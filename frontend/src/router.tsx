@@ -13,8 +13,9 @@ import { Workbench } from './views/Workbench'
 export function AppRoutes() {
   return (
     <Routes>
-      <Route path="/" element={<Workbench />} />
-      <Route path="/chat" element={<Chat />} />
+      <Route path="/" element={<Chat />} />
+      <Route path="/chat" element={<Navigate to="/" replace />} />
+      <Route path="/workbench" element={<Workbench />} />
       <Route path="/runs" element={<Runs />} />
       <Route path="/runs/:id" element={<RunDetailView />} />
       <Route path="/approvals" element={<Approvals />} />

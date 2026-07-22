@@ -1,13 +1,13 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
 
 import { api, type User } from './api/client'
 import { AppRoutes } from './router'
 import { Login } from './views/Login'
 
 const NAV = [
-  { to: '/chat', label: 'Chat' },
-  { to: '/', label: 'Workbench' },
+  { to: '/', label: 'Chat' },
+  { to: '/workbench', label: 'Workbench' },
   { to: '/runs', label: 'Runs' },
   { to: '/approvals', label: 'Approvals' },
   { to: '/documents', label: 'Documents' },
@@ -46,10 +46,20 @@ export default function App() {
           queryClient.clear()
         }}
       />
-      <main className="main">
-        <AppRoutes />
-      </main>
+      <Main />
     </div>
+  )
+}
+
+function Main() {
+  // The chat route owns its full viewport (its own scroll + pinned composer),
+  // so drop the standard content padding there.
+  const location = useLocation()
+  const isChat = location.pathname === '/'
+  return (
+    <main className={`main${isChat ? ' main--chat' : ''}`}>
+      <AppRoutes />
+    </main>
   )
 }
 
