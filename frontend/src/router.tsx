@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { Approvals } from './views/Approvals'
+import { Chat } from './views/Chat'
 import { Documents } from './views/Documents'
 import { Harnesses } from './views/Harnesses'
 import { Packs } from './views/Packs'
@@ -13,6 +14,7 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<Workbench />} />
+      <Route path="/chat" element={<Chat />} />
       <Route path="/runs" element={<Runs />} />
       <Route path="/runs/:id" element={<RunDetailView />} />
       <Route path="/approvals" element={<Approvals />} />

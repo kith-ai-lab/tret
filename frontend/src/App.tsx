@@ -6,6 +6,7 @@ import { AppRoutes } from './router'
 import { Login } from './views/Login'
 
 const NAV = [
+  { to: '/chat', label: 'Chat' },
   { to: '/', label: 'Workbench' },
   { to: '/runs', label: 'Runs' },
   { to: '/approvals', label: 'Approvals' },

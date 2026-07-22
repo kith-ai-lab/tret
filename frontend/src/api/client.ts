@@ -251,6 +251,35 @@ export interface ProviderStatus {
   last4: string | null
 }
 
+export interface ChatActivity {
+  tool: string
+  summary: string
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  run_id: string | null
+  ts: string
+  // Assistant-only fields, stamped when the turn's run finishes:
+  activity?: ChatActivity[]
+  status?: string
+  model_used?: string | null
+  cost_usd?: number
+}
+
+export interface ConversationSummary {
+  id: string
+  title: string | null
+  harness_id: string
+  message_count: number
+  updated_at: string | null
+}
+
+export interface ConversationDetail extends ConversationSummary {
+  messages: ChatMessage[]
+}
+
 export interface RouterSettings {
   router_model: string
   routing_prompt_version: string
@@ -368,6 +397,20 @@ export const api = {
       '/packs/validate',
       { method: 'POST', body: { path } },
     ),
+
+  // chat
+  listConversations: () => request<ConversationSummary[]>('/chat'),
+  createConversation: (harnessId?: string) =>
+    request<ConversationDetail>('/chat', {
+      method: 'POST',
+      body: { harness_id: harnessId ?? null },
+    }),
+  getConversation: (id: string) => request<ConversationDetail>(`/chat/${id}`),
+  sendChatMessage: (id: string, text: string) =>
+    request<{ run_id: string; conversation_id: string }>(`/chat/${id}/messages`, {
+      method: 'POST',
+      body: { text },
+    }),
 
   // settings + catalog
   providerStatus: () => request<ProviderStatus[]>('/settings/providers'),
