@@ -43,6 +43,19 @@ events (`routing`, `text_delta`, `tool_call`, `tool_result`,
 so the backend runs **one worker by design**. The multi-worker upgrade path
 is Postgres LISTEN/NOTIFY behind the same `RunEventBus` interface.
 
+## Chat orchestration
+
+Chat (`api/chat.py`) is a thin layer over the same engine: each user turn
+executes as a Run (`task_type='chat'`) with the conversation history injected
+and a **capability catalog** — a snapshot of installed pack task types,
+persisted in the run's `task_input` — appended to the system prompt. The chat
+harness carries the `run_harness_task` tool: the assistant delegates
+structured work to a specialist harness, which runs with its own doctrine,
+routing, validation, and audit trail. Delegated findings stay drafts behind
+the approval gate; the chat agent is instructed (and its tool results
+reiterate) to report them as such. Chat/freeform task types cannot be
+delegated to, so delegation cannot recurse.
+
 ## Providers
 
 `providers/base.py` defines canonical `Msg`/`ToolCall`/`ToolSpec` types and a

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from bench.api import auth, documents, findings, harnesses, packs, runs, settings as settings_api
+from bench.api import auth, chat, documents, findings, harnesses, packs, runs, settings as settings_api
 from bench.db.engine import get_engine, get_session_factory
 from bench.db.models import Base
 
@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="bench", version="0.1.0", lifespan=lifespan)
     app.include_router(auth.router)
+    app.include_router(chat.router)
     app.include_router(runs.router)
     app.include_router(harnesses.router)
     app.include_router(documents.router)

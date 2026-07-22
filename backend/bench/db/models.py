@@ -113,6 +113,23 @@ class Harness(Base):
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class Conversation(Base):
+    """A chat thread. Each user turn executes as a Run (task_type='chat');
+    messages here are the display/history record, with run ids per turn."""
+
+    __tablename__ = "conversations"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    harness_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("harnesses.id"), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="New conversation")
+    # entries: {role, content, run_id?, ts, activity?: [{tool, summary, child_run_id?, finding_ids?}]}
+    messages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at_col()
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class Document(Base):
     __tablename__ = "documents"
 

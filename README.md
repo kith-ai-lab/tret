@@ -48,6 +48,12 @@ docker compose up --build
 Open http://localhost:5180, log in (`admin@example.com` / `bench-admin` by
 default — change in `.env`), and you're in a seeded demo:
 
+- a **Chat** front door — just ask ("*Is the vendor flood score for Alder
+  Point still trustworthy?*") and the assistant recognizes the request,
+  triggers the right specialist harness task via its `run_harness_task` tool,
+  and reports the draft verdict back — with the delegated run fully audited
+  and its finding waiting in the approval queue
+
 - the **climate-risk** pack installed, with sample sites, forward-looking
   regional signals, and vendor-style hazard scores
 - a **Climate Analyst** harness — run a *Signal divergence assessment* for

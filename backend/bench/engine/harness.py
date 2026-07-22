@@ -99,7 +99,13 @@ class HarnessEngine:
         temperature = float(loop_cfg.get("temperature", DEFAULT_TEMPERATURE))
         max_cost = Decimal(str(loop_cfg.get("max_cost_usd", DEFAULT_MAX_COST_USD)))
 
-        system = assemble_system_prompt(harness, pack, run.task_type, output_schemas)
+        system = assemble_system_prompt(
+            harness,
+            pack,
+            run.task_type,
+            output_schemas,
+            extra_context=run.task_input.get("_capabilities"),
+        )
         user_message = build_user_message(run, pack, documents)
 
         # ── route ────────────────────────────────────────────────────────────
@@ -154,9 +160,12 @@ class HarnessEngine:
             terminal_tool=task.get("terminal_tool"),
         )
 
-        messages: list[Msg] = [Msg(role="user", content=user_message)]
+        # Chat turns carry prior conversation turns as history.
+        history = [Msg.from_json(m) for m in run.task_input.get("_history", [])]
+        messages: list[Msg] = [*history, Msg(role="user", content=user_message)]
         total_usage = Usage()
         nudged = False
+        seen_calls: dict[str, int] = {}  # repeated-identical-call breaker
 
         # ── loop ─────────────────────────────────────────────────────────────
         for iteration in range(1, max_iterations + 1):
@@ -258,6 +267,19 @@ class HarnessEngine:
                 ]
             )
             for tc, (result_text, is_error) in zip(tool_calls, results):
+                # Break retrieval loops: an identical call repeated 3+ times gets
+                # a pointed reminder appended to its result.
+                import json as _json
+
+                call_key = f"{tc.name}:{_json.dumps(tc.arguments, sort_keys=True, default=str)}"
+                seen_calls[call_key] = seen_calls.get(call_key, 0) + 1
+                if seen_calls[call_key] >= 3 and not is_error:
+                    result_text += (
+                        "\n\n[NOTE: you have now made this exact call "
+                        f"{seen_calls[call_key]} times and the result is unchanged. You have "
+                        "the data you need — proceed to your terminal action "
+                        f"({ctx.terminal_tool or 'your final answer'}) now.]"
+                    )
                 messages.append(
                     Msg(role="tool", content=result_text, tool_call_id=tc.id, meta={"error": is_error})
                 )

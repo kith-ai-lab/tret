@@ -53,8 +53,37 @@ async def bootstrap(db: AsyncSession) -> None:
             except PackValidationError as e:
                 log.error("pack %s failed validation: %s", pack_dir.name, e.errors)
 
+    # Seed the chat harness if missing (idempotent, also on upgraded installs).
+    chat_harness = (
+        await db.execute(select(Harness).where(Harness.task_profile == "chat"))
+    ).scalars().first()
+    if chat_harness is None:
+        db.add(
+            Harness(
+                workspace_id=workspace.id,
+                pack_id=None,
+                name="Chat Assistant",
+                description="Conversational front door: answers directly from documents and "
+                "datasets, and delegates structured work to specialist harnesses.",
+                task_profile="chat",
+                model_policy={"mode": "auto", "max_cost_tier": "standard"},
+                tool_names=[
+                    "run_harness_task",
+                    "read_document",
+                    "search_documents",
+                    "lookup_dataset",
+                    "list_prior_findings",
+                    "file_data_request",
+                ],
+                loop_config={"max_iterations": 16, "max_output_tokens": 4096, "temperature": 0.3},
+            )
+        )
+        await db.commit()
+
     # Seed default harnesses.
-    existing = (await db.execute(select(Harness))).scalars().first()
+    existing = (
+        await db.execute(select(Harness).where(Harness.task_profile != "chat"))
+    ).scalars().first()
     if existing is None:
         climate = (
             await db.execute(select(Pack).where(Pack.slug == "climate-risk"))

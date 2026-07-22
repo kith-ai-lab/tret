@@ -46,8 +46,26 @@ def _task_config(pack: Pack | None, task_type: str) -> dict | None:
     return None
 
 
+CHAT_PREAMBLE = """\
+## Current task: conversation
+
+You are the analyst's conversational assistant. Answer questions directly \
+using your document and dataset tools. When the analyst asks for work that a \
+specialist task type in the capability catalog covers (an assessment, an \
+extraction, a section draft, a QA review), delegate it with run_harness_task \
+rather than attempting the structured work yourself — the specialist run \
+carries its own doctrine, validation, and audit trail. Report delegated \
+results faithfully, always noting that recorded findings are drafts awaiting \
+human approval. If no specialist task fits and the request needs judgment you \
+cannot ground in retrieved data, say so honestly."""
+
+
 def assemble_system_prompt(
-    harness: Harness, pack: Pack | None, task_type: str, output_schemas: dict[str, dict]
+    harness: Harness,
+    pack: Pack | None,
+    task_type: str,
+    output_schemas: dict[str, dict],
+    extra_context: str | None = None,
 ) -> str:
     parts = [PLATFORM_PREAMBLE]
 
@@ -73,11 +91,16 @@ def assemble_system_prompt(
                 f"`\"{schema_ref}\"` and a payload matching this JSON Schema exactly:\n\n"
                 f"```json\n{json.dumps(output_schemas[schema_ref], indent=2)}\n```"
             )
+    elif task_type == "chat":
+        parts.append(CHAT_PREAMBLE)
     elif task_type == "freeform":
         parts.append(
             "## Current task: freeform\n\nAssist the analyst with their request, "
             "using the available tools and honoring all platform rules."
         )
+
+    if extra_context:
+        parts.append(extra_context)
 
     if harness.system_prompt_extra:
         parts.append(f"## Additional harness instructions\n\n{harness.system_prompt_extra}")
@@ -88,7 +111,9 @@ def assemble_system_prompt(
 def build_user_message(run: Run, pack: Pack | None, documents: list[Document]) -> str:
     task = _task_config(pack, run.task_type)
     lines: list[str] = []
-    if task and run.task_type != "freeform":
+    if run.task_type == "chat":
+        lines.append(str(run.task_input.get("message", "")))
+    elif task and run.task_type != "freeform":
         lines.append(f"Task: {task.get('display_name', run.task_type)}")
         lines.append(f"Parameters: {json.dumps(run.task_input)}")
     else:

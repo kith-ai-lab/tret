@@ -351,6 +351,117 @@ async def draft_section(ctx: RunContext, deliverable_slug: str, section_slug: st
 
 
 @builtin(
+    "run_harness_task",
+    "Delegate a structured task to a specialist harness (the capability catalog in your context "
+    "lists available task types and their input fields). The task runs with its own doctrine, "
+    "model routing, and validation; any verdict or finding it records is a DRAFT awaiting human "
+    "approval. Use this whenever the user asks for work a specialist task type covers — do not "
+    "attempt structured assessments yourself in chat.",
+    {
+        "type": "object",
+        "required": ["task_type", "task_input"],
+        "properties": {
+            "task_type": {"type": "string", "description": "Task type slug from the capability catalog"},
+            "task_input": {"type": "object", "description": "Inputs matching the task's input fields"},
+            "harness_name": {"type": "string", "description": "Optional specific harness to use"},
+        },
+    },
+)
+async def run_harness_task(
+    ctx: RunContext, task_type: str, task_input: dict, harness_name: str | None = None
+) -> str:
+    # Lazy imports avoid a circular dependency with the engine module.
+    from bench.db.models import Harness, Pack, Run
+    from bench.engine.harness import get_harness_engine
+
+    if task_type in ("chat", "freeform"):
+        raise ToolError("run_harness_task is for specialist pack tasks, not chat/freeform")
+
+    harnesses = (
+        (await ctx.db.execute(select(Harness).where(Harness.is_archived.is_(False))))
+        .scalars()
+        .all()
+    )
+    packs = {p.id: p for p in (await ctx.db.execute(select(Pack))).scalars().all()}
+
+    def supports(h: Harness) -> bool:
+        pack = packs.get(h.pack_id)
+        return pack is not None and any(
+            t["slug"] == task_type for t in pack.manifest.get("task_types", [])
+        )
+
+    candidates = [h for h in harnesses if supports(h)]
+    if harness_name:
+        candidates = [h for h in candidates if h.name == harness_name]
+    if not candidates:
+        available = sorted(
+            {
+                t["slug"]
+                for h in harnesses
+                if h.pack_id in packs
+                for t in packs[h.pack_id].manifest.get("task_types", [])
+            }
+        )
+        raise ToolError(
+            f"No harness supports task_type '{task_type}'"
+            + (f" with name '{harness_name}'" if harness_name else "")
+            + f". Available task types: {available}"
+        )
+    harness = candidates[0]
+
+    parent = await ctx.db.get(Run, ctx.run_id)
+    child = Run(
+        project_id=ctx.project_id,
+        harness_id=harness.id,
+        pack_id=harness.pack_id,
+        task_type=task_type,
+        task_input=task_input,
+        created_by=parent.created_by if parent else None,
+    )
+    ctx.db.add(child)
+    await ctx.db.commit()
+
+    await get_harness_engine().execute(child.id)
+
+    # Read results through a fresh session — the engine ran in its own.
+    from bench.db.engine import get_session_factory
+
+    async with get_session_factory()() as read_db:
+        done = await read_db.get(Run, child.id)
+        findings = (
+            (await read_db.execute(select(Finding).where(Finding.run_id == child.id)))
+            .scalars()
+            .all()
+        )
+        result = {
+            "child_run_id": str(child.id),
+            "status": done.status,
+            "model_used": done.model_used,
+            "cost_usd": float(done.cost_usd or 0),
+            "error": done.error,
+            "findings": [
+                {
+                    "finding_id": str(f.id),
+                    "schema": f.schema_slug,
+                    "subject": f.subject,
+                    "status": f.status,
+                    "payload": f.payload,
+                }
+                for f in findings
+            ],
+        }
+    if done.status != "completed":
+        result["note"] = "The delegated run did not complete; tell the user honestly what failed."
+    elif not findings:
+        result["note"] = "The run completed without recording a finding."
+    else:
+        result["note"] = (
+            "Findings are DRAFTS awaiting human approval — say so when you report them."
+        )
+    return json.dumps(result, default=str)
+
+
+@builtin(
     "file_data_request",
     "File a request for data that is missing but needed. Then complete the assessment honestly with "
     "what exists — declare the gap's effect on confidence instead of guessing.",
