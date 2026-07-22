@@ -1,0 +1,116 @@
+# Curated model catalog. `id` is the bench-wide model id (provider-prefixed);
+# `wire_id` is what gets sent to the provider's API. Static entries here always
+# win over dynamically fetched OpenRouter catalog entries.
+#
+# Prices are USD per million tokens and drive run cost accounting — keep them
+# roughly current; they are estimates, not billing.
+models:
+  - id: anthropic/claude-fable-5
+    provider: anthropic
+    wire_id: claude-fable-5
+    display_name: Claude Fable 5
+    context_window: 200000
+    input_price_per_mtok: 25.0
+    output_price_per_mtok: 125.0
+    cost_tier: premium
+    strengths: [deep reasoning, doctrine-following, long-form drafting, hardest verdicts]
+    supports_tools: true
+
+  - id: anthropic/claude-opus-4-8
+    provider: anthropic
+    wire_id: claude-opus-4-8
+    display_name: Claude Opus 4.8
+    context_window: 200000
+    input_price_per_mtok: 15.0
+    output_price_per_mtok: 75.0
+    cost_tier: premium
+    strengths: [deep reasoning, long-form drafting, nuanced judgment]
+    supports_tools: true
+
+  - id: anthropic/claude-sonnet-5
+    provider: anthropic
+    wire_id: claude-sonnet-5
+    display_name: Claude Sonnet 5
+    context_window: 200000
+    input_price_per_mtok: 3.0
+    output_price_per_mtok: 15.0
+    cost_tier: standard
+    strengths: [structured extraction, doctrine-following, balanced quality/cost, tool reliability]
+    supports_tools: true
+
+  - id: anthropic/claude-haiku-4-5
+    provider: anthropic
+    wire_id: claude-haiku-4-5
+    display_name: Claude Haiku 4.5
+    context_window: 200000
+    input_price_per_mtok: 1.0
+    output_price_per_mtok: 5.0
+    cost_tier: economy
+    strengths: [fast classification, QA grading, routing, short summaries]
+    supports_tools: true
+
+  - id: kimi/kimi-k2
+    provider: kimi
+    wire_id: kimi-k2-0711-preview
+    display_name: Kimi K2
+    context_window: 128000
+    input_price_per_mtok: 0.6
+    output_price_per_mtok: 2.5
+    cost_tier: economy
+    strengths: [agentic tool use, long documents, cost-efficient extraction]
+    supports_tools: true
+
+  - id: kimi/kimi-latest
+    provider: kimi
+    wire_id: kimi-latest
+    display_name: Kimi Latest
+    context_window: 128000
+    input_price_per_mtok: 1.0
+    output_price_per_mtok: 3.0
+    cost_tier: economy
+    strengths: [general assistant tasks, long documents]
+    supports_tools: true
+
+  - id: openrouter/google/gemini-2.5-pro
+    provider: openrouter
+    wire_id: google/gemini-2.5-pro
+    display_name: Gemini 2.5 Pro (OpenRouter)
+    context_window: 1000000
+    input_price_per_mtok: 1.25
+    output_price_per_mtok: 10.0
+    cost_tier: standard
+    strengths: [very long context, multimodal grounding, data analysis]
+    supports_tools: true
+
+  - id: openrouter/openai/gpt-4.1
+    provider: openrouter
+    wire_id: openai/gpt-4.1
+    display_name: GPT-4.1 (OpenRouter)
+    context_window: 1000000
+    input_price_per_mtok: 2.0
+    output_price_per_mtok: 8.0
+    cost_tier: standard
+    strengths: [structured extraction, long context, instruction following]
+    supports_tools: true
+
+  - id: openrouter/meta-llama/llama-3.3-70b-instruct
+    provider: openrouter
+    wire_id: meta-llama/llama-3.3-70b-instruct
+    display_name: Llama 3.3 70B (OpenRouter)
+    context_window: 131072
+    input_price_per_mtok: 0.3
+    output_price_per_mtok: 0.6
+    cost_tier: economy
+    strengths: [open-weights, cheap drafting, summarization]
+    supports_tools: true
+
+  - id: openrouter/deepseek/deepseek-chat-v3
+    provider: openrouter
+    wire_id: deepseek/deepseek-chat-v3-0324
+    display_name: DeepSeek V3 (OpenRouter)
+    context_window: 131072
+    input_price_per_mtok: 0.3
+    output_price_per_mtok: 1.2
+    cost_tier: economy
+    strengths: [open-weights, cost-efficient reasoning, extraction]
+    supports_tools: true

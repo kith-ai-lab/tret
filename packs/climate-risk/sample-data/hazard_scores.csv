@@ -1,0 +1,23 @@
+site_id,peril,score,rating,source,vintage_year,method_note
+S-001,flood,48,moderate,RiskVendor National Index,2024,Present-day riverine and coastal flood exposure percentile at census-block resolution
+S-001,heat,55,moderate,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-002,flood,52,moderate,RiskVendor National Index,2024,Present-day riverine and coastal flood exposure percentile at census-block resolution
+S-002,heat,51,moderate,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-003,flood,22,low,RiskVendor National Index,2018,Present-day riverine flood exposure percentile; produced before basin re-mapping
+S-003,heat,49,moderate,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-005,heat,72,high,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-005,drought,38,moderate,AquaMetrics Water Risk 3.1,2022,Basin-level baseline water stress
+S-006,flood,71,high,RiskVendor National Index,2024,Present-day riverine flood exposure percentile at census-block resolution
+S-006,heat,53,moderate,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-007,flood,64,high,RiskVendor National Index,2024,Present-day riverine flood exposure percentile at census-block resolution
+S-007,heat,50,moderate,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-008,heat,69,high,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-008,wind,44,moderate,RiskVendor National Index,2023,Historical peak-gust frequency percentile
+S-009,drought,38,moderate,AquaMetrics Water Risk 3.1,2022,Basin-level baseline water stress
+S-009,heat,74,high,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-010,flood,31,low,RiskVendor National Index,2024,Present-day riverine flood exposure percentile at census-block resolution
+S-010,heat,42,moderate,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-011,wind,68,high,RiskVendor National Index,2021,Present-day gust exposure scored at site elevation including terrain amplification factor
+S-011,heat,40,moderate,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-012,heat,41,moderate,RiskVendor National Index,2023,Historical heat-day frequency percentile
+S-012,flood,28,low,RiskVendor National Index,2024,Present-day riverine flood exposure percentile at census-block resolution

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Evidence finding",
+  "type": "object",
+  "required": ["claim", "evidence_quote", "source_document", "confidence"],
+  "additionalProperties": false,
+  "properties": {
+    "claim": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 500,
+      "description": "The discrete, verifiable statement this evidence supports"
+    },
+    "evidence_quote": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 1000,
+      "description": "Verbatim quote from the source document (trimmed, not paraphrased)"
+    },
+    "source_document": {
+      "type": "string",
+      "description": "Filename of the source document"
+    },
+    "location_hint": {
+      "type": "string",
+      "description": "Where in the document, e.g. a section heading or row"
+    },
+    "confidence": { "enum": ["high", "medium", "low"] },
+    "framework_element": {
+      "type": "string",
+      "description": "Optional named framework element this maps to, e.g. 'TCFD Governance a)' or 'GHG Protocol Scope 2'"
+    },
+    "note": {
+      "type": "string",
+      "maxLength": 600,
+      "description": "Caveats: client-asserted vs independently evidenced, staleness, gaps"
+    }
+  }
+}

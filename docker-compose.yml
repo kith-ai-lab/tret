@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bench"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment:
+      BENCH_DATABASE_URL: postgresql+asyncpg://bench:bench@postgres:5432/bench
+      BENCH_SECRET_KEY: ${BENCH_SECRET_KEY:-dev-secret-change-me}
+      BENCH_ADMIN_EMAIL: ${BENCH_ADMIN_EMAIL:-admin@example.com}
+      BENCH_ADMIN_PASSWORD: ${BENCH_ADMIN_PASSWORD:-bench-admin}
+      BENCH_STORAGE_DIR: /data/storage
+      BENCH_PACKS_DIR: /packs
+      BENCH_ANTHROPIC_API_KEY: ${BENCH_ANTHROPIC_API_KEY:-}
+      BENCH_MOONSHOT_API_KEY: ${BENCH_MOONSHOT_API_KEY:-}
+      BENCH_OPENROUTER_API_KEY: ${BENCH_OPENROUTER_API_KEY:-}
+      BENCH_ROUTER_MODEL: ${BENCH_ROUTER_MODEL:-anthropic/claude-haiku-4-5}
+    volumes:
+      - ./packs:/packs:ro
+      - storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  pgdata:
+  storage:

@@ -1,0 +1,11 @@
+record_id,facility,period,category,activity,quantity,unit,data_source,notes
+CW-001,Alder Point,FY2025,scope1_stationary,natural gas boilers,412500,therms,utility invoices,Metered; two months estimated from prior-year average
+CW-002,Alder Point,FY2025,scope1_mobile,diesel fleet,38200,gallons,fuel card statements,Complete
+CW-003,Willow Bend,FY2025,scope1_stationary,natural gas ovens,286900,therms,utility invoices,Complete
+CW-004,Willow Bend,FY2025,scope1_fugitive,refrigerant R-448A top-up,140,pounds,maintenance logs,Single service event; charge capacity not documented
+CW-005,Cedar Landing,FY2025,scope1_mobile,yard tractors diesel,9100,gallons,fuel card statements,Complete
+CW-006,Alder Point,FY2025,scope2_electricity,purchased electricity,6480000,kWh,utility invoices,Metered
+CW-007,Willow Bend,FY2025,scope2_electricity,purchased electricity,4210000,kWh,utility invoices,Metered
+CW-008,Cedar Landing,FY2025,scope2_electricity,purchased electricity,1830000,kWh,utility invoices,One meter estimated pending utility correction
+CW-009,Sycamore Park,FY2025,scope2_electricity,purchased electricity,11930000,kWh,utility invoices,Metered; includes new hall commissioned in Q3
+CW-010,Sycamore Park,FY2025,scope1_stationary,backup generators diesel,6200,gallons,fuel logs,Test runs only

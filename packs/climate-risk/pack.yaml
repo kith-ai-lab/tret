@@ -1,0 +1,110 @@
+pack: climate-risk
+version: 0.1.0
+display_name: Climate Risk Assessment
+description: >
+  Verdict, extraction, drafting, and QA workflows for climate/ESG analysts:
+  signal-divergence assessments, evidence extraction with provenance, and
+  framework-aligned deliverable drafting.
+frameworks: [TCFD, GHG-Protocol]
+
+doctrine:
+  - doctrine/01-assessment-principles.md
+  - doctrine/02-divergence-procedure.md
+  - doctrine/03-reason-codes.md
+
+task_types:
+  - slug: divergence_assessment
+    display_name: Signal divergence assessment
+    shape: verdict
+    input_schema:
+      site_id: { type: string, description: "Site id, e.g. S-003" }
+      peril: { type: string, enum: [flood, heat, wind, drought] }
+    output_schema: schemas/divergence_verdict.schema.json
+    terminal_tool: record_verdict
+    tools: [lookup_dataset, read_document, file_data_request, record_verdict]
+    output_contract: >
+      Strict-enum verdict + conditional reason code + 3-6 sentence plain-language
+      methodology note; JSON-schema enforced via record_verdict, cited values
+      cross-checked against dataset lookups.
+    instructions: |
+      Assess whether the forward-looking regional climate signal and the vendor
+      reference hazard score agree for the given site and peril, following the
+      divergence procedure in the doctrine.
+
+      Steps you must take, in order:
+      1. Look up the site in the `sites` dataset to find its region.
+      2. Retrieve the regional signal rows for that region and peril from
+         `regional_signals` — read BOTH scenarios and note median vs tail spread.
+      3. Retrieve the vendor score for the site and peril from `hazard_scores`,
+         including its vintage year.
+      4. Apply the doctrine's comparison and robustness rules, choose a verdict
+         and (if diverging) a reason code with its evidence test satisfied.
+      5. Record the verdict with record_verdict, schema_slug "divergence_verdict".
+         Every number you cite must appear verbatim in cited_values with the
+         _row reference returned by lookup_dataset.
+
+  - slug: evidence_extraction
+    display_name: Evidence extraction
+    shape: extraction
+    input_schema:
+      focus: { type: string, description: "What to extract, e.g. 'emissions activity data' or 'governance evidence'" }
+    output_schema: schemas/evidence_finding.schema.json
+    terminal_tool: record_finding
+    tools: [read_document, search_documents, record_finding, file_data_request]
+    output_contract: >
+      One record_finding call per extracted item; each carries a verbatim quote,
+      source document, confidence tier, and optional framework element.
+    instructions: |
+      Read the attached client evidence documents and extract discrete,
+      verifiable findings relevant to the stated focus. One record_finding call
+      per finding, schema_slug "evidence_finding". Quote the source verbatim in
+      evidence_quote (trim, do not paraphrase inside the quote). Assign a
+      confidence tier per the doctrine's honest-uncertainty rules; where a claim
+      is asserted by the client but not evidenced, say so in the note and rate
+      confidence low. When you have extracted the material findings, summarize
+      what you recorded.
+
+  - slug: tcfd_section_draft
+    display_name: TCFD section draft
+    shape: drafting
+    input_schema:
+      section: { type: string, enum: [governance, strategy, risk_management, metrics_targets] }
+    terminal_tool: draft_section
+    tools: [read_document, search_documents, lookup_dataset, list_prior_findings, draft_section, file_data_request]
+    output_contract: >
+      One markdown section stored via draft_section for deliverable
+      'tcfd-assessment'; grounded in prior approved findings and retrieved data only.
+    instructions: |
+      Draft the requested section of the TCFD-aligned climate risk assessment
+      (deliverable_slug "tcfd-assessment"), using the section structure in
+      templates/tcfd-assessment.md as your outline. Ground every factual claim
+      in either a prior finding (list_prior_findings) or a dataset value you
+      retrieved this run; where neither exists, describe the gap honestly and
+      file a data request rather than inventing content. Write for an investor
+      or credit officer: plain language, no tool names, no internal ids in the
+      prose. Store the finished section with draft_section.
+
+  - slug: qa_review
+    display_name: QA review of a finding
+    shape: qa_review
+    input_schema:
+      finding_id: { type: string, description: "Id of the finding to review" }
+    output_schema: schemas/qa_assessment.schema.json
+    terminal_tool: record_finding
+    tools: [list_prior_findings, lookup_dataset, read_document, record_finding]
+    output_contract: >
+      A structured QA grade citing the doctrine heading for each criterion;
+      recorded via record_finding with schema qa_assessment.
+    instructions: |
+      Locate the target finding with list_prior_findings and grade it against
+      the doctrine: verdict consistency with cited values, robustness handling,
+      reason-code evidence test, and plain-language quality of the note. For
+      each criterion cite the doctrine heading you applied. Verify cited values
+      by re-retrieving them with lookup_dataset. Record your assessment with
+      record_finding, schema_slug "qa_assessment". You are reviewing, not
+      re-deciding: recommend, do not overwrite.
+
+datasets:
+  - { name: sites, file: sample-data/sites.csv }
+  - { name: regional_signals, file: sample-data/regional_signals.csv }
+  - { name: hazard_scores, file: sample-data/hazard_scores.csv }

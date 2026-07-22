@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "QA assessment",
+  "type": "object",
+  "required": ["target_finding_id", "criteria", "overall", "recommendation"],
+  "additionalProperties": false,
+  "properties": {
+    "target_finding_id": { "type": "string" },
+    "criteria": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["criterion", "doctrine_heading", "met", "note"],
+        "additionalProperties": false,
+        "properties": {
+          "criterion": { "type": "string" },
+          "doctrine_heading": {
+            "type": "string",
+            "description": "The doctrine heading applied for this criterion"
+          },
+          "met": { "type": "boolean" },
+          "note": { "type": "string", "maxLength": 400 }
+        }
+      }
+    },
+    "overall": { "enum": ["pass", "pass_with_notes", "fail"] },
+    "recommendation": {
+      "type": "string",
+      "minLength": 30,
+      "maxLength": 800,
+      "description": "What the approver should do; you review, you do not overwrite"
+    }
+  }
+}

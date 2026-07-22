@@ -1,0 +1,13 @@
+site_id,name,region_id,region_name,sector,lat,lon
+S-001,Cedar Landing,R-COAST,Coastal Lowland,logistics,44.6210,-67.3901
+S-002,Maple Works,R-COAST,Coastal Lowland,manufacturing,44.7013,-67.5122
+S-003,Alder Point,R-VALLEY,River Valley,manufacturing,45.2144,-68.9034
+S-004,Hawthorn Quay,R-COAST,Coastal Lowland,warehousing,44.5530,-67.2218
+S-005,Juniper Yard,R-PLAINS,Interior Plains,agriculture,46.0312,-70.1120
+S-006,Willow Bend,R-VALLEY,River Valley,food processing,45.3081,-69.0457
+S-007,Sycamore Park,R-VALLEY,River Valley,data center,45.1189,-68.7770
+S-008,Poplar Crossing,R-PLAINS,Interior Plains,distribution,46.1547,-70.3395
+S-009,Mesquite Flat,R-PLAINS,Interior Plains,agriculture,46.2903,-70.4481
+S-010,Birch Hollow,R-HILLS,Upland Hills,light industrial,45.8875,-69.6612
+S-011,Rowan Ridge,R-HILLS,Upland Hills,telecom,45.9440,-69.7208
+S-012,Laurel Gate,R-HILLS,Upland Hills,offices,45.8022,-69.5849

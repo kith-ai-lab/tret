@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Divergence verdict",
+  "type": "object",
+  "required": ["verdict", "confidence", "methodology_note", "cited_values", "doctrine_citations"],
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {
+      "enum": ["agree", "diverge_signal_higher", "diverge_reference_higher", "insufficient_data"]
+    },
+    "reason_code": {
+      "enum": [
+        "site_specific_factor",
+        "outdated_inputs",
+        "methodology_choice",
+        "scale_mismatch",
+        "coverage_gap"
+      ]
+    },
+    "confidence": { "enum": ["high", "medium", "low"] },
+    "methodology_note": {
+      "type": "string",
+      "minLength": 200,
+      "maxLength": 1200,
+      "description": "3-6 sentences for a credit officer: plain language, no tool names, no ids"
+    },
+    "cited_values": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["dataset", "row_ref", "value"],
+        "additionalProperties": false,
+        "properties": {
+          "dataset": { "type": "string" },
+          "row_ref": { "type": "string", "description": "The _row reference returned by lookup_dataset" },
+          "column": { "type": "string" },
+          "value": { "type": "string", "description": "Verbatim value as returned by lookup_dataset" }
+        }
+      }
+    },
+    "doctrine_citations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "description": "Doctrine heading relied on" }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "verdict": { "enum": ["diverge_signal_higher", "diverge_reference_higher"] }
+        }
+      },
+      "then": { "required": ["reason_code"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "verdict": { "enum": ["agree", "diverge_signal_higher", "diverge_reference_higher"] }
+        }
+      },
+      "then": { "properties": { "cited_values": { "minItems": 2 } } }
+    }
+  ]
+}
