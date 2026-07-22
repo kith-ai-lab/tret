@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bench.api.auth import current_user
 from bench.db.engine import get_db, get_session_factory
-from bench.db.models import Conversation, Harness, Pack, Project, Run, User
+from bench.db.models import Conversation, Dataset, Harness, Pack, Project, Run, User
 from bench.engine.harness import get_harness_engine
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -72,6 +72,13 @@ async def _capability_catalog(db: AsyncSession) -> str:
             )
     if len(lines) == 1:
         lines.append("(no specialist tasks installed)")
+
+    datasets = (await db.execute(select(Dataset).order_by(Dataset.name))).scalars().all()
+    if datasets:
+        lines.append("\n## Datasets available via lookup_dataset")
+        for ds in datasets:
+            cols = ", ".join(ds.schema_json.get("columns", []))
+            lines.append(f"- {ds.name} ({ds.row_count} rows; columns: {cols})")
     return "\n".join(lines)
 
 
