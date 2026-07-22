@@ -39,13 +39,14 @@ export function Harnesses() {
   const harnesses = harnessesQuery.data ?? []
 
   useEffect(() => {
-    if (selectedId === NEW_ID) return
-    if (harnesses.length > 0 && !harnesses.some((h) => h.id === selectedId)) {
-      setSelectedId(harnesses[0].id)
-    } else if (harnesses.length === 0 && selectedId !== NEW_ID) {
+    if (harnessesQuery.data === undefined || selectedId === NEW_ID) return
+    const list = harnessesQuery.data
+    if (list.length > 0 && !list.some((h) => h.id === selectedId)) {
+      setSelectedId(list[0].id)
+    } else if (list.length === 0) {
       setSelectedId(NEW_ID)
     }
-  }, [harnesses, selectedId])
+  }, [harnessesQuery.data, selectedId])
 
   return (
     <div>

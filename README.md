@@ -45,7 +45,7 @@ cp .env.example .env       # add at least one provider key (OpenRouter alone wor
 docker compose up --build
 ```
 
-Open http://localhost:5173, log in (`admin@example.com` / `bench-admin` by
+Open http://localhost:5180, log in (`admin@example.com` / `bench-admin` by
 default — change in `.env`), and you're in a seeded demo:
 
 - the **climate-risk** pack installed, with sample sites, forward-looking
