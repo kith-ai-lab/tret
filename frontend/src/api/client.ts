@@ -251,6 +251,35 @@ export interface ProviderStatus {
   last4: string | null
 }
 
+export interface DeliverableSection {
+  section: string
+  status: string // draft | approved | rejected
+  finding_id: string
+  updated_at: string | null
+}
+
+export interface Deliverable {
+  slug: string
+  sections: DeliverableSection[]
+  approved_count: number
+  draft_count: number
+  updated_at: string | null
+}
+
+export interface DeliverableExportSection {
+  section: string
+  finding_id: string
+  status: string
+  model: string | null
+  doctrine_sha: string
+}
+
+export interface DeliverableExport {
+  markdown: string
+  html: string
+  sections: DeliverableExportSection[]
+}
+
 export interface ChatActivity {
   tool: string
   summary: string
@@ -396,6 +425,13 @@ export const api = {
     request<{ valid: boolean; errors: string[]; pack: string | null; task_types: string[]; schemas: string[] }>(
       '/packs/validate',
       { method: 'POST', body: { path } },
+    ),
+
+  // deliverables
+  listDeliverables: () => request<Deliverable[]>('/deliverables'),
+  exportDeliverableJson: (slug: string, includeDraft = false) =>
+    request<DeliverableExport>(
+      `/deliverables/${encodeURIComponent(slug)}/export?format=json${includeDraft ? '&include_draft=true' : ''}`,
     ),
 
   // chat

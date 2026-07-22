@@ -10,6 +10,7 @@ const NAV = [
   { to: '/workbench', label: 'Workbench' },
   { to: '/runs', label: 'Runs' },
   { to: '/approvals', label: 'Approvals' },
+  { to: '/deliverables', label: 'Deliverables' },
   { to: '/documents', label: 'Documents' },
   { to: '/packs', label: 'Packs' },
   { to: '/harnesses', label: 'Harnesses' },

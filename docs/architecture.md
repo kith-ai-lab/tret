@@ -78,6 +78,8 @@ sample datasets. Packs found under `BENCH_PACKS_DIR` auto-install at boot.
 
 - Single backend worker (in-process event bus) — fine for a team install.
 - `search_documents` is substring search; pgvector RAG is the v2 path.
+- PDF export uses WeasyPrint; its native libs (pango/cairo) ship in the
+  Docker image. A bare local venv without them returns 501 with instructions.
 - Pack `tools.py` support is deliberately not loaded yet — pack tools will
   land with a sandboxing story rather than arbitrary in-process code.
 - Single workspace; roles are admin / analyst / approver.

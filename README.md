@@ -60,6 +60,9 @@ default — change in `.env`), and you're in a seeded demo:
   site `S-003` × `flood` from the Workbench and watch it retrieve data,
   reason under the doctrine, and record a verdict for approval
 - a **General Assistant** harness for freeform document work
+- **document outputs**: approved deliverable sections assemble into
+  Markdown, HTML, or a styled **PDF** (with a provenance appendix — models,
+  doctrine hash, approval status per section) from the Deliverables view
 
 ## Domain packs
 

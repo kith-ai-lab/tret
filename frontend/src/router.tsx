@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { Approvals } from './views/Approvals'
 import { Chat } from './views/Chat'
+import { Deliverables } from './views/Deliverables'
 import { Documents } from './views/Documents'
 import { Harnesses } from './views/Harnesses'
 import { Packs } from './views/Packs'
@@ -19,6 +20,7 @@ export function AppRoutes() {
       <Route path="/runs" element={<Runs />} />
       <Route path="/runs/:id" element={<RunDetailView />} />
       <Route path="/approvals" element={<Approvals />} />
+      <Route path="/deliverables" element={<Deliverables />} />
       <Route path="/documents" element={<Documents />} />
       <Route path="/packs" element={<Packs />} />
       <Route path="/harnesses" element={<Harnesses />} />

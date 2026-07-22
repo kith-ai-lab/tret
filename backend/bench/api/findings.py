@@ -110,6 +110,49 @@ async def decide_finding(
     return {"ok": True, "status": f.status, "approver": user.display_name}
 
 
+@router.get("/deliverables")
+async def list_deliverables(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """Deliverables = draft_section findings grouped by subject.deliverable,
+    latest finding per section winning (same rule as assembly)."""
+    findings = (
+        (
+            await db.execute(
+                select(Finding)
+                .where(Finding.schema_slug == "draft_section")
+                .order_by(Finding.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    groups: dict[str, dict] = {}
+    for f in findings:
+        slug = f.subject.get("deliverable", "untitled")
+        section = f.subject.get("section", "untitled")
+        g = groups.setdefault(slug, {"slug": slug, "sections": {}, "updated_at": None})
+        g["sections"][section] = {
+            "section": section,
+            "status": f.status,
+            "finding_id": str(f.id),
+            "updated_at": f.created_at.isoformat() if f.created_at else None,
+        }
+        g["updated_at"] = f.created_at.isoformat() if f.created_at else g["updated_at"]
+    out = []
+    for g in groups.values():
+        sections = list(g["sections"].values())
+        out.append(
+            {
+                "slug": g["slug"],
+                "sections": sections,
+                "approved_count": sum(1 for s in sections if s["status"] == "approved"),
+                "draft_count": sum(1 for s in sections if s["status"] == "draft"),
+                "updated_at": g["updated_at"],
+            }
+        )
+    out.sort(key=lambda d: d["updated_at"] or "", reverse=True)
+    return out
+
+
 @router.get("/deliverables/{deliverable_slug}/export")
 async def export_deliverable(
     deliverable_slug: str,
@@ -118,11 +161,11 @@ async def export_deliverable(
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    from fastapi.responses import HTMLResponse, PlainTextResponse
+    from fastapi.responses import HTMLResponse, PlainTextResponse, Response
     from sqlalchemy import select as _select
 
     from bench.db.models import Project
-    from bench.services.export import assemble_deliverable
+    from bench.services.export import PdfUnavailable, assemble_deliverable, render_pdf
 
     project = (await db.execute(_select(Project))).scalars().first()
     result = await assemble_deliverable(db, project.id, deliverable_slug, include_draft)
@@ -132,6 +175,29 @@ async def export_deliverable(
         return HTMLResponse(result["html"])
     if format == "json":
         return result
+    if format == "pdf":
+        shas = {s.get("doctrine_sha") for s in result["sections"] if s.get("doctrine_sha")}
+        try:
+            pdf = render_pdf(
+                result["html"],
+                deliverable_slug,
+                result["sections"],
+                shas.pop() if len(shas) == 1 else None,
+            )
+        except PdfUnavailable as e:
+            raise HTTPException(
+                501,
+                "PDF rendering unavailable: WeasyPrint's native libraries are missing "
+                f"in this environment ({e}). The Docker image includes them; for local "
+                "dev install pango (e.g. `brew install pango`).",
+            )
+        return Response(
+            pdf,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{deliverable_slug}.pdf"'
+            },
+        )
     return PlainTextResponse(result["markdown"], media_type="text/markdown")
 
 
