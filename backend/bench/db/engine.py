@@ -8,10 +8,32 @@ _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
+def _normalize_url(url: str) -> str:
+    """Accept plain postgres:// URLs (Fly, Heroku-style): upgrade them to the
+    asyncpg dialect and translate libpq-style sslmode params, which asyncpg
+    rejects as a connect kwarg."""
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+    if "sslmode=" in url:
+        from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+        parts = urlsplit(url)
+        params = dict(parse_qsl(parts.query))
+        sslmode = params.pop("sslmode", None)
+        if sslmode:
+            # asyncpg accepts sslmode-style strings via its `ssl` argument;
+            # 'disable' must be explicit or asyncpg attempts TLS by default.
+            params["ssl"] = sslmode
+        url = urlunsplit(parts._replace(query=urlencode(params)))
+    return url
+
+
 def get_engine():
     global _engine
     if _engine is None:
-        _engine = create_async_engine(get_settings().database_url, pool_pre_ping=True)
+        _engine = create_async_engine(_normalize_url(get_settings().database_url), pool_pre_ping=True)
     return _engine
 
 

@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type FormEvent, useState } from 'react'
 
-import { api, ApiError } from '../api/client'
+import { api, ApiError, type User } from '../api/client'
+import { type Column, MonoTable } from '../components/shared/MonoTable'
 import { StatusBadge } from '../components/shared/StatusBadge'
 import { formatDateTime } from './Runs'
 
@@ -10,11 +11,226 @@ export function SettingsView() {
     <div className="stack" style={{ gap: 28, maxWidth: 780 }}>
       <div>
         <h1 className="view-title">Settings</h1>
-        <div className="view-sub">Provider keys, router configuration, and open data requests.</div>
+        <div className="view-sub">
+          Team, provider keys, router configuration, and open data requests.
+        </div>
       </div>
+      <TeamSection />
       <ProviderKeys />
       <RouterInfo />
       <DataRequests />
+    </div>
+  )
+}
+
+// ── Team ──────────────────────────────────────────────────────────────────
+
+const ROLES = [
+  { value: 'admin', hint: 'everything, incl. keys and users' },
+  { value: 'approver', hint: 'can approve/reject findings' },
+  { value: 'analyst', hint: 'runs work, cannot approve' },
+]
+
+function generatePassword(): string {
+  const charset = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789-_!'
+  const bytes = new Uint32Array(16)
+  crypto.getRandomValues(bytes)
+  return [...bytes].map((b) => charset[b % charset.length]).join('')
+}
+
+function TeamSection() {
+  const queryClient = useQueryClient()
+  const usersQuery = useQuery({ queryKey: ['users'], queryFn: api.listUsers, retry: false })
+
+  const [email, setEmail] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [role, setRole] = useState('analyst')
+  const [password, setPassword] = useState('')
+  const [passwordVisible, setPasswordVisible] = useState(false)
+  const [created, setCreated] = useState<{ email: string; password: string } | null>(null)
+
+  const createMutation = useMutation({
+    mutationFn: () =>
+      api.createUser({ email: email.trim(), display_name: displayName.trim(), password, role }),
+    onSuccess: (user) => {
+      setCreated({ email: user.email, password })
+      setEmail('')
+      setDisplayName('')
+      setRole('analyst')
+      setPassword('')
+      setPasswordVisible(false)
+      queryClient.invalidateQueries({ queryKey: ['users'] })
+    },
+  })
+
+  const listError = usersQuery.error as ApiError | null
+  const createError = createMutation.error as ApiError | null
+  const isAdmin = !(usersQuery.isError && listError?.status === 403)
+
+  const columns: Column<User>[] = [
+    { key: 'email', header: 'Email', render: (u) => u.email },
+    { key: 'name', header: 'Display name', render: (u) => u.display_name },
+    {
+      key: 'role',
+      header: 'Role',
+      render: (u) => (
+        <span
+          className={`badge ${u.role === 'admin' ? 'badge-violet' : u.role === 'approver' ? 'badge-green' : 'badge-blue'}`}
+        >
+          {u.role}
+        </span>
+      ),
+    },
+  ]
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    setCreated(null)
+    createMutation.mutate()
+  }
+
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 8 }}>
+        Team
+      </div>
+
+      {usersQuery.isLoading ? (
+        <div className="empty pulse">Loading users…</div>
+      ) : usersQuery.isError ? (
+        <div className="empty">
+          {listError?.status === 403 ? 'Admin only.' : listError?.message}
+        </div>
+      ) : (
+        <div style={{ marginBottom: 14 }}>
+          <MonoTable
+            columns={columns}
+            rows={usersQuery.data ?? []}
+            rowKey={(u) => u.id}
+            empty="No users."
+          />
+        </div>
+      )}
+
+      {isAdmin && (
+        <form onSubmit={submit} className="panel">
+          <div className="mono-label" style={{ marginBottom: 10 }}>
+            Add user (admin)
+          </div>
+          <div className="row" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <div className="field" style={{ marginBottom: 0, width: 200 }}>
+              <label className="mono-label">Email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoComplete="off"
+                required
+              />
+            </div>
+            <div className="field" style={{ marginBottom: 0, width: 160 }}>
+              <label className="mono-label">Display name</label>
+              <input
+                type="text"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                required
+              />
+            </div>
+            <div className="field" style={{ marginBottom: 0, width: 130 }}>
+              <label className="mono-label">Role</label>
+              <select value={role} onChange={(e) => setRole(e.target.value)}>
+                {ROLES.map((r) => (
+                  <option key={r.value} value={r.value}>
+                    {r.value}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div
+            style={{
+              marginTop: 6,
+              fontFamily: 'var(--mono)',
+              fontSize: 10.5,
+              color: 'var(--text-muted)',
+            }}
+          >
+            {ROLES.map((r) => `${r.value}: ${r.hint}`).join(' · ')}
+          </div>
+          <div className="row" style={{ alignItems: 'flex-end', marginTop: 12, flexWrap: 'wrap' }}>
+            <div className="field" style={{ marginBottom: 0, flex: 1, minWidth: 220 }}>
+              <label className="mono-label">Password (min 8 chars)</label>
+              <input
+                type={passwordVisible ? 'text' : 'password'}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="new-password"
+                style={passwordVisible ? { fontFamily: 'var(--mono)' } : undefined}
+                required
+              />
+            </div>
+            <button
+              type="button"
+              className="btn"
+              onClick={() => {
+                setPassword(generatePassword())
+                setPasswordVisible(true)
+              }}
+            >
+              Generate
+            </button>
+            <button
+              className="btn btn-primary"
+              type="submit"
+              disabled={createMutation.isPending || !email.trim() || !displayName.trim() || password.length < 8}
+            >
+              {createMutation.isPending ? 'Creating…' : 'Add user'}
+            </button>
+          </div>
+          {passwordVisible && password && !created && (
+            <div
+              style={{
+                marginTop: 8,
+                fontFamily: 'var(--mono)',
+                fontSize: 11,
+                color: 'var(--text-muted)',
+              }}
+            >
+              Copy this password before saving — it is stored only as a hash.
+            </div>
+          )}
+          {createError && (
+            <div className="error-text" style={{ marginTop: 10 }}>
+              {createError.status === 403 ? 'Admin only.' : createError.message}
+            </div>
+          )}
+          {created && (
+            <div
+              className="panel"
+              style={{ marginTop: 12, borderColor: 'var(--amber)', background: 'var(--amber-dim)' }}
+            >
+              <div className="mono-label" style={{ marginBottom: 6, color: 'var(--amber)' }}>
+                One-time credentials — copy now, this will not be shown again
+              </div>
+              <div className="mono-body">
+                {created.email} ·{' '}
+                <code
+                  style={{
+                    userSelect: 'all',
+                    background: 'var(--bg-input)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 4,
+                    padding: '2px 6px',
+                  }}
+                >
+                  {created.password}
+                </code>
+              </div>
+            </div>
+          )}
+        </form>
+      )}
     </div>
   )
 }

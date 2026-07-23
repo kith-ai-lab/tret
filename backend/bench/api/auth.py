@@ -79,7 +79,12 @@ async def login(body: LoginBody, response: Response, db: AsyncSession = Depends(
         raise HTTPException(401, "Invalid credentials")
     token = _serializer().dumps(str(user.id))
     response.set_cookie(
-        SESSION_COOKIE, token, max_age=SESSION_MAX_AGE, httponly=True, samesite="lax"
+        SESSION_COOKIE,
+        token,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=get_settings().cookie_secure,
     )
     return UserOut(id=user.id, email=user.email, display_name=user.display_name, role=user.role)
 
@@ -92,6 +97,43 @@ async def logout(response: Response):
 
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(current_user)):
+    return UserOut(id=user.id, email=user.email, display_name=user.display_name, role=user.role)
+
+
+class CreateUserBody(BaseModel):
+    email: str
+    display_name: str
+    password: str
+    role: str = "analyst"  # admin | analyst | approver
+
+
+@router.get("/users")
+async def list_users(user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    users = (await db.execute(select(User).order_by(User.email))).scalars().all()
+    return [
+        UserOut(id=u.id, email=u.email, display_name=u.display_name, role=u.role) for u in users
+    ]
+
+
+@router.post("/users", response_model=UserOut)
+async def create_user(
+    body: CreateUserBody, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
+):
+    if body.role not in ("admin", "analyst", "approver"):
+        raise HTTPException(422, "role must be admin|analyst|approver")
+    if len(body.password) < 8:
+        raise HTTPException(422, "password must be at least 8 characters")
+    dupe = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
+    if dupe:
+        raise HTTPException(409, f"A user with email '{body.email}' already exists")
+    user = User(
+        email=body.email,
+        display_name=body.display_name,
+        password_hash=_hasher.hash(body.password),
+        role=body.role,
+    )
+    db.add(user)
+    await db.commit()
     return UserOut(id=user.id, email=user.email, display_name=user.display_name, role=user.role)
 
 

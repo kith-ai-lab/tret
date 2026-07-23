@@ -385,6 +385,9 @@ export const api = {
     request<User>('/auth/login', { method: 'POST', body: { email, password } }),
   logout: () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
   me: () => request<User>('/auth/me'),
+  listUsers: () => request<User[]>('/auth/users'),
+  createUser: (body: { email: string; display_name: string; password: string; role: string }) =>
+    request<User>('/auth/users', { method: 'POST', body }),
 
   // runs
   createRun: (body: CreateRunBody) =>

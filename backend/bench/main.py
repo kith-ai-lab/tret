@@ -44,6 +44,27 @@ def create_app() -> FastAPI:
     async def healthz():
         return {"ok": True}
 
+    # Single-app deployments (Fly, etc.): serve the built SPA from the backend.
+    from bench.config import get_settings
+
+    frontend_dir = get_settings().serve_frontend_dir
+    if frontend_dir:
+        from pathlib import Path
+
+        from fastapi.responses import FileResponse
+        from fastapi.staticfiles import StaticFiles
+
+        dist = Path(frontend_dir)
+        if (dist / "index.html").is_file():
+            app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
+
+            @app.get("/{full_path:path}", include_in_schema=False)
+            async def spa(full_path: str):
+                candidate = dist / full_path
+                if full_path and candidate.is_file():
+                    return FileResponse(candidate)
+                return FileResponse(dist / "index.html")
+
     return app
 
 

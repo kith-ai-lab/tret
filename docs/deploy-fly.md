@@ -1,0 +1,62 @@
+# Deploying to Fly.io
+
+bench runs as a **single Fly app**: the backend serves the built frontend
+(`Dockerfile.fly`), talking to a Fly Postgres cluster, with a volume for
+uploaded documents. One always-on machine — the run event bus is in-process,
+so do **not** scale horizontally (see docs/architecture.md).
+
+## One-time setup
+
+```bash
+fly apps create <app-name> --org <org>
+fly postgres create --name <app-name>-db --org <org> --region <region> \
+    --initial-cluster-size 1 --vm-size shared-cpu-1x --volume-size 3
+fly postgres attach <app-name>-db --app <app-name>
+fly volumes create bench_storage --app <app-name> --region <region> --size 3
+
+fly secrets set --app <app-name> --stage \
+  BENCH_DATABASE_URL="<the postgres:// URL printed by attach>" \
+  BENCH_SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" \
+  BENCH_ADMIN_EMAIL="you@example.com" \
+  BENCH_ADMIN_PASSWORD="<strong password>" \
+  BENCH_OPENROUTER_API_KEY="sk-or-..."        # and/or Anthropic/Moonshot keys
+```
+
+Notes:
+- `attach` also sets a `DATABASE_URL` secret; bench reads `BENCH_DATABASE_URL`,
+  so set it explicitly (same value). Plain `postgres://` URLs and libpq
+  `sslmode` params are normalized automatically.
+- `BENCH_COOKIE_SECURE=true` and the frontend/static serving are already set
+  in `fly.toml` / `Dockerfile.fly`.
+
+## Deploy
+
+```bash
+fly deploy --remote-only
+```
+
+Tables are created and the seed (admin user, sample project, packs) runs on
+boot, idempotently. Subsequent deploys keep all data.
+
+## After first boot
+
+1. Log in as the admin at `https://<app-name>.fly.dev`.
+2. **Settings → Team**: create accounts for teammates (analyst / approver /
+   admin). Passwords are shown once at creation — send them over a secure
+   channel; there is no email flow (yet).
+3. Provider keys can also be managed per-workspace in Settings (encrypted at
+   rest with `BENCH_SECRET_KEY`); env secrets always win.
+
+## Operations
+
+- Logs: `fly logs --app <app-name>`
+- Console: `fly ssh console --app <app-name>`
+- DB shell: `fly postgres connect --app <app-name>-db`
+- Scale memory (keep count at 1): `fly scale memory 2048 --app <app-name>`
+- The health check hits `/api/healthz`.
+
+## Cost expectations
+
+Smallest useful footprint (one shared-cpu-1x/1GB app machine, one
+shared-cpu-1x/256MB single-node Postgres, 6GB volumes) lands in the
+single-digit dollars per month range, plus your LLM provider usage.

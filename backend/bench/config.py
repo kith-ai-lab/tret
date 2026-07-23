@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://bench:bench@localhost:5432/bench"
     secret_key: str = "dev-secret-change-me"  # signs sessions, encrypts stored provider keys
     storage_dir: str = "./storage"  # uploaded documents
+    cookie_secure: bool = False  # set true behind TLS (any real deployment)
+    serve_frontend_dir: str = ""  # if set, serve the built SPA from this dir
 
     # First-boot admin bootstrap (used only if no users exist)
     admin_email: str = "admin@example.com"
