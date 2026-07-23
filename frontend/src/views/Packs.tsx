@@ -1,8 +1,9 @@
 import { useQuery } from '@tanstack/react-query'
 import { Fragment, type ReactNode, useEffect, useState } from 'react'
 
-import { api } from '../api/client'
+import { api, type InputFieldSchema, type PackMethodRef } from '../api/client'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
+import { type Column, MonoTable } from '../components/shared/MonoTable'
 
 export function Packs() {
   const packsQuery = useQuery({ queryKey: ['packs'], queryFn: api.listPacks })
@@ -128,6 +129,8 @@ function PackDetailPane({ packId }: { packId: string }) {
         </table>
       </div>
 
+      <PackMethods packId={packId} />
+
       <div>
         <div className="mono-label" style={{ marginBottom: 6 }}>
           Doctrine
@@ -154,6 +157,113 @@ function PackDetailPane({ packId }: { packId: string }) {
             )}
           </>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ── Deterministic methods ─────────────────────────────────────────────────
+
+function compactParams(schema: Record<string, InputFieldSchema> | undefined): string {
+  const entries = Object.entries(schema ?? {})
+  if (entries.length === 0) return '—'
+  return entries
+    .map(([field, spec]) => `${field}: ${spec.enum ? spec.enum.join('|') : (spec.type ?? 'string')}`)
+    .join(' · ')
+}
+
+function PackMethods({ packId }: { packId: string }) {
+  const methodsQuery = useQuery({ queryKey: ['pack-methods'], queryFn: api.listPackMethods })
+  const methods = (methodsQuery.data ?? []).filter((m) => m.pack_id === packId)
+
+  const columns: Column<PackMethodRef>[] = [
+    { key: 'slug', header: 'Slug', render: (m) => <span style={{ whiteSpace: 'nowrap' }}>{m.slug}</span> },
+    {
+      key: 'name',
+      header: 'Name',
+      render: (m) => <span style={{ whiteSpace: 'nowrap' }}>{m.display_name ?? m.slug}</span>,
+    },
+    {
+      key: 'desc',
+      header: 'Description',
+      render: (m) => (
+        <span
+          title={(m.description ?? '').trim()}
+          style={{
+            color: 'var(--text-muted)',
+            display: '-webkit-box',
+            WebkitLineClamp: 3,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+            minWidth: 220,
+            maxWidth: 420,
+          }}
+        >
+          {(m.description ?? '').trim()}
+        </span>
+      ),
+    },
+    {
+      key: 'params',
+      header: 'Params',
+      render: (m) => (
+        <span style={{ whiteSpace: 'nowrap' }}>
+          {compactParams(m.params_schema)
+            .split(' · ')
+            .map((p, i) => (
+              <span key={i} style={{ display: 'block' }}>
+                {p}
+              </span>
+            ))}
+        </span>
+      ),
+    },
+    {
+      key: 'inputs',
+      header: 'Inputs',
+      render: (m) => (
+        <span className="row" style={{ gap: 4, display: 'inline-flex', flexWrap: 'wrap' }}>
+          {(m.inputs ?? []).map((inp) => (
+            <span key={inp} className="chip" style={{ fontSize: 10, padding: '1px 7px' }}>
+              {inp}
+            </span>
+          ))}
+        </span>
+      ),
+    },
+  ]
+
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 6 }}>
+        Methods
+      </div>
+      {methodsQuery.isLoading ? (
+        <div className="empty pulse" style={{ padding: '6px 0' }}>
+          Loading methods…
+        </div>
+      ) : methodsQuery.isError ? (
+        <div className="error-text">{(methodsQuery.error as Error).message}</div>
+      ) : (
+        <div style={{ overflowX: 'auto' }}>
+          <MonoTable
+            columns={columns}
+            rows={methods}
+            rowKey={(m) => m.slug}
+            empty="This pack ships no deterministic methods."
+          />
+        </div>
+      )}
+      <div
+        style={{
+          marginTop: 8,
+          fontFamily: 'var(--mono)',
+          fontSize: 11,
+          color: 'var(--text-muted)',
+        }}
+      >
+        Vetted deterministic analytics — the agent invokes these with parameters; it never writes
+        code. Every execution is manifest-pinned (params, code hash, output hash).
       </div>
     </div>
   )

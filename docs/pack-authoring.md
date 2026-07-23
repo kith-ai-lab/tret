@@ -68,12 +68,52 @@ datasets:
 - **datasets** are the deterministic lane: CSVs whose rows the model can
   retrieve (exact-match filters) but never edit or compute over.
 
+## Methods — the deterministic compute lane
+
+When your domain needs *computed* numbers (aggregations, inventories, rates),
+ship them as **methods**: vetted Python scripts the agent can invoke with
+parameters but never write.
+
+```yaml
+methods:
+  - slug: my_rollup
+    display_name: My rollup
+    description: One paragraph the agent reads to know when to use it.
+    entrypoint: methods/my_rollup.py
+    params_schema:
+      status: { type: string, enum: [all, approved], description: "..." }
+    inputs: [my_dataset, "findings:my_verdict"]   # materialized and passed in
+    timeout_seconds: 60
+```
+
+Script contract — a pure function over stdin/stdout, stdlib only:
+
+```python
+import json, sys
+payload = json.load(sys.stdin)           # {"params": {...}, "inputs": {name: [rows]}}
+rows = compute(payload)                   # deterministic!
+json.dump({"rows": rows}, sys.stdout)    # flat dicts
+```
+
+Rules that keep the trust story intact:
+- **Deterministic**: same inputs + params → same output, always. No network,
+  no clock, no randomness. The runner executes with an isolated interpreter,
+  empty environment, CPU/memory limits, and a timeout.
+- **Pin your constants**: emission factors, thresholds, mappings live *in the
+  code* with a named version — changing them changes the code sha, which is
+  exactly the point.
+- **Declare gaps**: if a record can't be processed (unknown unit, missing
+  factor), skip it and report it in the output — never silently guess.
+- Every execution is recorded in `method_runs` with params, code sha, input
+  hashes, and output hash; the agent cites method outputs like dataset rows.
+
 ## Builtin tools you can grant
 
 | Tool | Use |
 |---|---|
 | `read_document` / `search_documents` | attached evidence documents |
-| `lookup_dataset` | the only source of numbers |
+| `lookup_dataset` | retrieve stored numbers |
+| `run_method` | compute derived numbers via vetted pack methods |
 | `list_prior_findings` | reference earlier verdicts/extractions |
 | `record_verdict` / `record_finding` | schema-validated structured outputs |
 | `draft_section` | store a markdown deliverable section |

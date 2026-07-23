@@ -208,6 +208,7 @@ function ToolItemRow({ item }: { item: StreamItem }) {
   const isCall = item.kind === 'tool_call'
   const body = isCall ? JSON.stringify(item.arguments, null, 2) : item.result
   const truncated = body.length > 4000 ? `${body.slice(0, 4000)}\n… (truncated)` : body
+  const manifest = !isCall && item.tool === 'run_method' ? methodManifest(item.result) : null
   return (
     <details className={`tool-row${!isCall && item.error ? ' is-error' : ''}`}>
       <summary>
@@ -230,8 +231,39 @@ function ToolItemRow({ item }: { item: StreamItem }) {
         </span>
       </summary>
       <div className="tool-body">{truncated}</div>
+      {manifest && (
+        <div
+          style={{
+            padding: '5px 10px',
+            borderTop: '1px solid var(--border-subtle)',
+            fontFamily: 'var(--mono)',
+            fontSize: 10.5,
+            color: 'var(--text-muted)',
+          }}
+        >
+          manifest: {manifest.code_sha} → {manifest.output_hash} ({manifest.duration_ms}ms)
+        </div>
+      )}
     </details>
   )
+}
+
+/** Parse a run_method tool result for its manifest pin; null if unparseable. */
+function methodManifest(
+  result: string,
+): { code_sha: string; output_hash: string; duration_ms: number } | null {
+  try {
+    const parsed: unknown = JSON.parse(result)
+    if (!parsed || typeof parsed !== 'object' || !('method_run_id' in parsed)) return null
+    const p = parsed as Record<string, unknown>
+    return {
+      code_sha: String(p.code_sha ?? '?'),
+      output_hash: String(p.output_hash ?? '?'),
+      duration_ms: Number(p.duration_ms ?? 0),
+    }
+  } catch {
+    return null
+  }
 }
 
 /** Rebuild the output text + tool activity from a persisted transcript. */

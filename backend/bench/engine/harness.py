@@ -157,6 +157,8 @@ class HarnessEngine:
             model_used=run.model_used,
             document_ids=list(run.document_ids or []),
             output_schemas=output_schemas,
+            pack_manifest=pack.manifest if pack else None,
+            pack_dir=pack.source_path if pack else None,
             terminal_tool=task.get("terminal_tool"),
         )
 

@@ -15,10 +15,13 @@ domain-agnostic and packs are pluggable.
 
 Five rules are built into the architecture, not just the prompts:
 
-1. **The AI never invents numbers.** Numeric values enter a run only through
-   the `lookup_dataset` tool, and every cited value is mechanically
-   cross-checked against what was actually retrieved. An un-retrieved number
-   is a validation error, not a hallucination that slipped through.
+1. **The AI never invents numbers.** Values enter a run only by retrieving
+   dataset rows (`lookup_dataset`) or by invoking **vetted deterministic
+   methods** (`run_method`) — pack-authored Python the agent can parameterize
+   but never write, each execution manifest-pinned (params, code hash, output
+   hash). Every cited value is mechanically cross-checked against what was
+   actually retrieved or computed; anything else is a validation error, not a
+   hallucination that slipped through.
 2. **Outputs are drafts until a named human approves.** The approver is
    stamped from the login session — there is no API field to claim approval.
 3. **Every run is fully auditable**: which model ran, why the router picked it

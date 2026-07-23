@@ -59,6 +59,17 @@ async def get_pack(
     return out
 
 
+@router.get("/methods/all")
+async def list_methods(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    """All deterministic methods across installed packs (for UI + reference)."""
+    packs = (await db.execute(select(Pack).order_by(Pack.slug))).scalars().all()
+    out = []
+    for p in packs:
+        for m in p.manifest.get("methods", []):
+            out.append({**m, "pack_slug": p.slug, "pack_id": str(p.id)})
+    return out
+
+
 class InstallBody(BaseModel):
     path: str
 

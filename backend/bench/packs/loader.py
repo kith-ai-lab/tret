@@ -66,6 +66,21 @@ def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[s
         if not (pack_dir / ds.file).exists():
             errors.append(f"dataset file missing: {ds.file}")
 
+    dataset_names = {d.name for d in manifest.datasets}
+    seen_methods: set[str] = set()
+    for m in manifest.methods:
+        if m.slug in seen_methods:
+            errors.append(f"duplicate method slug '{m.slug}'")
+        seen_methods.add(m.slug)
+        if not (pack_dir / m.entrypoint).exists():
+            errors.append(f"method '{m.slug}': entrypoint missing: {m.entrypoint}")
+        for spec in m.inputs:
+            if not spec.startswith("findings:") and spec not in dataset_names:
+                errors.append(
+                    f"method '{m.slug}': input '{spec}' is neither a pack dataset "
+                    "nor a findings:<schema_slug> reference"
+                )
+
     return manifest, schemas, errors
 
 
@@ -78,6 +93,14 @@ async def install_pack(
     if errors:
         raise PackValidationError(errors)
 
+    stored_manifest = manifest.model_dump()
+    stored_manifest["schemas"] = schemas
+    # Resolve each task's output_schema path to its slug for the engine/context.
+    for task in stored_manifest["task_types"]:
+        if task.get("output_schema"):
+            task["output_schema_slug"] = Path(task["output_schema"]).stem.removesuffix(".schema")
+    sha = doctrine_sha(pack_dir, manifest.doctrine)
+
     existing = (
         await db.execute(
             select(Pack).where(
@@ -88,24 +111,23 @@ async def install_pack(
         )
     ).scalar_one_or_none()
     if existing is not None:
-        return existing
-
-    stored_manifest = manifest.model_dump()
-    stored_manifest["schemas"] = schemas
-    # Resolve each task's output_schema path to its slug for the engine/context.
-    for task in stored_manifest["task_types"]:
-        if task.get("output_schema"):
-            task["output_schema_slug"] = Path(task["output_schema"]).stem.removesuffix(".schema")
-
-    pack = Pack(
-        workspace_id=workspace_id,
-        slug=manifest.pack,
-        version=manifest.version,
-        doctrine_sha=doctrine_sha(pack_dir, manifest.doctrine),
-        manifest=stored_manifest,
-        source_path=str(pack_dir),
-    )
-    db.add(pack)
+        # Same version, changed content (dev iteration): refresh in place so
+        # existing harness references stay valid. Released packs bump versions.
+        if existing.manifest != stored_manifest or existing.doctrine_sha != sha:
+            existing.manifest = stored_manifest
+            existing.doctrine_sha = sha
+            existing.source_path = str(pack_dir)
+        pack = existing
+    else:
+        pack = Pack(
+            workspace_id=workspace_id,
+            slug=manifest.pack,
+            version=manifest.version,
+            doctrine_sha=sha,
+            manifest=stored_manifest,
+            source_path=str(pack_dir),
+        )
+        db.add(pack)
     await db.flush()
 
     for ds_spec in manifest.datasets:

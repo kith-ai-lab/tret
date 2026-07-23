@@ -70,7 +70,7 @@ task_types:
     input_schema:
       section: { type: string, enum: [governance, strategy, risk_management, metrics_targets] }
     terminal_tool: draft_section
-    tools: [read_document, search_documents, lookup_dataset, list_prior_findings, draft_section, file_data_request]
+    tools: [read_document, search_documents, lookup_dataset, list_prior_findings, run_method, draft_section, file_data_request]
     output_contract: >
       One markdown section stored via draft_section for deliverable
       'tcfd-assessment'; grounded in prior approved findings and retrieved data only.
@@ -108,3 +108,30 @@ datasets:
   - { name: sites, file: sample-data/sites.csv }
   - { name: regional_signals, file: sample-data/regional_signals.csv }
   - { name: hazard_scores, file: sample-data/hazard_scores.csv }
+  - { name: carbon_workbook, file: sample-data/evidence/acme-carbon-workbook.csv }
+
+methods:
+  - slug: portfolio_divergence_rate
+    display_name: Portfolio divergence rate
+    description: >
+      Aggregate recorded divergence verdicts by peril: totals per verdict,
+      divergence rate, and the dominant reason code. The 'gap is the product'
+      rollup — use it whenever asked about divergence patterns across the
+      portfolio rather than a single site.
+    entrypoint: methods/portfolio_divergence_rate.py
+    params_schema:
+      status: { type: string, enum: [all, approved, draft], description: "Which verdicts to include (default all)" }
+      peril: { type: string, enum: [flood, heat, wind, drought], description: "Optional single-peril filter" }
+    inputs: ["findings:divergence_verdict"]
+
+  - slug: ghg_inventory
+    display_name: GHG inventory (Scope 1 & 2)
+    description: >
+      Compute Scope 1 and Scope 2 (location-based) emissions totals from the
+      carbon workbook activity data, by facility and category, using the
+      pinned demo emission-factor set. Emissions figures must come from this
+      method, never from estimation.
+    entrypoint: methods/ghg_inventory.py
+    params_schema:
+      facility: { type: string, description: "Optional facility name filter, e.g. 'Alder Point'" }
+    inputs: [carbon_workbook]

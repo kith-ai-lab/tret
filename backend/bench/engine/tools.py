@@ -36,6 +36,8 @@ class RunContext:
     model_used: str | None
     document_ids: list[uuid.UUID]
     output_schemas: dict[str, dict]  # schema_slug -> JSON Schema (from the pack)
+    pack_manifest: dict | None = None  # stored manifest (methods, task types)
+    pack_dir: str | None = None
     terminal_tool: str | None = None
     terminal_recorded: bool = False
     retrieved_values: list[dict] = field(default_factory=list)  # lookup_dataset audit trail
@@ -348,6 +350,83 @@ async def draft_section(ctx: RunContext, deliverable_slug: str, section_slug: st
     ctx.findings_created.append(finding.id)
     ctx.terminal_recorded = True
     return f"Section '{section_slug}' of '{deliverable_slug}' stored as draft finding {finding.id}."
+
+
+@builtin(
+    "run_method",
+    "Execute a vetted deterministic analytics method from the domain pack (the capability "
+    "catalog lists available methods and their parameters). Methods are reviewed, versioned "
+    "code — use them for ANY computation, aggregation, or derived number; never calculate "
+    "yourself. Returned values carry row references you can cite like dataset lookups.",
+    {
+        "type": "object",
+        "required": ["method"],
+        "properties": {
+            "method": {"type": "string", "description": "Method slug from the capability catalog"},
+            "params": {"type": "object", "description": "Parameters matching the method's schema"},
+        },
+    },
+)
+async def run_method(ctx: RunContext, method: str, params: dict | None = None) -> str:
+    from bench.services.methods import MethodError, execute_method
+
+    manifest = ctx.pack_manifest
+    # Chat/generic harnesses have no pack of their own — search installed packs.
+    spec = None
+    pack_id, pack_dir = ctx.pack_id, ctx.pack_dir
+    if manifest:
+        spec = next((m for m in manifest.get("methods", []) if m["slug"] == method), None)
+    if spec is None:
+        from bench.db.models import Pack
+
+        packs = (await ctx.db.execute(select(Pack))).scalars().all()
+        for p in packs:
+            candidate = next(
+                (m for m in p.manifest.get("methods", []) if m["slug"] == method), None
+            )
+            if candidate:
+                spec, pack_id, pack_dir = candidate, p.id, p.source_path
+                break
+    if spec is None:
+        raise ToolError(f"Unknown method '{method}'. Check the capability catalog for valid slugs.")
+
+    try:
+        record = await execute_method(
+            ctx.db,
+            project_id=ctx.project_id,
+            pack_id=pack_id,
+            pack_dir=pack_dir,
+            method_spec=spec,
+            params=params or {},
+            run_id=ctx.run_id,
+        )
+    except MethodError as e:
+        raise ToolError(f"Method '{method}' failed: {e}")
+
+    # Register outputs so cited_values can reference them, exactly like lookups.
+    ref_base = f"method/{method}/{record.id}"
+    rows_out = []
+    for i, row in enumerate(record.output):
+        row_ref = f"{ref_base}:{i}"
+        item = dict(row)
+        item["_row"] = row_ref
+        rows_out.append(item)
+        for k, v in row.items():
+            ctx.retrieved_values.append(
+                {"dataset": ref_base, "row_ref": row_ref, "column": k, "value": str(v)}
+            )
+    return json.dumps(
+        {
+            "method_run_id": str(record.id),
+            "code_sha": record.code_sha[:16],
+            "output_hash": (record.output_hash or "")[:16],
+            "inputs": record.input_summary,
+            "duration_ms": record.duration_ms,
+            "rows": rows_out,
+            "note": "Cite these values with dataset='" + ref_base + "' and the _row references.",
+        },
+        default=str,
+    )
 
 
 @builtin(

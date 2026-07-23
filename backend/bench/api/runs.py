@@ -111,6 +111,33 @@ async def get_run(
             "doctrine_sha": run.doctrine_sha}
 
 
+@router.get("/method-runs/{method_run_id}")
+async def get_method_run(
+    method_run_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+):
+    """Resolve a method/<slug>/<id> citation to its full execution manifest."""
+    from bench.db.models import MethodRun
+
+    mr = await db.get(MethodRun, method_run_id)
+    if mr is None:
+        raise HTTPException(404, "Method run not found")
+    return {
+        "id": str(mr.id),
+        "method_slug": mr.method_slug,
+        "run_id": str(mr.run_id) if mr.run_id else None,
+        "params": mr.params,
+        "code_sha": mr.code_sha,
+        "input_summary": mr.input_summary,
+        "output_hash": mr.output_hash,
+        "row_count": mr.row_count,
+        "duration_ms": mr.duration_ms,
+        "status": mr.status,
+        "error": mr.error,
+        "output": mr.output,
+        "created_at": mr.created_at.isoformat() if mr.created_at else None,
+    }
+
+
 @router.get("/{run_id}/events")
 async def run_events(run_id: uuid.UUID, user: User = Depends(current_user)):
     bus = get_event_bus()

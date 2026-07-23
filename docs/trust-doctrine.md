@@ -8,11 +8,19 @@ not by hoping the prompt holds.
 ## 1. Deterministic vs. interpretive separation
 
 The AI reasons, compares, and drafts. It does not compute, estimate, or recall
-numbers. Structured numeric inputs live in **datasets**; the only way a value
-enters a run is the `lookup_dataset` tool, which records everything it
-returns. When the model records a verdict, its `cited_values` are cross-checked
-against that record — a value it never retrieved fails validation and is sent
-back for repair. (`bench/engine/validation.py`)
+numbers. Values enter a run through exactly two doors, both recorded:
+
+- **`lookup_dataset`** — retrieval from structured datasets.
+- **`run_method`** — invocation of a *pack-authored, operator-vetted* Python
+  method. The agent supplies parameters; it never writes code. Every execution
+  is manifest-pinned (params, code sha, input hashes, output hash) in the
+  `method_runs` table, and its outputs carry row references
+  (`method/<slug>/<run-id>:<row>`) that resolve back to that manifest.
+
+When the model records a verdict, its `cited_values` are cross-checked against
+everything actually retrieved or computed this run — a value from neither door
+fails validation and is sent back for repair. (`bench/engine/validation.py`,
+`bench/services/methods.py`)
 
 ## 2. The blessing gate
 

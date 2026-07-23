@@ -73,6 +73,26 @@ async def _capability_catalog(db: AsyncSession) -> str:
     if len(lines) == 1:
         lines.append("(no specialist tasks installed)")
 
+    method_lines: list[str] = []
+    for p in packs.values():
+        for m in p.manifest.get("methods", []):
+            fields = ", ".join(
+                f"{name} ({spec.get('type', 'string')}"
+                + (f": {'|'.join(spec['enum'])}" if spec.get("enum") else "")
+                + ")"
+                + (f" — {spec['description']}" if spec.get("description") else "")
+                for name, spec in (m.get("params_schema") or {}).items()
+            )
+            method_lines.append(
+                f"- method: {m['slug']} — {m.get('display_name', m['slug'])} — "
+                f"params: {fields or '(none)'} — {m.get('description', '').strip()}"
+            )
+    if method_lines:
+        lines.append(
+            "\n## Deterministic methods (for run_method — use for ANY computed number)"
+        )
+        lines.extend(method_lines)
+
     datasets = (await db.execute(select(Dataset).order_by(Dataset.name))).scalars().all()
     if datasets:
         lines.append("\n## Datasets available via lookup_dataset")

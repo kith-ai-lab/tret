@@ -240,6 +240,34 @@ class DataRequest(Base):
     created_at: Mapped[datetime] = created_at_col()
 
 
+class MethodRun(Base):
+    """One execution of a pack-authored deterministic method.
+
+    The manifest of the deterministic lane: params in, code hash, input
+    summary, output rows + hash. Findings cite method outputs via row refs
+    of the form `method/<slug>/<method_run_id>:<row>` — this table is what
+    those references resolve to.
+    """
+
+    __tablename__ = "method_runs"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    pack_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("packs.id"), nullable=False)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id"))  # invoking agent run
+    method_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    code_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    input_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    output: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    output_hash: Mapped[str | None] = mapped_column(Text)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="completed")  # completed|failed
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+
+
 class ProviderCredential(Base):
     __tablename__ = "provider_credentials"
 

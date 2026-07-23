@@ -206,6 +206,22 @@ export interface DataRequest {
   created_at: string | null
 }
 
+export interface PackMethod {
+  slug: string
+  display_name?: string
+  description?: string
+  entrypoint?: string
+  params_schema?: Record<string, InputFieldSchema>
+  inputs?: string[]
+  timeout_seconds?: number
+}
+
+/** From GET /api/packs/methods/all — a PackMethod annotated with its pack. */
+export interface PackMethodRef extends PackMethod {
+  pack_slug: string
+  pack_id: string
+}
+
 export interface Pack {
   id: string
   slug: string
@@ -421,6 +437,7 @@ export const api = {
   // packs
   listPacks: () => request<Pack[]>('/packs'),
   getPack: (id: string) => request<PackDetail>(`/packs/${id}`),
+  listPackMethods: () => request<PackMethodRef[]>('/packs/methods/all'),
   validatePack: (path: string) =>
     request<{ valid: boolean; errors: string[]; pack: string | null; task_types: string[]; schemas: string[] }>(
       '/packs/validate',

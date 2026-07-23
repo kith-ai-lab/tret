@@ -57,6 +57,9 @@ async def bootstrap(db: AsyncSession) -> None:
     chat_harness = (
         await db.execute(select(Harness).where(Harness.task_profile == "chat"))
     ).scalars().first()
+    if chat_harness is not None and "run_method" not in (chat_harness.tool_names or []):
+        chat_harness.tool_names = [*chat_harness.tool_names, "run_method"]
+        await db.commit()
     if chat_harness is None:
         db.add(
             Harness(
@@ -69,6 +72,7 @@ async def bootstrap(db: AsyncSession) -> None:
                 model_policy={"mode": "auto", "max_cost_tier": "standard"},
                 tool_names=[
                     "run_harness_task",
+                    "run_method",
                     "read_document",
                     "search_documents",
                     "lookup_dataset",
