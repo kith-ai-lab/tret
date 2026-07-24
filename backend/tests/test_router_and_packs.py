@@ -20,7 +20,7 @@ def test_fallback_prefers_shape_table_order():
     catalog = ModelCatalog()
     registry = FakeRegistry({"openrouter"})
     chosen = fallback_model("verdict", catalog, registry)
-    assert chosen == "openrouter/openai/gpt-4.1"  # first verdict pref with a key
+    assert chosen == "openrouter/openai/gpt-5.6-terra"  # first verdict pref with a key
 
 
 def test_fallback_respects_allowed_list():

@@ -9,7 +9,7 @@ primary_region = "iad"
   BENCH_STORAGE_DIR = "/data/storage"
   BENCH_SERVE_FRONTEND_DIR = "/app/frontend-dist"
   BENCH_COOKIE_SECURE = "true"
-  BENCH_ROUTER_MODEL = "openrouter/openai/gpt-4.1"
+  BENCH_ROUTER_MODEL = "openrouter/openai/gpt-5.6-luna"
 
 [http_service]
   internal_port = 8000

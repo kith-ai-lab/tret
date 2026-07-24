@@ -36,6 +36,7 @@ class ModelInfo:
     strengths: list[str] = field(default_factory=list)
     supports_tools: bool = True
     curated: bool = True
+    released: str | None = None  # YYYY-MM; feeds the router's prefer-newer rule
 
     def cost_usd(self, input_tokens: int, output_tokens: int) -> Decimal:
         return (
@@ -55,6 +56,7 @@ class ModelInfo:
             "strengths": self.strengths,
             "supports_tools": self.supports_tools,
             "curated": self.curated,
+            "released": self.released,
         }
 
 
@@ -89,6 +91,7 @@ class ModelCatalog:
                 strengths=m.get("strengths", []),
                 supports_tools=m.get("supports_tools", True),
                 curated=True,
+                released=str(m["released"]) if m.get("released") else None,
             )
             out[info.id] = info
         return out
@@ -121,6 +124,15 @@ class ModelCatalog:
                 out_price = Decimal(str(pricing.get("completion", "0"))) * Decimal(1_000_000)
             except Exception:
                 continue
+            created = m.get("created")
+            released = None
+            if created:
+                try:
+                    from datetime import datetime, timezone
+
+                    released = datetime.fromtimestamp(int(created), tz=timezone.utc).strftime("%Y-%m")
+                except (ValueError, OSError):
+                    pass
             dynamic[bench_id] = ModelInfo(
                 id=bench_id,
                 provider="openrouter",
@@ -133,6 +145,7 @@ class ModelCatalog:
                 strengths=[],
                 supports_tools=True,
                 curated=False,
+                released=released,
             )
         self._dynamic = dynamic
         self._dynamic_fetched_at = time.monotonic()

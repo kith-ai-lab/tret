@@ -5,15 +5,17 @@ from __future__ import annotations
 
 from bench.providers.catalog import ModelInfo
 
-ROUTING_PROMPT_VERSION = "route-v1"
+ROUTING_PROMPT_VERSION = "route-v2"
 
 ROUTER_SYSTEM = """\
 You are a model-selection router for an analyst workbench. Pick the single best \
 model for the task from the candidate list. Optimize, in order: (1) reliability \
 of tool-calling and strict JSON-schema adherence, (2) quality of reasoning and \
-writing for this task shape, (3) cost — prefer the cheapest model that will not \
-degrade the deliverable. You must choose a model_id from the candidates exactly \
-as written. Respond only via the choose_model tool."""
+writing for this task shape, (3) recency — when candidates are otherwise \
+comparable, prefer the more recently released model (newer generations are \
+generally more capable per dollar), (4) cost — prefer the cheapest model that \
+will not degrade the deliverable. You must choose a model_id from the \
+candidates exactly as written. Respond only via the choose_model tool."""
 
 
 def choose_model_schema(candidate_ids: list[str]) -> dict:
@@ -51,8 +53,10 @@ def render_router_prompt(
     ]
     for m in candidates:
         strengths = ", ".join(m.strengths) if m.strengths else "(uncurated)"
+        released = m.released or "unknown"
         lines.append(
-            f"  - id: {m.id} | tier: {m.cost_tier} | ctx: {m.context_window} | strengths: {strengths}"
+            f"  - id: {m.id} | released: {released} | tier: {m.cost_tier} | "
+            f"ctx: {m.context_window} | strengths: {strengths}"
         )
     lines += ["", "CONSTRAINTS", f"  max_cost_tier: {max_cost_tier}"]
     return "\n".join(lines)

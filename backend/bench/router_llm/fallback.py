@@ -10,28 +10,31 @@ from bench.providers.catalog import ModelCatalog, ProviderRegistry
 FALLBACK_TABLE: dict[str, list[str]] = {
     "verdict": [
         "anthropic/claude-sonnet-5",
+        "openrouter/openai/gpt-5.6-terra",
+        "openrouter/moonshotai/kimi-k3",
         "kimi/kimi-k2",
-        "openrouter/openai/gpt-4.1",
     ],
     "extraction": [
         "anthropic/claude-sonnet-5",
+        "openrouter/openai/gpt-5.6-terra",
+        "openrouter/moonshotai/kimi-k3",
         "kimi/kimi-k2",
-        "openrouter/openai/gpt-4.1",
     ],
     "drafting": [
         "anthropic/claude-opus-4-8",
         "anthropic/claude-sonnet-5",
-        "openrouter/google/gemini-2.5-pro",
+        "openrouter/google/gemini-3.6-flash",
     ],
     "qa_review": [
         "anthropic/claude-haiku-4-5",
+        "openrouter/google/gemini-3.5-flash-lite",
+        "openrouter/deepseek/deepseek-v4-pro",
         "kimi/kimi-k2",
-        "openrouter/deepseek/deepseek-chat-v3",
     ],
     "freeform": [
         "anthropic/claude-sonnet-5",
+        "openrouter/openai/gpt-5.6-luna",
         "kimi/kimi-k2",
-        "openrouter/openai/gpt-4.1",
     ],
 }
 
