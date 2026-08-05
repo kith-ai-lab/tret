@@ -32,7 +32,18 @@ export interface UsageInfo {
   iteration: number
   input_tokens: number
   output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
   cost_usd: number
+  // Estimated, not metered. null when the engine reported no estimate.
+  // Every figure is the run's cumulative total so far, not a per-iteration delta.
+  energy_wh: number | null // compute / IT load only
+  co2e_g: number | null // run total = scope1 + scope2 + scope3
+  scope2_g: number | null
+  scope3_g: number | null
+  baseline_co2e_g: number | null
+  // Signed: negative means heavier than the baseline. Never take its absolute.
+  avoided_co2e_g: number | null
 }
 
 export interface RunStreamState {
@@ -53,6 +64,11 @@ const initialState: RunStreamState = {
   status: null,
   done: false,
   error: null,
+}
+
+/** Estimates are nullable on the wire: a missing estimate is not zero draw. */
+function numberOrNull(value: unknown): number | null {
+  return typeof value === 'number' ? value : null
 }
 
 export function useRunStream(runId: string | null): RunStreamState {
@@ -120,12 +136,38 @@ export function useRunStream(runId: string | null): RunStreamState {
           iteration: Number(d.iteration ?? 0),
           input_tokens: Number(d.input_tokens ?? 0),
           output_tokens: Number(d.output_tokens ?? 0),
+          cache_read_tokens: Number(d.cache_read_tokens ?? 0),
+          cache_write_tokens: Number(d.cache_write_tokens ?? 0),
           cost_usd: Number(d.cost_usd ?? 0),
+          energy_wh: numberOrNull(d.energy_wh),
+          co2e_g: numberOrNull(d.co2e_g),
+          scope2_g: numberOrNull(d.scope2_g),
+          scope3_g: numberOrNull(d.scope3_g),
+          baseline_co2e_g: numberOrNull(d.baseline_co2e_g),
+          avoided_co2e_g: numberOrNull(d.avoided_co2e_g),
         },
       })),
     )
     on('done', (d) => {
-      setState((s) => ({ ...s, done: true, status: typeof d.status === 'string' ? d.status : 'completed' }))
+      setState((s) => ({
+        ...s,
+        done: true,
+        status: typeof d.status === 'string' ? d.status : 'completed',
+        // `done` carries the final cost/energy totals; keep the last usage
+        // frame's token counts, which `done` does not repeat.
+        usage: s.usage
+          ? {
+              ...s.usage,
+              cost_usd: Number(d.cost_usd ?? s.usage.cost_usd),
+              energy_wh: numberOrNull(d.energy_wh) ?? s.usage.energy_wh,
+              co2e_g: numberOrNull(d.co2e_g) ?? s.usage.co2e_g,
+              scope2_g: numberOrNull(d.scope2_g) ?? s.usage.scope2_g,
+              scope3_g: numberOrNull(d.scope3_g) ?? s.usage.scope3_g,
+              baseline_co2e_g: numberOrNull(d.baseline_co2e_g) ?? s.usage.baseline_co2e_g,
+              avoided_co2e_g: numberOrNull(d.avoided_co2e_g) ?? s.usage.avoided_co2e_g,
+            }
+          : s.usage,
+      }))
       es.close()
     })
     on('error', (d) => {

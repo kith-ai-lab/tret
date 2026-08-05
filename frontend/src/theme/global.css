@@ -926,6 +926,8 @@ input[type="radio"] {
 .chat-turn-footer {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  row-gap: 4px;
   gap: 12px;
   margin-top: 10px;
   font-family: var(--mono);
@@ -1160,4 +1162,199 @@ input[type="radio"] {
 .config-stat .mono-label {
   font-size: 10px;
   margin-bottom: 4px;
+}
+
+/* ── Emissions / footprint ─────────────────────────────────────────────── */
+
+/* Mono small print: basis strings, disclaimers, factor provenance. */
+.fine-print {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.fine-print code {
+  font-size: 10.5px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+/* Callouts. `note` for text that must be read; `warn` for a live caveat. */
+.callout {
+  border-left: 2px solid var(--border);
+  border-radius: 0 6px 6px 0;
+  padding: 10px 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.callout .callout-title {
+  display: block;
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 5px;
+}
+
+.callout-note {
+  border-left-color: var(--gray);
+  background: var(--gray-dim);
+  color: var(--text);
+}
+
+.callout-note .callout-title {
+  color: var(--text-muted);
+}
+
+.callout-warn {
+  border-left-color: var(--amber);
+  background: var(--amber-dim);
+  color: var(--text);
+}
+
+.callout-warn .callout-title {
+  color: var(--amber);
+}
+
+/* Stacked proportion bar (scopes, actual-vs-baseline). */
+.stacked-bar {
+  display: flex;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--bg-input);
+}
+
+.stacked-bar > span {
+  display: block;
+}
+
+.swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 6px;
+}
+
+/* Two-row comparison bars. */
+.cmp-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 12ch;
+  gap: 10px;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.cmp-track {
+  height: 10px;
+  border-radius: 5px;
+  background: var(--bg-input);
+  overflow: hidden;
+}
+
+.cmp-track > span {
+  display: block;
+  height: 100%;
+  border-radius: 5px;
+}
+
+.cmp-row .cmp-val {
+  text-align: right;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Per-day mini bars (CSS only — no chart library in this app). */
+.spark {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 46px;
+  /* A long window can hold more days than fit; scroll the bars rather than the
+     page. */
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.spark-col {
+  flex: 1 1 0;
+  min-width: 2px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.spark-col > i {
+  display: block;
+  background: var(--accent);
+  opacity: 0.7;
+  border-radius: 1px 1px 0 0;
+  min-height: 1px;
+}
+
+.spark-col:hover > i {
+  opacity: 1;
+}
+
+.spark-col.neg > i {
+  background: var(--red);
+}
+
+.spark-col.pos > i {
+  background: var(--green);
+}
+
+.spark-axis {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* Live footprint ticker. Fixed-width numeric cells so a streaming update never
+   reflows the surrounding layout. */
+.ticker {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.ticker .t-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.ticker .t-key {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.ticker .t-val {
+  display: inline-block;
+  text-align: right;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Collapsibles are keyboard-reachable natively; the marker is hidden, so the
+   focus ring has to be visible instead. */
+summary:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
 }

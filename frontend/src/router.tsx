@@ -1,9 +1,11 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 
+import { Analytics } from './views/Analytics'
 import { Approvals } from './views/Approvals'
 import { Chat } from './views/Chat'
 import { Deliverables } from './views/Deliverables'
 import { Documents } from './views/Documents'
+import { Emissions } from './views/Emissions'
 import { Harnesses } from './views/Harnesses'
 import { Packs } from './views/Packs'
 import { RunDetailView } from './views/RunDetail'
@@ -20,6 +22,8 @@ export function AppRoutes() {
       <Route path="/runs" element={<Runs />} />
       <Route path="/runs/:id" element={<RunDetailView />} />
       <Route path="/approvals" element={<Approvals />} />
+      <Route path="/analytics" element={<Analytics />} />
+      <Route path="/emissions" element={<Emissions />} />
       <Route path="/deliverables" element={<Deliverables />} />
       <Route path="/documents" element={<Documents />} />
       <Route path="/packs" element={<Packs />} />

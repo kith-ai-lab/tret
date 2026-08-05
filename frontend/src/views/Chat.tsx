@@ -4,6 +4,8 @@ import { Link, useNavigate } from 'react-router-dom'
 
 import { api, type ChatMessage } from '../api/client'
 import { useRunStream } from '../api/useRunStream'
+import { formatCost, formatTokens } from '../components/shared/format'
+import { LiveFootprint } from '../components/shared/LiveFootprint'
 import { shortModelName } from '../components/shared/RoutingBadge'
 import { Markdown } from './Packs'
 
@@ -360,7 +362,7 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
             <span className="err">{message.status}</span>
           )}
           {message.model_used && <span>{shortModelName(message.model_used)}</span>}
-          {message.cost_usd !== undefined && <span>${message.cost_usd.toFixed(4)}</span>}
+          {message.cost_usd !== undefined && <span>{formatCost(message.cost_usd)}</span>}
           {message.run_id && (
             <Link to={`/runs/${message.run_id}`} className="chat-viewrun">
               view run
@@ -376,6 +378,7 @@ function LiveTurn({ runId, stream }: { runId: string; stream: ReturnType<typeof 
   const navigate = useNavigate()
   const toolCalls = stream.items.filter((i) => i.kind === 'tool_call')
   const finalizing = stream.done
+  const usage = stream.usage
   return (
     <div className="chat-turn assistant">
       <AssistantAvatar />
@@ -410,6 +413,17 @@ function LiveTurn({ runId, stream }: { runId: string; stream: ReturnType<typeof 
         {stream.error && <div className="error-text" style={{ marginTop: 8 }}>{stream.error}</div>}
         <div className="chat-turn-footer">
           <span className="pulse">{finalizing ? 'finalizing' : 'streaming'}</span>
+          {usage && (
+            <span
+              title={`cache ${formatTokens(usage.cache_read_tokens)} read / ${formatTokens(usage.cache_write_tokens)} write`}
+            >
+              {formatTokens(usage.input_tokens)} in / {formatTokens(usage.output_tokens)} out
+            </span>
+          )}
+          {usage && <span>{formatCost(usage.cost_usd)}</span>}
+          {/* Rendered unconditionally: the ticker holds its own width and shows
+              em-dashes until the first usage frame, so the footer never reflows. */}
+          <LiveFootprint usage={usage} />
           <Link to={`/runs/${runId}`} className="chat-viewrun">
             view run
           </Link>

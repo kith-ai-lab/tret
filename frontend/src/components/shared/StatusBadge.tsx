@@ -3,6 +3,9 @@ const STATUS_COLOR: Record<string, string> = {
   queued: 'badge-gray',
   running: 'badge-blue',
   completed: 'badge-green',
+  // The loop finished but produced no assistant output — not a failure, not a
+  // clean success. Amber reads truer than the gray fallback.
+  completed_without_output: 'badge-amber',
   failed: 'badge-red',
   cancelled: 'badge-gray',
   // findings

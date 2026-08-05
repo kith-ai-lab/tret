@@ -2,7 +2,14 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import { api, type InputFieldSchema, type ModelInfo, type TaskType } from '../api/client'
+import {
+  api,
+  DEFAULT_OBJECTIVE,
+  type InputFieldSchema,
+  type ModelInfo,
+  objectiveDescription,
+  type TaskType,
+} from '../api/client'
 import { shortModelName } from '../components/shared/RoutingBadge'
 
 const FREEFORM: TaskType = { slug: 'freeform', display_name: 'Freeform', shape: 'freeform' }
@@ -204,11 +211,16 @@ export function Workbench() {
                 {runMutation.isPending ? 'Starting…' : 'Run'}
               </button>
               {harnessDetailQuery.data && (
-                <span className="mono-label">
+                <span
+                  className="mono-label"
+                  title={objectiveDescription(harnessDetailQuery.data.model_policy.objective)}
+                >
                   policy: {harnessDetailQuery.data.model_policy.mode}
                   {harnessDetailQuery.data.model_policy.mode === 'pinned' &&
                     harnessDetailQuery.data.model_policy.model &&
                     ` → ${shortModelName(harnessDetailQuery.data.model_policy.model)}`}
+                  {' · '}
+                  {harnessDetailQuery.data.model_policy.objective ?? DEFAULT_OBJECTIVE}
                 </span>
               )}
             </div>
@@ -277,6 +289,20 @@ function SchemaFields({
   )
 }
 
+/** Price line for a model. Local models are free in dollars, which must read as
+ *  "free", not as a missing price. */
+export function modelPriceLabel(m: ModelInfo): string {
+  if (m.input_price_per_mtok === 0 && m.output_price_per_mtok === 0) {
+    return m.cost_tier === 'local' ? 'free (local weights)' : 'no published price'
+  }
+  return `$${m.input_price_per_mtok}/${m.output_price_per_mtok} per Mtok`
+}
+
+/** Why a model can't be selected — "local" has a base URL, not a key. */
+export function modelUnavailableLabel(m: ModelInfo): string {
+  return m.provider === 'local' ? 'no local base URL' : 'no key'
+}
+
 /** Model picker grouped by provider; unavailable providers are disabled. */
 export function ModelSelect({
   models,
@@ -299,8 +325,8 @@ export function ModelSelect({
             .filter((m) => m.provider === p)
             .map((m) => (
               <option key={m.id} value={m.id} disabled={!m.available}>
-                {m.display_name} · {m.cost_tier} · ${m.input_price_per_mtok}/{m.output_price_per_mtok} per Mtok
-                {m.available ? '' : ' (no key)'}
+                {m.display_name} · {m.cost_tier} · {modelPriceLabel(m)}
+                {m.available ? '' : ` (${modelUnavailableLabel(m)})`}
               </option>
             ))}
         </optgroup>

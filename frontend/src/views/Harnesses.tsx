@@ -4,13 +4,17 @@ import { type FormEvent, useEffect, useState } from 'react'
 import {
   api,
   ApiError,
+  DEFAULT_OBJECTIVE,
   type Harness,
   type HarnessBody,
   type LoopConfig,
   type ModelPolicy,
+  OBJECTIVE_DESCRIPTIONS,
+  ROUTING_OBJECTIVES,
+  type RoutingObjective,
 } from '../api/client'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
-import { ModelSelect } from './Workbench'
+import { ModelSelect, modelPriceLabel, modelUnavailableLabel } from './Workbench'
 
 const NEW_ID = '__new__'
 
@@ -27,7 +31,7 @@ const emptyForm: HarnessBody = {
   pack_id: null,
   task_profile: 'freeform',
   system_prompt_extra: null,
-  model_policy: { mode: 'auto', max_cost_tier: 'premium' },
+  model_policy: { mode: 'auto', max_cost_tier: 'premium', objective: DEFAULT_OBJECTIVE },
   tool_names: [],
   loop_config: { ...DEFAULT_LOOP },
 }
@@ -265,6 +269,26 @@ function HarnessEditor({
           ))}
         </div>
 
+        {/* Routing objective — what the router optimizes for. Stored on the
+            policy regardless of mode, since a harness can be un-pinned later. */}
+        <div className="field">
+          <label className="mono-label">Routing objective</label>
+          <select
+            value={form.model_policy.objective ?? DEFAULT_OBJECTIVE}
+            onChange={(e) => setPolicy({ objective: e.target.value as RoutingObjective })}
+          >
+            {ROUTING_OBJECTIVES.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+            {OBJECTIVE_DESCRIPTIONS[form.model_policy.objective ?? DEFAULT_OBJECTIVE]}
+            {form.model_policy.mode === 'pinned' && ' — applies when routing is automatic'}
+          </div>
+        </div>
+
         {form.model_policy.mode === 'pinned' ? (
           <div className="field" style={{ marginBottom: 0 }}>
             <label className="mono-label">Pinned model</label>
@@ -317,9 +341,10 @@ function HarnessEditor({
                         }}
                       />
                       <span>{m.display_name}</span>
+                      {m.cost_tier === 'local' && <span className="badge badge-green">local</span>}
                       <span className="desc">
-                        {m.provider} · {m.cost_tier}
-                        {m.available ? '' : ' · no key'}
+                        {m.provider} · {modelPriceLabel(m)} · energy class {m.energy_class} (est.)
+                        {m.available ? '' : ` · ${modelUnavailableLabel(m)}`}
                       </span>
                     </label>
                   )

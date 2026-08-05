@@ -10,6 +10,25 @@ export interface User {
   role: string // admin | analyst | approver
 }
 
+/** What the router was asked to optimize for (backend: router_llm/objectives.py). */
+export const ROUTING_OBJECTIVES = ['quality', 'balanced', 'token_conservation', 'eco'] as const
+
+export type RoutingObjective = (typeof ROUTING_OBJECTIVES)[number]
+
+export const DEFAULT_OBJECTIVE: RoutingObjective = 'balanced'
+
+/** One-line description per objective, mirroring the backend docstrings. */
+export const OBJECTIVE_DESCRIPTIONS: Record<RoutingObjective, string> = {
+  quality: 'prefer the most capable candidate within the cost tier — thrift is secondary',
+  balanced: 'the cheapest model that will do the job well, newer first (default)',
+  token_conservation: 'prefer small-but-sufficient models with disciplined output',
+  eco: 'prefer lowest estimated energy — local models first',
+}
+
+export function objectiveDescription(objective: string | undefined): string {
+  return OBJECTIVE_DESCRIPTIONS[(objective ?? DEFAULT_OBJECTIVE) as RoutingObjective] ?? ''
+}
+
 export interface RoutingDecision {
   router_model: string | null
   routing_prompt_version: string
@@ -17,6 +36,7 @@ export interface RoutingDecision {
   chosen_model: string
   reasoning: string
   confidence: string | null
+  objective: string // quality | balanced | token_conservation | eco
   fallback_used: boolean
   override: string | null // "user_pin" | "run_override" | null
   latency_ms: number
@@ -34,7 +54,18 @@ export interface RunSummary {
   routing: RoutingDecision | null
   input_tokens: number
   output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
   cost_usd: number
+  // Estimated, never metered. null (not 0) for runs predating eco accounting.
+  energy_wh: number | null
+  co2e_g: number | null
+  // Read as recorded from the run's own accounting block, never recomputed at
+  // today's factors. null wherever the run has no figure — a run recorded before
+  // scopes/baseline existed reports null, not 0.
+  scope2_g: number | null
+  scope3_g: number | null
+  avoided_co2e_g: number | null
   iterations: number
   error: string | null
   created_at: string | null
@@ -56,11 +87,82 @@ export interface Msg {
   meta: Record<string, unknown>
 }
 
+/** One accounted component of a run's assembled context. */
+export interface ContextBlock {
+  kind: string // platform_preamble | doctrine | task_instructions | output_schema | tool_specs | …
+  label: string
+  chars: number
+  est_tokens: number
+  sha256?: string
+  sections?: string[]
+  parts?: Record<string, number> // sub-breakdown, e.g. est tokens per tool
+  note?: string
+}
+
+export interface ContextComposition {
+  estimator: string // e.g. "chars/4"
+  total_est_tokens: number
+  total_chars: number
+  by_kind: Record<string, number>
+  blocks: ContextBlock[]
+}
+
+/** GHG Protocol split for one run, from the bench operator's perspective.
+ *  scope1_g is always 0 and always present — reported as an explicit zero rather
+ *  than omitted. `basis` states the reasoning and is rendered verbatim. */
+export interface EmissionScopes {
+  scope1_g: number
+  scope2_g: number
+  scope3_g: number
+  basis: string
+}
+
+/** The same-token counterfactual against a frontier baseline model. An
+ *  efficiency indicator, never an offset or a reduction claim. Every numeric
+ *  field is null when no baseline could be resolved; `basis` always explains. */
+export interface EmissionsBaseline {
+  model: string | null
+  energy_class: string | null
+  energy_wh: number | null
+  energy_wh_total: number | null
+  co2e_g: number | null
+  // Signed on purpose: a run heavier than the baseline reports a negative
+  // figure. Never render its absolute value.
+  avoided_co2e_g: number | null
+  avoided_pct: number | null
+  basis: string
+}
+
+/** The auditable energy/carbon derivation on a run. Every field is an estimate.
+ *  The keys after `basis` were added with scope accounting: they are optional
+ *  because runs recorded before it exists genuinely do not carry them. */
+export interface EnergyAccounting {
+  estimated: boolean
+  model: string
+  energy_class: string // S | M | L | XL
+  energy_wh_per_mtok: number
+  weighted_tokens: number
+  cache_read_weight: number
+  cache_write_weight: number
+  energy_wh: number // compute / IT load only — excludes facility overhead
+  grid_co2e_g_per_kwh: number
+  co2e_g: number // run total; equals scope1_g + scope2_g + scope3_g
+  basis: string
+  pue?: number
+  energy_wh_total?: number // compute x PUE
+  deployment?: string // cloud | local
+  embodied_g?: number
+  scopes?: EmissionScopes
+  baseline?: EmissionsBaseline | null
+}
+
 export interface RunDetail extends RunSummary {
   task_input: Record<string, unknown>
   messages: Msg[]
   document_ids: string[]
   doctrine_sha: string | null
+  context_composition: ContextComposition | null
+  energy: EnergyAccounting | null
 }
 
 export interface CreateRunBody {
@@ -94,6 +196,7 @@ export interface ModelPolicy {
   model?: string
   allowed?: string[]
   max_cost_tier?: string
+  objective?: RoutingObjective
 }
 
 export interface LoopConfig {
@@ -242,15 +345,18 @@ export interface PackDetail extends Pack {
 
 export interface ModelInfo {
   id: string
-  provider: string // anthropic | kimi | openrouter
+  provider: string // anthropic | kimi | openrouter | local
   display_name: string
   context_window: number
   input_price_per_mtok: number
   output_price_per_mtok: number
-  cost_tier: string // economy | standard | premium
+  cost_tier: string // economy | standard | premium | local
   strengths: string[]
   supports_tools: boolean
   curated: boolean
+  released: string | null // YYYY-MM
+  energy_class: string // S | M | L | XL — heuristic estimate
+  energy_wh_per_mtok: number
   available: boolean
 }
 
@@ -265,6 +371,26 @@ export interface ProviderStatus {
   configured: boolean
   source: 'env' | 'db' | null
   last4: string | null
+}
+
+/** One model found on the local server, as reported by the connection test. */
+export interface LocalTestModel {
+  id: string
+  display_name: string
+  supports_tools: boolean
+  context_window: number // 0 = the server didn't report one (never guessed)
+}
+
+/** POST /api/settings/providers/local/test — a read-only diagnostic. The URL
+ *  tested is always the server's own BENCH_LOCAL_BASE_URL; the client cannot
+ *  supply one (that would make this an SSRF hole). */
+export interface LocalProviderTest {
+  configured: boolean
+  base_url: string | null
+  reachable: boolean
+  error: string | null
+  models: LocalTestModel[]
+  counts: { models: number; tool_capable: number; no_tools: number }
 }
 
 export interface DeliverableSection {
@@ -329,6 +455,139 @@ export interface RouterSettings {
   router_model: string
   routing_prompt_version: string
   timeout_seconds: number
+}
+
+// ── Guardrail analytics ──────────────────────────────────────────────────
+
+export interface GuardrailMethodStat {
+  method_slug: string
+  runs: number
+  failed: number
+  completed: number
+  failure_rate_pct: number
+}
+
+export interface GuardrailMethodError {
+  method_slug: string
+  error: string
+  at: string | null
+}
+
+export interface GuardrailHarnessStat {
+  harness_id: string
+  harness_name: string
+  runs: number
+  runs_with_validation_error: number
+  validation_errors: number
+  unrecovered_validation_errors: number
+  run_error_rate_pct: number
+}
+
+export interface GuardrailTotals {
+  method_runs: number
+  method_failures: number
+  method_failure_rate_pct: number
+  runs_scanned: number
+  runs_scan_limit: number
+  validation_errors: number
+  unrecovered_validation_errors: number
+}
+
+export interface GuardrailAnalytics {
+  window_days: number | null
+  project_id: string | null
+  totals: GuardrailTotals
+  methods: GuardrailMethodStat[]
+  recent_method_errors: GuardrailMethodError[]
+  harnesses: GuardrailHarnessStat[]
+}
+
+// ── Emissions analytics ──────────────────────────────────────────────────
+// GET /api/analytics/emissions. Every total is a plain sum of each run's stored
+// figures, frozen at the factors in force when that run ran — nothing is
+// recomputed at current settings, and runs without an estimate are excluded from
+// the sums and counted separately.
+
+export interface EmissionsTotals {
+  runs: number
+  runs_with_estimate: number
+  runs_without_estimate: number
+  runs_without_scope_split: number
+  runs_without_baseline: number
+  energy_wh: number // total, PUE-inclusive
+  energy_wh_compute: number // IT load only
+  co2e_g: number
+  scope1_g: number
+  scope2_g: number
+  scope3_g: number
+  baseline_co2e_g: number
+  avoided_co2e_g: number // signed
+  avoided_pct: number // signed
+}
+
+/** Shared metric shape for the by_model / by_harness rollups. */
+export interface EmissionsBucket {
+  runs: number
+  energy_wh: number
+  co2e_g: number
+  baseline_co2e_g: number
+  avoided_co2e_g: number
+}
+
+export interface EmissionsByModel extends EmissionsBucket {
+  model: string
+  energy_class: string | null
+}
+
+export interface EmissionsByHarness extends EmissionsBucket {
+  harness_id: string
+  harness_name: string
+}
+
+export interface EmissionsByDay {
+  date: string // YYYY-MM-DD
+  co2e_g: number
+  avoided_co2e_g: number
+}
+
+/** One (deployment, grid factor, PUE) combination actually present in the
+ *  window — what makes `mixed_factors` inspectable rather than just flagged. */
+export interface EmissionsRecordedFactor {
+  deployment: string | null
+  grid_co2e_g_per_kwh: number | null
+  pue: number | null
+  runs: number
+}
+
+export interface EmissionsFactors {
+  grid_co2e_g_per_kwh: number
+  local_grid_co2e_g_per_kwh: number | null
+  datacenter_pue: number
+  local_pue: number
+  baseline_model: string | null
+  mixed_factors: boolean
+  note: string
+  recorded: EmissionsRecordedFactor[]
+}
+
+export interface EmissionsScan {
+  limit: number
+  rows_scanned: number
+  truncated: boolean
+}
+
+export interface EmissionsAnalytics {
+  window_days: number | null
+  project_id: string | null
+  totals: EmissionsTotals
+  by_model: EmissionsByModel[]
+  by_harness: EmissionsByHarness[]
+  by_day: EmissionsByDay[]
+  factors: EmissionsFactors
+  scan: EmissionsScan
+  estimated: boolean
+  /** Rendered verbatim, never paraphrased. */
+  disclaimer: string
 }
 
 // ── Fetch wrapper ────────────────────────────────────────────────────────
@@ -475,7 +734,21 @@ export const api = {
       method: 'POST',
       body: { provider, api_key: apiKey },
     }),
+  testLocalProvider: () =>
+    request<LocalProviderTest>('/settings/providers/local/test', { method: 'POST' }),
   listModels: () => request<ModelInfo[]>('/models'),
   listTools: () => request<ToolInfo[]>('/tools'),
   routerSettings: () => request<RouterSettings>('/settings/router'),
+
+  // analytics
+  guardrailAnalytics: (days = 30, projectId?: string) => {
+    const qs = new URLSearchParams({ days: String(days) })
+    if (projectId) qs.set('project_id', projectId)
+    return request<GuardrailAnalytics>(`/analytics/guardrails?${qs.toString()}`)
+  },
+  emissionsAnalytics: (days = 30, projectId?: string) => {
+    const qs = new URLSearchParams({ days: String(days) })
+    if (projectId) qs.set('project_id', projectId)
+    return request<EmissionsAnalytics>(`/analytics/emissions?${qs.toString()}`)
+  },
 }

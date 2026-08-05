@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
-import type { RoutingDecision } from '../../api/client'
+import { objectiveDescription, type RoutingDecision } from '../../api/client'
 
 /** Strip the provider prefix: "anthropic/claude-sonnet-5" → "claude-sonnet-5". */
 export function shortModelName(id: string): string {
@@ -70,6 +70,10 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
             <span>{routing.router_model ?? '— (no router call)'}</span>
             <span className="k">Prompt version</span>
             <span>{routing.routing_prompt_version}</span>
+            <span className="k">Objective</span>
+            <span title={objectiveDescription(routing.objective)}>
+              {routing.objective ?? '—'}
+            </span>
             <span className="k">Override</span>
             <span>{routing.override ?? 'none'}</span>
             <span className="k">Fallback used</span>

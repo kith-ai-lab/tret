@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { type FormEvent, useState } from 'react'
+import { type FormEvent, type ReactNode, useState } from 'react'
 
-import { api, ApiError, type User } from '../api/client'
+import { api, ApiError, type LocalProviderTest, type User } from '../api/client'
 import { type Column, MonoTable } from '../components/shared/MonoTable'
 import { StatusBadge } from '../components/shared/StatusBadge'
 import { formatDateTime } from './Runs'
@@ -270,38 +270,76 @@ function ProviderKeys() {
       ) : providersQuery.isError ? (
         <div className="error-text">{(providersQuery.error as Error).message}</div>
       ) : (
-        <table className="mono-table" style={{ marginBottom: 14 }}>
-          <thead>
-            <tr>
-              <th>Provider</th>
-              <th>Configured</th>
-              <th>Source</th>
-              <th>Key</th>
-            </tr>
-          </thead>
-          <tbody>
-            {(providersQuery.data ?? []).map((p) => (
-              <tr key={p.provider}>
-                <td>{p.provider}</td>
-                <td>
-                  <span
-                    style={{
-                      display: 'inline-block',
-                      width: 8,
-                      height: 8,
-                      borderRadius: 4,
-                      background: p.configured ? 'var(--green)' : 'var(--red)',
-                      marginRight: 6,
-                    }}
-                  />
-                  {p.configured ? 'yes' : 'no'}
-                </td>
-                <td>{p.source ?? '—'}</td>
-                <td>{p.last4 ? `••••${p.last4}` : '—'}</td>
+        <>
+          <table className="mono-table" style={{ marginBottom: 8 }}>
+            <thead>
+              <tr>
+                <th>Provider</th>
+                <th>Configured</th>
+                <th>Source</th>
+                <th>Credential</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {(providersQuery.data ?? []).map((p) => {
+                // "local" has no API key: a configured base URL is the credential,
+                // and an unset one is a normal state, not a misconfiguration.
+                const isLocal = p.provider === 'local'
+                return (
+                  <tr key={p.provider}>
+                    <td>{p.provider}</td>
+                    <td>
+                      <span
+                        style={{
+                          display: 'inline-block',
+                          width: 8,
+                          height: 8,
+                          borderRadius: 4,
+                          background: p.configured
+                            ? 'var(--green)'
+                            : isLocal
+                              ? 'var(--gray)'
+                              : 'var(--red)',
+                          marginRight: 6,
+                        }}
+                      />
+                      {p.configured ? 'yes' : 'no'}
+                    </td>
+                    <td>{p.source ?? '—'}</td>
+                    <td>
+                      {isLocal ? (
+                        <span style={{ color: 'var(--text-muted)' }}>
+                          {p.configured ? 'base URL (no key)' : 'not set'}
+                        </span>
+                      ) : p.last4 ? (
+                        `••••${p.last4}`
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+          <div
+            style={{
+              marginBottom: 14,
+              fontFamily: 'var(--mono)',
+              fontSize: 10.5,
+              color: 'var(--text-muted)',
+            }}
+          >
+            local is enabled with the <code>BENCH_LOCAL_BASE_URL</code> env var (an OpenAI-compatible
+            server, e.g. <code>http://localhost:11434/v1</code>) — it takes no API key. Its models
+            then appear as <code>local/*</code> in the pickers, free in dollars but never in watts.
+          </div>
+          <LocalModels
+            configured={
+              (providersQuery.data ?? []).find((p) => p.provider === 'local')?.configured ?? false
+            }
+          />
+        </>
       )}
 
       <form onSubmit={submit} className="panel">
@@ -342,6 +380,303 @@ function ProviderKeys() {
           </div>
         )}
       </form>
+    </div>
+  )
+}
+
+// ── Local models: setup guide + connection test ───────────────────────────
+// The full write-up lives in docs/local-models.md; this is the in-app version of
+// it, kept deliberately short. Commands are shown, never run — bench cannot
+// install anything on the machine hosting the model server.
+
+const OLLAMA_MODEL = 'qwen2.5:14b-instruct'
+const OLLAMA_MODEL_SMALL = 'qwen2.5:7b-instruct'
+const OLLAMA_BASE_URL = 'http://localhost:11434/v1'
+const DOCKER_BASE_URL = 'http://host.docker.internal:11434/v1'
+
+/** A copy-able command line. Selection still works if the clipboard is blocked
+ *  (no HTTPS, no permission), which is why the text stays user-selectable. */
+function CommandSnippet({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false)
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* clipboard unavailable — the snippet is selectable by hand */
+    }
+  }
+
+  return (
+    <div className="row" style={{ gap: 8, alignItems: 'flex-start', marginTop: 6 }}>
+      <pre className="code-block" style={{ flex: 1, userSelect: 'all' }}>
+        {command}
+      </pre>
+      <button type="button" className="btn btn-sm" onClick={() => void copy()}>
+        {copied ? 'copied' : 'copy'}
+      </button>
+    </div>
+  )
+}
+
+function Step({ n, title, children }: { n: number; title: string; children: ReactNode }) {
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div className="mono-body">
+        <strong>{n}.</strong> {title}
+      </div>
+      <div
+        style={{
+          fontFamily: 'var(--mono)',
+          fontSize: 11,
+          color: 'var(--text-muted)',
+          marginTop: 4,
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function SetupGuide() {
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div className="panel" style={{ marginBottom: 14 }}>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <div>
+          <div className="mono-label">Set up local models</div>
+          <div
+            style={{
+              fontFamily: 'var(--mono)',
+              fontSize: 11,
+              color: 'var(--text-muted)',
+              marginTop: 4,
+            }}
+          >
+            Three steps, ~10 minutes plus a download. No cloud key, no egress.
+          </div>
+        </div>
+        <button type="button" className="btn btn-sm" onClick={() => setOpen(!open)}>
+          {open ? 'hide' : 'show me how'}
+        </button>
+      </div>
+
+      {open && (
+        <>
+          <Step n={1} title="Install Ollama — a local model server">
+            macOS (or install the app from ollama.com/download, which also starts the server):
+            <CommandSnippet command="brew install ollama && ollama serve" />
+            Linux:
+            <CommandSnippet command="curl -fsSL https://ollama.com/install.sh | sh" />
+            Windows: run the installer from ollama.com/download — it starts the server for you.
+          </Step>
+
+          <Step n={2} title="Download a model that can call tools">
+            bench drives everything through tool calls, so the model must support them. This one is
+            about 9 GB and wants ~16 GB of RAM:
+            <CommandSnippet command={`ollama pull ${OLLAMA_MODEL}`} />
+            On a smaller machine use <code>{OLLAMA_MODEL_SMALL}</code> instead (~4.7 GB, ~8 GB RAM).
+          </Step>
+
+          <Step n={3} title="Point bench at it and restart">
+            Add this to your <code>.env</code>, then restart bench:
+            <CommandSnippet command={`BENCH_LOCAL_BASE_URL=${OLLAMA_BASE_URL}`} />
+            Running the docker compose stack? The container's <code>localhost</code> is not your
+            machine — use <code>{DOCKER_BASE_URL}</code>. Or skip the install entirely and run{' '}
+            <code>docker compose --profile local up</code> for a bundled Ollama (slower: CPU-only in
+            a container).
+          </Step>
+
+          <div
+            style={{
+              marginTop: 14,
+              fontFamily: 'var(--mono)',
+              fontSize: 11,
+              color: 'var(--text-muted)',
+            }}
+          >
+            Full guide, other servers (LM Studio, vLLM, llama.cpp), recommended models, and
+            troubleshooting: <code>docs/local-models.md</code>.
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/** True when the failure is "nothing is listening there", as opposed to an HTTP
+ *  error from a server that did answer. */
+function isConnectFailure(error: string): boolean {
+  const e = error.toLowerCase()
+  return (
+    e.includes('connecterror') ||
+    e.includes('connecttimeout') ||
+    e.includes('connection refused') ||
+    e.includes('all connection attempts failed') ||
+    e.includes('timeout')
+  )
+}
+
+function TestResult({ result }: { result: LocalProviderTest }) {
+  if (!result.configured) {
+    return (
+      <div className="mono-body" style={{ marginTop: 10, color: 'var(--text-muted)' }}>
+        No <code>BENCH_LOCAL_BASE_URL</code> is set, so there is nothing to test.
+      </div>
+    )
+  }
+
+  if (!result.reachable) {
+    const dockerHint =
+      !!result.base_url &&
+      result.base_url.includes('localhost') &&
+      !!result.error &&
+      isConnectFailure(result.error)
+    return (
+      <div style={{ marginTop: 10 }}>
+        <div className="error-text">not reachable at {result.base_url}</div>
+        {result.error && (
+          <pre className="code-block" style={{ marginTop: 6, color: 'var(--text-muted)' }}>
+            {result.error}
+          </pre>
+        )}
+        <div
+          style={{
+            marginTop: 6,
+            fontFamily: 'var(--mono)',
+            fontSize: 11,
+            color: 'var(--text-muted)',
+          }}
+        >
+          Check that the server is running (<code>ollama serve</code>, or the Ollama app) and that
+          the port matches.
+          {dockerHint && (
+            <>
+              {' '}
+              If bench runs in docker, <code>localhost</code> is the container, not your machine —
+              set <code>{DOCKER_BASE_URL}</code> instead.
+            </>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  if (result.models.length === 0) {
+    return (
+      <div style={{ marginTop: 10 }}>
+        <div className="mono-body" style={{ color: 'var(--amber)' }}>
+          reachable at {result.base_url} — but the server has no models
+        </div>
+        <div
+          style={{
+            marginTop: 4,
+            fontFamily: 'var(--mono)',
+            fontSize: 11,
+            color: 'var(--text-muted)',
+          }}
+        >
+          Download one (~9 GB), then test again:
+        </div>
+        <CommandSnippet command={`ollama pull ${OLLAMA_MODEL}`} />
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="mono-body" style={{ color: 'var(--green)' }}>
+        reachable at {result.base_url} — {result.counts.models} model
+        {result.counts.models === 1 ? '' : 's'}, {result.counts.tool_capable} usable by bench
+      </div>
+      <table className="mono-table" style={{ marginTop: 8 }}>
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Tool calling</th>
+            <th className="num">Context</th>
+          </tr>
+        </thead>
+        <tbody>
+          {result.models.map((m) => (
+            <tr key={m.id}>
+              <td>{m.display_name}</td>
+              <td style={{ color: m.supports_tools ? 'var(--green)' : 'var(--red)' }}>
+                {m.supports_tools ? '✓' : '✗'}
+              </td>
+              <td className="num">
+                {m.context_window > 0 ? m.context_window.toLocaleString() : 'not reported'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {result.counts.no_tools > 0 && (
+        <div
+          style={{
+            marginTop: 6,
+            fontFamily: 'var(--mono)',
+            fontSize: 11,
+            color: 'var(--text-muted)',
+          }}
+        >
+          A ✗ means the model failed bench's forced-tool-call probe and is excluded from routing —
+          pick a tool-calling build (e.g. <code>{OLLAMA_MODEL}</code>) rather than working around
+          it. See <code>docs/local-models.md</code>.
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LocalModels({ configured }: { configured: boolean }) {
+  const testMutation = useMutation({ mutationFn: api.testLocalProvider })
+  const testError = testMutation.error as ApiError | null
+
+  if (!configured) return <SetupGuide />
+
+  return (
+    <div className="panel" style={{ marginBottom: 14 }}>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <div>
+          <div className="mono-label">Local model server</div>
+          <div
+            style={{
+              fontFamily: 'var(--mono)',
+              fontSize: 11,
+              color: 'var(--text-muted)',
+              marginTop: 4,
+            }}
+          >
+            Re-reads the configured server now, ignoring the 5-minute discovery cache, and re-probes
+            each model's tool calling.
+          </div>
+        </div>
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          onClick={() => testMutation.mutate()}
+          disabled={testMutation.isPending}
+        >
+          {testMutation.isPending ? 'testing…' : 'Test connection'}
+        </button>
+      </div>
+
+      {testMutation.isPending && (
+        <div className="empty pulse" style={{ padding: '10px 0' }}>
+          Contacting the server and probing tool calling — up to ~45s with several models…
+        </div>
+      )}
+      {testError && (
+        <div className="error-text" style={{ marginTop: 10 }}>
+          {testError.status === 403 ? 'Requires admin role.' : testError.message}
+        </div>
+      )}
+      {testMutation.data && !testMutation.isPending && <TestResult result={testMutation.data} />}
     </div>
   )
 }

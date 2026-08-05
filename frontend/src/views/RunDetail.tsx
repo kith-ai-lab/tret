@@ -4,6 +4,10 @@ import { Link, useParams } from 'react-router-dom'
 
 import { api, type Msg, type RunDetail } from '../api/client'
 import { type StreamItem, useRunStream } from '../api/useRunStream'
+import { ContextComposition } from '../components/shared/ContextComposition'
+import { EnergyDetail } from '../components/shared/EnergyDetail'
+import { footprintText, formatCost, formatTokens } from '../components/shared/format'
+import { LiveFootprint } from '../components/shared/LiveFootprint'
 import { ProvenanceCard } from '../components/shared/ProvenanceCard'
 import { RoutingBadge } from '../components/shared/RoutingBadge'
 import { StatusBadge } from '../components/shared/StatusBadge'
@@ -61,10 +65,18 @@ export function RunDetailView() {
   const text = isLive ? stream.text : (replay?.text ?? '')
   const items: StreamItem[] = isLive ? stream.items : (replay?.items ?? [])
 
-  const inputTokens = isLive ? (stream.usage?.input_tokens ?? run.input_tokens) : run.input_tokens
-  const outputTokens = isLive ? (stream.usage?.output_tokens ?? run.output_tokens) : run.output_tokens
-  const costUsd = isLive ? (stream.usage?.cost_usd ?? run.cost_usd) : run.cost_usd
-  const iterations = isLive ? (stream.usage?.iteration ?? run.iterations) : run.iterations
+  // Live views prefer the streamed running totals; a finished run reads from the
+  // persisted record. Energy figures are estimates in both paths.
+  const live = isLive ? stream.usage : null
+  const inputTokens = live?.input_tokens ?? run.input_tokens
+  const outputTokens = live?.output_tokens ?? run.output_tokens
+  const cacheReadTokens = live?.cache_read_tokens ?? run.cache_read_tokens
+  const cacheWriteTokens = live?.cache_write_tokens ?? run.cache_write_tokens
+  const costUsd = live?.cost_usd ?? run.cost_usd
+  const energyWh = live?.energy_wh ?? run.energy_wh
+  const co2eG = live?.co2e_g ?? run.co2e_g
+  const iterations = live?.iteration ?? run.iterations
+  const footprint = footprintText(energyWh, co2eG)
 
   return (
     <div className="stack">
@@ -87,6 +99,14 @@ export function RunDetailView() {
           </button>
         )}
       </div>
+
+      {/* Live footprint — always rendered while the run streams, with stable
+          numeric widths so an update never reflows what is below it. */}
+      {isLive && (
+        <div className="panel" style={{ padding: '10px 14px' }}>
+          <LiveFootprint usage={stream.usage} label="live footprint (est., cumulative)" />
+        </div>
+      )}
 
       {/* Task input */}
       <div>
@@ -168,6 +188,9 @@ export function RunDetailView() {
         </div>
       )}
 
+      {/* Context composition — where the prompt tokens went */}
+      {run.context_composition && <ContextComposition composition={run.context_composition} />}
+
       {/* Provenance + footer */}
       <ProvenanceCard
         model={routing?.chosen_model ?? run.model_used}
@@ -175,15 +198,31 @@ export function RunDetailView() {
         documentCount={run.document_ids.length}
         inputTokens={inputTokens}
         outputTokens={outputTokens}
+        cacheReadTokens={cacheReadTokens}
+        cacheWriteTokens={cacheWriteTokens}
         costUsd={costUsd}
+        energyWh={energyWh}
+        co2eG={co2eG}
       />
 
-      <div className="row mono-label" style={{ gap: 24 }}>
+      {run.energy && <EnergyDetail energy={run.energy} />}
+
+      <div className="row mono-label" style={{ gap: 24, flexWrap: 'wrap' }}>
         <span>iterations {iterations}</span>
         <span>
-          tokens {inputTokens.toLocaleString()} in / {outputTokens.toLocaleString()} out
+          tokens {formatTokens(inputTokens)} in / {formatTokens(outputTokens)} out
         </span>
-        <span>cost ${costUsd.toFixed(4)}</span>
+        {(cacheReadTokens > 0 || cacheWriteTokens > 0) && (
+          <span title="Prompt-cache tokens: reads bill at 0.1x the input price, writes at 1.25x.">
+            cache {formatTokens(cacheReadTokens)} read / {formatTokens(cacheWriteTokens)} write
+          </span>
+        )}
+        <span>cost {formatCost(costUsd)}</span>
+        {footprint && (
+          <span title="Heuristic estimate from token counts and the model's energy class — not a measurement.">
+            {footprint}
+          </span>
+        )}
         {run.started_at && run.finished_at && (
           <span>
             duration {((new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()) / 1000).toFixed(1)}s

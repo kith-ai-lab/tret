@@ -3,11 +3,28 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { api, type RunSummary } from '../api/client'
+import { COUNTERFACTUAL_SHORT, avoidedFraming } from '../components/shared/emissions'
+import {
+  NO_ESTIMATE,
+  NO_ESTIMATE_HINT,
+  footprintText,
+  formatCo2e,
+  formatCost,
+  formatTokens,
+  orDash,
+} from '../components/shared/format'
 import { type Column, MonoTable } from '../components/shared/MonoTable'
 import { RoutingBadge } from '../components/shared/RoutingBadge'
 import { StatusBadge } from '../components/shared/StatusBadge'
 
-const STATUSES = ['queued', 'running', 'completed', 'failed', 'cancelled']
+const STATUSES = [
+  'queued',
+  'running',
+  'completed',
+  'completed_without_output',
+  'failed',
+  'cancelled',
+]
 
 export function Runs() {
   const navigate = useNavigate()
@@ -62,16 +79,31 @@ export function Runs() {
       key: 'tokens',
       header: 'Tokens',
       align: 'right',
-      render: (r) => `${r.input_tokens.toLocaleString()} / ${r.output_tokens.toLocaleString()}`,
+      render: (r) => (
+        <span
+          title={`cache ${formatTokens(r.cache_read_tokens)} read / ${formatTokens(r.cache_write_tokens)} write`}
+        >
+          {formatTokens(r.input_tokens)} / {formatTokens(r.output_tokens)}
+        </span>
+      ),
     },
-    { key: 'cost', header: 'Cost', align: 'right', render: (r) => `$${r.cost_usd.toFixed(4)}` },
+    { key: 'cost', header: 'Cost', align: 'right', render: (r) => formatCost(r.cost_usd) },
+    {
+      key: 'footprint',
+      header: 'Footprint',
+      align: 'right',
+      render: (r) => <Footprint run={r} />,
+    },
     { key: 'duration', header: 'Duration', align: 'right', render: (r) => duration(r) },
   ]
 
   return (
     <div>
       <h1 className="view-title">Runs</h1>
-      <div className="view-sub">Every run, with its auditable routing decision.</div>
+      <div className="view-sub">
+        Every run, with its auditable routing decision. Footprint figures are estimates, not
+        measurements.
+      </div>
 
       <div className="row" style={{ marginBottom: 14 }}>
         <select
@@ -110,6 +142,28 @@ export function Runs() {
         />
       )}
     </div>
+  )
+}
+
+/** The run's estimated footprint, with its scope split and signed baseline
+ *  difference in the tooltip. A run with no estimate shows an em-dash, never 0 —
+ *  the full derivation is on the run page. */
+function Footprint({ run }: { run: RunSummary }) {
+  const text = footprintText(run.energy_wh, run.co2e_g)
+  if (!text) {
+    return <span title={NO_ESTIMATE_HINT}>{NO_ESTIMATE}</span>
+  }
+  const framing = avoidedFraming(run.avoided_co2e_g)
+  const hasScopes = run.scope2_g !== null || run.scope3_g !== null
+  const scopePart = hasScopes
+    ? `scope 1 ${formatCo2e(0)} · scope 2 ${orDash(formatCo2e(run.scope2_g))} · scope 3 ${orDash(formatCo2e(run.scope3_g))}. `
+    : 'No scope split recorded for this run. '
+  return (
+    <span
+      title={`${scopePart}${framing.label} ${orDash(formatCo2e(run.avoided_co2e_g))} — ${COUNTERFACTUAL_SHORT}`}
+    >
+      {text}
+    </span>
   )
 }
 
