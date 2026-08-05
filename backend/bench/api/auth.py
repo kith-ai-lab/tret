@@ -2,9 +2,15 @@
 
 Kept behind small dependencies (`current_user`, `require_admin`) so an OIDC
 implementation can replace this module without touching other routers.
+
+Login is rate limited by a small in-memory sliding window (per client IP +
+email). It is per-process — correct for the single-worker deployment bench
+ships, and a speed bump rather than a defence against a distributed attacker.
+Put a WAF/proxy limit in front for anything internet-facing.
 """
 from __future__ import annotations
 
+import time
 import uuid
 
 from argon2 import PasswordHasher
@@ -28,6 +34,52 @@ SESSION_MAX_AGE = 60 * 60 * 24 * 14  # 14 days
 
 def _serializer() -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(get_settings().secret_key, salt="bench-session")
+
+
+class SlidingWindowLimiter:
+    """Fixed-cost in-memory sliding window: at most `limit` hits per `window`.
+
+    Bounded by pruning empty keys on every check, so a spray of distinct keys
+    cannot grow the map without also aging out.
+    """
+
+    def __init__(self) -> None:
+        self._hits: dict[str, list[float]] = {}
+
+    def _prune(self, now: float, window: float) -> None:
+        for key in list(self._hits):
+            recent = [t for t in self._hits[key] if now - t < window]
+            if recent:
+                self._hits[key] = recent
+            else:
+                del self._hits[key]
+
+    def check(self, key: str, limit: int, window: float, *, now: float | None = None) -> float:
+        """Seconds to wait before another attempt is allowed (0.0 = allowed now)."""
+        now = time.monotonic() if now is None else now
+        self._prune(now, window)
+        hits = self._hits.get(key, [])
+        if len(hits) < limit:
+            return 0.0
+        return max(0.0, window - (now - hits[0]))
+
+    def record(self, key: str, *, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        self._hits.setdefault(key, []).append(now)
+
+    def reset(self, key: str | None = None) -> None:
+        if key is None:
+            self._hits.clear()
+        else:
+            self._hits.pop(key, None)
+
+
+login_limiter = SlidingWindowLimiter()
+
+
+def _login_key(request: Request, email: str) -> str:
+    client = request.client.host if request.client else "unknown"
+    return f"{client}|{email.strip().lower()}"
 
 
 async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
@@ -69,14 +121,36 @@ class UserOut(BaseModel):
 
 
 @router.post("/login", response_model=UserOut)
-async def login(body: LoginBody, response: Response, db: AsyncSession = Depends(get_db)):
+async def login(
+    body: LoginBody,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    settings = get_settings()
+    key = _login_key(request, body.email)
+    retry_after = login_limiter.check(
+        key, settings.login_max_attempts, settings.login_window_seconds
+    )
+    if retry_after > 0:
+        raise HTTPException(
+            429,
+            "Too many failed login attempts. Try again later.",
+            headers={"Retry-After": str(int(retry_after) + 1)},
+        )
+
+    def _reject() -> HTTPException:
+        login_limiter.record(key)
+        return HTTPException(401, "Invalid credentials")
+
     user = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
     if user is None or not user.password_hash:
-        raise HTTPException(401, "Invalid credentials")
+        raise _reject()
     try:
         _hasher.verify(user.password_hash, body.password)
     except VerifyMismatchError:
-        raise HTTPException(401, "Invalid credentials")
+        raise _reject()
+    login_limiter.reset(key)  # a success clears the window for this IP + email
     token = _serializer().dumps(str(user.id))
     response.set_cookie(
         SESSION_COOKIE,

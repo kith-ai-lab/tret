@@ -8,17 +8,42 @@ Contract with the script:
   stdin:  {"params": {...}, "inputs": {"<name>": [row, ...]}}
   stdout: {"rows": [{...}, ...]}   (flat dicts; stdlib only; pure function)
 
-Sandbox (v1): isolated interpreter (`python -I`), empty environment, CPU and
-memory rlimits, wall-clock timeout, output caps, no DB access — inputs are
-materialized by the runner and passed in. Pack code is operator-trusted (same
-stance as pack installation itself); OS-level isolation is the v2 hardening.
+What the sandbox actually guarantees
+-----------------------------------
+Every method runs as a separate short-lived process:
+
+  * `python -I` — isolated interpreter: no PYTHON* env vars, no user
+    site-packages, cwd not on sys.path.
+  * empty environment (no API keys, no DB URL), inherited fds closed;
+    stdin/stdout are the whole contract (stderr is captured for diagnostics
+    only and truncated).
+  * rlimits: CPU 30s, address space 768MB, 64 open files, low process count —
+    each applied only where the platform supports it.
+  * wall-clock timeout from the manifest, output size and row caps.
+  * no DB handle — inputs are materialized by the runner and passed on stdin.
+  * pack integrity is re-verified before execution: a pack edited since install
+    fails loudly rather than producing untrusted numbers.
+  * on Linux with the `unshare` binary and permission to use it, the process
+    runs in an empty network namespace (`BENCH_METHODS_NETWORK_ISOLATION`,
+    default on). This is the only real network control.
+
+What it does NOT guarantee: filesystem isolation. A method runs as the bench
+user and can read anything that user can read (including ./storage and the
+pack tree) and write anywhere that user can write. Off Linux — or without
+`unshare` — it can also open sockets; the AST scan in `bench/packs/safety.py`
+is a deterrent there, not a boundary. Pack code is therefore operator-trusted:
+installing a pack is deploying code. Real isolation means running bench (or at
+least this subprocess) in a container/VM whose filesystem and network you
+control — see docs/hardening.md.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import logging
 import resource
+import shutil
 import sys
 import time
 import uuid
@@ -27,10 +52,19 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bench.db.models import Dataset, DatasetRow, Finding, MethodRun
+from bench.config import get_settings
+from bench.db.models import Dataset, DatasetRow, Finding, MethodRun, Pack
+from bench.packs.integrity import PackIntegrityError, verify_pack_integrity
+
+log = logging.getLogger("bench.methods")
 
 MAX_OUTPUT_BYTES = 5 * 1024 * 1024
 MAX_OUTPUT_ROWS = 2000
+MAX_STDERR_CHARS = 2000
+RLIMIT_CPU_SECONDS = 30
+RLIMIT_ADDRESS_SPACE = 768 * 1024 * 1024
+RLIMIT_OPEN_FILES = 64  # stdin/stdout/stderr + imports; no room for socket farms
+RLIMIT_PROCESSES = 16  # blocks fork bombs; per-uid, so keep it above zero
 
 
 class MethodError(Exception):
@@ -38,11 +72,96 @@ class MethodError(Exception):
 
 
 def _set_limits() -> None:  # runs in the child before exec
-    resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
+    resource.setrlimit(resource.RLIMIT_CPU, (RLIMIT_CPU_SECONDS, RLIMIT_CPU_SECONDS))
+    for name, value in (
+        ("RLIMIT_AS", RLIMIT_ADDRESS_SPACE),
+        ("RLIMIT_NOFILE", RLIMIT_OPEN_FILES),
+        ("RLIMIT_NPROC", RLIMIT_PROCESSES),
+    ):
+        limit = getattr(resource, name, None)
+        if limit is None:
+            continue  # not all rlimits exist on all platforms
+        try:
+            resource.setrlimit(limit, (value, value))
+        except (ValueError, OSError):
+            pass  # e.g. RLIMIT_AS is a no-op/unsupported on macOS
+
+
+# None = not probed yet; [] = isolation unavailable; [...] = command prefix.
+_isolation_prefix: list[str] | None = None
+
+
+async def network_isolation_prefix() -> list[str]:
+    """Command prefix that drops the child into an empty network namespace.
+
+    Linux + `unshare` only, and only if we may actually create the namespace —
+    probed once per process, with a logged warning on fallback so an operator
+    who asked for isolation learns they did not get it.
+    """
+    global _isolation_prefix
+    if not get_settings().methods_network_isolation:
+        return []
+    if _isolation_prefix is not None:
+        return _isolation_prefix
+
+    _isolation_prefix = []
+    if sys.platform != "linux":
+        log.warning(
+            "BENCH_METHODS_NETWORK_ISOLATION is on but this is %s, not Linux: methods run "
+            "WITHOUT network isolation (fine for development; not for production)",
+            sys.platform,
+        )
+        return _isolation_prefix
+    unshare = shutil.which("unshare")
+    if unshare is None:
+        log.warning(
+            "BENCH_METHODS_NETWORK_ISOLATION is on but `unshare` is not installed: methods "
+            "run WITHOUT network isolation (install util-linux)"
+        )
+        return _isolation_prefix
     try:
-        resource.setrlimit(resource.RLIMIT_AS, (768 * 1024 * 1024,) * 2)
-    except (ValueError, OSError):
-        pass  # RLIMIT_AS unsupported on some platforms (macOS)
+        probe = await asyncio.create_subprocess_exec(
+            unshare,
+            "--net",
+            "--",
+            "true",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await asyncio.wait_for(probe.communicate(), timeout=10)
+        ok = probe.returncode == 0
+    except (OSError, asyncio.TimeoutError) as e:
+        ok, err = False, str(e).encode()
+    if ok:
+        _isolation_prefix = [unshare, "--net", "--"]
+        log.info("method sandbox: network isolation enabled via unshare --net")
+    else:
+        log.warning(
+            "BENCH_METHODS_NETWORK_ISOLATION is on but `unshare --net` is not permitted here "
+            "(%s): methods run WITHOUT network isolation. Grant CAP_SYS_ADMIN / enable "
+            "unprivileged user namespaces, or isolate the container's network instead",
+            err.decode(errors="replace").strip()[:200] or "no detail",
+        )
+    return _isolation_prefix
+
+
+async def _verify_pack(db: AsyncSession, pack_id: uuid.UUID, pack_dir: Path) -> None:
+    """Re-check the installed pack's content hash before trusting its code."""
+    pack = await db.get(Pack, pack_id)
+    if pack is None:
+        return
+    label = f"{pack.slug}@{pack.version}"
+    if not pack.content_hash:
+        log.warning(
+            "pack %s has no pinned content hash (installed before integrity pinning); "
+            "reinstall it to pin one",
+            label,
+        )
+        return
+    try:
+        verify_pack_integrity(pack_dir, pack.content_hash, pack_label=label)
+    except PackIntegrityError as e:
+        raise MethodError(str(e))
 
 
 def _flatten_finding(f: Finding) -> dict:
@@ -144,15 +263,20 @@ async def execute_method(
 
     start = time.monotonic()
     try:
+        # Integrity first: a drifted pack must never produce a "completed" run.
+        await _verify_pack(db, pack_id, Path(pack_dir))
+        prefix = await network_isolation_prefix()
         proc = await asyncio.create_subprocess_exec(
+            *prefix,  # empty, or `unshare --net --` on a capable Linux host
             sys.executable,
             "-I",  # isolated: no env vars, no user site-packages
             str(entrypoint),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,  # diagnostics only, truncated below
             cwd=str(entrypoint.parent),
             env={},
+            close_fds=True,  # nothing but stdin/stdout/stderr crosses into the child
             preexec_fn=_set_limits,
         )
         try:
@@ -163,9 +287,8 @@ async def execute_method(
             proc.kill()
             raise MethodError("Method timed out")
         if proc.returncode != 0:
-            raise MethodError(
-                f"Method exited {proc.returncode}: {stderr.decode(errors='replace')[:500]}"
-            )
+            detail = stderr.decode(errors="replace")[:MAX_STDERR_CHARS]
+            raise MethodError(f"Method exited {proc.returncode}: {detail}")
         if len(stdout) > MAX_OUTPUT_BYTES:
             raise MethodError("Method output exceeds size cap")
         try:

@@ -16,6 +16,11 @@ class TaskType(BaseModel):
     tools: list[str] = Field(default_factory=list)
     instructions: str = ""
     output_contract: str = ""  # one-line summary shown to the router
+    # Doctrine this task actually needs: entries are files from the pack's own
+    # `doctrine:` list, optionally narrowed to a `#`/`##` heading
+    # ("02-procedure.md#Step 5 — Compare on the overlap only"). Empty (the
+    # default) loads every doctrine file, so existing packs are unaffected.
+    doctrine: list[str] = Field(default_factory=list)
 
     @field_validator("shape")
     @classmethod

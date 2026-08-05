@@ -1,6 +1,10 @@
 """Pack loading: parse + validate pack.yaml, hash doctrine, install to DB,
 seed sample datasets. Schemas are inlined into the stored manifest so the
 engine never re-reads pack files for validation at runtime.
+
+Validation also runs the static method scan (`bench.packs.safety`) — a
+deterrent against non-deterministic method code, not a sandbox — and install
+pins a content hash over every pack file (`bench.packs.integrity`).
 """
 from __future__ import annotations
 
@@ -15,8 +19,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bench.db.models import Dataset, DatasetRow, Pack
-from bench.engine.context import doctrine_sha
+from bench.engine.context import doctrine_sha, parse_doctrine_selector, select_doctrine_text
 from bench.engine.tools import get_builtin_tools
+from bench.packs.integrity import pack_content_hash
+from bench.packs.safety import scan_method_file
 from bench.packs.schema import PackManifest
 
 
@@ -24,6 +30,28 @@ class PackValidationError(Exception):
     def __init__(self, errors: list[str]):
         self.errors = errors
         super().__init__("; ".join(errors))
+
+
+def _doctrine_selector_errors(
+    pack_dir: Path, manifest: PackManifest, task_slug: str, selector: str
+) -> list[str]:
+    """A task's `doctrine:` entry must name a pack doctrine file (and a real section)."""
+    rel, section = parse_doctrine_selector(selector)
+    if rel not in manifest.doctrine:
+        return [
+            f"task '{task_slug}': doctrine selector '{selector}' references '{rel}', which is "
+            "not in the pack's doctrine list"
+        ]
+    path = pack_dir / rel
+    if section is None or not path.exists():
+        return []
+    _, matched, unresolved = select_doctrine_text(path.read_text(), [section])
+    if unresolved:
+        return [
+            f"task '{task_slug}': doctrine selector '{selector}' names a heading that does not "
+            f"exist in {rel}"
+        ]
+    return []
 
 
 def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[str]]:
@@ -56,8 +84,20 @@ def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[s
                     schemas[slug] = schema
                 except Exception as e:
                     errors.append(f"task '{task.slug}': invalid JSON Schema: {e}")
+        for selector in task.doctrine:
+            errors.extend(_doctrine_selector_errors(pack_dir, manifest, task.slug, selector))
         if task.terminal_tool and task.terminal_tool not in builtins:
             errors.append(f"task '{task.slug}': terminal_tool '{task.terminal_tool}' is not a known tool")
+        # A terminal tool the task never offers the model can never be called, so
+        # the run would nudge once and then end `completed_without_output` for
+        # ever — silently, and only on that task type. Fail at install instead.
+        # Only checkable when the task declares its own tools: an empty `tools`
+        # falls back to the harness's tool_names, which no pack can see.
+        if task.terminal_tool and task.tools and task.terminal_tool not in task.tools:
+            errors.append(
+                f"task '{task.slug}': terminal_tool '{task.terminal_tool}' is not in the task's "
+                f"tools {sorted(task.tools)} — the model could never call it"
+            )
         for tool in task.tools:
             if tool not in builtins:
                 errors.append(f"task '{task.slug}': unknown tool '{tool}'")
@@ -72,8 +112,12 @@ def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[s
         if m.slug in seen_methods:
             errors.append(f"duplicate method slug '{m.slug}'")
         seen_methods.add(m.slug)
-        if not (pack_dir / m.entrypoint).exists():
+        entrypoint = pack_dir / m.entrypoint
+        if not entrypoint.exists():
             errors.append(f"method '{m.slug}': entrypoint missing: {m.entrypoint}")
+        else:
+            for violation in scan_method_file(entrypoint, label=m.entrypoint):
+                errors.append(f"method '{m.slug}': {violation}")
         for spec in m.inputs:
             if not spec.startswith("findings:") and spec not in dataset_names:
                 errors.append(
@@ -100,6 +144,7 @@ async def install_pack(
         if task.get("output_schema"):
             task["output_schema_slug"] = Path(task["output_schema"]).stem.removesuffix(".schema")
     sha = doctrine_sha(pack_dir, manifest.doctrine)
+    content_hash = pack_content_hash(pack_dir)
 
     existing = (
         await db.execute(
@@ -113,9 +158,16 @@ async def install_pack(
     if existing is not None:
         # Same version, changed content (dev iteration): refresh in place so
         # existing harness references stay valid. Released packs bump versions.
-        if existing.manifest != stored_manifest or existing.doctrine_sha != sha:
+        # This is also the documented way to re-pin the integrity hash after an
+        # intentional pack edit.
+        if (
+            existing.manifest != stored_manifest
+            or existing.doctrine_sha != sha
+            or existing.content_hash != content_hash
+        ):
             existing.manifest = stored_manifest
             existing.doctrine_sha = sha
+            existing.content_hash = content_hash
             existing.source_path = str(pack_dir)
         pack = existing
     else:
@@ -124,6 +176,7 @@ async def install_pack(
             slug=manifest.pack,
             version=manifest.version,
             doctrine_sha=sha,
+            content_hash=content_hash,
             manifest=stored_manifest,
             source_path=str(pack_dir),
         )

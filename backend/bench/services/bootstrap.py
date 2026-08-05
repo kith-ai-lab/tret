@@ -49,9 +49,18 @@ async def bootstrap(db: AsyncSession) -> None:
                 continue
             try:
                 pack = await install_pack(db, pack_dir, workspace.id, project.id)
-                log.info("pack ready: %s@%s", pack.slug, pack.version)
+                log.info(
+                    "pack ready: %s@%s (content %s)",
+                    pack.slug,
+                    pack.version,
+                    (pack.content_hash or "unpinned")[:16],
+                )
             except PackValidationError as e:
-                log.error("pack %s failed validation: %s", pack_dir.name, e.errors)
+                # Includes the static method safety scan (bench/packs/safety.py):
+                # a pack that trips it is NOT installed.
+                log.error("pack %s failed validation and was NOT installed:", pack_dir.name)
+                for error in e.errors:
+                    log.error("  - %s", error)
 
     # Seed the chat harness if missing (idempotent, also on upgraded installs).
     chat_harness = (
