@@ -8,7 +8,7 @@ _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
-def _normalize_url(url: str) -> str:
+def normalize_database_url(url: str) -> str:
     """Accept plain postgres:// URLs (Fly, Heroku-style): upgrade them to the
     asyncpg dialect and translate libpq-style sslmode params, which asyncpg
     rejects as a connect kwarg."""
@@ -33,7 +33,7 @@ def _normalize_url(url: str) -> str:
 def get_engine():
     global _engine
     if _engine is None:
-        _engine = create_async_engine(_normalize_url(get_settings().database_url), pool_pre_ping=True)
+        _engine = create_async_engine(normalize_database_url(get_settings().database_url), pool_pre_ping=True)
     return _engine
 
 

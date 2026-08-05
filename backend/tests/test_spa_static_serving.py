@@ -9,7 +9,7 @@ Note on encoding: TestClient — like uvicorn — percent-decodes the request pa
 into the ASGI scope but does not normalize it, so `%2e%2e%2f` reaches the route
 as a genuine ".." segment. That is exactly the production behavior this guards.
 The suite does not enter the TestClient context manager, so the app's lifespan
-(DB create_all + bootstrap) never runs: these are pure routing assertions.
+(schema migration + bootstrap) never runs: these are pure routing assertions.
 """
 from __future__ import annotations
 

@@ -365,6 +365,25 @@ right tool when you want one *specific* model. Note that a harness capped at
 fails loudly (`RoutingUnavailable`) instead of quietly falling back to the
 cloud, which is the whole point.
 
+The ceiling applies to every routing path, including the two that are easy to
+overlook:
+
+- **The deterministic fallback.** When the LLM router step is skipped or fails,
+  the fallback table is walked under the same ceiling. It cannot climb out of
+  the cap to find something capable; if nothing qualifies it returns nothing and
+  the run fails loudly.
+- **The router model itself.** Choosing a model is a model call too. If
+  `BENCH_ROUTER_MODEL` is above the harness ceiling — the default,
+  `anthropic/claude-haiku-4-5`, is above `local` — bench does not consult it for
+  that harness and lets the deterministic fallback decide instead. A harness
+  capped at `local` therefore makes no cloud request at all, not even to decide
+  where to route. Configure a local router model
+  (`BENCH_ROUTER_MODEL=local/<model>`) if you want LLM routing on a local-only
+  harness.
+
+The persisted `RoutingDecision` reflects this: `router_model` is null whenever no
+router was contacted, and `reasoning` names the ceiling that was in force.
+
 If bench has no cloud provider keys configured at all (`BENCH_ANTHROPIC_API_KEY`,
 `BENCH_MOONSHOT_API_KEY`, and `BENCH_OPENROUTER_API_KEY` all unset) but a local
 server is configured and has at least one tool-capable model, bench still

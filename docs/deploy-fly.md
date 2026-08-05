@@ -53,8 +53,26 @@ keys afterwards. Full checklist: [hardening.md](hardening.md).
 fly deploy --remote-only
 ```
 
-Tables are created and the seed (admin user, sample project, packs) runs on
-boot, idempotently. Subsequent deploys keep all data.
+On boot bench migrates its own schema to the current Alembic head, then runs the
+idempotent seed (admin user, sample project, packs). Subsequent deploys keep all
+data — including deploys that add columns, and an upgrade from a v0.1 database
+that predates migrations entirely. Full details, the manual recovery commands,
+and how to check the current revision: [upgrading.md](upgrading.md).
+
+Watch the first boot after an upgrade (`fly logs --app <app-name>`): the schema
+step logs what it decided before anything is served.
+
+```
+INFO  [bench.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
+INFO  [bench.schema] schema is at revision f4c1d8ab26e7
+```
+
+A machine whose database cannot be matched to a known revision exits with an
+explanation and the exact `alembic stamp` / `alembic upgrade head` commands to
+run, rather than starting and failing later on a missing column. Only one machine
+runs at a time here (the run event bus is in-process, so do not scale out), but
+the migration step takes a Postgres advisory lock regardless, so an overlapping
+old and new machine during a deploy cannot both migrate.
 
 ## After first boot
 

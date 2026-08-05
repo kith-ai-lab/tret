@@ -219,6 +219,14 @@ isolated.
 [docs/hardening.md](docs/hardening.md) is the checklist;
 [docs/deploy-fly.md](docs/deploy-fly.md) is a worked single-app deployment.
 
+### Upgrading
+
+Pull the new version and start it. bench migrates its own database on boot —
+including a v0.1 database created before bench used migrations, which it detects
+and adopts. Back up first, and read
+[docs/upgrading.md](docs/upgrading.md) for what the startup log tells you, how to
+check the current revision, and the manual recovery path.
+
 ## Architecture
 
 FastAPI + Postgres backend, React frontend, provider-neutral agent engine.
@@ -236,6 +244,7 @@ See [docs/architecture.md](docs/architecture.md) and
 | [local-models.md](docs/local-models.md) | zero-cloud operation |
 | [evals.md](docs/evals.md) | the golden-run suite |
 | [hardening.md](docs/hardening.md) | production checklist |
+| [upgrading.md](docs/upgrading.md) | schema migrations, legacy databases, recovery |
 | [deploy-fly.md](docs/deploy-fly.md) | reference deployment |
 | [demo-script.md](docs/demo-script.md) | a guided walkthrough of the seeded demo |
 

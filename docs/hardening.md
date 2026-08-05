@@ -165,8 +165,15 @@ see [eco-accounting.md](eco-accounting.md).
 
 ## 8. Database and storage
 
-- Give bench its own Postgres role, and run Alembic migrations
-  (`alembic upgrade head`) rather than relying on the demo's `create_all`.
+- Give bench its own Postgres role. Alembic owns the schema and bench brings the
+  database to head on boot, including adopting a pre-migrations (v0.1) database —
+  see [upgrading.md](upgrading.md). That role therefore needs DDL rights on its
+  own schema. To keep DDL out of the app's role instead, run
+  `alembic upgrade head` from a deploy step under a privileged role and set
+  `BENCH_SKIP_MIGRATIONS=1` on the app.
+- Back the database up **before** an upgrade that migrates it. A failed migration
+  rolls back (Postgres DDL is transactional), but a downgrade discards the columns
+  it removes.
 - `BENCH_STORAGE_DIR` holds uploaded documents in the clear. Put it on an
   encrypted volume with restrictive permissions, and back it up with the DB —
   findings reference documents by id.
@@ -182,5 +189,6 @@ see [eco-accounting.md](eco-accounting.md).
 - [ ] container/VM with a non-root user and controlled egress
 - [ ] `unshare` available, or network policy denying method egress
 - [ ] packs reviewed as code, installed from a path only operators can write
-- [ ] `alembic upgrade head` on deploy; DB and `storage/` backed up
+- [ ] DB and `storage/` backed up, and backed up again before an upgrade
+      (bench migrates the schema itself on boot — [upgrading.md](upgrading.md))
 - [ ] proxy/WAF rate limit in front of `/api/auth/login`

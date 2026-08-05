@@ -26,8 +26,38 @@ cd backend && .venv/bin/ruff check bench tests && .venv/bin/pytest -q
 cd frontend && npm run build
 ```
 
-CI runs exactly this, plus `bench packs validate` on the shipped pack and a
-`docker compose` boot smoke test.
+CI runs exactly this, plus `bench packs validate` on the shipped pack, a
+`docker compose` boot smoke test, and the schema-lifecycle job below.
+
+## Changing the database schema
+
+The ordinary suite runs on sqlite and in-process fakes, so it cannot see whether
+a schema change reaches a real database. **Every change to
+`backend/bench/db/models.py` needs a migration in the same PR:**
+
+```bash
+cd backend
+alembic revision --autogenerate -m "what changed"   # then read the generated file
+```
+
+Then add the new revision to `REVISION_MARKERS` in `backend/bench/db/migrate.py`,
+naming a table or column only that revision creates — that table is how bench
+recognises a pre-migrations database and decides which revision to stamp it at
+(docs/upgrading.md). `tests/test_schema_migrations.py` fails if you skip it.
+
+Run the real-Postgres suite against a throwaway server before you push. It
+creates and drops a database per test, and asserts the thing the sqlite suite
+cannot: that Alembic autogenerate produces an **empty** diff against
+`Base.metadata`, i.e. the models and the migrations have not drifted apart.
+
+```bash
+cd backend
+BENCH_TEST_POSTGRES_URL=postgresql+asyncpg://bench:bench@localhost:5432/postgres \
+  .venv/bin/python -m pytest tests/test_migrations_postgres.py -q
+```
+
+CI runs it in the `migrations` job. Without `BENCH_TEST_POSTGRES_URL` the module
+skips, which is why `pytest -q` alone is not enough for a schema change.
 
 ## The golden-run policy
 

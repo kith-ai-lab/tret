@@ -26,6 +26,35 @@ services:
       BENCH_MOONSHOT_API_KEY: ${BENCH_MOONSHOT_API_KEY:-}
       BENCH_OPENROUTER_API_KEY: ${BENCH_OPENROUTER_API_KEY:-}
       BENCH_ROUTER_MODEL: ${BENCH_ROUTER_MODEL:-anthropic/claude-haiku-4-5}
+      BENCH_ROUTER_TIMEOUT_SECONDS: ${BENCH_ROUTER_TIMEOUT_SECONDS:-10.0}
+      # Every knob .env.example documents has to be listed here or it does not
+      # reach the container: compose reads .env only to interpolate ${...}, and
+      # nothing copies .env into the image. tests/test_compose_env.py asserts
+      # this block stays in step with .env.example and with the code defaults, so
+      # a documented setting can never again be silently ignored.
+      #
+      # The `:-<default>` values are deliberate rather than empty: an unset knob
+      # would otherwise arrive as an empty string, and "" is not a valid int,
+      # float or bool, so the backend would refuse to boot.
+      BENCH_OPENROUTER_CATALOG: ${BENCH_OPENROUTER_CATALOG:-true}
+      # Attribution headers OpenRouter shows on its dashboard. Overridable here
+      # so a fork or a private deployment is not announcing this repo's URL.
+      BENCH_OPENROUTER_REFERER: ${BENCH_OPENROUTER_REFERER:-https://github.com/bench-platform/bench}
+      BENCH_OPENROUTER_TITLE: ${BENCH_OPENROUTER_TITLE:-bench}
+      BENCH_LOGIN_MAX_ATTEMPTS: ${BENCH_LOGIN_MAX_ATTEMPTS:-10}
+      BENCH_LOGIN_WINDOW_SECONDS: ${BENCH_LOGIN_WINDOW_SECONDS:-300.0}
+      BENCH_METHODS_NETWORK_ISOLATION: ${BENCH_METHODS_NETWORK_ISOLATION:-true}
+      BENCH_LOCAL_DISPLAY_NAME: ${BENCH_LOCAL_DISPLAY_NAME:-Local}
+      BENCH_LOCAL_PROBE_TOOLS: ${BENCH_LOCAL_PROBE_TOOLS:-true}
+      # Eco accounting — docs/eco-accounting.md, docs/emissions-methodology.md.
+      BENCH_GRID_CO2E_G_PER_KWH: ${BENCH_GRID_CO2E_G_PER_KWH:-400.0}
+      # Blank on purpose: unset means "use BENCH_GRID_CO2E_G_PER_KWH for local
+      # inference too". A number here would silently defeat that fallback.
+      BENCH_LOCAL_GRID_CO2E_G_PER_KWH: ${BENCH_LOCAL_GRID_CO2E_G_PER_KWH:-}
+      BENCH_DATACENTER_PUE: ${BENCH_DATACENTER_PUE:-1.2}
+      BENCH_LOCAL_PUE: ${BENCH_LOCAL_PUE:-1.05}
+      BENCH_EMBODIED_G_PER_RUN: ${BENCH_EMBODIED_G_PER_RUN:-0.0}
+      BENCH_EMISSIONS_BASELINE_MODEL: ${BENCH_EMISSIONS_BASELINE_MODEL:-}
       # Local inference server (Ollama, LM Studio, vLLM, llama.cpp), for running
       # with no cloud provider at all — docs/local-models.md. From inside this
       # container your host's server is NOT localhost: use

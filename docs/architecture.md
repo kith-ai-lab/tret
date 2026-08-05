@@ -151,6 +151,30 @@ code sha, input summary, and output hash — which is what lets the agent cite a
 computed number the way it cites a dataset row. See docs/hardening.md for what
 is *not* isolated (the filesystem).
 
+## Schema and migrations
+
+**Alembic owns the schema.** `db/models.py` declares it, `alembic/versions/` is
+the only thing that ever applies it to a database, and `db/migrate.py` runs those
+migrations from the app's startup path (`ensure_schema`, before any request is
+served) using Alembic's Python API on a connection it already holds.
+
+The startup step classifies the database rather than assuming: **empty** →
+upgrade from the first revision; **stamped** → upgrade whatever is outstanding;
+**legacy** (tables present but no `alembic_version` — a database from v0.1, which
+built its schema with `create_all` and left no stamp) → infer the baseline
+revision from the columns that actually exist, stamp it, then upgrade. A schema
+matching no known revision fails startup with the operator's recovery commands,
+because a wrong stamp skips a migration silently. A Postgres advisory lock wraps
+the whole step so overlapping instances cannot both migrate. Operator-facing
+detail is in docs/upgrading.md.
+
+`create_all` survives in exactly two places, both non-production: the sqlite
+fallback for a non-Postgres URL, and `tests/evals/golden_world.py`, which builds
+a disposable sqlite world from `Base.metadata` directly. Both are why the
+models-vs-migrations drift check exists — CI asserts Alembic autogenerate
+produces an empty diff against `Base.metadata` on a real Postgres, so the models
+cannot grow a column that no migration adds.
+
 ## Known v1 constraints
 
 - Single backend worker (in-process event bus) — fine for a team install.

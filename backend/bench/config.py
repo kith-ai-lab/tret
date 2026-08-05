@@ -6,6 +6,7 @@ docs/hardening.md.
 """
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The values shipped in .env.example / the defaults below. Refused in production.
@@ -94,6 +95,21 @@ class Settings(BaseSettings):
     local_api_key: str = ""  # most local servers ignore this
     local_display_name: str = "Local"
     local_probe_tools: bool = True  # probe each discovered model for real tool support
+
+    @field_validator("local_grid_co2e_g_per_kwh", mode="before")
+    @classmethod
+    def _blank_means_unset(cls, value):
+        """An empty value means "not set" — fall back to grid_co2e_g_per_kwh.
+
+        Environment variables have no way to say None: a blank line in .env, or a
+        `${VAR:-}` interpolation in docker-compose.yml for a knob the operator
+        never set, both arrive as "". Without this, that empty string is a float
+        parse error and the backend refuses to boot — and hardcoding a number in
+        compose instead would silently break the documented fallback (local
+        inference would keep reporting 400 g/kWh after the operator set their own
+        `BENCH_GRID_CO2E_G_PER_KWH`).
+        """
+        return None if isinstance(value, str) and not value.strip() else value
 
 
 @lru_cache

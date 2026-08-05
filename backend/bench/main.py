@@ -20,7 +20,7 @@ from bench.api import (
 )
 from bench.config import enforce_production_safety
 from bench.db.engine import get_engine, get_session_factory
-from bench.db.models import Base
+from bench.db.migrate import ensure_schema
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bench")
@@ -28,11 +28,12 @@ log = logging.getLogger("bench")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create tables if missing (Alembic owns real migrations; this keeps the
-    # docker-compose demo one-command) and run the idempotent seed.
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Bring the schema to the Alembic head — including adopting a legacy
+    # create_all database created by an older release — then run the idempotent
+    # seed. bench/db/migrate.py explains the three states this handles; a
+    # database it cannot classify raises SchemaUpgradeError and startup fails
+    # here on purpose, rather than crashing later on a missing column.
+    await ensure_schema(get_engine())
     from bench.services.bootstrap import bootstrap
 
     async with get_session_factory()() as db:

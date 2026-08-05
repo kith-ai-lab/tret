@@ -42,6 +42,71 @@ jobs:
           python -m bench.cli packs validate ../packs/climate-risk
           python -m bench.cli packs hash ../packs/climate-risk
 
+  # The schema lifecycle, against a real Postgres. The `backend` job above runs
+  # everything on sqlite/in-process fakes, which is exactly why it stayed green
+  # while upgrades were broken: `create_all` builds a correct schema from
+  # nothing, so a fresh CI database can never reveal a missing migration or a
+  # legacy database that no migration ever adopted. This job is the one that can.
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: bench
+          POSTGRES_PASSWORD: bench
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U bench"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      PGPASSWORD: bench
+      # tests/test_migrations_postgres.py creates and drops a throwaway database
+      # per test; this URL is only the maintenance connection.
+      BENCH_TEST_POSTGRES_URL: postgresql+asyncpg://bench:bench@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        working-directory: backend
+        run: pip install -e ".[dev]"
+      - name: Schema lifecycle (empty, legacy, drift, downgrade, app boot)
+        working-directory: backend
+        # Asserts, per its module docstring: empty -> head builds the schema;
+        # **Alembic autogenerate produces an EMPTY diff against Base.metadata**
+        # (models-vs-migrations drift — the root-cause check); an unstamped
+        # create_all database is classified, stamped and upgraded with its rows
+        # intact; downgrade -1 then upgrade works; and the real FastAPI lifespan
+        # boots against both an empty and a legacy database.
+        run: pytest tests/test_migrations_postgres.py -q
+      - name: alembic CLI upgrade head on an empty database
+        working-directory: backend
+        # The path a deployer follows by hand, and the one env.py's async engine
+        # branch serves. Kept separate from the tests above, which drive Alembic
+        # through its Python API on a connection the app already owns.
+        env:
+          BENCH_DATABASE_URL: postgresql+asyncpg://bench:bench@localhost:5432/bench_cli
+        run: |
+          psql -h localhost -U bench -d postgres -c 'CREATE DATABASE bench_cli'
+          alembic upgrade head
+          alembic current | tee /tmp/current.txt
+          grep -q "$(alembic heads | awk '{print $1}') (head)" /tmp/current.txt
+      - name: Downgrade to base and back up
+        working-directory: backend
+        # Proves every downgrade() is real, not just the last one.
+        env:
+          BENCH_DATABASE_URL: postgresql+asyncpg://bench:bench@localhost:5432/bench_cli
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+          alembic current
+
   frontend:
     runs-on: ubuntu-latest
     steps:

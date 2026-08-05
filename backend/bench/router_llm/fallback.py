@@ -1,7 +1,10 @@
 """Deterministic fallback when the LLM router fails or is unavailable.
 
 Keyed on the task *shape* every pack task declares. Ordered preference;
-first model whose provider has a key wins.
+first model whose provider has a key *and* is within the harness cost ceiling
+wins. The ceiling is not advisory: nothing in this module may return a model the
+harness policy excludes, and "nothing qualifies" is answered with None so the
+caller can fail loudly.
 
 The shape table encodes the `balanced` objective. Under the thrift objectives
 (`token_conservation`, `eco`) the table is not the right answer — it is a list of
@@ -13,9 +16,11 @@ from __future__ import annotations
 
 from bench.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
 from bench.router_llm.objectives import (
+    DEFAULT_MAX_COST_TIER,
     DEFAULT_OBJECTIVE,
     THRIFT_OBJECTIVES,
     candidate_sort_key,
+    within_cost_tier,
 )
 
 FALLBACK_TABLE: dict[str, list[str]] = {
@@ -56,8 +61,19 @@ def fallback_model(
     registry: ProviderRegistry,
     allowed: list[str] | None = None,
     objective: str = DEFAULT_OBJECTIVE,
+    max_cost_tier: str = DEFAULT_MAX_COST_TIER,
 ) -> str | None:
-    usable = _usable(catalog, registry, allowed)
+    """The model this shape falls back to, or None if the policy permits none.
+
+    `max_cost_tier` is the harness ceiling and is enforced here, not only in the
+    router's candidate list: this path runs whenever the LLM router is skipped or
+    fails, which on a deployment without a key for the configured router model is
+    *every* run. Returning None makes the caller raise `RoutingUnavailable`,
+    which is the documented contract for a capped harness with nothing to run —
+    see docs/local-models.md. Escalating past the ceiling instead would send
+    confidential work to a provider the operator excluded on purpose.
+    """
+    usable = _usable(catalog, registry, allowed, max_cost_tier)
     if not usable:
         return None
 
@@ -85,7 +101,10 @@ def fallback_model(
 
 
 def _usable(
-    catalog: ModelCatalog, registry: ProviderRegistry, allowed: list[str] | None
+    catalog: ModelCatalog,
+    registry: ProviderRegistry,
+    allowed: list[str] | None,
+    max_cost_tier: str = DEFAULT_MAX_COST_TIER,
 ) -> list[ModelInfo]:
     return [
         m
@@ -93,4 +112,5 @@ def _usable(
         if m.supports_tools
         and registry.has_key(m.provider)
         and (not allowed or m.id in allowed)
+        and within_cost_tier(m, max_cost_tier)
     ]

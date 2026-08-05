@@ -21,6 +21,21 @@ from bench.providers.catalog import ModelInfo
 OBJECTIVES = ("quality", "balanced", "token_conservation", "eco")
 DEFAULT_OBJECTIVE = "balanced"
 
+# The harness cost ceiling, as a total order. Lives here rather than in
+# router.py because both the router and the deterministic fallback must apply
+# the *same* ceiling — a cap enforced on only one of the two paths is not a cap.
+# "local" ranks below "economy" so a max_cost_tier cap never excludes it: local
+# inference is already zero-cost, so there is nothing for a cost ceiling to
+# protect. `max_cost_tier: local` is therefore a confidentiality control (no
+# cloud provider may be chosen), not a spending one.
+TIER_ORDER = {"local": -1, "economy": 0, "standard": 1, "premium": 2}
+DEFAULT_MAX_COST_TIER = "premium"
+
+
+def within_cost_tier(model: ModelInfo, max_tier: str) -> bool:
+    """Whether `model` is at or below the ceiling `max_tier` names."""
+    return TIER_ORDER.get(model.cost_tier, 2) <= TIER_ORDER.get(max_tier, 2)
+
 # Objectives that rank models by thrift rather than by capability. These ignore
 # the curated-first preference (curation survives only as a tiebreak): if an
 # uncurated entry really is cheaper or lower-energy, an objective that asks for
