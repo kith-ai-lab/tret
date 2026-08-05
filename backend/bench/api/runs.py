@@ -14,6 +14,7 @@ from bench.db.engine import get_db
 from bench.db.models import Harness, Project, Run, User
 from bench.engine.events import get_event_bus
 from bench.engine.harness import get_harness_engine
+from bench.services.emissions import emission_summary_fields
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
@@ -41,7 +42,18 @@ def _run_summary(run: Run) -> dict:
         "routing": run.routing,
         "input_tokens": run.input_tokens,
         "output_tokens": run.output_tokens,
+        "cache_read_tokens": run.cache_read_tokens,
+        "cache_write_tokens": run.cache_write_tokens,
         "cost_usd": float(run.cost_usd or 0),
+        # Estimated ecological cost alongside the dollar cost. None (not 0) for
+        # runs that predate eco accounting: no estimate is not the same as none
+        # drawn. Full derivation is in the detail view's "energy" block.
+        "energy_wh": float(run.energy_wh) if run.energy_wh is not None else None,
+        # co2e_g (run total), scope2_g, scope3_g, avoided_co2e_g — read as
+        # recorded from the run's own accounting block, never recomputed at
+        # today's factors, and null wherever the run has no figure. Runs recorded
+        # before scopes/baseline existed report null for those, not 0.
+        **emission_summary_fields(run.energy_accounting),
         "iterations": run.iterations,
         "error": run.error,
         "created_at": run.created_at.isoformat() if run.created_at else None,
@@ -108,7 +120,14 @@ async def get_run(
         raise HTTPException(404, "Run not found")
     return {**_run_summary(run), "task_input": run.task_input, "messages": run.messages,
             "document_ids": [str(d) for d in (run.document_ids or [])],
-            "doctrine_sha": run.doctrine_sha}
+            "doctrine_sha": run.doctrine_sha,
+            # What the context was made of, per component, in estimated tokens.
+            "context_composition": run.context_composition,
+            # How the energy/carbon estimate was arrived at: energy class,
+            # Wh/Mtok, token weighting, PUE, grid intensity, the GHG Protocol
+            # scope split and the same-token baseline counterfactual. All
+            # estimates, exactly as recorded when the run happened.
+            "energy": run.energy_accounting}
 
 
 @router.get("/method-runs/{method_run_id}")

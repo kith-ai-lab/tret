@@ -12,6 +12,8 @@ from bench.db.engine import get_db
 from bench.db.models import Harness, Pack, User, Workspace
 from bench.engine.context import assemble_system_prompt
 from bench.providers.catalog import get_catalog
+from bench.router_llm.objectives import DEFAULT_OBJECTIVE, OBJECTIVES
+from bench.router_llm.router import TIER_ORDER
 
 router = APIRouter(prefix="/api/harnesses", tags=["harnesses"])
 
@@ -56,9 +58,22 @@ def _validate_policy(policy: dict) -> None:
     for m in policy.get("allowed") or []:
         if catalog.get(m) is None:
             raise HTTPException(422, f"allowed model '{m}' is not in the catalog")
+    # `local` is a real ceiling, not a floor: TIER_ORDER ranks it below economy,
+    # so capping there leaves local models as the only candidates — the
+    # zero-cloud policy (docs/local-models.md), expressed as a cost tier.
     tier = policy.get("max_cost_tier", "premium")
-    if tier not in ("economy", "standard", "premium"):
-        raise HTTPException(422, "max_cost_tier must be economy|standard|premium")
+    if tier not in TIER_ORDER:
+        raise HTTPException(
+            422, f"max_cost_tier must be one of {'|'.join(TIER_ORDER)}"
+        )
+    # An unrecognized objective must never fall through to the default: silently
+    # routing on "balanced" when the operator asked for "eco" is exactly the kind
+    # of quiet substitution this platform exists to rule out.
+    # `or` (not a get default) so unset/None reads as the default exactly the way
+    # router_llm.objectives.objective_of reads it at run time.
+    objective = policy.get("objective") or DEFAULT_OBJECTIVE
+    if objective not in OBJECTIVES:
+        raise HTTPException(422, f"model_policy.objective must be one of {'|'.join(OBJECTIVES)}")
 
 
 @router.get("")

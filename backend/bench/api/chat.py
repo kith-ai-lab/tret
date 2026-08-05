@@ -244,6 +244,14 @@ async def _execute_and_record(run_id: uuid.UUID, conversation_id: uuid.UUID) -> 
                 "status": run.status,
                 "model_used": run.model_used,
                 "cost_usd": float(run.cost_usd or 0),
+                # What the turn actually cost, in full: dollars, cache reuse, and
+                # the estimated ecological figure. Same shape as a run summary
+                # (api/runs.py::_run_summary) so a chat turn is as legible as the
+                # run behind it; energy is null, never 0, when unestimated.
+                "cache_read_tokens": run.cache_read_tokens,
+                "cache_write_tokens": run.cache_write_tokens,
+                "energy_wh": float(run.energy_wh) if run.energy_wh is not None else None,
+                "co2e_g": (run.energy_accounting or {}).get("co2e_g"),
             },
         ]
         await db.commit()

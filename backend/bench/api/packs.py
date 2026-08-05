@@ -26,6 +26,11 @@ def _out(p: Pack) -> dict:
         "description": manifest.get("description", ""),
         "frameworks": manifest.get("frameworks", []),
         "doctrine_sha": p.doctrine_sha,
+        # The integrity pin: sha256 over every file in the pack, recorded at
+        # install. Surfaced so an operator can compare what is installed against
+        # what the pack author published (docs/pack-authoring.md). Null for packs
+        # installed before integrity pinning landed.
+        "content_hash": p.content_hash,
         "doctrine_files": manifest.get("doctrine", []),
         "task_types": manifest.get("task_types", []),
         "schemas": manifest.get("schemas", {}),

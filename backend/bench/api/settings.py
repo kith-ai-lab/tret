@@ -1,7 +1,10 @@
 """Settings + catalog endpoints: provider key status (write-only keys), the
-model catalog for pickers, and the available tool list.
+model catalog for pickers, the available tool list, and the local-model
+connection diagnostic.
 """
 from __future__ import annotations
+
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -19,6 +22,12 @@ from bench.services.credentials import get_fernet, load_db_keys
 router = APIRouter(prefix="/api", tags=["settings"])
 
 PROVIDERS = ("anthropic", "kimi", "openrouter")
+
+# Whole-request cap for the local connection test: one /models GET (10s) plus a
+# forced tool-call probe per discovered model (8s each) can otherwise add up on
+# a server with a dozen models pulled. Past this the answer is "too slow to be
+# usable", which is itself the useful diagnostic.
+LOCAL_TEST_TIMEOUT_SECONDS = 45.0
 
 
 @router.get("/settings/providers")
@@ -42,7 +51,93 @@ async def provider_status(user: User = Depends(current_user), db: AsyncSession =
                 "last4": effective[-4:] if effective else None,
             }
         )
+    # "local" has no API key concept — a configured base URL is the credential,
+    # so there is nothing to keep write-only or DB-store the way cloud keys are.
+    out.append(
+        {
+            "provider": "local",
+            "configured": bool(settings.local_base_url),
+            "source": "env" if settings.local_base_url else None,
+            "last4": None,
+        }
+    )
     return out
+
+
+def _local_test_payload(
+    *,
+    configured: bool,
+    base_url: str | None,
+    reachable: bool,
+    error: str | None = None,
+    models: list[dict] | None = None,
+) -> dict:
+    models = models or []
+    tool_capable = sum(1 for m in models if m["supports_tools"])
+    return {
+        "configured": configured,
+        "base_url": base_url,
+        "reachable": reachable,
+        "error": error,
+        "models": models,
+        "counts": {
+            "models": len(models),
+            "tool_capable": tool_capable,
+            "no_tools": len(models) - tool_capable,
+        },
+    }
+
+
+@router.post("/settings/providers/local/test")
+async def test_local_provider(user: User = Depends(require_admin)):
+    """Diagnose the configured local model server. Reads only; persists nothing.
+
+    Deliberately takes **no body and no parameters**. The only URL this endpoint
+    will ever fetch is the server's own `BENCH_LOCAL_BASE_URL`: accepting a URL
+    from the client would turn a logged-in browser into a request forger against
+    anything the backend can reach (cloud metadata endpoints, internal
+    services). Echoing the configured base URL back is fine — it is operator
+    config, not a secret, and it is already visible to whoever set it.
+
+    A fresh pass, not the cached one: it bypasses the 5-minute discovery TTL and
+    re-probes tool support, because the whole point of pressing the button is to
+    see the server as it is right now (`ollama pull` a minute ago included).
+    """
+    settings = get_settings()
+    if not settings.local_base_url:
+        return _local_test_payload(configured=False, base_url=None, reachable=False)
+
+    catalog = get_catalog()
+    try:
+        result = await asyncio.wait_for(
+            catalog.refresh_local(force=True), timeout=LOCAL_TEST_TIMEOUT_SECONDS
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        return _local_test_payload(
+            configured=True,
+            base_url=settings.local_base_url,
+            reachable=False,
+            error=(
+                f"Timeout: the server did not finish discovery and tool probing within "
+                f"{LOCAL_TEST_TIMEOUT_SECONDS:.0f}s"
+            ),
+        )
+
+    return _local_test_payload(
+        configured=True,
+        base_url=result.base_url,
+        reachable=result.reachable,
+        error=result.error,
+        models=[
+            {
+                "id": m.id,
+                "display_name": m.display_name,
+                "supports_tools": m.supports_tools,
+                "context_window": m.context_window,
+            }
+            for m in sorted(result.models, key=lambda m: m.id)
+        ],
+    )
 
 
 class SetKeyBody(BaseModel):
@@ -75,6 +170,7 @@ async def set_provider_key(
 async def list_models(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     catalog = get_catalog()
     await catalog.refresh_dynamic()
+    await catalog.refresh_local()
     registry = ProviderRegistry(await load_db_keys(db))
     return [
         {**m.to_json(), "available": registry.has_key(m.provider)}

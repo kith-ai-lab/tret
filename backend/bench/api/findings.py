@@ -172,7 +172,19 @@ async def export_deliverable(
     if not result["sections"]:
         raise HTTPException(404, "No approved sections exist for this deliverable")
     if format == "html":
-        return HTMLResponse(result["html"])
+        # The body is rendered from model-authored markdown. It is sanitized at
+        # render time (services/html_sanitize), and these headers are the second
+        # layer: a sandboxed, script-and-fetch-free context on an origin that
+        # holds the reviewer's session, so a future renderer regression cannot
+        # turn a drafted section into same-origin script or a tracking beacon.
+        return HTMLResponse(
+            result["html"],
+            headers={
+                "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
     if format == "json":
         return result
     if format == "pdf":
