@@ -18,13 +18,29 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Lint
         working-directory: backend
-        run: ruff check bench
+        # Tests are linted too: the eval suite is production-grade code.
+        run: ruff check bench tests
       - name: Test
         working-directory: backend
+        # Includes tests/evals — the golden runs are a build gate, not a
+        # separate opt-in suite (docs/evals.md). Live evals stay skipped.
         run: pytest -q
+      - name: Single migration head
+        working-directory: backend
+        # Two heads merge cleanly in git and then fail on deploy.
+        run: |
+          heads=$(alembic heads | grep -c '(head)' || true)
+          alembic heads
+          if [ "$heads" -ne 1 ]; then
+            echo "::error::expected exactly 1 Alembic head, found $heads"
+            exit 1
+          fi
       - name: Validate climate pack
         working-directory: backend
-        run: python -m bench.cli packs validate ../packs/climate-risk
+        # Also runs the method safety scan and prints the integrity hash.
+        run: |
+          python -m bench.cli packs validate ../packs/climate-risk
+          python -m bench.cli packs hash ../packs/climate-risk
 
   frontend:
     runs-on: ubuntu-latest
@@ -36,7 +52,7 @@ jobs:
       - name: Install
         working-directory: frontend
         run: npm install
-      - name: Build
+      - name: Typecheck and build
         working-directory: frontend
         run: npm run build
 

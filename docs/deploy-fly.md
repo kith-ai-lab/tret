@@ -26,8 +26,26 @@ Notes:
 - `attach` also sets a `DATABASE_URL` secret; bench reads `BENCH_DATABASE_URL`,
   so set it explicitly (same value). Plain `postgres://` URLs and libpq
   `sslmode` params are normalized automatically.
-- `BENCH_COOKIE_SECURE=true` and the frontend/static serving are already set
-  in `fly.toml` / `Dockerfile.fly`.
+- `BENCH_ENVIRONMENT=production`, `BENCH_COOKIE_SECURE=true`, and the
+  frontend/static serving are already set in `fly.toml` / `Dockerfile.fly`.
+
+### Production mode is on, so the secrets above are not optional
+
+`BENCH_ENVIRONMENT=production` makes bench **refuse to boot** while the shipped
+development defaults are still in place — a dev `BENCH_SECRET_KEY` (forgeable
+sessions, trivially decryptable stored provider keys) or the default
+`BENCH_ADMIN_PASSWORD`. Set both in the `fly secrets set` above, before the
+first deploy. A machine that fails this check logs the reason and exits:
+
+```
+Refusing to start with BENCH_ENVIRONMENT=production:
+  - BENCH_SECRET_KEY is still the shipped default. ...
+See docs/hardening.md.
+```
+
+Rotating `BENCH_SECRET_KEY` later invalidates sessions **and** every provider
+key stored through the Settings UI (they are encrypted with it); re-enter those
+keys afterwards. Full checklist: [hardening.md](hardening.md).
 
 ## Deploy
 

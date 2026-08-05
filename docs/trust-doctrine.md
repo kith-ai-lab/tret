@@ -22,6 +22,22 @@ everything actually retrieved or computed this run — a value from neither door
 fails validation and is sent back for repair. (`bench/engine/validation.py`,
 `bench/services/methods.py`)
 
+**What this guarantees, precisely.** Method code is pinned two ways: each
+execution records the entrypoint's `code_sha`, and the pack's whole content
+hash is re-verified before the method runs, so a pack edited under a running
+deployment fails loudly instead of quietly changing numbers. Execution is
+confined to a short-lived `python -I` subprocess with an empty environment,
+rlimits, a wall clock, output caps, no DB handle, and — on Linux where
+`unshare` is usable — no network. Pack validation also AST-scans method code for
+network, subprocess, FFI, and dynamic-code use.
+
+**What it does not guarantee.** That scan is a deterrent, not a sandbox, and the
+subprocess has no filesystem isolation: pack methods are operator-trusted code,
+and installing a pack is deploying code you reviewed. The trust claim here is
+*provenance and reproducibility* — every number is attributable to vetted code
+and hashed inputs — not *containment of hostile pack authors*. Containment is
+the deployment's job; see `docs/hardening.md`.
+
 ## 2. The blessing gate
 
 Every structured output is created with status `draft`. It becomes `approved`

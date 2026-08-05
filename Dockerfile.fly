@@ -24,9 +24,16 @@ RUN pip install --no-cache-dir .
 COPY packs /packs
 COPY --from=frontend /fe/dist /app/frontend-dist
 
+# This image is a real deployment, so it declares itself one: BENCH_ENVIRONMENT
+# =production turns the shipped dev defaults into hard boot failures rather than
+# a quiet insecure install (bench/config.py::enforce_production_safety,
+# docs/hardening.md). A container built from this file therefore refuses to start
+# until BENCH_SECRET_KEY and BENCH_ADMIN_PASSWORD are supplied — which is the
+# point. fly.toml restates both values so they are visible where deploys are read.
 ENV BENCH_PACKS_DIR=/packs \
     BENCH_STORAGE_DIR=/data/storage \
     BENCH_SERVE_FRONTEND_DIR=/app/frontend-dist \
+    BENCH_ENVIRONMENT=production \
     BENCH_COOKIE_SECURE=true
 
 EXPOSE 8000

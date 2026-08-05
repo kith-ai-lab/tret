@@ -1,0 +1,59 @@
+name: Feature request
+description: Propose a change to the core platform, engine, providers, or UI.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a new **domain pack**, use the *New pack proposal* template instead —
+        packs need no core changes and are the easiest way to extend bench.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What analyst-facing work is hard or untrustworthy today? Describe the
+        situation, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Engine / agent loop
+        - Router or model catalog
+        - Provider adapter
+        - Packs, doctrine, or deterministic methods
+        - API
+        - Frontend
+        - Deployment / operations
+        - Docs
+        - Other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: trust
+    attributes:
+      label: Effect on the trust guarantees
+      description: >-
+        The five rules in the README are structural (docs/trust-doctrine.md).
+        Would this proposal let a model introduce a number that was not
+        retrieved or computed, let a finding reach approved without a named
+        human, or remove something from the audit trail? If so, say how you would
+        keep the guarantee intact — a proposal that trades one away will be
+        declined, however convenient.
+      value: "No effect — reason:"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including whether this could be a pack, a config value, or a doc change.

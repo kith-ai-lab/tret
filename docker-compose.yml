@@ -26,9 +26,40 @@ services:
       BENCH_MOONSHOT_API_KEY: ${BENCH_MOONSHOT_API_KEY:-}
       BENCH_OPENROUTER_API_KEY: ${BENCH_OPENROUTER_API_KEY:-}
       BENCH_ROUTER_MODEL: ${BENCH_ROUTER_MODEL:-anthropic/claude-haiku-4-5}
+      # Local inference server (Ollama, LM Studio, vLLM, llama.cpp), for running
+      # with no cloud provider at all — docs/local-models.md. From inside this
+      # container your host's server is NOT localhost: use
+      # BENCH_LOCAL_BASE_URL=http://host.docker.internal:11434/v1 (the
+      # extra_hosts entry below makes that name resolve on Linux too).
+      #
+      # Using the bundled `local` profile below instead? Put
+      # BENCH_LOCAL_BASE_URL=http://ollama:11434/v1 in .env. It stays .env-driven
+      # on purpose: hard-wiring the ollama URL here would make bench report
+      # local as configured even when the profile is off, i.e. permanently
+      # configured-but-down.
+      BENCH_LOCAL_BASE_URL: ${BENCH_LOCAL_BASE_URL:-}
+      BENCH_LOCAL_API_KEY: ${BENCH_LOCAL_API_KEY:-}
+      # This file is the local quickstart, so it defaults to development mode:
+      # plain HTTP on localhost and the shipped default secret/password, so
+      # `docker compose up` just works. Do not expose it to a network as-is.
+      #
+      # For a real deployment, put these in .env — with production set, bench
+      # refuses to boot while the shipped default secret key or admin password
+      # is still in place, rather than running insecurely (docs/hardening.md).
+      # Terminate TLS in front of it; cookie_secure keeps the session cookie off
+      # plain HTTP. Neither line needs editing here:
+      #   BENCH_ENVIRONMENT=production
+      #   BENCH_COOKIE_SECURE=true
+      #   BENCH_SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+      #   BENCH_ADMIN_PASSWORD=<strong password>
+      BENCH_ENVIRONMENT: ${BENCH_ENVIRONMENT:-development}
+      BENCH_COOKIE_SECURE: ${BENCH_COOKIE_SECURE:-false}
     volumes:
       - ./packs:/packs:ro
       - storage:/data/storage
+    # So BENCH_LOCAL_BASE_URL can reach a model server running on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,6 +73,53 @@ services:
     ports:
       - "5180:80"
 
+  # ── bundled local model server (opt-in) ────────────────────────────────────
+  # `docker compose --profile local up` adds an Ollama server and pulls one
+  # tool-capable model into it, so bench can run with no cloud key and no manual
+  # install. Set BENCH_LOCAL_BASE_URL=http://ollama:11434/v1 in .env to use it.
+  #
+  # Set expectations before you start it:
+  #   - the first start downloads multi-GB model weights (a few GB, once —
+  #     they persist in the `ollama` volume, not in the image);
+  #   - inference here is CPU-only. Docker Desktop passes no GPU through on
+  #     macOS, so on Apple Silicon a NATIVE `brew install ollama` is several
+  #     times faster and is the recommended path (docs/local-models.md);
+  #   - this profile is the zero-manual-steps path, not the fastest one.
+  ollama:
+    image: ollama/ollama
+    profiles: ["local"]
+    volumes:
+      # Named volume: pulled weights survive `docker compose down`.
+      - ollama:/root/.ollama
+    # Reachable as http://ollama:11434 on the compose network only — no host
+    # port is published, since bench is the only thing that needs to talk to it.
+    expose:
+      - "11434"
+    restart: unless-stopped
+
+  # One-shot: waits for the server, pulls the default model, exits. Idempotent —
+  # a model already in the volume re-downloads nothing, so re-running the profile
+  # is cheap. Pick a different model with BENCH_LOCAL_PULL_MODEL in .env.
+  ollama-init:
+    image: ollama/ollama
+    profiles: ["local"]
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      PULL_MODEL: ${BENCH_LOCAL_PULL_MODEL:-qwen2.5:7b-instruct}
+    entrypoint: ["/bin/sh", "-c"]
+    # $$ escapes compose interpolation: the shell expands these, not compose.
+    command:
+      - |
+        echo "waiting for ollama at $$OLLAMA_HOST ..."
+        until ollama list >/dev/null 2>&1; do sleep 2; done
+        echo "pulling $$PULL_MODEL (multi-GB on first run; cached afterwards) ..."
+        ollama pull "$$PULL_MODEL"
+        echo "done: $$(ollama list)"
+    restart: "no"
+
 volumes:
   pgdata:
   storage:
+  ollama:

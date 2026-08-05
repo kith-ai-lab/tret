@@ -22,9 +22,44 @@ cd frontend && npm install && npm run dev
 ## Before you open a PR
 
 ```bash
-cd backend && .venv/bin/ruff check bench && .venv/bin/pytest -q
+cd backend && .venv/bin/ruff check bench tests && .venv/bin/pytest -q
 cd frontend && npm run build
 ```
+
+CI runs exactly this, plus `bench packs validate` on the shipped pack and a
+`docker compose` boot smoke test.
+
+## The golden-run policy
+
+`backend/tests/evals/` holds the **golden runs**: scenarios that drive the real
+engine, the real pack, real doctrine, real tools, and real validation against a
+scripted model, each locking in one of the trust guarantees from the README. They
+are the regression gate for the failure mode that has no stack trace — output
+that still looks fine and is no longer grounded.
+
+```bash
+cd backend && .venv/bin/python -m pytest tests/evals -q     # offline, deterministic
+```
+
+They also run in the ordinary suite, so `pytest -q` already covers them.
+
+**Any change to prompts, doctrine, routing, providers, or packs must keep them
+green.** When one fails, exactly one of two things is true:
+
+- **It is a regression** — fix the change.
+- **The change is intentional and the expectation is now wrong** (a deliberately
+  reworded preamble, a task's tool list changed on purpose). Update the
+  expectation **in the same commit as the change**, and say why in the commit
+  message. A golden expectation updated in a separate "fix tests" commit is
+  indistinguishable from a regression that was papered over.
+
+Never make a golden run pass by loosening it — dropping the exact failure text,
+removing an assertion, widening a set. Loosening an eval is a change to what
+bench promises, and it needs to be argued as one.
+
+Adding a guarantee? Add the scenario in the same PR. Details, including the
+`ReplayProvider` script format and the known gaps:
+[docs/evals.md](docs/evals.md).
 
 ## Ground rules
 

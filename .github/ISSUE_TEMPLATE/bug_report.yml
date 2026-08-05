@@ -1,0 +1,69 @@
+name: Bug report
+description: Something behaves incorrectly, or a guarantee did not hold.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the bug is that a **run produced something it should not have** — a
+        number the model was never given, a finding that skipped approval, a
+        citation that does not match what was retrieved — say so plainly and
+        include the run id. Those are the highest-priority bugs in bench.
+
+        Please do not paste real client data, provider API keys, or session
+        cookies. Redact transcripts before attaching them.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Install pack X / use the seeded climate-risk demo
+        2. Run task type Y for subject Z
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: run-id
+    attributes:
+      label: Run id (if applicable)
+      description: >-
+        From the run detail URL. The run row carries the routing decision,
+        doctrine hash, and full transcript, which is usually all we need.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: How you are running bench, and against which models.
+      value: |
+        - Install: docker compose / local dev / Fly / other
+        - bench version or commit:
+        - Providers configured: Anthropic / Moonshot / OpenRouter / local
+        - Model used for the run (from the run detail view):
+        - `BENCH_ENVIRONMENT`: development / production
+        - OS:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: Backend logs, the run's error field, or a browser console trace.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: >-
+            I checked whether `pytest -q` (including `tests/evals`) passes on my
+            checkout — a failing golden run usually names the broken guarantee
+            directly.
+        - label: I have redacted any client data, credentials, or personal information.
+          required: true

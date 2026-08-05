@@ -42,6 +42,8 @@ task_types:
     output_schema: schemas/my_verdict.schema.json
     terminal_tool: record_verdict
     tools: [lookup_dataset, read_document, file_data_request, record_verdict]
+    doctrine:            # OPTIONAL: the doctrine this task needs (see below)
+      - doctrine/01-principles.md
     output_contract: One line the model router reads.
     instructions: |
       Step-by-step instructions for the task. Reference your doctrine.
@@ -63,10 +65,56 @@ datasets:
   retrieved via `lookup_dataset` — use it for any output that carries numbers.
 - **terminal_tool** (`record_verdict`, `record_finding`, or `draft_section`)
   makes the structured output the *terminal action* of the run. If the model
-  stops without recording, the engine nudges it once, then the run completes
-  without a finding rather than fabricating one.
+  stops without recording, the engine nudges it once; if it still records
+  nothing, the run ends with status **`completed_without_output`** rather than
+  fabricating a finding. Declaring a `terminal_tool` is what makes that honesty
+  possible — a task without one has no way to tell "answered" from "gave up".
 - **datasets** are the deterministic lane: CSVs whose rows the model can
   retrieve (exact-match filters) but never edit or compute over.
+
+## Task-scoped doctrine
+
+Doctrine is re-sent on every iteration of every run, so doctrine a task never
+uses is pure waste — money, latency, and energy. A task type may therefore
+declare what it needs:
+
+```yaml
+task_types:
+  - slug: evidence_extraction
+    doctrine:
+      - doctrine/01-principles.md                      # a whole file
+      - "doctrine/03-reason-codes.md#outdated_inputs"   # one `#`/`##` section
+```
+
+- **Omit `doctrine:` and the task gets every doctrine file in the pack** — the
+  default, so packs written before this existed behave exactly as before.
+- Selectors may only name files listed in the pack's top-level `doctrine:`.
+- A section selector matches a heading by text (case-insensitive; a prefix such
+  as `#Step 5` is enough). The file's front matter — its title and the framing
+  paragraphs before the first `##` — always rides along, because that is
+  usually where the rule that makes the section interpretable lives.
+- `bench packs validate` fails on a selector naming an unknown file or a
+  heading that does not exist, so scoping cannot rot silently. At runtime an
+  unresolvable selector fails *open* (whole file loaded) and is noted in the
+  run's context composition: a scoping mistake can never starve a task of
+  doctrine.
+- Scope conservatively. A task must keep every section it might cite or apply —
+  if a task grades or produces verdicts, it needs the procedure and the reason
+  codes. When unsure, declare nothing.
+
+Whatever a run loads is hashed per file and recorded in the run's
+`context_composition` alongside its estimated token count, so the audit trail
+states exactly what the model saw — and `GET /api/runs/{id}` shows you which
+component of your prompt is spending the tokens.
+
+## Tool results are capped
+
+`lookup_dataset`, `run_method`, and `list_prior_findings` return at most 200
+rows / 100KB per call. Over that, the result carries an explicit `[TRUNCATED:
+…]` marker telling the model to narrow the query, and the rows it did not see
+are **not** citable — the citation cross-check only knows about what was
+actually returned. Design datasets and methods so the interesting answer fits:
+filterable columns, and a method for anything that wants aggregating.
 
 ## Methods — the deterministic compute lane
 
@@ -106,6 +154,73 @@ Rules that keep the trust story intact:
   factor), skip it and report it in the output — never silently guess.
 - Every execution is recorded in `method_runs` with params, code sha, input
   hashes, and output hash; the agent cites method outputs like dataset rows.
+
+## The safety scan your methods must pass
+
+`bench packs validate` AST-scans every method entrypoint and **fails the pack**
+— so it is never installed — if the code reaches for anything that would stop it
+being a pure, reproducible function. Violations are reported with `file:line`.
+
+| Refused | Examples |
+| --- | --- |
+| Network | `socket`, `socketserver`, `ssl`, `http*`, `urllib`, `ftplib`, `smtplib`, `poplib`, `imaplib`, `nntplib`, `telnetlib`, `xmlrpc`, `webbrowser`, `selectors`, `asyncio` |
+| Process spawning | `subprocess`, `multiprocessing`, `pty`; `os.system`, `os.popen`, `os.fork`, `os.forkpty`, `os.kill`, `os.killpg`, `os.abort`, `os.exec*`, `os.spawn*`, `os.posix_spawn` |
+| Dynamic code | `runpy`, `code`, `codeop`, `eval`, `exec`, `compile` |
+| Dynamic import | `importlib`, `imp`, `__import__`, and relative imports (a method is one file) |
+| FFI | `ctypes`, `cffi` |
+| Code-executing deserialisation | `pickle`, `shelve`, `marshal` |
+| Namespace escapes | `__builtins__`, `__subclasses__`, `__globals__`, `__code__`, `__loader__`, `__mro__` |
+| Environment mutation | `os.putenv`, `os.unsetenv` |
+
+Matching is on the dotted name *and* its root package, so `http.client` trips
+`http`. The authoritative list is `backend/bench/packs/safety.py`.
+
+If a rule blocks something you need, the need is usually the problem: a method
+that fetches a URL is not reproducible, and a method that shells out is not
+reviewable. Fetch the data outside bench and ship it as a dataset instead.
+
+**This scan is a deterrent, not a sandbox.** Any determined author can defeat an
+AST check. What actually contains a method is the subprocess isolation in
+`services/methods.py` and the fact that an operator reviewed your pack before
+installing it. See [hardening.md](hardening.md) for what is and is not isolated
+(notably: the filesystem is not).
+
+## Integrity pinning and how to re-pin
+
+At install, bench hashes **every file** in the pack directory — methods,
+schemas, datasets, templates, `pack.yaml`, doctrine — and stores it as
+`packs.content_hash` (visible on `GET /api/packs`). Before any method executes,
+the hash is recomputed and compared. A mismatch fails the run, names both
+hashes, and records a failed `method_runs` row.
+
+Two consequences for authoring:
+
+1. **Editing pack files under a running deployment breaks method runs**, on
+   purpose. A method whose code changed silently would make earlier findings
+   unreproducible while still looking correct.
+2. `doctrine_sha` and `content_hash` are different pins. Doctrine changes move
+   both; changing a dataset CSV or a method moves only `content_hash`.
+
+The re-pin flow after an intentional edit:
+
+```bash
+bench packs hash ./my-pack      # the hash an install would store; changes nothing
+```
+
+then reinstall the pack, which re-pins it:
+
+- restart bench — boot runs the idempotent pack install, or
+- `POST /api/packs/install {"path": "/path/to/my-pack"}` (admin only).
+
+While iterating locally, expect to reinstall after each edit that touches a
+method or its inputs. Bump `version` in `pack.yaml` for anything you publish, so
+consumers can tell a re-pin from a genuinely new pack. Packs installed before
+integrity pinning existed carry a null hash: bench warns, runs them, and the
+next install pins them.
+
+Pinning catches tampering and drift by whoever can write to the pack directory.
+It is **not a signature** — the same person can reinstall to re-pin. Signed
+packs remain future work.
 
 ## Builtin tools you can grant
 

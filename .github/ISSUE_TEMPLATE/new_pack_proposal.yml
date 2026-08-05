@@ -1,0 +1,87 @@
+name: New pack proposal
+description: Propose a domain pack — a new profession's judgment, encoded.
+labels: [pack]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Packs are where bench becomes useful in a specific field, and they need
+        no backend code: a manifest, versioned doctrine, JSON Schemas, optional
+        deterministic methods, and fictional sample data
+        ([docs/pack-authoring.md](../blob/main/docs/pack-authoring.md)).
+
+        Open this before writing much, so the task shapes can be sanity-checked
+        against what the engine already enforces.
+  - type: input
+    id: domain
+    attributes:
+      label: Domain
+      placeholder: e.g. contract review, grant compliance, food-safety audit
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: The decision this pack supports
+      description: >-
+        Who reads the output, and what do they do differently because of it? A
+        pack whose output nobody acts on does not need this platform.
+    validations:
+      required: true
+  - type: textarea
+    id: task-types
+    attributes:
+      label: Task types
+      description: >-
+        For each: the shape (verdict / extraction / drafting / qa_review /
+        freeform), the inputs an analyst would supply, and the structured output.
+      placeholder: |
+        - slug: clause_risk_assessment
+          shape: verdict
+          inputs: contract_id, clause_type
+          output: verdict enum + reason code + cited clauses
+    validations:
+      required: true
+  - type: textarea
+    id: doctrine
+    attributes:
+      label: Doctrine — where the professional judgment comes from
+      description: >-
+        Which standards, regulations, or house rules the reasoning follows, and
+        whether they can be redistributed. Doctrine written as checkable
+        evidence tests ("you may only use this code if you retrieved X") is what
+        makes compliance auditable rather than aspirational.
+    validations:
+      required: true
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Where the numbers come from
+      description: >-
+        bench forbids invented values, so every number must arrive as a dataset
+        row or as the output of a vetted deterministic method. List the datasets
+        you would ship and any computations that need to be methods (rates,
+        rollups, inventories) — methods must be pure, stdlib-only, and
+        network-free.
+    validations:
+      required: true
+  - type: textarea
+    id: sample-data
+    attributes:
+      label: Sample data
+      description: >-
+        Packs ship enough **fictional** data for a stranger to run every task
+        type end to end, including at least one case where the interesting
+        outcome occurs. Confirm you can produce that without real client data.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmations
+      options:
+        - label: No real client, patient, or personal data — fictional samples only.
+          required: true
+        - label: I have read docs/pack-authoring.md and docs/trust-doctrine.md.
+          required: true
+        - label: I intend to author this pack (rather than requesting someone else does).
