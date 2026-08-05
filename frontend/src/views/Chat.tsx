@@ -2,12 +2,27 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 
-import { api, type ChatMessage } from '../api/client'
+import {
+  api,
+  type ChatMessage,
+  type ModelInfo,
+  objectiveDescription,
+  ROUTING_OBJECTIVES,
+} from '../api/client'
 import { useRunStream } from '../api/useRunStream'
-import { formatCost, formatTokens } from '../components/shared/format'
+import { EnergyDetail } from '../components/shared/EnergyDetail'
+import { avoidedFraming } from '../components/shared/emissions'
+import { formatCo2e, formatCost, formatPct, formatTokens, orDash } from '../components/shared/format'
 import { LiveFootprint } from '../components/shared/LiveFootprint'
-import { shortModelName } from '../components/shared/RoutingBadge'
+import { RoutingBadge, shortModelName } from '../components/shared/RoutingBadge'
 import { Markdown } from './Packs'
+import { ModelSelect } from './Workbench'
+
+// localStorage keys for the composer's per-turn overrides. Both persist across
+// reloads for the session; either can be cleared back to "harness default" by
+// picking the empty option.
+const OBJECTIVE_STORAGE_KEY = 'bench.chat.objective'
+const MODEL_OVERRIDE_STORAGE_KEY = 'bench.chat.modelOverride'
 
 const EXAMPLE_PROMPTS = [
   {
@@ -42,6 +57,21 @@ export function Chat() {
     queryFn: api.listConversations,
   })
   const conversations = conversationsQuery.data ?? []
+  const modelsQuery = useQuery({ queryKey: ['models'], queryFn: api.listModels })
+
+  // Per-turn routing overrides for the composer. Empty string means "use the
+  // harness's configured default" — that default is never silently guessed
+  // here, and an override is only sent when the user actually picked one.
+  // Persisted per browser (not per conversation): the choice carries forward
+  // to the next message and the next chat, same as leaving a filter set.
+  const [objective, setObjective] = useState<string>(
+    () => localStorage.getItem(OBJECTIVE_STORAGE_KEY) ?? '',
+  )
+  const [modelOverride, setModelOverride] = useState<string>(
+    () => localStorage.getItem(MODEL_OVERRIDE_STORAGE_KEY) ?? '',
+  )
+  useEffect(() => localStorage.setItem(OBJECTIVE_STORAGE_KEY, objective), [objective])
+  useEffect(() => localStorage.setItem(MODEL_OVERRIDE_STORAGE_KEY, modelOverride), [modelOverride])
 
   // Default to the most recent conversation once the list first loads. Never
   // override the user's explicit selection (incl. the deliberate null of a
@@ -93,7 +123,10 @@ export function Chat() {
 
   const sendMutation = useMutation({
     mutationFn: ({ conversationId, text }: { conversationId: string; text: string }) =>
-      api.sendChatMessage(conversationId, text),
+      api.sendChatMessage(conversationId, text, {
+        model_override: modelOverride || undefined,
+        objective: objective || undefined,
+      }),
     onSuccess: (data) => {
       setPending({ conversationId: data.conversation_id, runId: data.run_id })
       queryClient.invalidateQueries({ queryKey: ['conversation', data.conversation_id] })
@@ -161,7 +194,17 @@ export function Chat() {
         </div>
 
         {isLanding ? (
-          <Landing draft={draft} onDraft={setDraft} onSend={send} disabled={inFlight} />
+          <Landing
+            draft={draft}
+            onDraft={setDraft}
+            onSend={send}
+            disabled={inFlight}
+            models={modelsQuery.data ?? []}
+            objective={objective}
+            onObjectiveChange={setObjective}
+            modelOverride={modelOverride}
+            onModelOverrideChange={setModelOverride}
+          />
         ) : (
           <>
             <Thread
@@ -177,6 +220,11 @@ export function Chat() {
                   onSend={() => void send(draft)}
                   disabled={inFlight}
                   error={sendMutation.isError ? (sendMutation.error as Error).message : null}
+                  models={modelsQuery.data ?? []}
+                  objective={objective}
+                  onObjectiveChange={setObjective}
+                  modelOverride={modelOverride}
+                  onModelOverrideChange={setModelOverride}
                 />
                 <div className="chat-hint">
                   Responses are drafts — structured findings go to Approvals before they count.
@@ -245,11 +293,21 @@ function Landing({
   onDraft,
   onSend,
   disabled,
+  models,
+  objective,
+  onObjectiveChange,
+  modelOverride,
+  onModelOverrideChange,
 }: {
   draft: string
   onDraft: (v: string) => void
   onSend: (text: string) => void
   disabled: boolean
+  models: ModelInfo[]
+  objective: string
+  onObjectiveChange: (v: string) => void
+  modelOverride: string
+  onModelOverrideChange: (v: string) => void
 }) {
   return (
     <div className="chat-landing">
@@ -269,6 +327,11 @@ function Landing({
           disabled={disabled}
           error={null}
           autoFocus
+          models={models}
+          objective={objective}
+          onObjectiveChange={onObjectiveChange}
+          modelOverride={modelOverride}
+          onModelOverrideChange={onModelOverrideChange}
         />
         <div className="chat-cards">
           {EXAMPLE_PROMPTS.map((ex) => (
@@ -304,6 +367,13 @@ function Thread({
     if (el) el.scrollTop = el.scrollHeight
   }, [messages.length, liveTextLength, liveItemCount, loading])
 
+  // The persisted assistant message for `live.runId` can land (and start
+  // rendering its own completed-turn chip) a render or two before the
+  // `pending` state clears — without this check the same turn would briefly
+  // show both the live ticker and the completed chip at once.
+  const liveRunHasLanded =
+    !!live && messages.some((m) => m.role === 'assistant' && m.run_id === live.runId)
+
   return (
     <div className="chat-scroll" ref={scrollRef}>
       <div className="chat-column chat-messages">
@@ -323,7 +393,7 @@ function Thread({
           ),
         )}
 
-        {live && <LiveTurn runId={live.runId} stream={live.stream} />}
+        {live && !liveRunHasLanded && <LiveTurn runId={live.runId} stream={live.stream} />}
       </div>
     </div>
   )
@@ -336,6 +406,9 @@ function AssistantAvatar() {
 function AssistantTurn({ message }: { message: ChatMessage }) {
   const navigate = useNavigate()
   const activity = message.activity ?? []
+  // The compact chip only makes sense once the turn actually has a cost/carbon
+  // record — a message from before this accounting existed carries neither.
+  const hasFootprint = message.cost_usd !== undefined
   return (
     <div className="chat-turn assistant">
       <AssistantAvatar />
@@ -357,19 +430,114 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
         <div className="chat-prose md">
           <Markdown source={message.content || '_(no output)_'} />
         </div>
-        <div className="chat-turn-footer">
-          {message.status && message.status !== 'completed' && (
-            <span className="err">{message.status}</span>
-          )}
-          {message.model_used && <span>{shortModelName(message.model_used)}</span>}
-          {message.cost_usd !== undefined && <span>{formatCost(message.cost_usd)}</span>}
-          {message.run_id && (
+
+        {hasFootprint ? (
+          <details className="chat-footprint">
+            <summary>
+              <ChevronIcon />
+              {message.status && message.status !== 'completed' && (
+                <span className="err">{message.status}</span>
+              )}
+              <FootprintChipLine message={message} />
+            </summary>
+            <div className="chat-footprint-body">
+              <FootprintDetail message={message} />
+            </div>
+          </details>
+        ) : (
+          message.status &&
+          message.status !== 'completed' && (
+            <div className="chat-turn-footer">
+              <span className="err">{message.status}</span>
+            </div>
+          )
+        )}
+
+        {message.run_id && (
+          <div className="chat-turn-footer">
             <Link to={`/runs/${message.run_id}`} className="chat-viewrun">
               view run
             </Link>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** The compact, always-rendered line: model, cost, estimated carbon, and the
+ *  same-token counterfactual — an em-dash (never 0) for whatever part the
+ *  backend did not estimate, and the surcharge case named and colored, sign
+ *  preserved, never shown as a positive "saving". */
+function FootprintChipLine({ message }: { message: ChatMessage }) {
+  const framing = avoidedFraming(message.avoided_co2e_g)
+  const pct = message.energy?.baseline?.avoided_pct
+  const pctText = pct === null || pct === undefined ? null : formatPct(pct)
+  let avoidedText = '—'
+  let avoidedColor: string | undefined
+  if (framing.tone === 'saving') {
+    avoidedText = `${pctText ? `${pctText} ` : ''}lighter than frontier`
+    avoidedColor = framing.color
+  } else if (framing.tone === 'surcharge') {
+    avoidedText = `${pctText ? `${pctText} ` : ''}surcharge vs frontier`
+    avoidedColor = framing.color
+  } else if (framing.tone === 'even') {
+    avoidedText = 'level with frontier'
+  }
+  return (
+    <span className="chip-footprint">
+      {message.model_used && <span>{shortModelName(message.model_used)}</span>}
+      <span className="sep">·</span>
+      <span>{formatCost(message.cost_usd)}</span>
+      <span className="sep">·</span>
+      <span title="Estimated from token counts — never measured.">
+        {orDash(formatCo2e(message.co2e_g))} CO₂e (est.)
+      </span>
+      <span className="sep">·</span>
+      <span style={{ color: avoidedColor }} title={framing.note}>
+        {avoidedText}
+      </span>
+    </span>
+  )
+}
+
+/** Everything behind the click: routing rationale, token breakdown, and the
+ *  full scope/baseline/derivation (EnergyDetail → EmissionsCalc), reused
+ *  verbatim rather than re-implemented for chat. */
+function FootprintDetail({ message }: { message: ChatMessage }) {
+  const showCache = message.cache_read_tokens !== undefined || message.cache_write_tokens !== undefined
+  return (
+    <div className="stack" style={{ gap: 12 }}>
+      <div className="row" style={{ flexWrap: 'wrap' }}>
+        <RoutingBadge routing={message.routing ?? null} />
+      </div>
+      {(message.input_tokens !== undefined || showCache) && (
+        <div className="config-stats" style={{ gap: 24 }}>
+          {message.input_tokens !== undefined && (
+            <div className="config-stat">
+              <div className="mono-label">Tokens in / out</div>
+              <div className="mono-body">
+                {formatTokens(message.input_tokens)} / {formatTokens(message.output_tokens)}
+              </div>
+            </div>
+          )}
+          {showCache && (
+            <div className="config-stat">
+              <div className="mono-label">Cache read / write</div>
+              <div className="mono-body" title="Cache reads bill at a discount; cache writes are a full pass.">
+                {formatTokens(message.cache_read_tokens)} / {formatTokens(message.cache_write_tokens)}
+              </div>
+            </div>
           )}
         </div>
-      </div>
+      )}
+      {message.energy ? (
+        <EnergyDetail energy={message.energy} />
+      ) : (
+        <div className="empty" style={{ padding: '4px 0' }}>
+          No carbon estimate recorded for this turn.
+        </div>
+      )}
     </div>
   )
 }
@@ -444,6 +612,11 @@ function Composer({
   disabled,
   error,
   autoFocus,
+  models,
+  objective,
+  onObjectiveChange,
+  modelOverride,
+  onModelOverrideChange,
 }: {
   value: string
   onChange: (v: string) => void
@@ -451,6 +624,11 @@ function Composer({
   disabled: boolean
   error: string | null
   autoFocus?: boolean
+  models: ModelInfo[]
+  objective: string
+  onObjectiveChange: (v: string) => void
+  modelOverride: string
+  onModelOverrideChange: (v: string) => void
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -477,6 +655,13 @@ function Composer({
   return (
     <div className="chat-composer">
       {error && <div className="error-text" style={{ marginBottom: 8 }}>{error}</div>}
+      <ComposerControls
+        models={models}
+        objective={objective}
+        onObjectiveChange={onObjectiveChange}
+        modelOverride={modelOverride}
+        onModelOverrideChange={onModelOverrideChange}
+      />
       <div className={`chat-inputbox${disabled ? ' disabled' : ''}`}>
         <textarea
           ref={ref}
@@ -502,12 +687,78 @@ function Composer({
   )
 }
 
+/** Model-selection controls: which objective the router optimizes for, and an
+ *  optional model pin, both for this message only. Neither pre-selects
+ *  anything — the empty option is always "use the harness's configured
+ *  default" and is visibly labelled as such, never silently guessed. */
+function ComposerControls({
+  models,
+  objective,
+  onObjectiveChange,
+  modelOverride,
+  onModelOverrideChange,
+}: {
+  models: ModelInfo[]
+  objective: string
+  onObjectiveChange: (v: string) => void
+  modelOverride: string
+  onModelOverrideChange: (v: string) => void
+}) {
+  return (
+    <div className="chat-controls">
+      <span className="chat-control">
+        <select
+          className="chat-control-select"
+          value={objective}
+          onChange={(e) => onObjectiveChange(e.target.value)}
+          title={objective ? objectiveDescription(objective) : 'Using the harness default objective'}
+          aria-label="Routing objective for this message"
+        >
+          <option value="">objective: using harness default</option>
+          {ROUTING_OBJECTIVES.map((o) => (
+            <option key={o} value={o} title={objectiveDescription(o)}>
+              objective: {o}
+            </option>
+          ))}
+        </select>
+      </span>
+      <span className="chat-control" style={{ maxWidth: 260 }}>
+        <ModelSelect
+          models={models}
+          value={modelOverride}
+          onChange={onModelOverrideChange}
+          emptyLabel="model: using harness default"
+        />
+      </span>
+    </div>
+  )
+}
+
 // ── Icons ─────────────────────────────────────────────────────────────────
 
 function SendIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 19V5M5 12l7-7 7 7" />
+    </svg>
+  )
+}
+
+/** Rotates via `.chat-footprint[open] &` — points right closed, down open. */
+function ChevronIcon() {
+  return (
+    <svg
+      className="fp-caret"
+      width="10"
+      height="10"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9 18l6-6-6-6" />
     </svg>
   )
 }

@@ -950,6 +950,64 @@ input[type="radio"] {
   color: var(--accent);
 }
 
+/* Completed-turn footprint chip: a quiet, single-line summary that expands to
+   the full routing/cost/carbon record on click. Native <details> — keyboard
+   reachable with no extra wiring, and the focus ring comes from the shared
+   summary:focus-visible rule above. */
+.chat-footprint {
+  margin-top: 10px;
+}
+
+.chat-footprint > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  list-style: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.chat-footprint > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-footprint > summary:hover {
+  color: var(--text);
+}
+
+.chat-footprint > summary .fp-caret {
+  flex-shrink: 0;
+  transition: transform 0.12s ease;
+}
+
+.chat-footprint[open] > summary .fp-caret {
+  transform: rotate(90deg);
+}
+
+.chat-footprint > summary .err {
+  color: var(--red);
+  text-transform: uppercase;
+}
+
+.chip-footprint {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.chip-footprint .sep {
+  color: var(--border);
+}
+
+.chat-footprint-body {
+  margin: 10px 0 2px 17px;
+}
+
 /* Composer dock (pinned bottom of the column). */
 .chat-composer-dock {
   flex-shrink: 0;
@@ -959,6 +1017,35 @@ input[type="radio"] {
 
 .chat-composer {
   width: 100%;
+}
+
+/* Per-message routing controls: compact, muted, sit just above the input box.
+   Each is explicit about defaulting to the harness's own policy — neither
+   pre-selects a value the user did not choose. */
+.chat-controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.chat-control {
+  flex: 0 1 auto;
+  min-width: 150px;
+  max-width: 220px;
+}
+
+.chat-control select {
+  width: 100%;
+  font-size: 10.5px;
+  padding: 4px 8px;
+  border-radius: 12px;
+  color: var(--text-muted);
+  background: var(--bg-panel);
+}
+
+.chat-control select:focus {
+  color: var(--text);
 }
 
 .chat-inputbox {

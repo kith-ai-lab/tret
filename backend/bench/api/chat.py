@@ -21,6 +21,8 @@ from bench.api.auth import current_user
 from bench.db.engine import get_db, get_session_factory
 from bench.db.models import Conversation, Dataset, Harness, Pack, Project, Run, User
 from bench.engine.harness import get_harness_engine
+from bench.router_llm.objectives import OBJECTIVES
+from bench.services.emissions import emission_summary_fields
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -108,6 +110,52 @@ class CreateConversationBody(BaseModel):
 
 class SendMessageBody(BaseModel):
     text: str
+    # Per-turn overrides, both optional. Omitting both leaves routing exactly as
+    # before (the harness's configured default policy). `model_override` is
+    # threaded onto the run's task_input exactly the way api/runs.py threads its
+    # own `model_override` — an invalid/unavailable model is not validated here
+    # either; it surfaces as the same RoutingUnavailable run failure runs.py
+    # produces, recorded on the run and then on this turn's assistant message.
+    model_override: str | None = None
+    # `objective` is validated at the door (see `_validate_objective`) the same
+    # way api/harnesses.py validates a harness's model_policy.objective, and is
+    # persisted onto the run's task_input for the audit trail. NOTE: unlike
+    # model_override, the engine has no per-run hook that reads it back out —
+    # only a harness's own model_policy.objective steers routing today — so this
+    # is recorded but does not yet change which model is chosen for the turn.
+    objective: str | None = None
+
+
+def _validate_objective(objective: str | None) -> None:
+    """422 on an unrecognized objective rather than falling through to a default.
+
+    Mirrors api/harnesses.py::_validate_policy's identical check on a harness's
+    model_policy.objective: a bad value must be rejected at the door, not read
+    as the default.
+    """
+    if objective is not None and objective not in OBJECTIVES:
+        raise HTTPException(422, f"objective must be one of {'|'.join(OBJECTIVES)}")
+
+
+def _run_task_input(
+    text: str,
+    history: list[dict],
+    capabilities: str,
+    model_override: str | None,
+    objective: str | None,
+) -> dict:
+    """The task_input for one chat turn's delegated run.
+
+    `_model_override`/`_objective` are only added when set, so a turn that
+    supplies neither produces byte-for-byte the task_input this endpoint always
+    built — the default behavior is unchanged.
+    """
+    task_input: dict = {"message": text, "_history": history, "_capabilities": capabilities}
+    if model_override:
+        task_input["_model_override"] = model_override
+    if objective:
+        task_input["_objective"] = objective
+    return task_input
 
 
 @router.get("")
@@ -177,6 +225,7 @@ async def send_message(
     text = body.text.strip()
     if not text:
         raise HTTPException(422, "Empty message")
+    _validate_objective(body.objective)
 
     # Engine history: prior user/assistant turns, lean (no tool detail).
     history = [
@@ -190,11 +239,13 @@ async def send_message(
         harness_id=conv.harness_id,
         pack_id=None,
         task_type="chat",
-        task_input={
-            "message": text,
-            "_history": history,
-            "_capabilities": await _capability_catalog(db),
-        },
+        task_input=_run_task_input(
+            text,
+            history,
+            await _capability_catalog(db),
+            body.model_override,
+            body.objective,
+        ),
         created_by=user.id,
     )
     db.add(run)
@@ -211,6 +262,57 @@ async def send_message(
     return {"run_id": str(run.id), "conversation_id": str(conv.id)}
 
 
+def _assistant_message(run: Run) -> dict:
+    """The persisted assistant turn: text/activity, plus the full cost, carbon
+    and routing record behind it.
+
+    Same shape as a run summary/detail (api/runs.py::_run_summary, get_run) so a
+    chat turn is as legible as the run behind it — the compact chip reads the
+    top-line fields (via `emission_summary_fields`) and the expanded view reuses
+    `energy`/`routing` verbatim with the same `EmissionsCalc`/`RoutingBadge`
+    components a run detail page uses. Nullable fields stay null, never 0, when
+    the run has no estimate or was never routed.
+    """
+    assistant_text = ""
+    activity = []
+    for m in run.messages or []:
+        if m.get("role") == "assistant":
+            if m.get("content"):
+                assistant_text = m["content"]  # last assistant text wins
+            for tc in m.get("tool_calls") or []:
+                entry = {"tool": tc.get("name"), "summary": ""}
+                if tc.get("name") == "run_harness_task":
+                    args = tc.get("arguments") or {}
+                    entry["summary"] = f"delegated {args.get('task_type', '?')}"
+                activity.append(entry)
+    if run.status != "completed" and not assistant_text:
+        assistant_text = f"(run {run.status}: {run.error or 'no output'})"
+    return {
+        "role": "assistant",
+        "content": assistant_text,
+        "run_id": str(run.id),
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "activity": activity,
+        "status": run.status,
+        "model_used": run.model_used,
+        "cost_usd": float(run.cost_usd or 0),
+        "input_tokens": run.input_tokens,
+        "output_tokens": run.output_tokens,
+        "cache_read_tokens": run.cache_read_tokens,
+        "cache_write_tokens": run.cache_write_tokens,
+        "energy_wh": float(run.energy_wh) if run.energy_wh is not None else None,
+        # co2e_g, scope2_g, scope3_g, avoided_co2e_g — read as recorded, never
+        # recomputed at today's factors; null wherever the run has no figure.
+        **emission_summary_fields(run.energy_accounting),
+        # Full derivation (scope split, frontier-baseline counterfactual, every
+        # factor) and the full routing decision (chosen model, objective,
+        # reasoning, fallback_used, candidates), exactly as recorded. Both null
+        # when the run never estimated/routed.
+        "energy": run.energy_accounting,
+        "routing": run.routing,
+    }
+
+
 async def _execute_and_record(run_id: uuid.UUID, conversation_id: uuid.UUID) -> None:
     """Run the chat turn, then append the assistant entry to the conversation."""
     await get_harness_engine().execute(run_id)
@@ -219,39 +321,5 @@ async def _execute_and_record(run_id: uuid.UUID, conversation_id: uuid.UUID) -> 
         conv = await db.get(Conversation, conversation_id)
         if run is None or conv is None:
             return
-        assistant_text = ""
-        activity = []
-        for m in run.messages or []:
-            if m.get("role") == "assistant":
-                if m.get("content"):
-                    assistant_text = m["content"]  # last assistant text wins
-                for tc in m.get("tool_calls") or []:
-                    entry = {"tool": tc.get("name"), "summary": ""}
-                    if tc.get("name") == "run_harness_task":
-                        args = tc.get("arguments") or {}
-                        entry["summary"] = f"delegated {args.get('task_type', '?')}"
-                    activity.append(entry)
-        if run.status != "completed" and not assistant_text:
-            assistant_text = f"(run {run.status}: {run.error or 'no output'})"
-        conv.messages = [
-            *(conv.messages or []),
-            {
-                "role": "assistant",
-                "content": assistant_text,
-                "run_id": str(run.id),
-                "ts": datetime.now(timezone.utc).isoformat(),
-                "activity": activity,
-                "status": run.status,
-                "model_used": run.model_used,
-                "cost_usd": float(run.cost_usd or 0),
-                # What the turn actually cost, in full: dollars, cache reuse, and
-                # the estimated ecological figure. Same shape as a run summary
-                # (api/runs.py::_run_summary) so a chat turn is as legible as the
-                # run behind it; energy is null, never 0, when unestimated.
-                "cache_read_tokens": run.cache_read_tokens,
-                "cache_write_tokens": run.cache_write_tokens,
-                "energy_wh": float(run.energy_wh) if run.energy_wh is not None else None,
-                "co2e_g": (run.energy_accounting or {}).get("co2e_g"),
-            },
-        ]
+        conv.messages = [*(conv.messages or []), _assistant_message(run)]
         await db.commit()

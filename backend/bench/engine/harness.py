@@ -54,6 +54,22 @@ MAX_ITERATIONS_CEILING = 50
 # it, so a model that ignores the instruction still cannot run away.
 OUTPUT_BUDGET_HARD_MULTIPLE = Decimal("1.5")
 
+
+def effective_model_policy(harness_policy: dict | None, task_input: dict | None) -> dict:
+    """The harness policy with per-run overrides applied, for this run only.
+
+    Chat's composer can ask for a different routing objective than the harness
+    default (`_objective`); the harness row is never mutated, and the routing
+    decision records which objective actually applied. Validation lives at the
+    API boundary, so an unknown value would already have been rejected there;
+    `objectives.objective_of` normalizes anything that slips through.
+    """
+    policy = dict(harness_policy or {"mode": "auto"})
+    run_objective = (task_input or {}).get("_objective")
+    if run_objective:
+        policy["objective"] = run_objective
+    return policy
+
 # Terminal run statuses that are not failures. `completed_without_output` is the
 # honest name for a run that ran to the end of its own accord but never landed a
 # valid terminal result: the task required one (the pack names a `terminal_tool`)
@@ -138,7 +154,7 @@ class HarnessEngine:
         max_output_tokens = int(loop_cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))
         temperature = float(loop_cfg.get("temperature", DEFAULT_TEMPERATURE))
         max_cost = Decimal(str(loop_cfg.get("max_cost_usd", DEFAULT_MAX_COST_USD)))
-        model_policy = harness.model_policy or {"mode": "auto"}
+        model_policy = effective_model_policy(harness.model_policy, run.task_input)
         budget_raw = model_policy.get("max_run_output_tokens")
         output_budget = int(budget_raw) if budget_raw else 0
 

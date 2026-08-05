@@ -432,11 +432,27 @@ export interface ChatMessage {
   content: string
   run_id: string | null
   ts: string
-  // Assistant-only fields, stamped when the turn's run finishes:
+  // Assistant-only fields, stamped when the turn's run finishes. Same shape as
+  // a run summary/detail (RunSummary/RunDetail) so a chat turn is as legible
+  // as the run behind it — nullable fields are null (never 0) when the turn
+  // carries no estimate or was never routed.
   activity?: ChatActivity[]
   status?: string
   model_used?: string | null
   cost_usd?: number
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_tokens?: number
+  cache_write_tokens?: number
+  energy_wh?: number | null
+  co2e_g?: number | null
+  scope2_g?: number | null
+  scope3_g?: number | null
+  avoided_co2e_g?: number | null
+  // Full derivation and full routing decision, exactly as recorded — for the
+  // expanded/click-through view (EmissionsCalc/EnergyDetail, RoutingBadge).
+  energy?: EnergyAccounting | null
+  routing?: RoutingDecision | null
 }
 
 export interface ConversationSummary {
@@ -721,10 +737,14 @@ export const api = {
       body: { harness_id: harnessId ?? null },
     }),
   getConversation: (id: string) => request<ConversationDetail>(`/chat/${id}`),
-  sendChatMessage: (id: string, text: string) =>
+  sendChatMessage: (
+    id: string,
+    text: string,
+    overrides: { model_override?: string; objective?: string } = {},
+  ) =>
     request<{ run_id: string; conversation_id: string }>(`/chat/${id}/messages`, {
       method: 'POST',
-      body: { text },
+      body: { text, ...overrides },
     }),
 
   // settings + catalog

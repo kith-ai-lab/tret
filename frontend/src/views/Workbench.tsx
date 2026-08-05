@@ -325,7 +325,7 @@ export function ModelSelect({
             .filter((m) => m.provider === p)
             .map((m) => (
               <option key={m.id} value={m.id} disabled={!m.available}>
-                {m.display_name} · {m.cost_tier} · {modelPriceLabel(m)}
+                {m.display_name} · {m.cost_tier} · {modelPriceLabel(m)} · energy {m.energy_class}
                 {m.available ? '' : ` (${modelUnavailableLabel(m)})`}
               </option>
             ))}

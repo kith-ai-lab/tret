@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from bench.api.harnesses import _validate_policy
 from bench.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
+from bench.engine.harness import effective_model_policy
 from bench.router_llm.fallback import fallback_model
 from bench.router_llm.objectives import (
     DEFAULT_OBJECTIVE,
@@ -360,8 +361,11 @@ def test_routing_decision_defaults_to_the_default_objective():
     assert decision.to_json()["objective"] == DEFAULT_OBJECTIVE
 
 
-async def test_route_persists_the_objective_on_the_fallback_path():
-    # No anthropic key, so the router model itself is unreachable → fallback.
+async def test_route_persists_the_objective_on_the_fallback_path(monkeypatch):
+    # No usable router model at all, so the deterministic fallback decides.
+    # (Having *no* key for the configured router model is no longer enough: the
+    # router now resolves to a small model from a provider that does have one.)
+    monkeypatch.setattr(ModelRouter, "_resolve_router_model", lambda self, max_tier: None)
     router = ModelRouter(ModelCatalog(), _Registry({"openrouter"}))
     decision = await router.route(
         model_policy=_policy(objective="eco"),
@@ -409,3 +413,31 @@ async def test_route_records_the_objective_for_a_single_candidate():
     )
     assert decision.chosen_model == "kimi/kimi-k2"
     assert decision.objective == "token_conservation"
+
+
+# ── per-run objective override (chat composer control) ───────────────────────
+# The composer can ask for a different objective than the harness default. The
+# harness row must never be mutated, and omitting the override must reproduce
+# the harness policy exactly.
+def test_per_run_objective_overrides_the_harness_default():
+    harness_policy = {"mode": "auto", "max_cost_tier": "premium", "objective": "balanced"}
+    policy = effective_model_policy(harness_policy, {"_objective": "eco"})
+    assert policy["objective"] == "eco"
+    assert policy["max_cost_tier"] == "premium"  # the rest of the policy survives
+    assert harness_policy["objective"] == "balanced"  # caller's dict untouched
+
+
+def test_no_override_leaves_the_harness_policy_unchanged():
+    harness_policy = {"mode": "auto", "objective": "quality"}
+    assert effective_model_policy(harness_policy, {}) == harness_policy
+    assert effective_model_policy(harness_policy, {"_model_override": "kimi/kimi-k2"}) == (
+        harness_policy
+    )
+    assert effective_model_policy(harness_policy, None) == harness_policy
+
+
+def test_an_absent_harness_policy_still_accepts_a_per_run_objective():
+    assert effective_model_policy(None, {"_objective": "token_conservation"}) == {
+        "mode": "auto",
+        "objective": "token_conservation",
+    }
