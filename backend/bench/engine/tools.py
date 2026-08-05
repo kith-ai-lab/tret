@@ -39,6 +39,14 @@ class RunContext:
     pack_manifest: dict | None = None  # stored manifest (methods, task types)
     pack_dir: str | None = None
     terminal_tool: str | None = None
+    # Set by the ENGINE when a call to `terminal_tool` succeeds — never by a tool
+    # about itself. Tools used to flip this on their own, which meant a tool and
+    # the task's declared `terminal_tool` could disagree: `record_finding` (the
+    # declared terminal tool for two shipped task types) never set it, so those
+    # runs were nudged after succeeding and ended `completed_without_output`;
+    # `draft_section` set it unconditionally, so it could mark a run complete on
+    # a task whose real terminal tool validates a schema. One writer, keyed on
+    # the task config, makes both mistakes unrepresentable.
     terminal_recorded: bool = False
     retrieved_values: list[dict] = field(default_factory=list)  # lookup_dataset audit trail
     findings_created: list[uuid.UUID] = field(default_factory=list)
@@ -65,6 +73,37 @@ def get_builtin_tools() -> dict[str, ToolSpec]:
 
 class ToolError(Exception):
     """Returned to the model as a tool error message (not fatal to the run)."""
+
+
+# ── result caps ───────────────────────────────────────────────────────────────
+# A tool result is re-sent as conversation input on every later iteration, so an
+# unbounded result is paid for many times over. Caps are deliberately generous:
+# a task that needs more than this needs a narrower query or a pack method, not
+# a bigger dump. Truncation is always announced in the result text — a silently
+# shortened result would let the model reason over data it cannot see.
+MAX_RESULT_ROWS = 200
+MAX_RESULT_BYTES = 100_000
+# Headroom above MAX_RESULT_BYTES for markers/notes appended after a result is
+# built (truncation markers here, the repeated-call note in the engine loop).
+RESULT_MARKER_SLACK_BYTES = 8_192
+
+
+def _cap_rows(rows: list[dict]) -> list[dict]:
+    """Cap a row list by count, then by serialized size (caps read at call time)."""
+    kept = rows[:MAX_RESULT_ROWS]
+    while len(kept) > 1 and len(json.dumps(kept, default=str).encode()) > MAX_RESULT_BYTES:
+        kept = kept[: -max(1, len(kept) // 10)]
+    return kept
+
+
+def _truncation_marker(shown: int, total: int, narrow: str) -> str:
+    """The explicit marker that makes a truncated result safe to reason over."""
+    return (
+        f"\n\n[TRUNCATED: showing {shown} of {total} matching rows "
+        f"(caps: {MAX_RESULT_ROWS} rows / {MAX_RESULT_BYTES // 1000}KB per result). "
+        "Rows not shown here were NOT retrieved: you may not cite or reason over them. "
+        f"{narrow}]"
+    )
 
 
 # ── document tools ────────────────────────────────────────────────────────────
@@ -177,16 +216,22 @@ async def lookup_dataset(
         )
     ).scalars().all()
     filters = filters or {}
-    out: list[dict] = []
+    requested = min(int(limit), MAX_RESULT_ROWS)
+    matching: list[dict] = []
+    matched = 0
     for row in rows:
         data = row.data
         if all(str(data.get(k)) == str(v) for k, v in filters.items()):
+            matched += 1
+            if len(matching) >= requested:
+                continue
             item = {k: data[k] for k in columns if k in data} if columns else dict(data)
             item["_row"] = f"{dataset}:{row.row_index}"
-            out.append(item)
-            if len(out) >= limit:
-                break
+            matching.append(item)
+    out = _cap_rows(matching)
     # Remember every value returned — the cited-values cross-check reads this.
+    # Truncated-away rows are deliberately never registered, so a value from
+    # beyond the cap cannot pass the citation check.
     for item in out:
         for k, v in item.items():
             if k == "_row":
@@ -200,7 +245,15 @@ async def lookup_dataset(
             f"Dataset columns: {list(ds.schema_json.get('columns', []))}. "
             "If this data is genuinely required, use file_data_request and proceed honestly."
         )
-    return json.dumps(out, default=str)
+    body = json.dumps(out, default=str)
+    if len(out) < matched:
+        body += _truncation_marker(
+            len(out),
+            matched,
+            "Narrow the query: add exact-match filters, request only the columns you need, "
+            "or aggregate with a pack method via run_method instead of reading every row.",
+        )
+    return body
 
 
 @builtin(
@@ -218,22 +271,29 @@ async def list_prior_findings(ctx: RunContext, schema_slug: str | None = None, l
     q = select(Finding).where(Finding.project_id == ctx.project_id).order_by(Finding.created_at.desc())
     if schema_slug:
         q = q.where(Finding.schema_slug == schema_slug)
-    rows = (await ctx.db.execute(q.limit(limit))).scalars().all()
+    rows = (await ctx.db.execute(q.limit(min(int(limit), MAX_RESULT_ROWS)))).scalars().all()
     if not rows:
         return "No prior findings."
-    return json.dumps(
-        [
-            {
-                "id": str(f.id),
-                "schema": f.schema_slug,
-                "subject": f.subject,
-                "status": f.status,
-                "payload": f.payload,
-            }
-            for f in rows
-        ],
-        default=str,
-    )
+    items = [
+        {
+            "id": str(f.id),
+            "schema": f.schema_slug,
+            "subject": f.subject,
+            "status": f.status,
+            "payload": f.payload,
+        }
+        for f in rows
+    ]
+    kept = _cap_rows(items)
+    body = json.dumps(kept, default=str)
+    if len(kept) < len(items):
+        body += _truncation_marker(
+            len(kept),
+            len(items),
+            "Narrow the list: pass schema_slug and a smaller limit, or aggregate the findings "
+            "with a pack method via run_method.",
+        )
+    return body
 
 
 # ── structured outputs ────────────────────────────────────────────────────────
@@ -294,7 +354,6 @@ async def _record(ctx: RunContext, schema_slug: str, subject: dict, payload: dic
 )
 async def record_verdict(ctx: RunContext, schema_slug: str, subject: dict, payload: dict) -> str:
     finding = await _record(ctx, schema_slug, subject, payload)
-    ctx.terminal_recorded = True
     return f"Verdict recorded as draft finding {finding.id}. It now awaits human approval."
 
 
@@ -348,7 +407,6 @@ async def draft_section(ctx: RunContext, deliverable_slug: str, section_slug: st
     ctx.db.add(finding)
     await ctx.db.flush()
     ctx.findings_created.append(finding.id)
-    ctx.terminal_recorded = True
     return f"Section '{section_slug}' of '{deliverable_slug}' stored as draft finding {finding.id}."
 
 
@@ -404,17 +462,30 @@ async def run_method(ctx: RunContext, method: str, params: dict | None = None) -
         raise ToolError(f"Method '{method}' failed: {e}")
 
     # Register outputs so cited_values can reference them, exactly like lookups.
+    # The complete output stays in method_runs (the audit record is never
+    # truncated); only what the model is shown is capped.
     ref_base = f"method/{method}/{record.id}"
-    rows_out = []
+    all_rows = []
     for i, row in enumerate(record.output):
-        row_ref = f"{ref_base}:{i}"
         item = dict(row)
-        item["_row"] = row_ref
-        rows_out.append(item)
-        for k, v in row.items():
+        item["_row"] = f"{ref_base}:{i}"
+        all_rows.append(item)
+    rows_out = _cap_rows(all_rows)
+    for item in rows_out:
+        for k, v in item.items():
+            if k == "_row":
+                continue
             ctx.retrieved_values.append(
-                {"dataset": ref_base, "row_ref": row_ref, "column": k, "value": str(v)}
+                {"dataset": ref_base, "row_ref": item["_row"], "column": k, "value": str(v)}
             )
+    note = "Cite these values with dataset='" + ref_base + "' and the _row references."
+    if len(rows_out) < len(all_rows):
+        note += _truncation_marker(
+            len(rows_out),
+            len(all_rows),
+            "Re-run the method with narrowing parameters to see the rest; the full output is "
+            f"recorded under method run {record.id}.",
+        )
     return json.dumps(
         {
             "method_run_id": str(record.id),
@@ -423,7 +494,7 @@ async def run_method(ctx: RunContext, method: str, params: dict | None = None) -
             "inputs": record.input_summary,
             "duration_ms": record.duration_ms,
             "rows": rows_out,
-            "note": "Cite these values with dataset='" + ref_base + "' and the _row references.",
+            "note": note,
         },
         default=str,
     )
@@ -517,6 +588,11 @@ async def run_harness_task(
             "status": done.status,
             "model_used": done.model_used,
             "cost_usd": float(done.cost_usd or 0),
+            # The delegated run's own ecological line, so a chat turn that
+            # delegates can report the full cost of the work it caused rather
+            # than only the dollars. Estimated — docs/eco-accounting.md.
+            "energy_wh": float(done.energy_wh) if done.energy_wh is not None else None,
+            "co2e_g": (done.energy_accounting or {}).get("co2e_g"),
             "error": done.error,
             "findings": [
                 {
@@ -529,7 +605,15 @@ async def run_harness_task(
                 for f in findings
             ],
         }
-    if done.status != "completed":
+    # Status literals, not the engine constants: harness.py imports this module,
+    # so tools.py can only reach it lazily (see the local import above).
+    if done.status == "completed_without_output":
+        result["note"] = (
+            "The delegated run finished but never recorded a valid result — usually its "
+            "verdict failed validation. There is no finding to report. Say that plainly; "
+            "do not summarize the transcript as though it were a verdict."
+        )
+    elif done.status != "completed":
         result["note"] = "The delegated run did not complete; tell the user honestly what failed."
     elif not findings:
         result["note"] = "The run completed without recording a finding."
@@ -570,11 +654,25 @@ async def file_data_request(ctx: RunContext, subject: dict, what_is_missing: str
     )
 
 
+def _cap_result_text(text: str) -> str:
+    """Last-resort size backstop for any tool result (pack tools included)."""
+    ceiling = MAX_RESULT_BYTES + RESULT_MARKER_SLACK_BYTES
+    encoded = text.encode()
+    if len(encoded) <= ceiling:
+        return text
+    head = encoded[:ceiling].decode(errors="ignore")
+    return head + (
+        f"\n\n[TRUNCATED: this result was {len(encoded)} bytes and was cut at "
+        f"{ceiling} bytes. Content past the cut was NOT retrieved and may not be cited. "
+        "Request a narrower slice of it.]"
+    )
+
+
 async def execute_tool(ctx: RunContext, spec: ToolSpec, arguments: dict) -> tuple[str, bool]:
     """Run one tool call. Returns (result_text, is_error)."""
     try:
         result = await spec.handler(ctx, **arguments)
-        return result, False
+        return _cap_result_text(result), False
     except ToolError as e:
         return f"Tool error: {e}", True
     except TypeError as e:

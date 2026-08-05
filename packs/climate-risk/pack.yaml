@@ -12,6 +12,9 @@ doctrine:
   - doctrine/02-divergence-procedure.md
   - doctrine/03-reason-codes.md
 
+# Task types may declare the doctrine they need (see docs/pack-authoring.md).
+# Declaring nothing loads all of it. Tasks that reason about verdicts and reason
+# codes — divergence_assessment, qa_review — deliberately keep the full set.
 task_types:
   - slug: divergence_assessment
     display_name: Signal divergence assessment
@@ -51,6 +54,10 @@ task_types:
     output_schema: schemas/evidence_finding.schema.json
     terminal_tool: record_finding
     tools: [read_document, search_documents, record_finding, file_data_request]
+    # Extraction quotes documents; it never issues a divergence verdict, so the
+    # divergence procedure and reason codes are not in play.
+    doctrine:
+      - doctrine/01-assessment-principles.md
     output_contract: >
       One record_finding call per extracted item; each carries a verbatim quote,
       source document, confidence tier, and optional framework element.
@@ -71,6 +78,12 @@ task_types:
       section: { type: string, enum: [governance, strategy, risk_management, metrics_targets] }
     terminal_tool: draft_section
     tools: [read_document, search_documents, lookup_dataset, list_prior_findings, run_method, draft_section, file_data_request]
+    # Drafting reports verdicts others reached: it needs the principles and the
+    # meaning of the reason codes it will describe, not the procedure for
+    # producing a verdict.
+    doctrine:
+      - doctrine/01-assessment-principles.md
+      - doctrine/03-reason-codes.md
     output_contract: >
       One markdown section stored via draft_section for deliverable
       'tcfd-assessment'; grounded in prior approved findings and retrieved data only.
