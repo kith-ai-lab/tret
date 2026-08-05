@@ -6,6 +6,26 @@
 # roughly current; they are estimates, not billing. `released` (YYYY-MM) feeds
 # the router's prefer-newer rule. Verified against the live OpenRouter catalog
 # 2026-07.
+#
+# ── energy_class: HEURISTIC ESTIMATES, NOT MEASUREMENTS ───────────────────────
+# No provider publishes per-model energy draw, and inference energy depends on
+# hardware, batching, and datacentre efficiency that bench cannot see. So each
+# model gets an order-of-magnitude bucket, converted to Wh per million tokens
+# processed in providers/catalog.py (ENERGY_CLASS_WH_PER_MTOK):
+#
+#   S  ≈   50 Wh/Mtok  small / distilled / quantized weights, incl. local models
+#   M  ≈  300 Wh/Mtok  mid-size served models — the anchor: ~0.3 Wh for a ~1k
+#                      token prompt, the order of magnitude large operators have
+#                      published for a median text prompt
+#   L  ≈ 1200 Wh/Mtok  large frontier models
+#   XL ≈ 3000 Wh/Mtok  largest frontier / heavy-reasoning models
+#
+# Classes here are assigned from public model-scale signals (parameter counts
+# where known, price and latency as proxies otherwise). They are good enough to
+# compare two candidate models by roughly how much energy they burn, and NOT
+# good enough to report as an emissions figure of record. A model may override
+# the class default with an explicit `energy_wh_per_mtok`. Reasoning and limits:
+# docs/eco-accounting.md.
 models:
   - id: anthropic/claude-fable-5
     provider: anthropic
@@ -16,6 +36,7 @@ models:
     input_price_per_mtok: 10.0
     output_price_per_mtok: 50.0
     cost_tier: premium
+    energy_class: XL
     strengths: [deep reasoning, doctrine-following, long-form drafting, hardest verdicts]
     supports_tools: true
 
@@ -28,6 +49,7 @@ models:
     input_price_per_mtok: 5.0
     output_price_per_mtok: 25.0
     cost_tier: premium
+    energy_class: XL
     strengths: [deep reasoning, long-form drafting, nuanced judgment]
     supports_tools: true
 
@@ -40,6 +62,7 @@ models:
     input_price_per_mtok: 2.0
     output_price_per_mtok: 10.0
     cost_tier: standard
+    energy_class: L
     strengths: [structured extraction, doctrine-following, balanced quality/cost, tool reliability]
     supports_tools: true
 
@@ -52,6 +75,7 @@ models:
     input_price_per_mtok: 1.0
     output_price_per_mtok: 5.0
     cost_tier: economy
+    energy_class: M
     strengths: [fast classification, QA grading, routing, short summaries]
     supports_tools: true
 
@@ -64,6 +88,7 @@ models:
     input_price_per_mtok: 0.6
     output_price_per_mtok: 2.5
     cost_tier: economy
+    energy_class: M
     strengths: [agentic tool use, long documents, cost-efficient extraction]
     supports_tools: true
 
@@ -76,6 +101,7 @@ models:
     input_price_per_mtok: 1.0
     output_price_per_mtok: 3.0
     cost_tier: economy
+    energy_class: M
     strengths: [general assistant tasks, long documents]
     supports_tools: true
 
@@ -88,6 +114,7 @@ models:
     input_price_per_mtok: 3.0
     output_price_per_mtok: 15.0
     cost_tier: standard
+    energy_class: L
     strengths: [agentic tool use, very long context, strong reasoning]
     supports_tools: true
 
@@ -100,6 +127,7 @@ models:
     input_price_per_mtok: 2.5
     output_price_per_mtok: 15.0
     cost_tier: standard
+    energy_class: L
     strengths: [structured extraction, schema adherence, long context, instruction following]
     supports_tools: true
 
@@ -112,6 +140,7 @@ models:
     input_price_per_mtok: 1.0
     output_price_per_mtok: 6.0
     cost_tier: standard
+    energy_class: M
     strengths: [fast general assistant, reliable tool calls, routing, summaries]
     supports_tools: true
 
@@ -124,6 +153,7 @@ models:
     input_price_per_mtok: 1.5
     output_price_per_mtok: 7.5
     cost_tier: standard
+    energy_class: M
     strengths: [very long context, fast drafting, data analysis]
     supports_tools: true
 
@@ -136,6 +166,7 @@ models:
     input_price_per_mtok: 0.3
     output_price_per_mtok: 2.5
     cost_tier: economy
+    energy_class: S
     strengths: [cheap summaries, classification, long documents]
     supports_tools: true
 
@@ -148,6 +179,7 @@ models:
     input_price_per_mtok: 2.0
     output_price_per_mtok: 6.0
     cost_tier: standard
+    energy_class: L
     strengths: [reasoning, current-events knowledge, drafting]
     supports_tools: true
 
@@ -160,5 +192,6 @@ models:
     input_price_per_mtok: 0.43
     output_price_per_mtok: 0.87
     cost_tier: economy
+    energy_class: M
     strengths: [open-weights, cost-efficient reasoning, extraction]
     supports_tools: true

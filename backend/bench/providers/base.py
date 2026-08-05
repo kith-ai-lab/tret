@@ -61,9 +61,18 @@ class ToolSpec:
 
 @dataclass
 class Usage:
+    """Token accounting for one turn.
+
+    `input_tokens` is the *uncached* prompt only — cache reads and cache writes
+    are reported separately because they are priced differently. Providers whose
+    wire format folds cached tokens into the prompt total (OpenAI-compatible
+    APIs) subtract them so this invariant holds everywhere.
+    """
+
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 # ── streaming events ──────────────────────────────────────────────────────────

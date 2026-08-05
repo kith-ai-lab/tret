@@ -11,6 +11,11 @@ from bench.config import get_settings
 from bench.providers.base import ProviderError
 from bench.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
 from bench.router_llm.fallback import fallback_model
+from bench.router_llm.objectives import (
+    DEFAULT_OBJECTIVE,
+    candidate_sort_key,
+    objective_of,
+)
 from bench.router_llm.prompts import (
     ROUTER_SYSTEM,
     ROUTING_PROMPT_VERSION,
@@ -18,7 +23,12 @@ from bench.router_llm.prompts import (
     render_router_prompt,
 )
 
-TIER_ORDER = {"economy": 0, "standard": 1, "premium": 2}
+# "local" ranks below "economy" so a max_cost_tier cap never excludes it — local
+# inference is already zero-cost, so there is nothing for a cost ceiling to protect.
+TIER_ORDER = {"local": -1, "economy": 0, "standard": 1, "premium": 2}
+
+# How many candidates the router model is shown. The list is a prompt cost too.
+CANDIDATE_LIMIT = 20
 
 
 @dataclass
@@ -29,6 +39,10 @@ class RoutingDecision:
     chosen_model: str
     reasoning: str
     confidence: str | None = None
+    # What the harness asked the router to optimize for. Persisted because the
+    # same candidates and the same prompt version can yield different picks
+    # under different objectives — the audit trail has to say which was in force.
+    objective: str = DEFAULT_OBJECTIVE
     fallback_used: bool = False
     override: str | None = None  # "user_pin" | "run_override" | None
     latency_ms: int = 0
@@ -50,6 +64,7 @@ class ModelRouter:
     def _candidates(self, model_policy: dict) -> list[ModelInfo]:
         allowed = model_policy.get("allowed") or None
         max_tier = model_policy.get("max_cost_tier", "premium")
+        objective = objective_of(model_policy)
         out = []
         for m in self._catalog.all():
             if not m.supports_tools:
@@ -61,9 +76,9 @@ class ModelRouter:
             if TIER_ORDER.get(m.cost_tier, 2) > TIER_ORDER.get(max_tier, 2):
                 continue
             out.append(m)
-        # Curated first, then cheap-to-expensive; cap the list the router sees.
-        out.sort(key=lambda m: (not m.curated, m.output_price_per_mtok))
-        return out[:20]
+        # Ordered by the harness objective; cap the list the router sees.
+        out.sort(key=candidate_sort_key(objective))
+        return out[:CANDIDATE_LIMIT]
 
     async def route(
         self,
@@ -77,11 +92,12 @@ class ModelRouter:
         est_input_tokens: int,
         run_override: str | None = None,
     ) -> RoutingDecision:
+        objective = objective_of(model_policy)
         # 1. Overrides short-circuit — but are still logged as decisions.
         if run_override:
-            return self._validated_override(run_override, "run_override")
+            return self._validated_override(run_override, "run_override", objective)
         if model_policy.get("mode") == "pinned":
-            return self._validated_override(model_policy.get("model", ""), "user_pin")
+            return self._validated_override(model_policy.get("model", ""), "user_pin", objective)
 
         candidates = self._candidates(model_policy)
         if not candidates:
@@ -95,6 +111,7 @@ class ModelRouter:
                 candidates=[candidates[0].id],
                 chosen_model=candidates[0].id,
                 reasoning="Only one candidate model available.",
+                objective=objective,
                 fallback_used=False,
             )
 
@@ -113,6 +130,7 @@ class ModelRouter:
                 est_input_tokens=est_input_tokens,
                 max_cost_tier=model_policy.get("max_cost_tier", "premium"),
                 candidates=candidates,
+                objective=objective,
             )
             start = time.monotonic()
             for _attempt in range(2):  # one retry
@@ -136,6 +154,7 @@ class ModelRouter:
                             chosen_model=chosen,
                             reasoning=str(result.get("reasoning", ""))[:600],
                             confidence=result.get("confidence"),
+                            objective=objective,
                             latency_ms=int((time.monotonic() - start) * 1000),
                         )
                 except ProviderError:
@@ -143,7 +162,11 @@ class ModelRouter:
 
         # 2. Deterministic fallback.
         chosen = fallback_model(
-            task_shape, self._catalog, self._registry, model_policy.get("allowed")
+            task_shape,
+            self._catalog,
+            self._registry,
+            model_policy.get("allowed"),
+            objective=objective,
         )
         if chosen is None:
             raise RoutingUnavailable("Router failed and no fallback model is available.")
@@ -152,11 +175,17 @@ class ModelRouter:
             routing_prompt_version=ROUTING_PROMPT_VERSION,
             candidates=candidate_ids,
             chosen_model=chosen,
-            reasoning=f"LLM router unavailable or invalid; deterministic fallback for shape '{task_shape}'.",
+            reasoning=(
+                f"LLM router unavailable or invalid; deterministic fallback for shape "
+                f"'{task_shape}' under objective '{objective}'."
+            ),
+            objective=objective,
             fallback_used=True,
         )
 
-    def _validated_override(self, model_id: str, kind: str) -> RoutingDecision:
+    def _validated_override(
+        self, model_id: str, kind: str, objective: str = DEFAULT_OBJECTIVE
+    ) -> RoutingDecision:
         info = self._catalog.get(model_id)
         if info is None:
             raise RoutingUnavailable(f"Model '{model_id}' is not in the catalog.")
@@ -170,5 +199,6 @@ class ModelRouter:
             candidates=[model_id],
             chosen_model=model_id,
             reasoning="user pin" if kind == "user_pin" else "per-run override",
+            objective=objective,
             override=kind,
         )

@@ -84,6 +84,7 @@ class Pack(Base):
     slug: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[str] = mapped_column(Text, nullable=False)
     doctrine_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(Text)  # sha256 of all pack files (null: legacy)
     manifest: Mapped[dict] = mapped_column(JSONB, nullable=False)
     source_path: Mapped[str] = mapped_column(Text, nullable=False)
     installed_at: Mapped[datetime] = created_at_col()
@@ -100,6 +101,8 @@ class Harness(Base):
     system_prompt_extra: Mapped[str | None] = mapped_column(Text)
     task_profile: Mapped[str] = mapped_column(Text, nullable=False, default="freeform")
     # {"mode":"auto","allowed":[...],"max_cost_tier":"standard"} | {"mode":"pinned","model":"..."}
+    # Optional "max_run_output_tokens": soft per-run output budget the engine
+    # enforces between iterations (see engine/harness.py).
     model_policy: Mapped[dict] = mapped_column(JSONB, nullable=False, default=lambda: {"mode": "auto"})
     tool_names: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, default=list)
     loop_config: Mapped[dict] = mapped_column(
@@ -182,14 +185,38 @@ class Run(Base):
     task_type: Mapped[str] = mapped_column(Text, nullable=False)
     task_input: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     document_ids: Mapped[list] = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=False, default=list)
+    # queued | running | completed | completed_without_output | failed | cancelled.
+    # `completed_without_output` is a success of the guardrails, not of the task:
+    # the run ended on its own but never recorded the terminal result its task
+    # type requires (see engine/harness.py::_completion_status).
     status: Mapped[str] = mapped_column(Text, nullable=False, default="queued")
     routing: Mapped[dict | None] = mapped_column(JSONB)  # full RoutingDecision
     model_used: Mapped[str | None] = mapped_column(Text)
     provider_used: Mapped[str | None] = mapped_column(Text)
     messages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # input_tokens excludes the cache buckets, matching providers.base.Usage.
     input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    cache_read_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    cache_write_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    # Estimated energy drawn by this run, in watt-hours, with the full derivation
+    # in energy_accounting ({"energy_wh","co2e_g","energy_class",
+    # "energy_wh_per_mtok","grid_co2e_g_per_kwh","weighted_tokens",...}).
+    # Nullable rather than 0: runs that predate ecological accounting have no
+    # figure, and a zero would read as "this run was free", which is a lie.
+    # Estimates throughout — see docs/eco-accounting.md.
+    energy_wh: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    energy_accounting: Mapped[dict | None] = mapped_column(JSONB)
+    # Estimated token breakdown of the context assembled at run start:
+    # {"estimator","total_est_tokens","total_chars","by_kind","blocks":[...]}.
+    # Makes spend legible per component (preamble, each doctrine file, task
+    # instructions, output schema, tool specs). See engine/context.py.
+    context_composition: Mapped[dict | None] = mapped_column(JSONB)
     iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))

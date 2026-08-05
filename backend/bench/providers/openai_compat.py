@@ -1,6 +1,9 @@
 """Shared OpenAI-compatible chat/completions provider (httpx + SSE).
 
 Kimi (Moonshot) and OpenRouter both subclass this with a base_url and headers.
+Prompt caching differs between them: both *report* cached prompt tokens, but only
+OpenRouter accepts Anthropic-style `cache_control` breakpoints on message content
+parts, so writing them is opt-in per subclass via `_apply_cache_control`.
 """
 from __future__ import annotations
 
@@ -47,6 +50,57 @@ def _to_openai_messages(system: str, messages: list[Msg]) -> list[dict]:
     return out
 
 
+def _cached_prompt_tokens(usage: dict) -> int:
+    """Read `usage.prompt_tokens_details.cached_tokens`, defensively.
+
+    OpenRouter and Kimi both report this shape, but only on some models and only
+    once a cache is warm — anything unexpected reads as zero rather than raising.
+    """
+    details = usage.get("prompt_tokens_details")
+    if not isinstance(details, dict):
+        return 0
+    cached = details.get("cached_tokens")
+    if isinstance(cached, bool) or not isinstance(cached, (int, float)):
+        return 0
+    return max(int(cached), 0)
+
+
+def _usage_from_openai(usage: dict) -> Usage:
+    """Translate an OpenAI-style usage object into canonical Usage.
+
+    `prompt_tokens` counts cached tokens too, so they are subtracted to keep
+    Usage.input_tokens meaning "uncached input" as it does for Anthropic.
+    """
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    cache_read = min(_cached_prompt_tokens(usage), prompt_tokens)
+    return Usage(
+        input_tokens=prompt_tokens - cache_read,
+        output_tokens=int(usage.get("completion_tokens") or 0),
+        cache_read_tokens=cache_read,
+    )
+
+
+def _mark_cache_breakpoint(message: dict) -> bool:
+    """Attach `cache_control` to a message's final content part, in place.
+
+    A plain string body is promoted to a single text part first. Returns False
+    when there is nothing markable, so callers can keep an accurate budget.
+    """
+    content = message.get("content")
+    if isinstance(content, str):
+        if not content:
+            return False
+        content = [{"type": "text", "text": content}]
+        message["content"] = content
+    if not isinstance(content, list) or not content:
+        return False
+    part = content[-1]
+    if not isinstance(part, dict) or "cache_control" in part:
+        return False
+    part["cache_control"] = {"type": "ephemeral"}
+    return True
+
+
 def _to_openai_tools(tools: list[ToolSpec]) -> list[dict]:
     return [
         {
@@ -76,6 +130,14 @@ class OpenAICompatProvider(Provider):
         }
         self._extra_body = extra_body or {}
 
+    def _apply_cache_control(self, body: dict) -> None:
+        """Hook: add prompt-cache breakpoints to an outgoing request body.
+
+        No-op by default — most OpenAI-compatible APIs cache implicitly and
+        reject (or silently mangle) structured content parts. Subclasses whose
+        upstream honors Anthropic-style `cache_control` override this.
+        """
+
     async def stream(
         self,
         *,
@@ -97,6 +159,7 @@ class OpenAICompatProvider(Provider):
         }
         if tools:
             body["tools"] = _to_openai_tools(tools)
+        self._apply_cache_control(body)
 
         # Aggregate tool-call deltas by index.
         pending: dict[int, dict] = {}
@@ -122,11 +185,7 @@ class OpenAICompatProvider(Provider):
                         except json.JSONDecodeError:
                             continue
                         if chunk.get("usage"):
-                            u = chunk["usage"]
-                            usage = Usage(
-                                input_tokens=u.get("prompt_tokens", 0),
-                                output_tokens=u.get("completion_tokens", 0),
-                            )
+                            usage = _usage_from_openai(chunk["usage"])
                         for choice in chunk.get("choices", []):
                             if choice.get("finish_reason"):
                                 finish_reason = choice["finish_reason"]
@@ -222,7 +281,16 @@ class KimiProvider(OpenAICompatProvider):
 
 
 class OpenRouterProvider(OpenAICompatProvider):
+    """OpenRouter, which forwards `cache_control` to models that support it.
+
+    OpenRouter strips the field for models that don't, so marking breakpoints is
+    safe across its catalog. Only `system` and `user` messages are marked:
+    assistant and tool messages are left as plain strings because OpenRouter's
+    per-model translation of structured tool content is not uniform.
+    """
+
     name = "openrouter"
+    max_cache_breakpoints = 4  # Anthropic's per-request limit, which OpenRouter inherits
 
     def __init__(self, api_key: str, referer: str = "", title: str = "bench"):
         headers = {}
@@ -231,3 +299,16 @@ class OpenRouterProvider(OpenAICompatProvider):
         if title:
             headers["X-Title"] = title
         super().__init__(api_key, base_url="https://openrouter.ai/api/v1", default_headers=headers)
+
+    def _apply_cache_control(self, body: dict) -> None:
+        messages = body.get("messages") or []
+        budget = self.max_cache_breakpoints
+        if messages and messages[0].get("role") == "system":
+            if _mark_cache_breakpoint(messages[0]):
+                budget -= 1
+            messages = messages[1:]
+        for message in reversed(messages):
+            if budget <= 0:
+                return
+            if message.get("role") == "user" and _mark_cache_breakpoint(message):
+                budget -= 1
