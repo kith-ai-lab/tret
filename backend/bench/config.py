@@ -46,32 +46,63 @@ class Settings(BaseSettings):
     router_timeout_seconds: float = 10.0
 
     # ── ecological / emissions accounting (bench/services/emissions.py) ───────
-    # Every figure below is a heuristic. Read docs/emissions-methodology.md
-    # before quoting anything derived from them; none of it is metered and none
-    # of it is audit-grade.
+    # Every figure below is an estimate, calibrated against published data where
+    # published data exists. Read docs/emissions-methodology.md before quoting
+    # anything derived from them; none of it is metered and none of it is
+    # audit-grade. Each default's source, date and uncertainty is recorded on
+    # every run in `energy_accounting["factors"]`.
     #
     # Grams of CO2e per kWh of electricity, used to turn a run's estimated energy
-    # into an estimated carbon figure. The default is the rough world-average
-    # grid intensity (~400 gCO2e/kWh); set your own region's or your provider's
-    # figure for a less wrong number.
-    grid_co2e_g_per_kwh: float = 400.0
+    # into an estimated carbon figure. 470 is the IEA's 2024 global power-sector
+    # average (Electricity 2025 reports ~460–480; 470 is the midpoint). Set your
+    # own region's or supplier's figure for a less wrong number — eGRID
+    # subregions span more than 10x.
+    grid_co2e_g_per_kwh: float = 470.0
+    # GHG Protocol Scope 2 basis of the factor above: location_based (the
+    # physical grid that served the load), market_based (contractual renewable
+    # claims — PPAs, RECs, GOs), or unspecified. The two are not interchangeable
+    # and must never be summed, so the label is recorded per run. The shipped
+    # default is an IEA physical-grid average, hence location_based.
+    grid_co2e_basis: str = "location_based"
     # Optional separate factor for self-hosted (local) inference, where the
     # operator buys the power and may have a site- or market-based figure (a
     # supplier mix, a PPA, on-site solar). None falls back to
     # grid_co2e_g_per_kwh. This is the factor that lands in Scope 2.
     local_grid_co2e_g_per_kwh: float | None = None
-    # Power Usage Effectiveness: total facility energy / IT-load energy. 1.2 sits
-    # inside the ~1.1–1.2 band hyperscalers self-report fleet-wide, and is a
-    # heuristic stand-in for a facility bench cannot see.
+    # Basis of the local factor above. Defaults to unspecified because bench
+    # cannot know what an operator's own number represents — say which it is.
+    local_grid_co2e_basis: str = "unspecified"
+    # Power Usage Effectiveness: total facility energy / IT-load energy.
+    # 1.2 for hyperscaler cloud sits *above* every self-report (Google 1.09 in
+    # its 2025 Environmental Report, AWS 1.15, Microsoft 1.16 FY2024) and well
+    # below the 1.56 industry average, i.e. deliberately conservative for a
+    # facility bench cannot see.
     datacenter_pue: float = 1.2
-    # PUE for self-hosted inference. A desktop or workstation has almost no
-    # facility overhead — 1.05 covers fans and a share of room cooling.
+    # PUE for a self-hosted workstation. A desktop has almost no facility
+    # overhead — 1.05 covers fans and a share of room cooling.
     local_pue: float = 1.05
+    # PUE for self-hosted inference in a real machine room: 1.56, the Uptime
+    # Institute 2024 Global Data Center Survey industry average across 879
+    # operators. An on-prem facility is a small data centre and must not borrow
+    # a hyperscaler's number.
+    onprem_pue: float = 1.56
+    # Which of the two figures above self-hosted runs use: workstation |
+    # onprem_datacenter. Anything else falls back to workstation.
+    local_deployment_profile: str = "workstation"
     # Amortized embodied (manufacturing) carbon per local run, in grams —
     # GHG Protocol Scope 3 Cat. 2, capital goods. Default 0 means "not counted",
     # which *understates* self-hosted inference: set it from your own hardware's
-    # embodied footprint divided by its expected lifetime run count.
+    # embodied footprint divided by its expected lifetime run count
+    # (bench.services.emissions.amortized_embodied_g_per_run computes one from
+    # cited constants).
     embodied_g_per_run: float = 0.0
+    # Multiplicative uncertainty band around every reported figure: low =
+    # central/2.5, high = central x 2.5. A JUDGMENT BAND matching field practice
+    # (Green Algorithms claims order-of-magnitude correctness; Boavizta states
+    # 30–50%; spec-based estimation validates at -40%/+40%), never a confidence
+    # interval and never a standard deviation. Values below 1 are clamped to 1.
+    uncertainty_band_low: float = 2.5
+    uncertainty_band_high: float = 2.5
     # Model id for the frontier-baseline counterfactual. Empty auto-selects the
     # highest-energy-class curated non-local model. The comparison is a
     # same-token efficiency indicator, never an offset or a reduction claim.

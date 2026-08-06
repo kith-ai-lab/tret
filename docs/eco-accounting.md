@@ -82,18 +82,30 @@ have always found it):
 
 | class | Wh/Mtok | typical members |
 |---|---|---|
-| S | 50 | small, distilled, or quantized weights — including local models |
-| M | 300 | mid-size served models |
-| L | 1200 | large frontier models |
-| XL | 3000 | largest frontier / heavy-reasoning models |
+| S | 250 | small, distilled, or quantized weights — including local models |
+| M | 1,200 | mid-size served models |
+| L | 2,600 | large frontier models |
+| XL | 6,000 | largest non-reasoning frontier models |
+| R | 21,000 | the reasoning tier |
 
-**Where the numbers come from.** M is the anchor: ~300 Wh/Mtok is ~0.3 Wh for a
-~1k-token prompt, the order of magnitude large operators have published for a
-median text prompt on a mid-size served model. S/L/XL step from there by model
-scale, roughly a factor of 4–6 per step, matching how per-token inference energy
-scales with active parameter count. Individual class assignments come from public
-model-scale signals: parameter counts where they are known, price and latency as
-proxies where they are not.
+The unit is Wh per million **output-equivalent** tokens (see the per-run maths
+below): generation costs roughly 20x reading, so the buckets are not summed 1:1.
+
+**Where the numbers come from.** Each class except XL is a least-squares fit of
+`Wh = a x input + b x output` against Jegham et al., arXiv:2505.09598 — S from
+GPT-4.1 nano, M from GPT-4o, L from Claude 3.7 Sonnet, R from o3. XL has no
+measured anchor and is interpolated one step above L. Two of the five fits came
+out degenerate, and the input weight is therefore a documented assumption rather
+than a measurement. The full working, the residuals and the caveats are in
+[emissions-methodology.md](emissions-methodology.md) — read it before quoting a
+class figure.
+
+**The reasoning tier is assigned from what a model does, never from its price.**
+In the reference dataset DeepSeek-R1 is among the two heaviest models measured
+*and* among the cheapest sold, so bench's cheapest curated model carries its
+heaviest class. Individual assignments come from public model-scale signals and
+product positioning; each one carries its rationale as a comment in
+`models.yaml`.
 
 **Unclassified entries** get a class from their cost tier — dynamic OpenRouter
 models by price (economy→M, standard→L, premium→XL), local models S (small
@@ -107,52 +119,66 @@ A model may override its class default with an explicit `energy_wh_per_mtok` in
 ### Per-run math
 
 ```
-weighted_tokens = input + output + 0.1 × cache_read + 1.0 × cache_write
+weighted_tokens = 0.05 × input + 1.0 × output
+                + 0.005 × cache_read + 0.05 × cache_write
 energy_wh       = energy_wh_per_mtok × weighted_tokens / 1e6   # compute / IT load
 energy_wh_total = energy_wh × PUE                              # + facility overhead
 co2e_g          = energy_wh_total × grid_co2e_g_per_kwh / 1000 + embodied_g
 ```
 
-Cache reads are discounted to 0.1×, mirroring how bench prices them: a read
-re-uses stored KV state instead of running a fresh forward pass over those
-tokens. A cache *write* is a full forward pass and carries full weight. Both the
-per-run figure and its full derivation are persisted (`runs.energy_wh`,
+An output token is the unit and weighs 1.0; an input token weighs 0.05 because
+prefill is parallel while generation is autoregressive (the fitted ratio is ~20x).
+A cache *write* is a full prefill pass, so it weighs exactly what input does. A
+cache read is discounted a further 10x, mirroring how bench prices it: the read
+re-uses stored KV state instead of running a fresh forward pass. It is not free.
+Both the per-run figure and its full derivation are persisted (`runs.energy_wh`,
 `runs.energy_accounting`) and exposed by the runs API.
 
 `energy_wh` is **compute (IT-load) energy only** and always has been.
-`energy_wh_total` adds the data-centre overhead (`datacenter_pue` 1.2 for cloud,
-`local_pue` 1.05 for self-hosted), and it is the figure carbon comes off.
-`co2e_g` is the run total and always equals `scope1_g + scope2_g + scope3_g`.
-The scope mapping, the PUE reasoning and the `embodied_g` term are all in
-[emissions-methodology.md](emissions-methodology.md).
+`energy_wh_total` adds the data-centre overhead (`datacenter_pue` 1.2 for cloud;
+for self-hosted, `local_pue` 1.05 on a workstation or `onprem_pue` 1.56 in a
+machine room), and it is the figure carbon comes off. `co2e_g` is the run total
+and always equals `scope1_g + scope2_g + scope3_g`. The scope mapping, the PUE
+sourcing, the `embodied_g` term, the uncertainty band and the money-saved figure
+are all in [emissions-methodology.md](emissions-methodology.md).
 
 ### Grid intensity
 
-`BENCH_GRID_CO2E_G_PER_KWH` (setting `grid_co2e_g_per_kwh`, default `400.0`)
-converts energy to carbon. 400 gCO2e/kWh is roughly the world-average grid
-intensity; a regional or provider-specific figure is much better (~30 for
-Sweden, ~380 for the US average, ~700 for a coal-heavy grid).
-`BENCH_LOCAL_GRID_CO2E_G_PER_KWH` optionally overrides it for self-hosted runs,
-where the operator buys the power and may hold a site- or market-based factor;
-unset, local runs use the same figure as cloud runs. The intensity in force at
-run time is stored inside `runs.energy_accounting`, so changing the setting later
-does not silently rewrite history — and the `/api/analytics/emissions` rollup
-sums those stored figures rather than recomputing at today's settings.
+`BENCH_GRID_CO2E_G_PER_KWH` (setting `grid_co2e_g_per_kwh`, default `470.0`)
+converts energy to carbon. 470 gCO2e/kWh is the IEA's 2024 global power-sector
+average; a regional or supplier-specific figure is much better (~30 for Sweden,
+~350 for the US average, ~750 for a coal-heavy grid, and EPA eGRID subregions
+span more than 10x). `BENCH_LOCAL_GRID_CO2E_G_PER_KWH` optionally overrides it for
+self-hosted runs, where the operator buys the power and may hold a site- or
+market-based factor; unset, local runs use the same figure as cloud runs.
+
+Each factor also carries a **GHG Protocol basis** label
+(`BENCH_GRID_CO2E_BASIS`: `location_based` | `market_based` | `unspecified`),
+because a market-based figure and a location-based one answer different questions
+and must never be summed. The intensity and its basis in force at run time are
+stored inside `runs.energy_accounting`, so changing the setting later does not
+silently rewrite history — and the `/api/analytics/emissions` rollup sums those
+stored figures rather than recomputing at today's settings.
 
 ## Limits — read this before quoting a number
 
-- **These are estimates, not measurements.** No provider publishes per-model
-  energy draw. Nothing in bench is metered.
+- **These are estimates, not measurements.** The class constants are fitted to
+  measured latency on *inferred* hardware for five models and generalised well
+  beyond them. Nothing in bench is metered, and every figure carries an explicit
+  ±2.5x judgment band that is not a confidence interval.
 - **Inference energy depends on things bench cannot see**: hardware generation,
   batch size, sequence length, quantization, accelerator utilisation, whether
   your request landed on a warm replica. Data-centre overhead is *modelled* by a
   default PUE rather than ignored, but that PUE is a self-reported fleet average,
   not the building that served your request.
-- **Class assignment is judgement.** Model sizes are often undisclosed; price is
-  a proxy for scale and an imperfect one.
-- **Reasoning tokens can dominate.** A model that thinks at length before
-  answering can burn several times the energy of one that does not, and bench
-  only sees the tokens a provider reports.
+- **Class assignment is judgement.** Active parameter counts are unpublished for
+  every closed model in the catalog, so tier and price stand in for scale and do
+  so imperfectly.
+- **Reasoning tokens can dominate, and may not be counted.** A model that thinks
+  at length can burn 8x the energy of one that does not — hence the separate R
+  class. Worse, several providers exclude hidden thinking tokens from the billed
+  output count bench reads, so for those models the real work is *higher* than
+  counted. That bias is one-sided and is named on every run rather than absorbed.
 - **Training is excluded.** This is inference only, amortized training energy is
   not allocated.
 - **The router's own call is not counted.** A run's figure covers the execution
@@ -160,7 +186,10 @@ sums those stored figures rather than recomputing at today's settings.
   dollar cost bench already reports.
 - **Local models are the roughest estimate here.** S assumes small quantized
   weights on typical end-user hardware; a 70B model on a workstation GPU is well
-  outside that.
+  outside that. The class constants also come from *batched* serving stacks, and
+  single-user local inference carries the whole accelerator for one request — so
+  local figures understate by several times before embodied hardware is even
+  considered.
 - **Local models exclude embodied hardware by default** (`embodied_g_per_run` is
   0), which understates them — the honest caveat is spelled out in
   [emissions-methodology.md](emissions-methodology.md).

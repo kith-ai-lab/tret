@@ -293,7 +293,9 @@ def test_objective_rules_say_what_each_objective_means():
 def test_energy_is_shown_only_where_the_objective_reasons_about_it():
     for objective in ("eco", "token_conservation"):
         prompt = _prompt(objective)
-        assert "| energy: L (~1200 Wh/Mtok, est.)" in prompt
+        # L is the calibrated class fitted from Claude 3.7 Sonnet, in Wh per
+        # million output-equivalent tokens (services/emissions.py).
+        assert "| energy: L (~2600 Wh/Mtok, est.)" in prompt
     for objective in ("balanced", "quality"):
         assert "Wh/Mtok" not in _prompt(objective)
 

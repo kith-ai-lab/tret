@@ -302,17 +302,23 @@ async def guardrails(
 # has no single honest factor behind it.
 EMISSIONS_DISCLAIMER = (
     "ESTIMATES, NOT MEASUREMENTS. Energy is inferred from token counts and a "
-    "heuristic per-model energy class, multiplied by a heuristic data-centre PUE "
-    "and a grid intensity; nothing here is metered. Totals are summed from each "
+    "calibrated per-model energy class (fitted to published per-model figures, "
+    "then generalised well beyond them), multiplied by a deployment PUE and a "
+    "grid intensity; nothing here is metered. Totals are summed from each "
     "run's as-recorded figures, frozen at the factors in force when that run "
     "happened — they are NOT recomputed at current settings, so changing a factor "
-    "does not rewrite history. `avoided_co2e_g` is a same-token counterfactual "
-    "against the baseline model and is an efficiency indicator only: it is not an "
-    "offset, not a credit, not an emissions reduction, and it can be negative. "
-    "Not audit-grade and not usable for statutory or regulatory reporting without "
-    "replacing these defaults with metered energy and supplier- or region-specific "
-    "grid factors. Runs without an estimate are excluded from every total and "
-    "counted separately. See docs/emissions-methodology.md."
+    "does not rewrite history. `co2e_g_low`/`co2e_g_high` are a MULTIPLICATIVE "
+    "JUDGMENT BAND, not a confidence interval and not a standard deviation: no "
+    "credible methodology in this field publishes an interval. `avoided_co2e_g` "
+    "and `avoided_usd` are same-token counterfactuals against the baseline model "
+    "and are efficiency indicators only: not an offset, not a credit, not an "
+    "emissions reduction, not booked savings, and both can be negative. Money is "
+    "the firmer of the two — per-token prices are exact — but the counterfactual "
+    "behind it is still an assumption. Not audit-grade and not usable for "
+    "statutory or regulatory reporting without replacing these defaults with "
+    "metered energy and supplier- or region-specific grid factors. Runs without "
+    "an estimate are excluded from every total and counted separately. See "
+    "docs/emissions-methodology.md."
 )
 
 
@@ -335,15 +341,21 @@ def _recorded_emissions(accounting) -> dict | None:
         return None
     scopes = accounting.get("scopes") if isinstance(accounting.get("scopes"), dict) else None
     baseline = accounting.get("baseline") if isinstance(accounting.get("baseline"), dict) else None
+    band = accounting.get("uncertainty") if isinstance(accounting.get("uncertainty"), dict) else None
     compute_wh = _d(accounting.get("energy_wh") or 0)
     total_wh = accounting.get("energy_wh_total")
     baseline_co2e = baseline.get("co2e_g") if baseline else None
     avoided = baseline.get("avoided_co2e_g") if baseline else None
+    avoided_usd = baseline.get("avoided_usd") if baseline else None
     return {
         "model": accounting.get("model"),
         "energy_class": accounting.get("energy_class"),
         "deployment": accounting.get("deployment"),
         "grid_co2e_g_per_kwh": accounting.get("grid_co2e_g_per_kwh"),
+        # Added: the GHG Protocol basis the factor was recorded under. A window
+        # mixing location-based and market-based factors has no summable total,
+        # so it joins the factor key below rather than being averaged over.
+        "grid_co2e_basis": accounting.get("grid_co2e_basis"),
         "pue": accounting.get("pue"),
         "energy_wh_compute": compute_wh,
         # Pre-PUE rows have no total; their compute figure is the whole of what
@@ -355,6 +367,14 @@ def _recorded_emissions(accounting) -> dict | None:
         "scope3_g": _d(scopes.get("scope3_g") or 0) if scopes else None,
         "baseline_co2e_g": _d(baseline_co2e) if baseline_co2e is not None else None,
         "avoided_co2e_g": _d(avoided) if avoided is not None else None,
+        # Added: money against the same-token baseline, and the judgment band.
+        # Runs recorded before either existed report None and are counted, never
+        # back-filled with zeros.
+        "avoided_usd": _d(avoided_usd) if avoided_usd is not None else None,
+        "co2e_g_low": _d(band["co2e_g_low"]) if band and band.get("co2e_g_low") is not None else None,
+        "co2e_g_high": (
+            _d(band["co2e_g_high"]) if band and band.get("co2e_g_high") is not None else None
+        ),
     }
 
 
@@ -366,6 +386,13 @@ def _emissions_bucket() -> dict:
         "baseline_co2e_g": Decimal(0),
         "avoided_co2e_g": Decimal(0),
         "energy_class": None,
+        # Added: money saved and the band. Bands are summed low-with-low and
+        # high-with-high, which assumes the factors are wrong in the same
+        # direction for every run in the window — the honest assumption here,
+        # since it is the *same* class table, PUE and grid factor being applied.
+        "avoided_usd": Decimal(0),
+        "co2e_g_low": Decimal(0),
+        "co2e_g_high": Decimal(0),
     }
 
 
@@ -377,6 +404,12 @@ def _add_to_bucket(bucket: dict, rec: dict) -> None:
         bucket["baseline_co2e_g"] += rec["baseline_co2e_g"]
     if rec["avoided_co2e_g"] is not None:
         bucket["avoided_co2e_g"] += rec["avoided_co2e_g"]
+    if rec["avoided_usd"] is not None:
+        bucket["avoided_usd"] += rec["avoided_usd"]
+    # A run with no recorded band contributes its central figure to both ends,
+    # so the window total stays comparable with co2e_g instead of collapsing.
+    bucket["co2e_g_low"] += rec["co2e_g_low"] if rec["co2e_g_low"] is not None else rec["co2e_g"]
+    bucket["co2e_g_high"] += rec["co2e_g_high"] if rec["co2e_g_high"] is not None else rec["co2e_g"]
 
 
 def _bucket_json(bucket: dict, **identity) -> dict:
@@ -387,6 +420,9 @@ def _bucket_json(bucket: dict, **identity) -> dict:
         "co2e_g": float(round(bucket["co2e_g"], 6)),
         "baseline_co2e_g": float(round(bucket["baseline_co2e_g"], 6)),
         "avoided_co2e_g": float(round(bucket["avoided_co2e_g"], 6)),
+        "avoided_usd": float(round(bucket["avoided_usd"], 6)),
+        "co2e_g_low": float(round(bucket["co2e_g_low"], 6)),
+        "co2e_g_high": float(round(bucket["co2e_g_high"], 6)),
     }
 
 
@@ -436,6 +472,8 @@ async def emissions(
     without_estimate = 0
     without_scopes = 0
     without_baseline = 0
+    without_money = 0
+    without_band = 0
     by_model: dict[str, dict] = {}
     by_harness: dict[uuid.UUID, dict] = {}
     by_day: dict[str, dict] = {}
@@ -456,6 +494,10 @@ async def emissions(
             scope3 += rec["scope3_g"]
         if rec["baseline_co2e_g"] is None:
             without_baseline += 1
+        if rec["avoided_usd"] is None:
+            without_money += 1
+        if rec["co2e_g_low"] is None:
+            without_band += 1
 
         model_id = rec["model"] or model_used or "(unrecorded model)"
         model_bucket = by_model.setdefault(model_id, _emissions_bucket())
@@ -465,7 +507,12 @@ async def emissions(
         if created_at is not None:
             _add_to_bucket(by_day.setdefault(created_at.date().isoformat(), _emissions_bucket()), rec)
 
-        factor_key = (rec["deployment"], rec["grid_co2e_g_per_kwh"], rec["pue"])
+        factor_key = (
+            rec["deployment"],
+            rec["grid_co2e_g_per_kwh"],
+            rec["pue"],
+            rec["grid_co2e_basis"],
+        )
         factor_tally[factor_key] = factor_tally.get(factor_key, 0) + 1
 
     names = await _harness_names(db, list(by_harness))
@@ -484,6 +531,8 @@ async def emissions(
             "runs_without_estimate": without_estimate,
             "runs_without_scope_split": without_scopes,
             "runs_without_baseline": without_baseline,
+            "runs_without_money_comparison": without_money,
+            "runs_without_uncertainty_band": without_band,
             # Total (PUE-inclusive) energy as recorded; the compute-only figure is
             # alongside it so the overhead is visible rather than baked in.
             "energy_wh": float(round(totals["energy_wh"], 6)),
@@ -495,6 +544,12 @@ async def emissions(
             "baseline_co2e_g": float(round(totals["baseline_co2e_g"], 6)),
             "avoided_co2e_g": float(round(totals["avoided_co2e_g"], 6)),
             "avoided_pct": _pct(totals["avoided_co2e_g"], totals["baseline_co2e_g"]),
+            # Added. Money is signed like carbon: negative means this window's
+            # model choices cost *more* than the baseline would have.
+            "avoided_usd": float(round(totals["avoided_usd"], 6)),
+            # Added: the summed judgment band. Not a confidence interval.
+            "co2e_g_low": float(round(totals["co2e_g_low"], 6)),
+            "co2e_g_high": float(round(totals["co2e_g_high"], 6)),
         },
         "by_model": sorted(
             [
@@ -531,6 +586,21 @@ async def emissions(
             "local_pue": settings.local_pue,
             "baseline_model": baseline.id if baseline else None,
             "mixed_factors": mixed_factors,
+            # Added, same reference-only status as the rest of this block.
+            "grid_co2e_basis": settings.grid_co2e_basis,
+            "local_grid_co2e_basis": settings.local_grid_co2e_basis,
+            "onprem_pue": settings.onprem_pue,
+            "local_deployment_profile": settings.local_deployment_profile,
+            "uncertainty_band_low": settings.uncertainty_band_low,
+            "uncertainty_band_high": settings.uncertainty_band_high,
+            # Per-run provenance is where the sourcing actually lives: every run
+            # records value, unit, source, url, date and confidence for every
+            # factor it used, so nothing here has to be looked up elsewhere.
+            "provenance_note": (
+                "Per-factor sources, dates and confidence markers are recorded on "
+                "each run under energy_accounting.factors — read them there rather "
+                "than assuming these current settings applied."
+            ),
             "note": (
                 "current settings, for reference only — every total is summed from "
                 "each run's own stored figures, frozen at the factors in force when "
@@ -545,9 +615,10 @@ async def emissions(
                         "deployment": deployment,
                         "grid_co2e_g_per_kwh": grid,
                         "pue": pue,
+                        "grid_co2e_basis": basis,
                         "runs": n,
                     }
-                    for (deployment, grid, pue), n in factor_tally.items()
+                    for (deployment, grid, pue, basis), n in factor_tally.items()
                 ],
                 key=lambda r: (-r["runs"], str(r["deployment"])),
             ),
@@ -562,8 +633,10 @@ async def emissions(
             EMISSIONS_DISCLAIMER
             + (
                 " THIS WINDOW MIXES RECORDING BASES: its runs were recorded under "
-                "more than one (deployment, grid intensity, PUE) combination, so "
-                "there is no single factor behind these totals — see "
+                "more than one (deployment, grid intensity, PUE, GHG Protocol grid "
+                "basis) combination, so there is no single factor behind these "
+                "totals — and a window mixing location-based with market-based grid "
+                "factors is not summable at all under the GHG Protocol. See "
                 "factors.recorded for the breakdown."
                 if mixed_factors
                 else ""

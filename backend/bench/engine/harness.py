@@ -336,8 +336,10 @@ class HarnessEngine:
                         "cost_usd": float(run.cost_usd),
                         # Estimated, not metered — docs/emissions-methodology.md.
                         # energy_wh is compute only; the carbon fields (co2e_g,
-                        # scope2_g, scope3_g, baseline_co2e_g, avoided_co2e_g)
-                        # come straight from the accounting block.
+                        # scope2_g, scope3_g, baseline_co2e_g, avoided_co2e_g),
+                        # the same-token money figure (avoided_usd) and the
+                        # judgment band (co2e_g_low/high) come straight from the
+                        # accounting block.
                         "energy_wh": accounting["energy_wh"],
                         **emission_event_fields(accounting),
                     },

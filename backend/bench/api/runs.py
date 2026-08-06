@@ -49,10 +49,11 @@ def _run_summary(run: Run) -> dict:
         # runs that predate eco accounting: no estimate is not the same as none
         # drawn. Full derivation is in the detail view's "energy" block.
         "energy_wh": float(run.energy_wh) if run.energy_wh is not None else None,
-        # co2e_g (run total), scope2_g, scope3_g, avoided_co2e_g — read as
-        # recorded from the run's own accounting block, never recomputed at
-        # today's factors, and null wherever the run has no figure. Runs recorded
-        # before scopes/baseline existed report null for those, not 0.
+        # co2e_g (run total), scope2_g, scope3_g, avoided_co2e_g, avoided_usd and
+        # the judgment band (co2e_g_low/high) — read as recorded from the run's
+        # own accounting block, never recomputed at today's factors, and null
+        # wherever the run has no figure. Runs recorded before scopes, the
+        # baseline, money or the band existed report null for those, not 0.
         **emission_summary_fields(run.energy_accounting),
         "iterations": run.iterations,
         "error": run.error,
@@ -124,9 +125,12 @@ async def get_run(
             # What the context was made of, per component, in estimated tokens.
             "context_composition": run.context_composition,
             # How the energy/carbon estimate was arrived at: energy class,
-            # Wh/Mtok, token weighting, PUE, grid intensity, the GHG Protocol
-            # scope split and the same-token baseline counterfactual. All
-            # estimates, exactly as recorded when the run happened.
+            # Wh/Mtok, the separate input/output token weighting, PUE and its
+            # deployment profile, grid intensity and its GHG Protocol basis, the
+            # scope split, the same-token carbon *and* dollar counterfactuals, the
+            # uncertainty band with its per-factor sensitivity, every constant's
+            # provenance under `factors`, and the named biases under `caveats`.
+            # All estimates, exactly as recorded when the run happened.
             "energy": run.energy_accounting}
 
 

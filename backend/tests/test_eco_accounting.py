@@ -4,9 +4,17 @@ No network and no DB: the catalog's energy model is exercised directly, catalog
 discovery is driven through a fake httpx client (as in test_local_provider.py),
 and the runs API serializers are called with detached ORM objects.
 
-The numbers here are heuristics by design (docs/eco-accounting.md); what these
-tests lock down is that the heuristic is applied consistently, that discounts
-match the cost model, and above all that nothing is ever silently zero.
+The class constants are now calibrated rather than hand-picked (least-squares
+fits against Jegham et al., arXiv:2505.09598 — see
+docs/emissions-methodology.md), but they are still estimates. What these tests
+lock down is the arithmetic on top of them: that input and output tokens are
+weighted apart by the fitted ~20x, that the reasoning tier exists and sits far
+above the ladder, that discounts match the cost model, and above all that
+nothing is ever silently zero.
+
+Every expected number below is spelled out from the constants rather than copied
+from a previous run, so a future recalibration has to be argued for in the test
+rather than absorbed by a loosened assertion.
 """
 from __future__ import annotations
 
@@ -14,6 +22,7 @@ import uuid
 from decimal import Decimal
 
 import httpx
+import pytest
 import yaml
 
 from bench.api.runs import _run_summary, get_run
@@ -26,6 +35,9 @@ from bench.providers.catalog import (
     ENERGY_CACHE_WRITE_MULTIPLIER,
     ENERGY_CLASS_WH_PER_MTOK,
     ENERGY_CLASSES,
+    ENERGY_TOKEN_WEIGHT_INPUT,
+    ENERGY_TOKEN_WEIGHT_OUTPUT,
+    REASONING_ENERGY_CLASS,
     ModelCatalog,
     ModelInfo,
     co2e_grams,
@@ -62,13 +74,56 @@ def _patch_settings(monkeypatch, settings: Settings) -> None:
     monkeypatch.setattr(catalog_module, "get_settings", lambda: settings)
 
 
+def _assert_json_safe(value, path: str = "report") -> None:
+    """The block must survive a JSONB round-trip: dicts, lists, scalars only."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            assert isinstance(k, str), path
+            _assert_json_safe(v, f"{path}.{k}")
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _assert_json_safe(v, f"{path}[{i}]")
+    else:
+        assert value is None or isinstance(value, (bool, int, float, str)), (path, value)
+
+
 # ── the class table ───────────────────────────────────────────────────────────
 def test_energy_classes_are_ordered_powers_of_scale():
-    assert ENERGY_CLASSES == ("S", "M", "L", "XL")
+    assert ENERGY_CLASSES == ("S", "M", "L", "XL", "R")
     values = [ENERGY_CLASS_WH_PER_MTOK[c] for c in ENERGY_CLASSES]
-    assert values == [Decimal("50"), Decimal("300"), Decimal("1200"), Decimal("3000")]
+    # Wh per million OUTPUT-EQUIVALENT tokens, each anchored on a least-squares
+    # fit of Wh = a*input + b*output over Jegham et al. (arXiv:2505.09598):
+    # S from GPT-4.1 nano (b=271.9), M from GPT-4o (b=1233.1), L from Claude 3.7
+    # Sonnet (b=2634.7), R from o3 (b=20850.4). XL is the only interpolation.
+    assert values == [
+        Decimal("250"),
+        Decimal("1200"),
+        Decimal("2600"),
+        Decimal("6000"),
+        Decimal("21000"),
+    ]
     assert values == sorted(values)
     assert all(v > 0 for v in values)
+
+
+def test_the_reasoning_tier_is_its_own_class_far_above_the_ladder():
+    reasoning = ENERGY_CLASS_WH_PER_MTOK[REASONING_ENERGY_CLASS]
+    # o3 implies ~10,700 Wh/Mtok on a flat per-token basis at the medium prompt
+    # shape — already 3.5x the old XL ceiling of 3,000, and 20,850 once input and
+    # output are weighted apart. The tier exists because that gap is real.
+    assert reasoning == Decimal("21000")
+    assert reasoning > ENERGY_CLASS_WH_PER_MTOK["XL"] * 3
+    assert _model(energy_class="R").energy_wh_per_mtok == Decimal("21000")
+    assert _model(energy_class="R").is_reasoning_tier is True
+    for other in ("S", "M", "L", "XL"):
+        assert _model(energy_class=other).is_reasoning_tier is False
+
+
+def test_no_cost_tier_ever_infers_the_reasoning_tier():
+    # DeepSeek-R1 is among the two heaviest models measured and among the
+    # cheapest sold, so price is not evidence either way: R must be declared.
+    for tier in ("local", "economy", "standard", "premium", "something-new"):
+        assert energy_class_for_tier(tier) != REASONING_ENERGY_CLASS
 
 
 def test_unknown_class_falls_back_to_the_default_not_to_zero():
@@ -87,28 +142,59 @@ def test_tier_defaults_cover_every_tier_and_are_never_zero():
 
 
 def test_class_derives_wh_per_mtok_unless_overridden():
-    assert _model(energy_class="S").energy_wh_per_mtok == Decimal("50")
+    assert _model(energy_class="S").energy_wh_per_mtok == Decimal("250")
     measured = _model(energy_class="S", energy_wh_per_mtok=Decimal("7.5"))
     assert measured.energy_wh_per_mtok == Decimal("7.5")  # a real measurement wins
 
 
 # ── per-turn math ─────────────────────────────────────────────────────────────
-def test_a_million_tokens_costs_the_class_figure():
-    assert _model("L").energy_wh(1_000_000, 0) == Decimal("1200")
-    assert _model("L").energy_wh(0, 1_000_000) == Decimal("1200")
+def test_the_class_figure_is_a_million_OUTPUT_tokens():
+    # The unit is an output-equivalent token, so a million *generated* tokens is
+    # the class figure exactly...
+    assert _model("L").energy_wh(0, 1_000_000) == Decimal("2600")
+    # ...and a million *read* tokens is a twentieth of it. This is the whole
+    # change: prefill is parallel, generation is sequential.
+    assert _model("L").energy_wh(1_000_000, 0) == Decimal("130")
+    assert _model("L").energy_wh(0, 1_000_000) == 20 * _model("L").energy_wh(1_000_000, 0)
+
+
+def test_input_and_output_are_no_longer_interchangeable():
+    model = _model("M")
+    assert ENERGY_TOKEN_WEIGHT_INPUT == Decimal("0.05")  # 1/20, the fitted b/a
+    assert ENERGY_TOKEN_WEIGHT_OUTPUT == Decimal("1")
+    # 1,000 in / 1,000 out is dominated by the output half.
+    buckets = model.energy_wh_by_bucket(1_000, 1_000)
+    assert buckets["output"] == 20 * buckets["input"]
+    assert sum(buckets.values()) == model.energy_wh(1_000, 1_000)
+    # Swapping the shape (10k in / 100 out vs 100 in / 10k out) moves the figure
+    # by ~20x, which a 1:1 weighting could not express at all.
+    assert model.energy_wh(100, 10_000) > 15 * model.energy_wh(10_000, 100)
+
+
+def test_bucket_energy_always_sums_to_the_run_figure():
+    for cls in ("S", "M", "L", "XL", "R"):
+        model = _model(cls)
+        tokens = (123_457, 9_871, 55_555, 3_333)
+        assert sum(model.energy_wh_by_bucket(*tokens).values()) == model.energy_wh(*tokens)
 
 
 def test_cache_reads_are_discounted_like_price_but_not_free():
     model = _model("L")
-    assert ENERGY_CACHE_READ_MULTIPLIER == Decimal("0.1")
-    assert model.energy_wh(0, 0, cache_read_tokens=1_000_000) == Decimal("120")
+    # 0.005 output-equivalents = 0.1x an input token, the same discount price
+    # gets: 2600 x 0.005 = 13 Wh per million tokens read.
+    assert ENERGY_CACHE_READ_MULTIPLIER == Decimal("0.005")
+    assert ENERGY_CACHE_READ_MULTIPLIER == Decimal("0.1") * ENERGY_TOKEN_WEIGHT_INPUT
+    assert model.energy_wh(0, 0, cache_read_tokens=1_000_000) == Decimal("13")
     assert model.energy_wh(0, 0, cache_read_tokens=1_000_000) > 0
 
 
 def test_cache_writes_are_a_full_forward_pass():
     model = _model("L")
-    assert ENERGY_CACHE_WRITE_MULTIPLIER == Decimal("1")
+    # A write is a full prefill pass, so it weighs exactly what input does —
+    # which is now 0.05 output-equivalents rather than 1.0.
+    assert ENERGY_CACHE_WRITE_MULTIPLIER == ENERGY_TOKEN_WEIGHT_INPUT == Decimal("0.05")
     assert model.energy_wh(0, 0, cache_write_tokens=1_000_000) == model.energy_wh(1_000_000, 0)
+    assert model.energy_wh(0, 0, cache_write_tokens=1_000_000) == Decimal("130")
 
 
 def test_a_warm_cache_read_beats_re_sending_the_prefix():
@@ -119,8 +205,9 @@ def test_a_warm_cache_read_beats_re_sending_the_prefix():
 def test_energy_sums_all_four_buckets():
     model = _model("M")
     energy = model.energy_wh(100_000, 10_000, 800_000, 100_000)
-    weighted = 100_000 + 10_000 + Decimal("0.1") * 800_000 + 100_000
-    assert energy == Decimal("300") * weighted / Decimal(1_000_000)
+    # 0.05x100k + 1x10k + 0.005x800k + 0.05x100k = 5,000 + 10,000 + 4,000 + 5,000
+    weighted = Decimal("24000")
+    assert energy == Decimal("1200") * weighted / Decimal(1_000_000) == Decimal("28.8")
 
 
 def test_no_tokens_no_energy():
@@ -133,10 +220,12 @@ def test_co2e_uses_the_configured_grid_intensity():
     assert co2e_grams(Decimal("1000"), grid_g_per_kwh=30.0) == Decimal("30")
 
 
-def test_grid_intensity_defaults_to_the_world_average_setting(monkeypatch):
+def test_grid_intensity_defaults_to_the_cited_iea_global_average(monkeypatch):
     _patch_settings(monkeypatch, _settings())
-    assert _settings().grid_co2e_g_per_kwh == 400.0
-    assert co2e_grams(Decimal("1000")) == Decimal("400")
+    # IEA Electricity 2025, 2024 global power-sector average (~460-480; 470 is
+    # the midpoint). The old 400 was stale-low and uncited.
+    assert _settings().grid_co2e_g_per_kwh == 470.0
+    assert co2e_grams(Decimal("1000")) == Decimal("470")
 
 
 def test_grid_setting_is_env_configurable():
@@ -150,30 +239,34 @@ def test_accounting_is_auditable_and_json_safe(monkeypatch):
 
     assert report["estimated"] is True
     assert report["energy_class"] == "L"
-    assert report["energy_wh_per_mtok"] == 1200.0
-    assert report["weighted_tokens"] == 290_000.0
-    assert report["energy_wh"] == 348.0  # compute / IT load, no PUE
-    assert report["grid_co2e_g_per_kwh"] == 400.0
+    assert report["energy_wh_per_mtok"] == 2600.0
+    # 0.05x100k + 1x10k + 0.005x800k + 0.05x100k = 24,000 output-equivalents.
+    assert report["weighted_tokens"] == 24_000.0
+    assert report["energy_wh"] == 62.4  # 2600 x 24,000 / 1e6, compute only
+    assert report["grid_co2e_g_per_kwh"] == 470.0
     # co2e_g is the run *total*, so it carries the data-centre PUE (1.2 by
-    # default): 348 Wh x 1.2 = 417.6 Wh at 400 gCO2e/kWh = 167.04 g. The scope
+    # default): 62.4 Wh x 1.2 = 74.88 Wh at 470 gCO2e/kWh = 35.1936 g. The scope
     # decomposition of that total lives in tests/test_emissions.py.
-    assert report["energy_wh_total"] == 417.6
-    assert report["co2e_g"] == 167.04
+    assert report["energy_wh_total"] == 74.88
+    assert report["co2e_g"] == 35.1936
     assert "estimate, not a measurement" in report["basis"]
-    # JSON-safe all the way down — the block now nests `scopes` and `baseline`.
-    flat = [v for v in report.values() if not isinstance(v, dict)]
-    nested = [v for d in report.values() if isinstance(d, dict) for v in d.values()]
-    assert all(v is None or isinstance(v, (bool, int, float, str)) for v in flat + nested)
+    # Per-bucket energy sums to the compute figure, so the split is inspectable.
+    assert sum(report["energy_wh_by_bucket"].values()) == pytest.approx(62.4)
+    assert report["energy_wh_by_bucket"]["output"] == 26.0  # 2600 x 10k / 1e6
+    _assert_json_safe(report)
 
 
 def test_accounting_grid_override_is_recorded_with_the_figure():
     report = energy_accounting(_model("M"), 1_000_000, 0, grid_g_per_kwh=30.0)
-    assert report["energy_wh"] == 300.0  # compute / IT load, unaffected by PUE
+    # 1 Mtok of *input* at M is 1200 x 0.05 = 60 Wh, not 1200.
+    assert report["energy_wh"] == 60.0  # compute / IT load, unaffected by PUE
     assert report["grid_co2e_g_per_kwh"] == 30.0
     # The carbon figure is the run total, so the overridden grid factor is applied
-    # to the PUE-inclusive energy: 300 Wh x 1.2 = 360 Wh at 30 gCO2e/kWh = 10.8 g.
-    assert report["energy_wh_total"] == 360.0
-    assert report["co2e_g"] == 10.8
+    # to the PUE-inclusive energy: 60 Wh x 1.2 = 72 Wh at 30 gCO2e/kWh = 2.16 g.
+    assert report["energy_wh_total"] == 72.0
+    assert report["co2e_g"] == 2.16
+    # bench was handed a number, not a provenance, so it refuses to label it.
+    assert report["grid_co2e_basis"] == "unspecified"
 
 
 # ── zero dollars never means zero watts ───────────────────────────────────────
@@ -181,7 +274,8 @@ def test_a_free_model_still_reports_energy():
     free = _model("S", input_price_per_mtok=Decimal("0"), output_price_per_mtok=Decimal("0"))
     assert free.cost_usd(1_000_000, 1_000_000) == Decimal(0)
     report = energy_accounting(free, 1_000_000, 1_000_000, grid_g_per_kwh=400.0)
-    assert report["energy_wh"] == 100.0
+    # 250 x (0.05x1M + 1M) / 1e6 = 262.5 Wh
+    assert report["energy_wh"] == 262.5
     assert report["co2e_g"] > 0
 
 
@@ -207,7 +301,12 @@ def test_curated_catalog_energy_is_loaded_and_positive():
 def test_model_json_exposes_energy_for_ui_pickers():
     payload = _model("XL").to_json()
     assert payload["energy_class"] == "XL"
-    assert payload["energy_wh_per_mtok"] == 3000.0
+    assert payload["energy_wh_per_mtok"] == 6000.0
+    # Added so a picker can show that reading is cheap and writing is not.
+    assert payload["energy_wh_per_mtok_output"] == 6000.0
+    assert payload["energy_wh_per_mtok_input"] == 300.0
+    assert payload["reasoning_tier"] is False
+    assert _model("R").to_json()["reasoning_tier"] is True
 
 
 # ── fake httpx transport (mirrors test_local_provider.py) ─────────────────────
@@ -259,8 +358,9 @@ async def test_discovered_local_models_are_small_but_never_free_in_watts(monkeyp
     info = catalog.get("local/qwen2.5:14b-instruct")
     assert info.output_price_per_mtok == Decimal("0")  # free in dollars
     assert info.energy_class == "S"
-    assert info.energy_wh_per_mtok == Decimal("50")
-    assert info.energy_wh(1_000_000, 0) == Decimal("50")  # never free in watts
+    assert info.energy_wh_per_mtok == Decimal("250")
+    assert info.energy_wh(0, 1_000_000) == Decimal("250")  # never free in watts
+    assert info.energy_wh(1_000_000, 0) == Decimal("12.5")
 
 
 async def test_dynamic_openrouter_models_get_a_class_from_their_price_tier(monkeypatch):
@@ -302,7 +402,10 @@ async def test_dynamic_openrouter_models_get_a_class_from_their_price_tier(monke
     assert (mid.cost_tier, mid.energy_class) == ("standard", "L")
     assert (big.cost_tier, big.energy_class) == ("premium", "XL")
     # A zero-priced OpenRouter entry is not a zero-energy entry.
-    assert free.energy_wh(1_000_000, 0) == Decimal("300")
+    assert free.energy_wh(1_000_000, 0) == Decimal("60")
+    assert free.energy_wh(0, 1_000_000) == Decimal("1200")
+    # Price tiers never infer the reasoning class, however expensive.
+    assert big.energy_class != "R"
 
 
 # ── runs API exposure ─────────────────────────────────────────────────────────

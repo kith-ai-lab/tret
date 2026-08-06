@@ -7,25 +7,43 @@
 # the router's prefer-newer rule. Verified against the live OpenRouter catalog
 # 2026-07.
 #
-# ── energy_class: HEURISTIC ESTIMATES, NOT MEASUREMENTS ───────────────────────
-# No provider publishes per-model energy draw, and inference energy depends on
-# hardware, batching, and datacentre efficiency that bench cannot see. So each
-# model gets an order-of-magnitude bucket, converted to Wh per million tokens
-# processed in providers/catalog.py (ENERGY_CLASS_WH_PER_MTOK):
+# ── energy_class: CALIBRATED ESTIMATES, STILL NOT MEASUREMENTS ────────────────
+# Each class is Wh per million **output-equivalent** tokens (an output token
+# counts 1.0, an input token 0.05, a cache write 0.05, a cache read 0.005 —
+# generation costs ~20x reading per token). The constants live in
+# bench/services/emissions.py (ENERGY_CLASS_WH_PER_MTOK) and are least-squares
+# fits against Jegham et al., arXiv:2505.09598 (14 May 2025), the only granular
+# public per-model dataset:
 #
-#   S  ≈   50 Wh/Mtok  small / distilled / quantized weights, incl. local models
-#   M  ≈  300 Wh/Mtok  mid-size served models — the anchor: ~0.3 Wh for a ~1k
-#                      token prompt, the order of magnitude large operators have
-#                      published for a median text prompt
-#   L  ≈ 1200 Wh/Mtok  large frontier models
-#   XL ≈ 3000 Wh/Mtok  largest frontier / heavy-reasoning models
+#   S  ≈    250 Wh/Mtok  fitted from GPT-4.1 nano (b = 271.9). Small / distilled
+#                        / nano-class served models, and the default for local
+#                        weights.
+#   M  ≈  1,200 Wh/Mtok  fitted from GPT-4o (b = 1233.1). Mid-size served models.
+#   L  ≈  2,600 Wh/Mtok  fitted from Claude 3.7 Sonnet (b = 2634.7). Large
+#                        frontier models.
+#   XL ≈  6,000 Wh/Mtok  NO measured anchor — one geometric step above L. The
+#                        largest non-reasoning flagships.
+#   R  ≈ 21,000 Wh/Mtok  fitted from o3 (b = 20850.4). The reasoning tier.
+#                        DeepSeek-R1's fit implies 35,475, so this sits at the
+#                        LOW end of the two reasoning models measured.
 #
-# Classes here are assigned from public model-scale signals (parameter counts
-# where known, price and latency as proxies otherwise). They are good enough to
-# compare two candidate models by roughly how much energy they burn, and NOT
-# good enough to report as an emissions figure of record. A model may override
-# the class default with an explicit `energy_wh_per_mtok`. Reasoning and limits:
-# docs/eco-accounting.md.
+# HOW TO READ AN ASSIGNMENT BELOW. Active parameter counts are unpublished for
+# every closed model here, so **tier and price remain a proxy for size** and that
+# proxy is imperfect: a lab's margin, its context length and its serving
+# hardware all move price without moving energy. Worse, price does not predict
+# the reasoning tier in either direction — in the reference dataset DeepSeek-R1
+# is among the two heaviest models measured *and* among the cheapest on the
+# market. So class R is assigned from what a model does, never from what it
+# costs, and every assignment below carries its reasoning inline.
+#
+# The documented upgrade path is EcoLogits' active-parameter formula (published
+# fitted constants α=1.17e-6, β=-1.12e-2, γ=4.05e-5; linear in active params with
+# exponential decay in batch size, default batch 64). bench does not implement it
+# because it would be fed a guessed parameter count, but the seam is ready:
+# add an `active_params_b` here and teach
+# emissions.wh_per_mtok_for_model to prefer it. A model may also override its
+# class outright with an explicit `energy_wh_per_mtok` — do that if you have
+# metered your own deployment. Limits: docs/emissions-methodology.md.
 models:
   - id: anthropic/claude-fable-5
     provider: anthropic
@@ -36,7 +54,12 @@ models:
     input_price_per_mtok: 10.0
     output_price_per_mtok: 50.0
     cost_tier: premium
-    energy_class: XL
+    # R (reasoning): billed as a thinking-first flagship — "deep reasoning" and
+    # "hardest verdicts" are its stated strengths, and it is priced 5x Sonnet 5's
+    # output. Judgment call: Anthropic publishes no energy data and no active
+    # parameter count, so the evidence is product positioning, not measurement.
+    # R also carries the hidden-thinking-token bias (see docs).
+    energy_class: R
     strengths: [deep reasoning, doctrine-following, long-form drafting, hardest verdicts]
     supports_tools: true
 
@@ -49,6 +72,10 @@ models:
     input_price_per_mtok: 5.0
     output_price_per_mtok: 25.0
     cost_tier: premium
+    # XL: a largest-class frontier model, but positioned below Fable 5 and not
+    # sold as thinking-first, so it stays out of the reasoning tier. XL is the
+    # one class with no measured anchor, which makes this the least defensible
+    # number in the catalog — interpolation on top of a price proxy.
     energy_class: XL
     strengths: [deep reasoning, long-form drafting, nuanced judgment]
     supports_tools: true
@@ -62,6 +89,9 @@ models:
     input_price_per_mtok: 2.0
     output_price_per_mtok: 10.0
     cost_tier: standard
+    # L: the class anchored directly on measured Claude 3.7 Sonnet data
+    # (b = 2634.7 Wh/Mtok). The closest thing to a grounded assignment here —
+    # same vendor, same product line, one generation on.
     energy_class: L
     strengths: [structured extraction, doctrine-following, balanced quality/cost, tool reliability]
     supports_tools: true
@@ -75,6 +105,9 @@ models:
     input_price_per_mtok: 1.0
     output_price_per_mtok: 5.0
     cost_tier: economy
+    # M: a small fast sibling of the Sonnet line, priced at half Sonnet 5's
+    # input. Sits between the nano-class anchor (S) and the Sonnet-class anchor
+    # (L); M is the GPT-4o-anchored middle.
     energy_class: M
     strengths: [fast classification, QA grading, routing, short summaries]
     supports_tools: true
@@ -88,6 +121,9 @@ models:
     input_price_per_mtok: 0.6
     output_price_per_mtok: 2.5
     cost_tier: economy
+    # M: a large MoE with a modest *active* parameter count — the total-vs-active
+    # distinction is exactly what price cannot see, and MoE serving energy tracks
+    # active params. M rather than L on that basis, not on price.
     energy_class: M
     strengths: [agentic tool use, long documents, cost-efficient extraction]
     supports_tools: true
@@ -101,6 +137,7 @@ models:
     input_price_per_mtok: 1.0
     output_price_per_mtok: 3.0
     cost_tier: economy
+    # M: same family and serving profile as kimi-k2, marginally dearer.
     energy_class: M
     strengths: [general assistant tasks, long documents]
     supports_tools: true
@@ -114,6 +151,9 @@ models:
     input_price_per_mtok: 3.0
     output_price_per_mtok: 15.0
     cost_tier: standard
+    # L, not R: "strong reasoning" describes output quality, and it is not sold
+    # as spending a separate thinking pass. A borderline call — if it does emit
+    # thinking tokens by default it belongs in R, which would raise it ~8x.
     energy_class: L
     strengths: [agentic tool use, very long context, strong reasoning]
     supports_tools: true
@@ -127,6 +167,8 @@ models:
     input_price_per_mtok: 2.5
     output_price_per_mtok: 15.0
     cost_tier: standard
+    # L: frontier-scale, priced level with Kimi K3 output, no thinking-first
+    # positioning. Price-as-size proxy, stated plainly.
     energy_class: L
     strengths: [structured extraction, schema adherence, long context, instruction following]
     supports_tools: true
@@ -140,6 +182,8 @@ models:
     input_price_per_mtok: 1.0
     output_price_per_mtok: 6.0
     cost_tier: standard
+    # M: the fast/cheap half of the same generation as Terra, at ~40% of its
+    # output price — a smaller served model in the GPT-4o-anchored band.
     energy_class: M
     strengths: [fast general assistant, reliable tool calls, routing, summaries]
     supports_tools: true
@@ -153,6 +197,10 @@ models:
     input_price_per_mtok: 1.5
     output_price_per_mtok: 7.5
     cost_tier: standard
+    # M: a Flash-tier model. Sanity check against Google's own published median
+    # text prompt (0.24 Wh, arXiv:2508.15734): M puts a 1k-in/300-out prompt at
+    # ~0.42 Wh compute, ~0.5 Wh with PUE — roughly 2x Google's market-based,
+    # own-stack figure. Same order, on the conservative side.
     energy_class: M
     strengths: [very long context, fast drafting, data analysis]
     supports_tools: true
@@ -166,6 +214,8 @@ models:
     input_price_per_mtok: 0.3
     output_price_per_mtok: 2.5
     cost_tier: economy
+    # S: an explicitly lite/distilled model, the closest catalog entry to the
+    # GPT-4.1 nano fit (b = 271.9 Wh/Mtok) that anchors S.
     energy_class: S
     strengths: [cheap summaries, classification, long documents]
     supports_tools: true
@@ -179,6 +229,9 @@ models:
     input_price_per_mtok: 2.0
     output_price_per_mtok: 6.0
     cost_tier: standard
+    # L, not R: "reasoning" here is a capability claim, and its output price ($6)
+    # is a third of the premium tier. Same borderline caveat as Kimi K3 — the
+    # reasoning tier is 8x L, so getting this wrong matters.
     energy_class: L
     strengths: [reasoning, current-events knowledge, drafting]
     supports_tools: true
@@ -192,6 +245,13 @@ models:
     input_price_per_mtok: 0.43
     output_price_per_mtok: 0.87
     cost_tier: economy
-    energy_class: M
+    # R (reasoning) despite being the CHEAPEST model in this catalog — and that
+    # inversion is the point. DeepSeek's own R1 is one of the two heaviest models
+    # in the reference dataset (29.00 Wh at the medium prompt shape, against 2.78
+    # for Claude 3.7 Sonnet), because open reasoning models spend long visible
+    # thinking traces. A model advertising "cost-efficient reasoning" at $0.87
+    # per Mtok output is cheap in dollars and expensive in watts; treating price
+    # as a size proxy here would understate it by roughly 17x.
+    energy_class: R
     strengths: [open-weights, cost-efficient reasoning, extraction]
     supports_tools: true

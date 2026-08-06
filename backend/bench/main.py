@@ -11,6 +11,7 @@ from bench.api import (
     analytics,
     auth,
     chat,
+    docs,
     documents,
     findings,
     harnesses,
@@ -75,6 +76,9 @@ def create_app() -> FastAPI:
     app.include_router(runs.router)
     app.include_router(harnesses.router)
     app.include_router(documents.router)
+    # Reference documentation, read straight out of `docs/` so the methodology the
+    # product displays is the methodology in the repository (bench/api/docs.py).
+    app.include_router(docs.router)
     app.include_router(findings.router)
     app.include_router(packs.router)
     app.include_router(settings_api.router)

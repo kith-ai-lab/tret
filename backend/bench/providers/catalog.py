@@ -25,11 +25,17 @@ from bench.services.emissions import (
     ENERGY_CACHE_WRITE_MULTIPLIER,
     ENERGY_CLASS_WH_PER_MTOK,
     ENERGY_CLASSES,
+    ENERGY_TOKEN_WEIGHT_INPUT,
+    ENERGY_TOKEN_WEIGHT_OUTPUT,
+    REASONING_ENERGY_CLASS,
     co2e_grams,
     energy_accounting,
     energy_class_for_tier,
+    energy_wh_by_bucket,
+    is_reasoning_class,
     weighted_tokens,
     wh_per_mtok_for_class,
+    wh_per_mtok_for_model,
 )
 
 _MODELS_YAML = Path(__file__).parent / "models.yaml"
@@ -67,6 +73,9 @@ __all__ = [
     "ENERGY_CACHE_WRITE_MULTIPLIER",
     "ENERGY_CLASSES",
     "ENERGY_CLASS_WH_PER_MTOK",
+    "ENERGY_TOKEN_WEIGHT_INPUT",
+    "ENERGY_TOKEN_WEIGHT_OUTPUT",
+    "REASONING_ENERGY_CLASS",
     "LocalDiscovery",
     "ModelCatalog",
     "ModelInfo",
@@ -74,9 +83,12 @@ __all__ = [
     "co2e_grams",
     "energy_accounting",
     "energy_class_for_tier",
+    "energy_wh_by_bucket",
     "get_catalog",
+    "is_reasoning_class",
     "weighted_tokens",
     "wh_per_mtok_for_class",
+    "wh_per_mtok_for_model",
 ]
 
 
@@ -94,17 +106,33 @@ class ModelInfo:
     supports_tools: bool = True
     curated: bool = True
     released: str | None = None  # YYYY-MM; feeds the router's prefer-newer rule
-    # S | M | L | XL — heuristic energy bucket (see ENERGY_CLASS_WH_PER_MTOK).
+    # S | M | L | XL | R — calibrated energy bucket (see ENERGY_CLASS_WH_PER_MTOK).
+    # R is the reasoning tier and must be assigned deliberately: price does not
+    # predict it in either direction.
     energy_class: str = DEFAULT_ENERGY_CLASS
-    # Wh per million tokens processed. Passing None means "derive from
-    # energy_class"; after construction this is always a Decimal.
+    # Wh per million *output-equivalent* tokens (an output token is 1.0, an input
+    # token 0.05 — see emissions.weighted_tokens). Passing None means "derive
+    # from energy_class"; after construction this is always a Decimal.
     energy_wh_per_mtok: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.energy_class not in ENERGY_CLASS_WH_PER_MTOK:
             self.energy_class = DEFAULT_ENERGY_CLASS
         if self.energy_wh_per_mtok is None:
-            self.energy_wh_per_mtok = wh_per_mtok_for_class(self.energy_class)
+            # Via the emissions seam rather than the class table directly, so a
+            # future size-based estimator (EcoLogits' active-parameter formula,
+            # say) reaches every catalog entry by changing one function.
+            self.energy_wh_per_mtok = wh_per_mtok_for_model(self)
+
+    @property
+    def is_reasoning_tier(self) -> bool:
+        """Does this model spend thinking tokens before answering?
+
+        Matters beyond the energy figure: for several providers hidden reasoning
+        tokens are absent from the billed output count bench reads, so a
+        reasoning model's real generation work is undercounted.
+        """
+        return is_reasoning_class(self.energy_class)
 
     def energy_wh(
         self,
@@ -116,14 +144,31 @@ class ModelInfo:
         """Estimated *compute* (IT-load) energy for one turn, in watt-hours.
 
         Excludes data-centre overhead: multiply by the deployment's PUE for the
-        total (bench.services.emissions.pue_for). Every token bucket draws power
-        — including cache reads, at the same 0.1x discount price uses. Estimated,
-        never measured: docs/emissions-methodology.md.
+        total (bench.services.emissions.pue_for). Every token bucket draws power,
+        but not equally: generation costs roughly 20x reading per token, so
+        `weighted_tokens` converts each bucket to output-equivalents first.
+        Estimated, never measured: docs/emissions-methodology.md.
         """
         weighted = weighted_tokens(
             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
         )
         return self.energy_wh_per_mtok * weighted / Decimal(1_000_000)
+
+    def energy_wh_by_bucket(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> dict[str, Decimal]:
+        """Compute Wh split per token bucket; sums to `energy_wh`."""
+        return energy_wh_by_bucket(
+            self.energy_wh_per_mtok,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        )
 
     def cost_usd(
         self,
@@ -158,6 +203,15 @@ class ModelInfo:
             "released": self.released,
             "energy_class": self.energy_class,
             "energy_wh_per_mtok": float(self.energy_wh_per_mtok),
+            # Added: the per-bucket figures, so a picker can show that a
+            # long-prompt task costs far less than a long-answer one.
+            "energy_wh_per_mtok_input": float(
+                self.energy_wh_per_mtok * ENERGY_TOKEN_WEIGHT_INPUT
+            ),
+            "energy_wh_per_mtok_output": float(
+                self.energy_wh_per_mtok * ENERGY_TOKEN_WEIGHT_OUTPUT
+            ),
+            "reasoning_tier": self.is_reasoning_tier,
         }
 
 
