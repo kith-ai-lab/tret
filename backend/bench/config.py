@@ -4,14 +4,112 @@
 defaults into hard startup errors — see `production_config_problems` and
 docs/hardening.md.
 """
+import json
+import logging
+import math
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger("bench")
 
 # The values shipped in .env.example / the defaults below. Refused in production.
 DEFAULT_SECRET_KEY = "dev-secret-change-me"
 DEFAULT_ADMIN_PASSWORD = "bench-admin"
+
+# ── GHG Protocol Scope 2 basis labels ────────────────────────────────────────
+# These live here, rather than in bench/services/emissions.py where the rest of
+# the emissions vocabulary lives, for one reason: Settings has to *validate*
+# against them, and emissions.py imports this module. emissions.py re-exports
+# the same names, so it remains the module a reader goes to for the meaning.
+#
+# location_based describes the physical grid that served the load; market_based
+# describes contractual renewable claims (PPAs, RECs, GOs). They answer
+# different questions, are not interchangeable, and may never be summed.
+GRID_BASIS_LOCATION = "location_based"
+GRID_BASIS_MARKET = "market_based"
+GRID_BASIS_UNSPECIFIED = "unspecified"
+GRID_BASES = (GRID_BASIS_LOCATION, GRID_BASIS_MARKET, GRID_BASIS_UNSPECIFIED)
+
+# Provider names BENCH_GRID_FACTORS may be keyed by. Used *only* to warn about a
+# probable typo: an unrecognised key is kept, never rejected, because the catalog
+# gains providers over time and a hard failure would make bench unbootable on a
+# config that was correct yesterday. Kept as a literal rather than read from the
+# catalog because providers/catalog.py imports this module.
+GRID_FACTOR_PROVIDERS = ("local", "anthropic", "kimi", "openrouter")
+
+# An operator's label is a note next to a number, not a description. Long enough
+# for "Ontario grid, IESO 2024" and short enough to render in a table cell.
+GRID_FACTOR_LABEL_MAX = 80
+
+
+class GridFactor(BaseModel):
+    """One operator-configured grid carbon intensity, keyed by provider name.
+
+    `extra="forbid"` is deliberate: a mistyped `gCO2e_per_kwh` that was silently
+    ignored would leave the operator believing they had configured a factor while
+    bench quietly applied the global default. A rejected boot is the kinder
+    failure for a typo *inside* an entry, where there is nothing to guess.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # gCO2e per kWh. Must be a positive finite number: zero would claim
+    # carbon-free electricity, which no grid delivers and no operator can
+    # substantiate from a supplier disclosure, and inf/nan would poison every
+    # figure derived from it.
+    g_per_kwh: float
+    # GHG Protocol basis of the factor above. Defaults to unspecified rather than
+    # to location_based: bench does not know what an operator's own number
+    # represents, and guessing a basis is the one thing it must not do here.
+    basis: str = GRID_BASIS_UNSPECIFIED
+    # Free text shown next to the factor in the provenance surfaces — where the
+    # number came from, in the operator's own words ("Ontario grid, IESO 2024",
+    # "provider PPA disclosure"). Optional; blank means none.
+    label: str | None = None
+
+    @field_validator("g_per_kwh", mode="after")
+    @classmethod
+    def _positive_and_finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("g_per_kwh must be a finite number, not inf or nan")
+        if value <= 0:
+            raise ValueError(
+                f"g_per_kwh must be greater than 0, got {value}. A zero or negative grid "
+                "factor would claim electricity with no (or negative) emissions."
+            )
+        return value
+
+    @field_validator("basis", mode="before")
+    @classmethod
+    def _known_basis(cls, value):
+        basis = (str(value) if value is not None else "").strip().lower()
+        if not basis:
+            return GRID_BASIS_UNSPECIFIED
+        if basis not in GRID_BASES:
+            raise ValueError(
+                f"basis must be one of {', '.join(GRID_BASES)}; got {value!r}. "
+                "location_based and market_based are not interchangeable, so bench "
+                "will not accept a label it cannot interpret."
+            )
+        return basis
+
+    @field_validator("label", mode="before")
+    @classmethod
+    def _short_label(cls, value):
+        if value is None:
+            return None
+        label = str(value).strip()
+        if not label:
+            return None
+        if len(label) > GRID_FACTOR_LABEL_MAX:
+            raise ValueError(
+                f"label must be at most {GRID_FACTOR_LABEL_MAX} characters "
+                f"({len(label)} given) — it is rendered in a table cell next to the "
+                "factor, not a place for the methodology"
+            )
+        return label
 
 
 class Settings(BaseSettings):
@@ -64,10 +162,33 @@ class Settings(BaseSettings):
     # and must never be summed, so the label is recorded per run. The shipped
     # default is an IEA physical-grid average, hence location_based.
     grid_co2e_basis: str = "location_based"
-    # Optional separate factor for self-hosted (local) inference, where the
-    # operator buys the power and may have a site- or market-based figure (a
-    # supplier mix, a PPA, on-site solar). None falls back to
-    # grid_co2e_g_per_kwh. This is the factor that lands in Scope 2.
+    # Per-provider / per-deployment grid factors, as JSON keyed by bench provider
+    # name (local | anthropic | kimi | openrouter):
+    #
+    #   BENCH_GRID_FACTORS='{"local":{"g_per_kwh":42,"basis":"location_based",
+    #                                 "label":"Ontario grid, IESO 2024"},
+    #                        "anthropic":{"g_per_kwh":120,"basis":"market_based",
+    #                                     "label":"provider PPA disclosure"}}'
+    #
+    # This is CONFIGURATION, never inference. bench does not and will not derive a
+    # region from an IP address: for a cloud API call the caller's location says
+    # nothing about which data centre served the request, providers do not
+    # disclose the serving region, and OpenRouter routes to whichever upstream has
+    # capacity. Location is knowable only when the operator knows it — they
+    # self-host in a known place, or they pin a provider to a region — so it comes
+    # from them. No network call is involved either way.
+    #
+    # Precedence: this map (by provider) → local_grid_* below when the run is
+    # self-hosted → grid_co2e_g_per_kwh. Every run records which of the three
+    # applied. An unrecognised provider name warns at startup and is kept; an
+    # unknown key *inside* an entry is a hard error (see GridFactor).
+    grid_factors: dict[str, GridFactor] | None = None
+    # LEGACY, and kept working exactly as it always has: an optional separate
+    # factor for self-hosted (local) inference, where the operator buys the power
+    # and may have a site- or market-based figure (a supplier mix, a PPA, on-site
+    # solar). None falls back to grid_co2e_g_per_kwh. This is the factor that
+    # lands in Scope 2. Superseded by grid_factors["local"], which is strictly
+    # more expressive (it carries a label); prefer that in new configuration.
     local_grid_co2e_g_per_kwh: float | None = None
     # Basis of the local factor above. Defaults to unspecified because bench
     # cannot know what an operator's own number represents — say which it is.
@@ -141,6 +262,65 @@ class Settings(BaseSettings):
         `BENCH_GRID_CO2E_G_PER_KWH`).
         """
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("grid_factors", mode="before")
+    @classmethod
+    def _parse_grid_factors(cls, value):
+        """Blank means "not set"; a JSON object means one entry per provider.
+
+        pydantic-settings decodes a complex field's env value as JSON before it
+        reaches here, so a well-formed `BENCH_GRID_FACTORS` arrives already
+        parsed. What still arrives as a string is (a) a blank value — the same
+        `${VAR:-}` case `_blank_means_unset` exists for, which must mean "not set"
+        rather than a parse error, and (b) malformed JSON, which is reported as
+        such instead of as pydantic's generic "not a valid dictionary".
+
+        Provider names are lower-cased and stripped so `Anthropic` and
+        ` anthropic ` are the same key the catalog uses. A name bench does not
+        recognise is KEPT and warned about, not rejected: the catalog gains
+        providers over time, and refusing to boot on a stale config would be a
+        worse failure than an entry that lies dormant until its provider exists.
+        """
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                value = json.loads(text)
+            except ValueError as exc:
+                raise ValueError(
+                    "BENCH_GRID_FACTORS must be a JSON object keyed by provider name, e.g. "
+                    '\'{"local":{"g_per_kwh":42,"basis":"location_based"}}\' — '
+                    f"could not parse it as JSON: {exc}"
+                ) from exc
+        if not isinstance(value, dict):
+            raise ValueError(
+                "BENCH_GRID_FACTORS must be a JSON object keyed by provider name "
+                f"(local | anthropic | kimi | openrouter), got {type(value).__name__}"
+            )
+        entries: dict = {}
+        for key, entry in value.items():
+            provider = str(key).strip().lower()
+            if not provider:
+                raise ValueError("BENCH_GRID_FACTORS contains an empty provider name")
+            if provider in entries:
+                raise ValueError(
+                    f"BENCH_GRID_FACTORS names provider {provider!r} more than once"
+                )
+            entries[provider] = entry
+        unknown = sorted(set(entries) - set(GRID_FACTOR_PROVIDERS))
+        if unknown:
+            log.warning(
+                "BENCH_GRID_FACTORS names provider(s) bench does not recognise: %s. "
+                "Known providers: %s. The entries are kept and will apply if the catalog "
+                "gains those providers, so check for a typo — until then those factors "
+                "are never used and runs fall back to BENCH_GRID_CO2E_G_PER_KWH.",
+                ", ".join(unknown),
+                ", ".join(GRID_FACTOR_PROVIDERS),
+            )
+        return entries
 
 
 @lru_cache

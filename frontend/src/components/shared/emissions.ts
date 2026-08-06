@@ -291,6 +291,34 @@ export function avoidedMoneyFraming(avoided: number | null | undefined): Avoided
   }
 }
 
+// ── the money percentage ─────────────────────────────────────────────────
+// "N.N% cheaper than frontier" — the one place on this page a decimal place is
+// honest rather than false precision. It divides two arithmetic figures (list
+// price x exact token count), not two estimates, so it earns the precision the
+// carbon comparison above deliberately does not get.
+
+export const MONEY_PCT_PRECISION_NOTE =
+  'Precise on purpose: this percentage is arithmetic on published list prices, not an estimate — unlike the carbon comparison, which is stated as a coarse multiple because it rests on estimated energy constants carrying the same judgment band on both sides of the ratio.'
+
+/** "N.N% cheaper than frontier" / "N.N% more expensive than frontier" / "even
+ *  with frontier" / em dash when there is no baseline spend to compare
+ *  against. Never renders a null percentage as 0%. */
+export function moneyPctPhrase(pct: number | null | undefined): string {
+  if (pct === null || pct === undefined) return NO_COMPARISON
+  if (pct > 0) return `${pct.toFixed(1)}% cheaper than frontier`
+  if (pct < 0) return `${Math.abs(pct).toFixed(1)}% more expensive than frontier`
+  return 'even with frontier'
+}
+
+/** Compact signed form for table cells and tickers: "+70.0%" / "-200.0%" /
+ *  "0.0%" / em dash. Pair with `moneyPctPhrase` in a tooltip for the full
+ *  wording. */
+export function moneyPctCompact(pct: number | null | undefined): string {
+  if (pct === null || pct === undefined) return NO_COMPARISON
+  const sign = pct > 0 ? '+' : ''
+  return `${sign}${pct.toFixed(1)}%`
+}
+
 // ── factor provenance ────────────────────────────────────────────────────
 
 export interface ConfidenceMeta {
@@ -407,6 +435,81 @@ export const GRID_BASIS_META: Record<string, { label: string; what: string }> = 
 export function gridBasisLabel(basis: string | null | undefined): string {
   return GRID_BASIS_META[basis ?? '']?.label ?? (basis || 'not recorded')
 }
+
+/** What a basis means, for a tooltip. Handles the unrecorded case, which is not a
+ *  basis but is its own group and has to be explained rather than hidden. */
+export function gridBasisWhat(basis: string | null | undefined): string {
+  return (
+    GRID_BASIS_META[basis ?? '']?.what ??
+    'No basis was recorded on these runs — they predate the label. They are kept as their own group rather than folded in with a location-based figure they cannot be shown to share.'
+  )
+}
+
+// ── which rule chose the factor ──────────────────────────────────────────
+// A grid factor can now come from four places, and "why this number" is the more
+// interesting half once an operator has configured several. The backend records a
+// stable source key per run; this is the only place it is put into words.
+
+export const GRID_SOURCE_META: Record<string, { label: string; what: string }> = {
+  provider: {
+    label: 'per-provider factor',
+    what: 'Configured by the operator for this run’s provider (BENCH_GRID_FACTORS). The most specific rule, so it outranks both the self-hosted setting and the global default.',
+  },
+  local_setting: {
+    label: 'self-hosted factor',
+    what: 'The operator’s factor for self-hosted inference (BENCH_LOCAL_GRID_CO2E_G_PER_KWH — the legacy setting, still honoured), applied because this run ran locally and its provider has no per-provider entry.',
+  },
+  global_default: {
+    label: 'global default',
+    what: 'BENCH_GRID_CO2E_G_PER_KWH — the single factor applied wherever nothing more specific is configured. Ships as the IEA global power-sector average.',
+  },
+  run_override: {
+    label: 'supplied for this run',
+    what: 'A factor handed straight to the accounting call. bench cannot state its provenance and will not claim a GHG Protocol basis for it.',
+  },
+}
+
+/** "per-provider factor (anthropic)" / "global default" / em dash on a run
+ *  recorded before the source key existed — never a guessed "global default". */
+export function gridSourceLabel(source: string | null | undefined): string {
+  if (!source) return NO_COMPARISON
+  const [rule, name] = source.split(':')
+  const meta = GRID_SOURCE_META[rule]
+  if (!meta) return source
+  return name ? `${meta.label} (${name})` : meta.label
+}
+
+export function gridSourceWhat(source: string | null | undefined): string {
+  if (!source)
+    return 'No factor source was recorded on this run — it predates per-provider grid factors. Which rule applied is unknown, which is not the same as the global default.'
+  return GRID_SOURCE_META[source.split(':')[0]]?.what ?? `Recorded source key: ${source}.`
+}
+
+/** Why bench asks the operator instead of looking the region up. The question a
+ *  reviewer always asks, answered where the numbers are. */
+export const GRID_NO_INFERENCE_NOTE =
+  'Operator configuration, never inference. bench does not derive a grid region from an IP address and makes no network call to look one up: for a cloud API call the caller’s location says nothing about which data centre served the request, providers do not disclose the serving region, and a router such as OpenRouter sends the call to whichever upstream has capacity. Location is knowable when the operator knows it — they self-host somewhere, or they pin a provider to a region — so it comes from them.'
+
+// ── basis separation ─────────────────────────────────────────────────────
+// The GHG Protocol rule with teeth: energy and dollars sum across bases, carbon
+// does not. Per-provider factors make a mixed window ordinary, so this is the
+// normal presentation rather than an edge case.
+
+export const NOT_SUMMABLE_TITLE = 'These runs have no single carbon total'
+
+export const NOT_SUMMABLE_WHY =
+  'The runs in this window were accounted under more than one GHG Protocol basis. A location-based figure (the physical grid that served the load) and a market-based one (contractual renewable claims) answer different questions, so adding them produces a meaningless number rather than a smaller one — and under the GHG Protocol they may not be summed at all. Carbon is therefore reported once per basis, and never as a single figure.'
+
+export const SUMMABLE_ACROSS_BASES_NOTE =
+  'Energy in Wh and dollars are still totalled across the whole window: a kWh is a kWh however its carbon is accounted, and a price has no Scope 2 accounting method. Only carbon — including the scope split, the baseline comparison and the judgment band — is held back.'
+
+export const BASIS_SUBTOTAL_HINT =
+  'One row per GHG Protocol basis. Each row is internally consistent and may be read as a total; the rows may not be added to each other. Which rows exist is a consequence of how the operator configured their factors, not of anything bench inferred.'
+
+/** The em-dash placeholder wording for a carbon figure withheld because it would
+ *  cross a basis boundary. Distinct from "no estimate recorded". */
+export const NOT_SUMMABLE_CELL_HINT =
+  'No single figure: the runs behind this row span more than one GHG Protocol basis, which may not be summed. See the per-basis subtotals.'
 
 /** Readable names for the PUE deployment profiles. */
 export const PUE_PROFILE_LABELS: Record<string, string> = {

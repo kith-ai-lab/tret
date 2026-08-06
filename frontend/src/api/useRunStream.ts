@@ -47,6 +47,10 @@ export interface UsageInfo {
   // Money against the same-token baseline, signed the same way. Firmer than the
   // carbon figure: per-token prices are exact arithmetic, not estimation.
   avoided_usd: number | null
+  // Share of frontier spend avoided, one decimal place — exact, unlike the
+  // carbon comparison's coarse multiple. null (never 0%) until the engine
+  // reports one, or when the baseline itself costs nothing.
+  avoided_usd_pct: number | null
   // The judgment band around co2e_g — NOT a confidence interval. null until the
   // engine reports one.
   co2e_g_low: number | null
@@ -153,6 +157,7 @@ export function useRunStream(runId: string | null): RunStreamState {
           baseline_co2e_g: numberOrNull(d.baseline_co2e_g),
           avoided_co2e_g: numberOrNull(d.avoided_co2e_g),
           avoided_usd: numberOrNull(d.avoided_usd),
+          avoided_usd_pct: numberOrNull(d.avoided_usd_pct),
           co2e_g_low: numberOrNull(d.co2e_g_low),
           co2e_g_high: numberOrNull(d.co2e_g_high),
         },
@@ -176,6 +181,7 @@ export function useRunStream(runId: string | null): RunStreamState {
               baseline_co2e_g: numberOrNull(d.baseline_co2e_g) ?? s.usage.baseline_co2e_g,
               avoided_co2e_g: numberOrNull(d.avoided_co2e_g) ?? s.usage.avoided_co2e_g,
               avoided_usd: numberOrNull(d.avoided_usd) ?? s.usage.avoided_usd,
+              avoided_usd_pct: numberOrNull(d.avoided_usd_pct) ?? s.usage.avoided_usd_pct,
               co2e_g_low: numberOrNull(d.co2e_g_low) ?? s.usage.co2e_g_low,
               co2e_g_high: numberOrNull(d.co2e_g_high) ?? s.usage.co2e_g_high,
             }

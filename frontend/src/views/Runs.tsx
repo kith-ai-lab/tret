@@ -6,9 +6,11 @@ import { api, type RunSummary } from '../api/client'
 import {
   BAND_SHORT,
   COUNTERFACTUAL_SHORT,
+  MONEY_PCT_PRECISION_NOTE,
   MONEY_SHORT,
   avoidedFraming,
   avoidedMoneyFraming,
+  moneyPctPhrase,
 } from '../components/shared/emissions'
 import {
   NO_ESTIMATE,
@@ -174,7 +176,7 @@ function Footprint({ run }: { run: RunSummary }) {
   const bandPart = band ? `Range ${band} — ${BAND_SHORT} ` : ''
   return (
     <span
-      title={`${scopePart}${bandPart}${framing.label} ${orDash(formatCo2e(run.avoided_co2e_g))} — ${COUNTERFACTUAL_SHORT} ${money.label} ${formatCostSigned(run.avoided_usd)} — ${MONEY_SHORT}`}
+      title={`${scopePart}${bandPart}${framing.label} ${orDash(formatCo2e(run.avoided_co2e_g))} — ${COUNTERFACTUAL_SHORT} ${money.label} ${formatCostSigned(run.avoided_usd)} (${moneyPctPhrase(run.avoided_usd_pct)}) — ${MONEY_SHORT} ${MONEY_PCT_PRECISION_NOTE}`}
     >
       {text}
       {band && <span className="band-under">{band}</span>}

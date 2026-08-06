@@ -58,8 +58,16 @@ services:
       # GHG Protocol Scope 2 basis of that factor: location_based | market_based
       # | unspecified. The default factor is a physical-grid average.
       BENCH_GRID_CO2E_BASIS: ${BENCH_GRID_CO2E_BASIS:-location_based}
+      # Per-provider grid factors, as JSON keyed by provider name. Blank means
+      # none configured. Quote it in .env, single quotes and no spaces around the
+      # JSON, e.g.
+      #   BENCH_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based"}}
+      # Operator configuration only — bench never infers a region from an IP and
+      # makes no network call to resolve a factor.
+      BENCH_GRID_FACTORS: ${BENCH_GRID_FACTORS:-}
       # Blank on purpose: unset means "use BENCH_GRID_CO2E_G_PER_KWH for local
-      # inference too". A number here would silently defeat that fallback.
+      # inference too". A number here would silently defeat that fallback. Legacy
+      # but still honoured — BENCH_GRID_FACTORS["local"] supersedes it.
       BENCH_LOCAL_GRID_CO2E_G_PER_KWH: ${BENCH_LOCAL_GRID_CO2E_G_PER_KWH:-}
       BENCH_LOCAL_GRID_CO2E_BASIS: ${BENCH_LOCAL_GRID_CO2E_BASIS:-unspecified}
       BENCH_DATACENTER_PUE: ${BENCH_DATACENTER_PUE:-1.2}

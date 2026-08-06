@@ -31,13 +31,18 @@ import {
   BAND_SHORT,
   COUNTERFACTUAL_NOTE,
   ESTIMATE_NOTE,
+  GRID_NO_INFERENCE_NOTE,
   MONEY_EXACT_NOTE,
+  MONEY_PCT_PRECISION_NOTE,
   SCOPE_META,
   TOKEN_BUCKET_LABELS,
   avoidedFraming,
   avoidedMoneyFraming,
   coarseComparison,
   gridBasisLabel,
+  gridSourceLabel,
+  gridSourceWhat,
+  moneyPctPhrase,
   share,
 } from './emissions'
 import {
@@ -193,9 +198,19 @@ function buildSteps(energy: EnergyAccounting): Step[] {
     step: 'Electricity carbon',
     derivation: `${formatWh(energyForGrid)} / 1,000 x ${formatFactor(grid, 2)} gCO₂e/kWh`,
     result: orDash(formatCo2e(electricity)),
-    source: `instance setting · ${gridBasisLabel(energy.grid_co2e_basis)}`,
-    sourceHint:
-      'Grid intensity as configured when this run happened, with its GHG Protocol basis. Location-based and market-based factors answer different questions and must never be summed. A region- or supplier-specific factor is the single biggest improvement available here.',
+    // Which configuration rule chose the factor, and the operator's own label for
+    // it, rather than a generic "instance setting" — with several factors
+    // configured, which one applied is the question a reader has.
+    source: [
+      energy.grid_co2e_source ? gridSourceLabel(energy.grid_co2e_source) : 'instance setting',
+      gridBasisLabel(energy.grid_co2e_basis),
+      energy.grid_co2e_label ? `“${energy.grid_co2e_label}”` : null,
+    ]
+      .filter((part): part is string => Boolean(part))
+      .join(' · '),
+    sourceHint: `Grid intensity as configured when this run happened, with its GHG Protocol basis. Location-based and market-based factors answer different questions and must never be summed. A region- or supplier-specific factor is the single biggest improvement available here. ${gridSourceWhat(
+      energy.grid_co2e_source,
+    )} ${GRID_NO_INFERENCE_NOTE}`,
   })
 
   if (embodied !== undefined && embodied > 0) {
@@ -469,6 +484,7 @@ function RunBaseline({ energy }: { energy: EnergyAccounting }) {
   const comparison = coarseComparison(energy.co2e_g, baseline.co2e_g)
   const cost = energy.cost
   const avoidedUsd = cost?.avoided_usd ?? baseline.avoided_usd
+  const avoidedUsdPct = cost?.avoided_pct ?? baseline.avoided_usd_pct
   const money = avoidedMoneyFraming(avoidedUsd)
   const unavailable = baseline.co2e_g === null || baseline.co2e_g === undefined
   return (
@@ -506,14 +522,15 @@ function RunBaseline({ energy }: { energy: EnergyAccounting }) {
             label={money.label}
             value={formatCostSigned(avoidedUsd)}
             color={money.color}
-            title={money.note}
+            title={`${money.note} ${MONEY_PCT_PRECISION_NOTE}`}
             sub={
               avoidedUsd === null || avoidedUsd === undefined
                 ? undefined
-                : `exact prices · ${formatCostSigned(cost?.usd)} vs ${formatCostSigned(
+                : `${moneyPctPhrase(avoidedUsdPct)} · ${formatCostSigned(cost?.usd)} vs ${formatCostSigned(
                     cost?.baseline_usd ?? baseline.cost_usd,
                   )}`
             }
+            subTitle={MONEY_PCT_PRECISION_NOTE}
           />
         </div>
       )}
@@ -577,12 +594,14 @@ function Stat({
   title,
   color,
   sub,
+  subTitle,
 }: {
   label: string
   value: string
   title?: string
   color?: string
   sub?: string
+  subTitle?: string
 }) {
   return (
     <div className="config-stat">
@@ -590,7 +609,11 @@ function Stat({
       <div className="mono-body" style={{ color }} title={title}>
         {value}
       </div>
-      {sub && <div className="band-under">{sub}</div>}
+      {sub && (
+        <div className="band-under" title={subTitle}>
+          {sub}
+        </div>
+      )}
     </div>
   )
 }

@@ -5,7 +5,7 @@
  *  The dollar figure is exact and the carbon figure is not, so the carbon figure
  *  carries its judgment band on a second line wherever the run recorded one. A
  *  bare point estimate is the one thing this card must not show. */
-import { BAND_SHORT, MONEY_SHORT, avoidedMoneyFraming } from './emissions'
+import { BAND_SHORT, MONEY_PCT_PRECISION_NOTE, avoidedMoneyFraming, moneyPctPhrase } from './emissions'
 import { footprintText, formatCo2eBand, formatCost, formatCostSigned, formatTokens } from './format'
 
 export function ProvenanceCard({
@@ -23,6 +23,7 @@ export function ProvenanceCard({
   co2eGLow,
   co2eGHigh,
   avoidedUsd,
+  avoidedUsdPct,
 }: {
   model: string | null | undefined
   doctrineSha: string | null | undefined
@@ -40,6 +41,9 @@ export function ProvenanceCard({
   co2eGHigh?: number | null
   /** Signed money against the same-token baseline. Exact, unlike the carbon. */
   avoidedUsd?: number | null
+  /** Share of frontier spend avoided, one decimal place. null when there is no
+   *  baseline spend to compare against — never rendered as 0%. */
+  avoidedUsdPct?: number | null
 }) {
   const footprint = footprintText(energyWh, co2eG)
   const band = formatCo2eBand(co2eGLow, co2eGHigh)
@@ -85,9 +89,9 @@ export function ProvenanceCard({
           <Stat
             label={money.label}
             value={formatCostSigned(avoidedUsd)}
-            sub="exact prices"
-            subTitle={MONEY_SHORT}
-            title={money.note}
+            sub={moneyPctPhrase(avoidedUsdPct)}
+            subTitle={MONEY_PCT_PRECISION_NOTE}
+            title={`${money.note} ${MONEY_PCT_PRECISION_NOTE}`}
           />
         )}
       </div>

@@ -11,9 +11,12 @@ import {
   BAND_SHORT,
   COUNTERFACTUAL_SHORT,
   ESTIMATE_NOTE,
+  MONEY_PCT_PRECISION_NOTE,
   MONEY_SHORT,
   avoidedFraming,
   avoidedMoneyFraming,
+  moneyPctCompact,
+  moneyPctPhrase,
 } from './emissions'
 import {
   NO_ESTIMATE_HINT,
@@ -82,13 +85,21 @@ export function LiveFootprint({
       </span>
 
       {/* Money is exact where everything else on this row is estimated, so it is
-          labelled as the firmer figure rather than left to look like the rest. */}
-      <span className="t-item" title={`${money.note} ${MONEY_SHORT}`}>
+          labelled as the firmer figure rather than left to look like the rest.
+          The percentage rides under the dollar figure, compact — it carries a
+          decimal place on purpose, unlike the coarse carbon comparison above. */}
+      <span
+        className="t-item"
+        title={`${money.note} ${moneyPctPhrase(usage?.avoided_usd_pct)} ${MONEY_PCT_PRECISION_NOTE} ${MONEY_SHORT}`}
+      >
         <span className="t-key">
           {money.tone === 'surcharge' ? 'cost surcharge (exact)' : 'money vs baseline (exact)'}
         </span>
         <span className="t-val" style={{ minWidth: '10ch', color: money.color }}>
           {formatCostSigned(usage?.avoided_usd)}
+          {usage?.avoided_usd_pct !== null && usage?.avoided_usd_pct !== undefined && (
+            <span className="band-under">{moneyPctCompact(usage.avoided_usd_pct)}</span>
+          )}
         </span>
       </span>
     </div>

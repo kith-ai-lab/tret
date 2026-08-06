@@ -30,6 +30,8 @@ import {
   caveatDirection,
   confidenceMeta,
   gridBasisLabel,
+  gridSourceLabel,
+  gridSourceWhat,
   PUE_PROFILE_LABELS,
 } from './emissions'
 import { NO_ESTIMATE, formatFactor } from './format'
@@ -65,9 +67,24 @@ function factorDetail(factor: EmissionsFactor): string | null {
   }
   if (factor.key === 'grid_intensity') {
     parts.push(`GHG Protocol basis: ${gridBasisLabel(factor.basis)}`)
+    // Which precedence rule chose this factor — the half of the provenance that
+    // answers "why this number", not just "what number". Runs recorded before the
+    // source key existed carry none, and say nothing rather than guessing.
+    if (factor.source_key) parts.push(gridSourceLabel(factor.source_key))
+    if (factor.source_label) parts.push(`“${factor.source_label}”`)
     if (factor.overridden) parts.push('supplied for this run')
   }
   return parts.length > 0 ? parts.join(' · ') : null
+}
+
+/** The tooltip for that suffix. Only the grid factor has one worth writing: which
+ *  configuration rule applied is not self-explanatory from its name. */
+function factorDetailHint(factor: EmissionsFactor): string | undefined {
+  if (factor.key !== 'grid_intensity') return undefined
+  const source = gridSourceWhat(factor.source_key)
+  return factor.source_label
+    ? `${source} The operator's label for it: “${factor.source_label}”.`
+    : source
 }
 
 /** Per-factor provenance. The heart of deliverable "where did this come from". */
@@ -101,7 +118,11 @@ export function FactorTable({ factors }: { factors: EmissionsFactor[] }) {
                 <td>
                   <div>{factor.label}</div>
                   {detail && (
-                    <div className="fine-print" style={{ marginTop: 2 }}>
+                    <div
+                      className="fine-print"
+                      style={{ marginTop: 2 }}
+                      title={factorDetailHint(factor)}
+                    >
                       {detail}
                     </div>
                   )}

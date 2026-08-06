@@ -15,16 +15,24 @@ import {
   BAND_LABEL,
   BAND_SHORT,
   ESTIMATE_NOTE,
+  GRID_NO_INFERENCE_NOTE,
+  MONEY_PCT_PRECISION_NOTE,
   SCOPE_META,
   avoidedFraming,
   avoidedMoneyFraming,
   coarseComparison,
+  gridBasisLabel,
+  gridBasisWhat,
+  gridSourceLabel,
+  gridSourceWhat,
+  moneyPctPhrase,
 } from './emissions'
 import {
   NO_ESTIMATE,
   formatCo2e,
   formatCo2eBand,
   formatCostSigned,
+  formatFactor,
   formatWh,
   formatWhBand,
   orDash,
@@ -37,6 +45,7 @@ export function EnergyDetail({ energy }: { energy: EnergyAccounting }) {
   const framing = avoidedFraming(baseline?.avoided_co2e_g)
   const comparison = coarseComparison(energy.co2e_g, baseline?.co2e_g)
   const avoidedUsd = energy.cost?.avoided_usd ?? baseline?.avoided_usd
+  const avoidedUsdPct = energy.cost?.avoided_pct ?? baseline?.avoided_usd_pct
   const money = avoidedMoneyFraming(avoidedUsd)
   const totalWh = energy.energy_wh_total ?? energy.energy_wh
 
@@ -89,6 +98,24 @@ export function EnergyDetail({ energy }: { energy: EnergyAccounting }) {
         />
         <Stat label="Deployment" value={energy.deployment ?? NO_ESTIMATE} />
         <Stat
+          label="Grid intensity (est.)"
+          value={
+            energy.grid_co2e_g_per_kwh === undefined || energy.grid_co2e_g_per_kwh === null
+              ? NO_ESTIMATE
+              : `${formatFactor(energy.grid_co2e_g_per_kwh, 2)} gCO₂e/kWh`
+          }
+          // The operator's own label when they gave one, otherwise which rule
+          // chose the factor. Never a guessed source on a run that recorded none.
+          sub={
+            energy.grid_co2e_label ??
+            (energy.grid_co2e_source ? gridSourceLabel(energy.grid_co2e_source) : undefined)
+          }
+          subTitle={`${gridSourceWhat(energy.grid_co2e_source)} ${GRID_NO_INFERENCE_NOTE}`}
+          title={`The factor applied to this run's electricity, as recorded when it ran — ${gridBasisLabel(
+            energy.grid_co2e_basis,
+          )} (${gridBasisWhat(energy.grid_co2e_basis)})`}
+        />
+        <Stat
           label={framing.label}
           value={orDash(formatCo2e(baseline?.avoided_co2e_g))}
           color={framing.color}
@@ -100,9 +127,9 @@ export function EnergyDetail({ energy }: { energy: EnergyAccounting }) {
           label={money.label}
           value={formatCostSigned(avoidedUsd)}
           color={money.color}
-          sub={avoidedUsd === null || avoidedUsd === undefined ? undefined : 'exact prices'}
-          subTitle={money.note}
-          title={money.note}
+          sub={avoidedUsd === null || avoidedUsd === undefined ? undefined : moneyPctPhrase(avoidedUsdPct)}
+          subTitle={MONEY_PCT_PRECISION_NOTE}
+          title={`${money.note} ${MONEY_PCT_PRECISION_NOTE}`}
         />
       </div>
 

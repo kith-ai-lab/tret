@@ -13,9 +13,11 @@ import { useRunStream } from '../api/useRunStream'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
 import {
   BAND_SHORT,
+  MONEY_PCT_PRECISION_NOTE,
   avoidedFraming,
   avoidedMoneyFraming,
   coarseComparison,
+  moneyPctCompact,
 } from '../components/shared/emissions'
 import {
   formatCo2eWithBand,
@@ -525,8 +527,11 @@ function FootprintChipLine({ message }: { message: ChatMessage }) {
       {message.avoided_usd !== null && message.avoided_usd !== undefined && (
         <>
           <span className="sep">·</span>
-          <span style={{ color: money.color }} title={money.note}>
+          <span style={{ color: money.color }} title={`${money.note} ${MONEY_PCT_PRECISION_NOTE}`}>
             {formatCostSigned(message.avoided_usd)} vs frontier
+            {message.avoided_usd_pct !== null && message.avoided_usd_pct !== undefined && (
+              <> ({moneyPctCompact(message.avoided_usd_pct)})</>
+            )}
           </span>
         </>
       )}

@@ -70,6 +70,10 @@ export interface RunSummary {
   // Firmer footing than the carbon figure — per-token prices are exact — but the
   // counterfactual behind it is the same assumption. null on older runs.
   avoided_usd: number | null
+  // Share of frontier spend avoided, one decimal place (exact, unlike the
+  // carbon comparison's coarse multiple). null — never 0% — when there is no
+  // baseline, the baseline itself costs nothing, or this run predates it.
+  avoided_usd_pct: number | null
   // The judgment band around co2e_g. NOT a confidence interval and not a sigma;
   // `uncertainty.is_confidence_interval` is false and the wording must match.
   // null on runs recorded before the band existed.
@@ -144,6 +148,13 @@ export interface EmissionsBaseline {
   cost_usd?: number | null
   avoided_usd?: number | null
   avoided_usd_pct?: number | null
+  /** The grid factor the counterfactual side was priced at, and its GHG Protocol
+   *  basis and source rule. Recorded because a comparison whose two sides sit on
+   *  different bases is not a GHG Protocol difference — such a run also carries
+   *  the `baseline_crosses_grid_basis` caveat. Absent on older runs. */
+  grid_co2e_g_per_kwh?: number | null
+  grid_co2e_basis?: string | null
+  grid_co2e_source?: string | null
   basis: string
 }
 
@@ -187,6 +198,14 @@ export interface EmissionsFactor {
   // grid_intensity
   basis?: string
   overridden?: boolean
+  /** Which precedence rule chose the factor: `provider:<name>` | `local_setting`
+   *  | `global_default` | `run_override`. Absent on runs recorded before
+   *  per-provider factors existed — read as unknown, never as `global_default`. */
+  source_key?: string
+  /** The rule half of `source_key` (`provider:anthropic` -> `provider`). */
+  source_rule?: string
+  /** The operator's own note about the factor, when they set one. */
+  source_label?: string | null
   // pue
   profile?: string
   // embodied_hardware
@@ -289,6 +308,12 @@ export interface EnergyAccounting {
   // ── factor resolution ──
   pue_profile?: string // hyperscaler_cloud | workstation | onprem_datacenter
   grid_co2e_basis?: string // location_based | market_based | unspecified
+  /** Which precedence rule chose the grid factor: `provider:<name>` |
+   *  `local_setting` | `global_default` | `run_override`. Undefined on runs
+   *  recorded before per-provider factors existed. */
+  grid_co2e_source?: string
+  /** The operator's own label for that factor, when they set one. */
+  grid_co2e_label?: string | null
   // ── money, uncertainty, provenance ──
   cost?: EmissionsCost
   uncertainty?: EmissionsUncertainty
@@ -591,6 +616,10 @@ export interface ChatMessage {
   avoided_co2e_g?: number | null
   // Money saved and the judgment band, same nullability rule as the above.
   avoided_usd?: number | null
+  // Share of frontier spend avoided, one decimal place. null — never 0% — when
+  // there is no baseline, the baseline itself costs nothing, or this turn
+  // predates the money comparison.
+  avoided_usd_pct?: number | null
   co2e_g_low?: number | null
   co2e_g_high?: number | null
   // Full derivation and full routing decision, exactly as recorded — for the
@@ -668,43 +697,66 @@ export interface GuardrailAnalytics {
 // recomputed at current settings, and runs without an estimate are excluded from
 // the sums and counted separately.
 
-export interface EmissionsTotals {
-  runs: number
-  runs_with_estimate: number
-  runs_without_estimate: number
-  runs_without_scope_split: number
-  runs_without_baseline: number
-  // Runs carrying a carbon figure but no money comparison / no band. Counted,
-  // never back-filled with zeros.
-  runs_without_money_comparison: number
-  runs_without_uncertainty_band: number
-  energy_wh: number // total, PUE-inclusive
-  energy_wh_compute: number // IT load only
-  co2e_g: number
-  scope1_g: number
-  scope2_g: number
-  scope3_g: number
-  baseline_co2e_g: number
-  avoided_co2e_g: number // signed
-  avoided_pct: number // signed
-  // Signed money against the same-token baseline, summed as recorded.
-  avoided_usd: number
-  // The summed judgment band — low-with-low, high-with-high. Not an interval.
-  // A run with no band contributes its central figure to both ends.
-  co2e_g_low: number
-  co2e_g_high: number
-}
+/** The GHG Protocol basis a bucket's carbon was accounted under. `null` where the
+ *  runs recorded none (they predate the label) — its own group, never folded in
+ *  with a location-based figure it cannot be shown to share. */
+export type GridBasis = string | null
 
-/** Shared metric shape for the by_model / by_harness rollups. */
+/** Shared metric shape for every rollup: the window totals, the per-basis
+ *  subtotals, and the by_model / by_harness rows.
+ *
+ *  **Carbon is nullable and that is the point.** Location-based and market-based
+ *  figures may not be summed under the GHG Protocol, so a bucket spanning more
+ *  than one basis reports every carbon figure — including the scope split and the
+ *  baseline comparison — as `null`, sets `carbon_is_summable: false`, and explains
+ *  itself in `not_summable_note`. Energy (Wh) and dollars stay populated: those
+ *  sum across bases legitimately. Read the subtotals in `by_basis` instead. */
 export interface EmissionsBucket {
   runs: number
-  energy_wh: number
-  co2e_g: number
-  baseline_co2e_g: number
-  avoided_co2e_g: number
+  energy_wh: number // total, PUE-inclusive — always populated
+  energy_wh_compute: number // IT load only — always populated
+  co2e_g: number | null
+  baseline_co2e_g: number | null
+  avoided_co2e_g: number | null // signed
   avoided_usd: number
-  co2e_g_low: number
-  co2e_g_high: number
+  baseline_usd: number
+  // Computed from this bucket's summed dollars, not an average of per-run
+  // percentages. null (never 0%) when the bucket has no baseline spend.
+  // Unaffected by the basis rule: a dollar has no Scope 2 accounting method.
+  avoided_usd_pct: number | null
+  // The summed judgment band — low-with-low, high-with-high. Not an interval.
+  // A run with no band contributes its central figure to both ends.
+  co2e_g_low: number | null
+  co2e_g_high: number | null
+  // Scope figures are carbon, so they follow the same rule.
+  scope1_g: number | null
+  scope2_g: number | null
+  scope3_g: number | null
+  runs_without_scope_split: number
+  /** The bases behind this bucket, in presentation order. More than one entry
+   *  means its carbon was withheld. */
+  grid_bases: GridBasis[]
+  carbon_is_summable: boolean
+  /** Why the carbon figures are null. Null when they are not. */
+  not_summable_note: string | null
+}
+
+export interface EmissionsTotals extends EmissionsBucket {
+  runs_with_estimate: number
+  runs_without_estimate: number
+  runs_without_baseline: number
+  // Runs carrying a carbon figure but no money comparison / no band / no
+  // recorded GHG Protocol basis. Counted, never back-filled with zeros.
+  runs_without_money_comparison: number
+  runs_without_uncertainty_band: number
+  runs_without_grid_basis: number
+  avoided_pct: number | null // signed; null across a basis-mixed window
+}
+
+/** One GHG Protocol basis present in the window. Each row IS summable — that is
+ *  the whole point of separating them — so its carbon is always a figure. */
+export interface EmissionsByBasis extends EmissionsBucket {
+  basis: GridBasis
 }
 
 export interface EmissionsByModel extends EmissionsBucket {
@@ -719,12 +771,18 @@ export interface EmissionsByHarness extends EmissionsBucket {
 
 export interface EmissionsByDay {
   date: string // YYYY-MM-DD
-  co2e_g: number
-  avoided_co2e_g: number
+  // Null on a day that mixed bases (a factor changed mid-day). Energy always
+  // survives, so a mixed day still has something to plot.
+  co2e_g: number | null
+  avoided_co2e_g: number | null
+  energy_wh: number
+  grid_bases: GridBasis[]
+  carbon_is_summable: boolean
 }
 
-/** One (deployment, grid factor, PUE) combination actually present in the
- *  window — what makes `mixed_factors` inspectable rather than just flagged. */
+/** One (deployment, grid factor, PUE, basis, source) combination actually present
+ *  in the window — what makes `mixed_factors` inspectable rather than just
+ *  flagged. */
 export interface EmissionsRecordedFactor {
   deployment: string | null
   grid_co2e_g_per_kwh: number | null
@@ -733,16 +791,36 @@ export interface EmissionsRecordedFactor {
    *  combination key: a window mixing location-based with market-based factors is
    *  not summable at all, which is stronger than merely "mixed". */
   grid_co2e_basis: string | null
+  /** Which precedence rule chose that factor (`provider:<name>`,
+   *  `local_setting`, `global_default`, `run_override`), and the operator's own
+   *  label for it. Both null on runs recorded before per-provider factors. */
+  grid_co2e_source: string | null
+  grid_co2e_label: string | null
   runs: number
+}
+
+/** One configured per-provider override, as it stands right now. Reference only,
+ *  like everything in `EmissionsFactors`: a run that predates an entry was not
+ *  recorded under it. */
+export interface EmissionsGridFactor {
+  g_per_kwh: number
+  basis: string
+  label: string | null
 }
 
 export interface EmissionsFactors {
   grid_co2e_g_per_kwh: number
   local_grid_co2e_g_per_kwh: number | null
+  /** Per-provider grid factors currently configured, keyed by provider name. */
+  grid_factors?: Record<string, EmissionsGridFactor>
   datacenter_pue: number
   local_pue: number
   baseline_model: string | null
   mixed_factors: boolean
+  /** The stronger, separate flag: `mixed_factors` means "no single factor sits
+   *  behind these totals"; `mixed_grid_bases` means "there is no total". */
+  mixed_grid_bases?: boolean
+  grid_bases?: GridBasis[]
   note: string
   recorded: EmissionsRecordedFactor[]
   // Reference-only, like the rest of this block — nothing above was computed
@@ -766,6 +844,9 @@ export interface EmissionsAnalytics {
   window_days: number | null
   project_id: string | null
   totals: EmissionsTotals
+  /** Carbon subtotals grouped by GHG Protocol basis. Where the window mixes
+   *  bases, these are the only carbon figures the response contains. */
+  by_basis: EmissionsByBasis[]
   by_model: EmissionsByModel[]
   by_harness: EmissionsByHarness[]
   by_day: EmissionsByDay[]

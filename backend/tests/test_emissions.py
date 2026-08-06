@@ -22,6 +22,7 @@ number, not a stale comment.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -30,6 +31,7 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from bench.api import analytics
 from bench.api.analytics import _recorded_emissions, emissions
@@ -54,9 +56,11 @@ from bench.services.emissions import (
     energy_accounting,
     grid_basis_for,
     grid_factor_for,
+    grid_factor_override_for,
     pue_for,
     pue_profile_for,
     resolve_baseline_model,
+    resolve_grid_factor,
     scope_split,
 )
 
@@ -245,6 +249,234 @@ def test_an_explicit_grid_override_still_wins_over_both_settings():
     settings = _settings(grid_co2e_g_per_kwh=400.0, local_grid_co2e_g_per_kwh=30.0)
     report = _account(_local_model(), settings, grid_g_per_kwh=700.0)
     assert report["grid_co2e_g_per_kwh"] == 700.0
+
+
+# ── per-provider grid factors: parsing and validation ─────────────────────────
+# BENCH_GRID_FACTORS is operator configuration and nothing else. There is no
+# geolocation and no network call behind it, by design: for a cloud API call the
+# caller's location says nothing about which data centre served the request. What
+# these tests defend is that a malformed or dishonest factor is refused, while a
+# config naming a provider bench has not heard of yet still boots.
+def test_a_valid_grid_factor_map_parses_from_json():
+    settings = _settings(
+        grid_factors=json.dumps(
+            {
+                "local": {"g_per_kwh": 42, "basis": "location_based", "label": "Ontario grid"},
+                # Case and padding are normalised to the catalog's provider name.
+                " Anthropic ": {"g_per_kwh": 120, "basis": "market_based"},
+            }
+        )
+    )
+    assert set(settings.grid_factors) == {"local", "anthropic"}
+    assert settings.grid_factors["local"].g_per_kwh == 42.0
+    assert settings.grid_factors["local"].label == "Ontario grid"
+    # Basis is not guessed: an entry that does not say defaults to unspecified.
+    assert settings.grid_factors["anthropic"].basis == "market_based"
+    assert settings.grid_factors["anthropic"].label is None
+
+
+def test_a_blank_grid_factor_value_means_not_set():
+    """The same trap as BENCH_LOCAL_GRID_CO2E_G_PER_KWH: `${VAR:-}` arrives as "".
+
+    A parse error there would stop the backend booting under the documented
+    docker compose quickstart, for a knob the operator never set.
+    """
+    for blank in ("", "   ", None):
+        assert _settings(grid_factors=blank).grid_factors is None
+    assert _settings().grid_factors is None
+
+
+def test_an_entry_with_no_basis_defaults_to_unspecified_rather_than_a_guess():
+    settings = _settings(grid_factors='{"local": {"g_per_kwh": 42}}')
+    assert settings.grid_factors["local"].basis == "unspecified"
+
+
+@pytest.mark.parametrize(
+    "raw, why",
+    [
+        ("{not json", "malformed JSON"),
+        ("[]", "not an object"),
+        ('{"local": {"g_per_kwh": 0}}', "zero would claim carbon-free electricity"),
+        ('{"local": {"g_per_kwh": -5}}', "negative carbon does not exist"),
+        ('{"local": {"g_per_kwh": "inf"}}', "non-finite would poison every figure"),
+        ('{"local": {"g_per_kwh": "nan"}}', "non-finite would poison every figure"),
+        ('{"local": {"g_per_kwh": 42, "basis": "greenish"}}', "not a GHG Protocol basis"),
+        ('{"local": {"g_per_kwh": 42, "gCO2e": 1}}', "unknown key inside an entry"),
+        ('{"local": {"basis": "location_based"}}', "no factor at all"),
+        ('{"local": {"g_per_kwh": 42, "label": "%s"}}' % ("x" * 200), "label is not an essay"),
+    ],
+)
+def test_a_dishonest_or_malformed_grid_factor_is_refused(raw, why):
+    with pytest.raises(ValidationError):
+        _settings(grid_factors=raw)
+
+
+def test_an_unrecognised_provider_name_warns_and_still_boots(caplog):
+    """The catalog gains providers over time. A hard failure on a name bench does
+    not know yet would make an install unbootable on a config that was correct
+    when it was written — so the entry is kept, warned about, and inert."""
+    with caplog.at_level(logging.WARNING, logger="bench"):
+        settings = _settings(
+            grid_factors='{"aws-bedrock": {"g_per_kwh": 42}, "local": {"g_per_kwh": 30}}'
+        )
+    assert set(settings.grid_factors) == {"aws-bedrock", "local"}
+    assert "aws-bedrock" in caplog.text
+    assert "does not recognise" in caplog.text
+    # And it changes nothing: no run has that provider, so nothing resolves to it.
+    assert grid_factor_override_for("anthropic", settings) is None
+    assert _account(_model("L"), settings)["grid_co2e_source"] == "global_default"
+
+
+# ── per-provider grid factors: precedence, recorded on the run ────────────────
+def test_a_per_provider_factor_wins_over_the_global_default():
+    settings = _settings(
+        grid_co2e_g_per_kwh=400.0,
+        grid_factors='{"anthropic": {"g_per_kwh": 120, "basis": "market_based", "label": "PPA"}}',
+    )
+    report = _account(_model("L", provider="anthropic"), settings)
+    assert report["grid_co2e_g_per_kwh"] == 120.0
+    assert report["grid_co2e_basis"] == "market_based"
+    assert report["grid_co2e_source"] == "provider:anthropic"
+    assert report["grid_co2e_label"] == "PPA"
+    # A provider with no entry of its own is untouched by someone else's factor.
+    other = _account(_model("L", provider="kimi", id="kimi/test"), settings)
+    assert other["grid_co2e_g_per_kwh"] == 400.0
+    assert other["grid_co2e_source"] == "global_default"
+
+
+def test_a_provider_entry_outranks_the_legacy_local_setting_on_a_local_run():
+    """The precedence case with both rules in play at once. The legacy setting is
+    still read — for any provider without an entry — but the more specific
+    statement wins where both exist."""
+    settings = _settings(
+        grid_co2e_g_per_kwh=400.0,
+        local_grid_co2e_g_per_kwh=30.0,
+        local_grid_co2e_basis="market_based",
+        grid_factors='{"local": {"g_per_kwh": 42, "basis": "location_based", "label": "IESO"}}',
+    )
+    report = _account(_local_model(), settings)
+    assert report["grid_co2e_g_per_kwh"] == 42.0
+    assert report["grid_co2e_basis"] == "location_based"
+    assert report["grid_co2e_source"] == "provider:local"
+    assert report["grid_co2e_label"] == "IESO"
+    # Scope 2 is derived from the factor that actually applied, not from the
+    # legacy one: 13.125 Wh at 42 g/kWh.
+    assert report["scopes"]["scope2_g"] == pytest.approx(0.55125)
+
+
+def test_the_legacy_local_setting_still_applies_where_there_is_no_entry():
+    """Explicitly: nothing about the legacy path changed for an operator who never
+    sets BENCH_GRID_FACTORS, or who sets it for a different provider."""
+    settings = _settings(
+        grid_co2e_g_per_kwh=400.0,
+        local_grid_co2e_g_per_kwh=30.0,
+        local_grid_co2e_basis="market_based",
+        grid_factors='{"anthropic": {"g_per_kwh": 120}}',
+    )
+    report = _account(_local_model(), settings)
+    assert report["grid_co2e_g_per_kwh"] == 30.0
+    assert report["grid_co2e_basis"] == "market_based"
+    assert report["grid_co2e_source"] == "local_setting"
+    assert report["grid_co2e_label"] is None
+    assert grid_factor_for(DEPLOYMENT_LOCAL, settings, provider="local") == 30.0
+
+
+def test_the_three_precedence_rules_resolve_in_order():
+    settings = _settings(
+        grid_co2e_g_per_kwh=400.0,
+        local_grid_co2e_g_per_kwh=30.0,
+        grid_factors='{"local": {"g_per_kwh": 42}}',
+    )
+    provider = resolve_grid_factor("local", DEPLOYMENT_LOCAL, settings)
+    assert (provider["value"], provider["rule"]) == (42.0, "provider")
+    assert provider["setting"] == "BENCH_GRID_FACTORS[local]"
+
+    legacy = resolve_grid_factor("local", DEPLOYMENT_LOCAL, _settings(local_grid_co2e_g_per_kwh=30.0))
+    assert (legacy["value"], legacy["rule"]) == (30.0, "local_setting")
+    assert legacy["setting"] == "BENCH_LOCAL_GRID_CO2E_G_PER_KWH"
+
+    default = resolve_grid_factor("anthropic", DEPLOYMENT_CLOUD, settings)
+    assert (default["value"], default["rule"]) == (400.0, "global_default")
+    assert default["setting"] == "BENCH_GRID_CO2E_G_PER_KWH"
+
+    # An explicitly passed factor outranks all three and claims no provenance.
+    handed = resolve_grid_factor("local", DEPLOYMENT_LOCAL, settings, override=700.0)
+    assert (handed["value"], handed["rule"]) == (700.0, "run_override")
+    assert (handed["basis"], handed["label"], handed["setting"]) == ("unspecified", None, None)
+
+
+def test_a_run_override_still_beats_a_per_provider_factor():
+    settings = _settings(grid_factors='{"local": {"g_per_kwh": 42}}')
+    report = _account(_local_model(), settings, grid_g_per_kwh=700.0)
+    assert report["grid_co2e_g_per_kwh"] == 700.0
+    assert report["grid_co2e_source"] == "run_override"
+    assert report["grid_co2e_basis"] == "unspecified"
+
+
+def test_the_provenance_record_explains_which_rule_applied_and_why():
+    """The point of the source key: a provenance table that can say *why* a factor
+    was used, not only what it was."""
+    settings = _settings(
+        grid_factors='{"anthropic": {"g_per_kwh": 120, "basis": "market_based", "label": "PPA 2025"}}'
+    )
+    report = _account(_model("L"), settings)
+    factor = next(f for f in report["factors"] if f["key"] == "grid_intensity")
+    assert factor["value"] == 120.0
+    assert factor["source_key"] == "provider:anthropic"
+    assert factor["source_rule"] == "provider"
+    assert factor["source_label"] == "PPA 2025"
+    assert factor["basis"] == "market_based"
+    # The setting a reader has to change is the one that actually applied.
+    assert factor["setting"] == "BENCH_GRID_FACTORS[anthropic]"
+    # bench does not claim the IEA as the source for the operator's own number,
+    # and where the operator labelled it, the label is the citation.
+    assert "PPA 2025" in factor["source"]
+    assert "IEA" not in factor["source"]
+    # And the note answers the question a reviewer always asks.
+    assert "never inference" in factor["note"]
+    assert "IP address" in factor["note"]
+    assert "Precedence:" in factor["note"]
+
+
+def test_the_default_factor_still_cites_the_iea_and_names_its_precedence():
+    factor = next(
+        f for f in _account(_model("L"))["factors"] if f["key"] == "grid_intensity"
+    )
+    assert factor["source_key"] == "global_default"
+    assert factor["source_label"] is None
+    assert "IEA" in factor["source"]
+    # The setting named is the one that actually applied, not a list of the three
+    # that might have. Where the precedence order matters, the note carries it.
+    assert factor["setting"] == "BENCH_GRID_CO2E_G_PER_KWH"
+    assert "Precedence:" in factor["note"]
+    # A factor handed straight to the accounting call has no setting to change.
+    handed = next(
+        f
+        for f in _account(_model("L"), grid_g_per_kwh=123.0)["factors"]
+        if f["key"] == "grid_intensity"
+    )
+    assert handed["setting"] is None
+    assert handed["source_key"] == "run_override"
+
+
+def test_a_baseline_on_a_different_basis_is_named_as_a_caveat_not_absorbed():
+    """A cross-basis comparison is not a GHG Protocol difference. It is allowed to
+    exist — it is the model-selection signal — but it has to say so."""
+    settings = _settings(
+        emissions_baseline_model="anthropic/claude-fable-5",
+        grid_factors='{"local": {"g_per_kwh": 42, "basis": "location_based"}}',
+        grid_co2e_basis="market_based",
+    )
+    report = _account(_local_model(), settings)
+    assert report["grid_co2e_basis"] == "location_based"
+    assert report["baseline"]["grid_co2e_basis"] == "market_based"
+    caveat = next(
+        c for c in report["caveats"] if c["key"] == "baseline_crosses_grid_basis"
+    )
+    assert "may not be summed or netted" in caveat["note"]
+    # Same basis on both sides: no caveat to raise.
+    same = _account(_model("L"), _settings(emissions_baseline_model="anthropic/claude-fable-5"))
+    assert all(c["key"] != "baseline_crosses_grid_basis" for c in same["caveats"])
 
 
 # ── PUE ──────────────────────────────────────────────────────────────────────
@@ -675,6 +907,46 @@ def test_a_free_local_model_reports_zero_cost_and_a_real_saving():
     assert report["co2e_g"] > 0  # never free in watts
 
 
+# ── the money percentage: "N% cheaper than frontier" ─────────────────────────
+def test_avoided_pct_is_null_when_the_baseline_itself_costs_nothing():
+    # Zero tokens means the baseline's own dollar cost is zero, so there is no
+    # denominator for a percentage — null, not 0% and not the -0%-shaped
+    # nonsense 0/0 would otherwise produce.
+    settings = _settings(emissions_baseline_model="anthropic/claude-fable-5")
+    report = _account(_model("M"), settings, tokens=(0, 0, 0, 0))
+    baseline = report["baseline"]
+    assert baseline["cost_usd"] == 0.0
+    assert baseline["avoided_usd_pct"] is None
+    assert report["cost"]["avoided_pct"] is None
+    # avoided_usd itself is still a number (0), it is only the percentage that
+    # has no defensible value — a null denominator does not erase the dollars.
+    assert baseline["avoided_usd"] == 0.0
+
+
+def test_a_zero_cost_local_model_reads_100_percent_cheaper_with_its_caveat():
+    settings = _settings(emissions_baseline_model="anthropic/claude-fable-5")
+    report = _account(_local_model(), settings, tokens=(1_000_000, 0, 0, 0))
+    assert report["cost"]["usd"] == 0.0
+    assert report["cost"]["avoided_pct"] == pytest.approx(100.0)
+    assert report["baseline"]["avoided_usd_pct"] == pytest.approx(100.0)
+    caveat = next(
+        c for c in report["caveats"] if c["key"] == "money_excludes_self_hosting_costs"
+    )
+    assert caveat["applies"] is True
+    assert caveat["direction"] == "overstates"
+    for phrase in ("list-price API spend only", "Scope 2 electricity"):
+        assert phrase in caveat["note"]
+    # The deliberate asymmetry: this run still carries a real, nonzero carbon
+    # figure even though the money comparison reads a clean 100% cheaper.
+    assert report["co2e_g"] > 0
+
+
+def test_the_self_hosting_caveat_does_not_apply_to_a_priced_cloud_run():
+    report = _account(_model("L"))
+    keys = {c["key"] for c in report["caveats"]}
+    assert "money_excludes_self_hosting_costs" not in keys
+
+
 # ── per-factor provenance ─────────────────────────────────────────────────────
 _EXPECTED_FACTORS = {
     "energy_class",
@@ -846,6 +1118,7 @@ def test_summary_and_event_fields_are_null_when_there_is_no_estimate():
             "avoided_co2e_g": None,
             # Added, and null on a legacy block for the same reason as the rest.
             "avoided_usd": None,
+            "avoided_usd_pct": None,
             "co2e_g_low": None,
             "co2e_g_high": None,
         }
@@ -857,6 +1130,7 @@ def test_summary_and_event_fields_are_null_when_there_is_no_estimate():
             "baseline_co2e_g",
             "avoided_co2e_g",
             "avoided_usd",
+            "avoided_usd_pct",
             "co2e_g_low",
             "co2e_g_high",
         }
@@ -871,11 +1145,15 @@ def test_summary_and_event_fields_read_the_stored_values():
         "scope3_g": report["scopes"]["scope3_g"],
         "avoided_co2e_g": report["baseline"]["avoided_co2e_g"],
         "avoided_usd": report["baseline"]["avoided_usd"],
+        "avoided_usd_pct": report["baseline"]["avoided_usd_pct"],
         "co2e_g_low": report["uncertainty"]["co2e_g_low"],
         "co2e_g_high": report["uncertainty"]["co2e_g_high"],
     }
     assert emission_event_fields(report)["baseline_co2e_g"] == report["baseline"]["co2e_g"]
     assert emission_event_fields(report)["avoided_usd"] == report["baseline"]["avoided_usd"]
+    assert (
+        emission_event_fields(report)["avoided_usd_pct"] == report["baseline"]["avoided_usd_pct"]
+    )
 
 
 def _run(**over) -> Run:
@@ -980,6 +1258,10 @@ async def test_rollup_sums_stored_values_and_is_not_recomputed(monkeypatch):
             "grid_co2e_g_per_kwh": 400.0,
             "pue": 1.2,
             "grid_co2e_basis": "location_based",
+            # Which precedence rule chose the factor travels with it: these runs
+            # took the global default, and said so at the time.
+            "grid_co2e_source": "global_default",
+            "grid_co2e_label": None,
             "runs": 2,
         }
     ]
@@ -1104,6 +1386,194 @@ async def test_a_window_mixing_ghg_protocol_grid_bases_is_flagged():
     assert "location-based with market-based" in out["disclaimer"]
 
 
+async def test_a_basis_mixed_window_reports_no_carbon_total_only_subtotals():
+    """The rule with teeth. Under the GHG Protocol a location-based and a
+    market-based figure may not be added, so the window has no carbon total at
+    all — not a total with a warning next to it, which is what a reader quotes
+    anyway. Energy and dollars stay, because those genuinely do sum.
+    """
+    location = _account(_model("L", id="anthropic/loc"), _settings())
+    market = _account(
+        _model("L", id="anthropic/mkt"),
+        _settings(grid_factors='{"anthropic": {"g_per_kwh": 120, "basis": "market_based"}}'),
+    )
+    out = await emissions(
+        project_id=None, days=30, user=None, db=_EmissionRows([_row(location), _row(market)])
+    )
+    totals = out["totals"]
+    assert totals["carbon_is_summable"] is False
+    assert totals["grid_bases"] == ["location_based", "market_based"]
+    for field in (
+        "co2e_g",
+        "co2e_g_low",
+        "co2e_g_high",
+        "scope1_g",
+        "scope2_g",
+        "scope3_g",
+        "baseline_co2e_g",
+        "avoided_co2e_g",
+        "avoided_pct",
+    ):
+        assert totals[field] is None, field
+    # Energy IS summable across bases — a kWh is a kWh however its carbon is
+    # accounted — and so is money.
+    assert totals["energy_wh"] == pytest.approx(
+        location["energy_wh_total"] + market["energy_wh_total"]
+    )
+    assert totals["energy_wh_compute"] == pytest.approx(
+        location["energy_wh"] + market["energy_wh"]
+    )
+    assert totals["avoided_usd"] == pytest.approx(
+        location["baseline"]["avoided_usd"] + market["baseline"]["avoided_usd"]
+    )
+    assert totals["not_summable_note"] and "may not be summed" in totals["not_summable_note"]
+    assert "NO SINGLE CARBON TOTAL" in out["disclaimer"]
+    assert out["factors"]["mixed_grid_bases"] is True
+
+    # The subtotals, one row per basis, each summable by construction.
+    rows = {r["basis"]: r for r in out["by_basis"]}
+    assert [r["basis"] for r in out["by_basis"]] == ["location_based", "market_based"]
+    assert rows["location_based"]["co2e_g"] == pytest.approx(location["co2e_g"])
+    assert rows["market_based"]["co2e_g"] == pytest.approx(market["co2e_g"])
+    assert rows["market_based"]["scope3_g"] == pytest.approx(market["scopes"]["scope3_g"])
+    for row in out["by_basis"]:
+        assert row["runs"] == 1
+        assert row["carbon_is_summable"] is True
+        assert row["not_summable_note"] is None
+    # Sums of the subtotals are the operator's business, not bench's: the two rows
+    # are deliberately not added anywhere in the response.
+    assert "co2e_g" not in {k for k in totals if totals[k] is not None}
+
+
+async def test_a_single_basis_window_still_reports_one_carbon_total():
+    """The other half of the contract: separating bases must not cost an operator
+    with one basis their totals. Differing factors within one basis (a corrected
+    grid figure) still sum, and still flag mixed_factors."""
+    coarse = _account(_model("L"), _settings(grid_co2e_g_per_kwh=400.0))
+    corrected = _account(_model("L"), _settings(grid_co2e_g_per_kwh=30.0))
+    out = await emissions(
+        project_id=None, days=30, user=None, db=_EmissionRows([_row(coarse), _row(corrected)])
+    )
+    totals = out["totals"]
+    assert totals["carbon_is_summable"] is True
+    assert totals["grid_bases"] == ["location_based"]
+    assert totals["co2e_g"] == pytest.approx(coarse["co2e_g"] + corrected["co2e_g"])
+    assert totals["not_summable_note"] is None
+    assert "NO SINGLE CARBON TOTAL" not in out["disclaimer"]
+    # Two different factors on one basis: no single factor behind the total, but a
+    # legitimate total. The two flags are different claims and stay separate.
+    assert out["factors"]["mixed_factors"] is True
+    assert out["factors"]["mixed_grid_bases"] is False
+    assert len(out["by_basis"]) == 1
+    assert out["by_basis"][0]["basis"] == "location_based"
+    assert out["by_basis"][0]["runs"] == 2
+
+
+async def test_a_window_with_legacy_basis_less_runs_is_its_own_group():
+    """A run recorded before bench stored a basis cannot be shown to share one, so
+    it groups separately rather than being folded into the location-based figure.
+    Its own carbon survives; what disappears is the combined total."""
+    modern = _account(_model("L"), _settings())
+    legacy = {"estimated": True, "energy_wh": 10.0, "co2e_g": 4.0, "grid_co2e_g_per_kwh": 400}
+    out = await emissions(
+        project_id=None, days=30, user=None, db=_EmissionRows([_row(modern), _row(legacy)])
+    )
+    totals = out["totals"]
+    assert totals["runs_without_grid_basis"] == 1
+    assert totals["carbon_is_summable"] is False
+    assert totals["grid_bases"] == ["location_based", None]
+    assert totals["co2e_g"] is None
+    rows = {r["basis"]: r for r in out["by_basis"]}
+    assert rows[None]["co2e_g"] == 4.0
+    assert rows[None]["runs_without_scope_split"] == 1
+    assert rows["location_based"]["co2e_g"] == pytest.approx(modern["co2e_g"])
+    # Energy still covers both runs, including the legacy row's compute-only figure.
+    assert totals["energy_wh"] == pytest.approx(modern["energy_wh_total"] + 10.0)
+    assert "unrecorded" in out["disclaimer"]
+
+
+async def test_a_legacy_only_window_keeps_its_carbon_total():
+    """One basis group, even if that group is "unrecorded": nothing is being mixed,
+    so there is nothing to withhold."""
+    legacy = {"estimated": True, "energy_wh": 10.0, "co2e_g": 4.0}
+    out = await emissions(
+        project_id=None, days=30, user=None, db=_EmissionRows([_row(legacy), _row(legacy)])
+    )
+    assert out["totals"]["carbon_is_summable"] is True
+    assert out["totals"]["co2e_g"] == 8.0
+    assert out["totals"]["grid_bases"] == [None]
+
+
+async def test_rollup_rows_carry_their_own_bases_and_usually_stay_summable():
+    """Why per-row bases matter: a model belongs to one provider, so a per-model
+    row normally keeps a carbon figure even when the window has none. A harness
+    that ran both models does not."""
+    location = _account(_model("L", id="anthropic/loc"), _settings())
+    market = _account(
+        _model("L", id="anthropic/mkt"),
+        _settings(grid_factors='{"anthropic": {"g_per_kwh": 120, "basis": "market_based"}}'),
+    )
+    harness = uuid.uuid4()
+    out = await emissions(
+        project_id=None,
+        days=30,
+        user=None,
+        db=_EmissionRows(
+            [
+                _row(location, harness_id=harness, model_used="anthropic/loc"),
+                _row(market, harness_id=harness, model_used="anthropic/mkt"),
+            ]
+        ),
+    )
+    by_model = {r["model"]: r for r in out["by_model"]}
+    assert by_model["anthropic/loc"]["carbon_is_summable"] is True
+    assert by_model["anthropic/loc"]["co2e_g"] == pytest.approx(location["co2e_g"])
+    assert by_model["anthropic/mkt"]["grid_bases"] == ["market_based"]
+    # One harness ran both, so its carbon is not summable and its energy is.
+    row = out["by_harness"][0]
+    assert row["carbon_is_summable"] is False
+    assert row["co2e_g"] is None
+    assert row["energy_wh"] == pytest.approx(
+        location["energy_wh_total"] + market["energy_wh_total"]
+    )
+    # Same rule per day, so a mixed day still plots energy rather than nothing.
+    day = out["by_day"][0]
+    assert day["carbon_is_summable"] is False
+    assert day["co2e_g"] is None
+    assert day["avoided_co2e_g"] is None
+    assert day["energy_wh"] == pytest.approx(row["energy_wh"])
+
+
+async def test_the_rollup_shows_which_rule_chose_each_recorded_factor():
+    market = _account(
+        _local_model(),
+        _settings(
+            grid_factors='{"local": {"g_per_kwh": 42, "basis": "market_based", "label": "PPA"}}'
+        ),
+    )
+    legacy = _account(_local_model(), _settings(local_grid_co2e_g_per_kwh=30.0))
+    out = await emissions(
+        project_id=None, days=30, user=None, db=_EmissionRows([_row(market), _row(legacy)])
+    )
+    recorded = {r["grid_co2e_source"]: r for r in out["factors"]["recorded"]}
+    assert recorded["provider:local"]["grid_co2e_label"] == "PPA"
+    assert recorded["provider:local"]["grid_co2e_g_per_kwh"] == 42.0
+    assert recorded["local_setting"]["grid_co2e_label"] is None
+    assert recorded["local_setting"]["grid_co2e_g_per_kwh"] == 30.0
+
+
+async def test_the_rollup_reports_the_configured_overrides_for_reference_only(monkeypatch):
+    configured = _settings(
+        grid_factors='{"local": {"g_per_kwh": 42, "basis": "location_based", "label": "IESO"}}'
+    )
+    monkeypatch.setattr(analytics, "get_settings", lambda: configured)
+    out = await emissions(project_id=None, days=30, user=None, db=_EmissionRows([]))
+    assert out["factors"]["grid_factors"] == {
+        "local": {"g_per_kwh": 42.0, "basis": "location_based", "label": "IESO"}
+    }
+    assert "for reference only" in out["factors"]["note"]
+
+
 async def test_rollup_points_at_per_run_provenance_rather_than_its_own_settings():
     out = await emissions(project_id=None, days=30, user=None, db=_EmissionRows([]))
     factors = out["factors"]
@@ -1152,6 +1622,7 @@ async def test_avoided_pct_is_signed_and_safe_when_there_is_no_baseline():
         "runs_without_baseline": 0,
         "runs_without_money_comparison": 0,
         "runs_without_uncertainty_band": 0,
+        "runs_without_grid_basis": 0,
         "energy_wh": 0.0,
         "energy_wh_compute": 0.0,
         "co2e_g": 0.0,
@@ -1162,13 +1633,72 @@ async def test_avoided_pct_is_signed_and_safe_when_there_is_no_baseline():
         "avoided_co2e_g": 0.0,
         "avoided_pct": 0.0,
         "avoided_usd": 0.0,
+        "baseline_usd": 0.0,
+        # Unlike the carbon avoided_pct above, an empty window's money share is
+        # null, not 0.0: there is no baseline spend to divide by.
+        "avoided_usd_pct": None,
         "co2e_g_low": 0.0,
         "co2e_g_high": 0.0,
+        # An empty window contains no basis at all, so nothing is being mixed and
+        # its (zero) carbon is summable. Zero here is a real zero: there were no
+        # runs, not runs whose carbon could not be added.
+        "grid_bases": [],
+        "carbon_is_summable": True,
+        "not_summable_note": None,
     }
     heavier = _account(_model("XL"), _settings(emissions_baseline_model="anthropic/claude-haiku-4-5"))
     out = await emissions(project_id=None, days=30, user=None, db=_EmissionRows([_row(heavier)]))
     assert out["totals"]["avoided_co2e_g"] < 0
     assert out["totals"]["avoided_pct"] < 0
+    assert out["totals"]["avoided_usd_pct"] < 0
+
+
+async def test_money_rollups_sum_dollars_rather_than_average_percentages():
+    """Two runs against the same baseline, wildly different avoided_pct each —
+    the correct window figure is the summed-dollars ratio, not the mean of
+    70.0 and -900.0 (which would be a nonsense -415.0).
+    """
+    settings = _settings(emissions_baseline_model="anthropic/claude-fable-5")
+    # $3/Mtok input vs Fable 5's $10/Mtok: 1 Mtok costs $3, avoids $7 on a $10
+    # baseline -> 70.0% cheaper.
+    cheap = _account(_model("L"), settings, tokens=(1_000_000, 0, 0, 0))
+    # 100x the tokens at the same prices: $300 vs a $1,000 baseline, same 70.0%
+    # avoided_pct per run but a hundred times the dollars behind it.
+    also_cheap = _account(_model("L"), settings, tokens=(100_000_000, 0, 0, 0))
+    assert cheap["cost"]["avoided_pct"] == pytest.approx(70.0)
+    assert also_cheap["cost"]["avoided_pct"] == pytest.approx(70.0)
+
+    db = _EmissionRows([_row(cheap, model_used="anthropic/test"), _row(also_cheap, model_used="anthropic/test")])
+    out = await emissions(project_id=None, days=30, user=None, db=db)
+
+    # Summed-dollars identity: (7 + 700) avoided over (10 + 1,000) baseline.
+    expected_pct = 100.0 * (7.0 + 700.0) / (10.0 + 1_000.0)
+    assert out["totals"]["avoided_usd_pct"] == pytest.approx(expected_pct, abs=1e-3)
+    assert out["totals"]["avoided_usd_pct"] == pytest.approx(70.0, abs=1e-3)  # same ratio here
+    assert out["totals"]["baseline_usd"] == pytest.approx(1_010.0)
+
+    model_bucket = next(m for m in out["by_model"] if m["model"] == "anthropic/test")
+    assert model_bucket["avoided_usd_pct"] == pytest.approx(expected_pct, abs=1e-3)
+    assert model_bucket["baseline_usd"] == pytest.approx(1_010.0)
+
+
+async def test_money_rollup_pct_is_null_without_averaging_to_zero():
+    # One run with a baseline, one run recorded before money existed at all —
+    # the bucket must not silently treat the missing one as a $0 baseline.
+    settings = _settings(emissions_baseline_model="anthropic/claude-fable-5")
+    priced = _account(_model("L"), settings, tokens=(1_000_000, 0, 0, 0))
+    legacy = {"estimated": True, "co2e_g": 4.0}  # predates baseline/money entirely
+    out = await emissions(
+        project_id=None,
+        days=30,
+        user=None,
+        db=_EmissionRows([_row(priced, model_used="anthropic/test"), _row(legacy, model_used="anthropic/test")]),
+    )
+    model_bucket = next(m for m in out["by_model"] if m["model"] == "anthropic/test")
+    # Only the priced run's dollars are in the bucket; the legacy run contributes
+    # nothing (not a $0 baseline), so the ratio is exactly the priced run's own.
+    assert model_bucket["avoided_usd_pct"] == pytest.approx(70.0)
+    assert model_bucket["baseline_usd"] == pytest.approx(10.0)
 
 
 async def test_rollup_declares_its_scan_bound_and_never_claims_measurement():
@@ -1279,6 +1809,39 @@ def test_the_doc_carries_every_other_default_the_code_uses():
     # The bases, spelled the way the JSON spells them.
     for basis in GRID_BASES:
         assert basis in text
+
+
+def test_the_doc_documents_the_per_provider_factor_its_precedence_and_the_basis_rule():
+    """The doc is rendered in-product, and these are the parts an operator has to
+    read before configuring a factor — plus the argument a sustainability reviewer
+    always asks for, which must be in the document and not only in a commit."""
+    from bench.config import GRID_FACTOR_LABEL_MAX, GRID_FACTOR_PROVIDERS
+    from bench.services.emissions import GRID_SOURCE_RULES
+
+    text = _methodology_text()
+    assert "BENCH_GRID_FACTORS" in text
+    assert str(GRID_FACTOR_LABEL_MAX) in text
+    for provider in GRID_FACTOR_PROVIDERS:
+        assert provider in text, f"provider {provider} missing from the doc"
+    # Every source key an operator will see on a run.
+    for rule in GRID_SOURCE_RULES:
+        assert rule in text, f"source key {rule} missing from the doc"
+    assert "provider:<name>" in text
+    # The legacy settings are documented as legacy, not quietly dropped.
+    assert "BENCH_LOCAL_GRID_CO2E_G_PER_KWH" in text
+    assert "legacy" in text.lower()
+    # The IP-inference argument, stated rather than implied.
+    for phrase in (
+        "configuration and not geolocation",
+        "IP",
+        "caller's location is not the load's location",
+        "whichever upstream has capacity",
+        "zero network calls",
+    ):
+        assert phrase in text, f"the doc no longer says: {phrase}"
+    # And what basis separation does to a total.
+    for phrase in ("by_basis", "carbon_is_summable", "mixed_grid_bases"):
+        assert phrase in text, f"the doc no longer says: {phrase}"
 
 
 def test_the_doc_states_the_exclusions_and_refuses_to_overclaim():

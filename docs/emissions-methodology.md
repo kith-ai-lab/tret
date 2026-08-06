@@ -277,11 +277,123 @@ different accounting question.
 
 So bench records a basis label on every run (`grid_co2e_basis`:
 `location_based` | `market_based` | `unspecified`), and
-`GET /api/analytics/emissions` flags a window that mixes them. The shipped
-default factor is a physical-grid average, hence `location_based`. An operator's
-own factor defaults to `unspecified` until they say which it is — bench will not
-guess a basis on your behalf, and a factor passed explicitly into the accounting
-call is always `unspecified`.
+`GET /api/analytics/emissions` **stops reporting a single carbon total** for a
+window that mixes them (see [Basis separation](#basis-separation-what-may-be-added-to-what)).
+The shipped default factor is a physical-grid average, hence `location_based`. An
+operator's own factor defaults to `unspecified` until they say which it is —
+bench will not guess a basis on your behalf, and a factor passed explicitly into
+the accounting call is always `unspecified`.
+
+### Per-provider factors: `BENCH_GRID_FACTORS`
+
+One global factor is the wrong shape for a real deployment. An operator may
+self-host in a known place *and* call two cloud providers, one of which publishes
+a factor they accept. So the grid factor is configurable **per provider**, as
+JSON keyed by bench provider name (`local`, `anthropic`, `kimi`, `openrouter`):
+
+```
+BENCH_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based","label":"Ontario grid, IESO 2024"},"anthropic":{"g_per_kwh":120,"basis":"market_based","label":"provider PPA disclosure"}}
+```
+
+| key | required | meaning |
+|---|---|---|
+| `g_per_kwh` | yes | gCO2e/kWh. Must be positive and finite — a zero would claim carbon-free electricity, which no grid delivers. |
+| `basis` | no | `location_based` \| `market_based` \| `unspecified`. Defaults to `unspecified`: bench does not know what your number represents and will not guess. |
+| `label` | no | A short note (≤ 80 chars) shown beside the factor in the run's provenance table — where you got it, in your words. |
+
+Validation is strict inside an entry and forgiving about provider names, and the
+asymmetry is deliberate:
+
+- An **unknown key inside an entry** is a hard startup error. A mistyped
+  `gCO2e_per_kwh` that was quietly ignored would leave you believing you had
+  configured a factor while bench applied the global default.
+- An **unrecognised provider name** logs a warning at startup and is kept. The
+  catalog gains providers over time, and refusing to boot on a config that was
+  correct when it was written is the worse failure. Such an entry is inert until a
+  provider of that name exists.
+- A **blank** value means "not set", exactly like `BENCH_LOCAL_GRID_CO2E_G_PER_KWH`
+  — a `${VAR:-}` interpolation for a knob you never set must not stop the backend
+  booting.
+
+### Precedence, and what each run records
+
+| rank | rule | source key | setting |
+|---|---|---|---|
+| 1 | a factor passed straight into the accounting call | `run_override` | — (no basis claimed) |
+| 2 | `BENCH_GRID_FACTORS` entry for the run's provider | `provider:<name>` | `BENCH_GRID_FACTORS[<name>]` |
+| 3 | the self-hosted factor, on a local run (**legacy**) | `local_setting` | `BENCH_LOCAL_GRID_CO2E_G_PER_KWH` |
+| 4 | the global default | `global_default` | `BENCH_GRID_CO2E_G_PER_KWH` |
+
+Every run records **which rule applied**, not just the number it produced:
+`grid_co2e_source` carries the stable key above and `grid_co2e_label` carries your
+label when you set one, and both also appear on the `grid_intensity` provenance
+record as `source_key` / `source_rule` / `source_label`. A provenance table can
+therefore explain *why* a factor was used, which is the more interesting half once
+several factors are configured and one run looks wrong.
+
+`BENCH_LOCAL_GRID_CO2E_G_PER_KWH` and `BENCH_LOCAL_GRID_CO2E_BASIS` are
+**legacy**: still read, still documented, and behaving exactly as they always
+have for any provider without an entry of its own. `BENCH_GRID_FACTORS` with a
+`"local"` key supersedes them and is strictly more expressive (it carries a
+label), so prefer it in new configuration. Nothing is being removed.
+
+### Why this is configuration and not geolocation
+
+The obvious-looking feature here is to detect the caller's region and apply that
+region's grid factor. Bench does not do this, and will not, and it is worth being
+explicit because a reader will ask:
+
+- **The caller's location is not the load's location.** For a cloud API call, the
+  request is served by a data centre whose region has nothing to do with where the
+  caller sits. Attributing a Toronto grid factor to inference served from Virginia
+  is not an approximation; it is a different number about a different place.
+- **Providers do not disclose the serving region** per request. There is nothing
+  to read even if bench wanted to.
+- **A router makes it worse.** OpenRouter sends a call to whichever upstream has
+  capacity, so even the *provider* — let alone the region — can vary between two
+  identical requests.
+- **An IP lookup is also a network call and a privacy leak**, and bench's promise
+  is that it makes no network calls except to the LLM providers you configure
+  (plus an optional model-catalog fetch), with no telemetry ever. A geolocation
+  dependency would break that for a number that would still be wrong.
+
+Where location *is* knowable, the operator is the one who knows it: they
+self-host somewhere specific, or they have pinned a provider to a region, or they
+have a supplier disclosure in hand. So the factor comes from them. This adds
+**zero network calls** — `BENCH_GRID_FACTORS` is parsed from the environment at
+startup and nothing else happens.
+
+### Basis separation: what may be added to what
+
+Per-provider factors make a basis-mixed window the normal case rather than an edge
+case, which forces the question of what a window total actually means.
+
+| figure | summable across bases? | why |
+|---|---|---|
+| energy (Wh) | **yes** | A kWh is a kWh regardless of how its carbon is accounted. |
+| dollars | **yes** | A price has no Scope 2 accounting method. |
+| carbon (gCO2e) | **no** | Location-based and market-based figures answer different questions; adding them yields a meaningless number, not a smaller one. |
+| scope 1/2/3 | **no** | Scope totals *are* carbon, so they inherit the rule exactly. |
+| the judgment band | **no** | It is a band around carbon. |
+
+So `GET /api/analytics/emissions` reports `co2e_g`, the three scope figures,
+`baseline_co2e_g`, `avoided_co2e_g`, `avoided_pct` and the band as **`null`**
+whenever the window spans more than one basis, sets
+`totals.carbon_is_summable: false`, and puts the real figures in **`by_basis`** —
+one row per basis, each summable by construction. Energy and money stay populated.
+
+Reporting a total with a warning beside it was the alternative, and it is worse: a
+number on a page gets quoted, and the warning does not travel with it.
+
+Two details worth stating:
+
+- A run recorded **before bench stored a basis** counts as its own group (`null`).
+  It cannot be shown to share a basis with a location-based run, and assuming it
+  does would be the same error in the other direction. A window of only such runs
+  has one group, so it keeps its total.
+- Per-row rollups follow the same rule and mostly keep their figures: a model
+  belongs to one provider, so a `by_model` row usually stays summable even when the
+  window does not. A harness that ran two providers does not, and says so.
 
 ### Regional sourcing
 
@@ -289,7 +401,9 @@ call is always `unspecified`.
 live dependency in the accounting path would make a stored run's carbon figure
 depend on a third party's uptime, and each of these sources carries licence or
 coverage limits an operator has to accept for themselves. The seam is
-`BENCH_GRID_CO2E_G_PER_KWH` (and its local variant).
+configuration: `BENCH_GRID_FACTORS` per provider, `BENCH_GRID_CO2E_G_PER_KWH`
+globally (and the legacy local variant). You paste in a figure you sourced and can
+defend; bench never fetches one.
 
 | source | granularity | catch |
 |---|---|---|
@@ -331,16 +445,81 @@ published and exact**, so `cost.usd` and `cost.baseline_usd` are arithmetic, not
 estimation. Nothing is inferred from hardware, batching or a grid mix.
 
 ```
-avoided_usd = baseline_usd - actual_usd
+avoided_usd     = baseline_usd - actual_usd
+avoided_usd_pct = 100 * avoided_usd / baseline_usd    # null if baseline_usd <= 0
 ```
 
 Signed exactly like `avoided_co2e_g`: negative means this run cost **more** than
 the baseline would have — a surcharge, reported as one.
 
-The counterfactual is still an assumption, and it is the *same* assumption the
-carbon comparison makes (see below). Money and carbon can also disagree: a cheap
-reasoning model saves dollars while costing more carbon, and bench reports both
-rather than picking the flattering one.
+### The percentage, and why it gets a decimal place when carbon does not
+
+`avoided_usd_pct` ("N.N% cheaper than frontier") is carried on `cost.avoided_pct`
+and on `baseline.avoided_usd_pct` — same figure, two access points, so it travels
+wherever `avoided_usd` already does (run summary, run detail, the SSE
+`usage`/`done` events, chat messages, and the `/api/analytics/emissions` window
+totals and `by_model`/`by_harness` rollups).
+
+It is reported to **one decimal place**, unlike the carbon comparison's
+deliberately coarse "~50x lighter" — and that asymmetry is intentional, not an
+oversight. The carbon ratio divides two *estimated* figures, each carrying the
+same order-of-magnitude judgment band, so a decimal place on it would be false
+precision. The money ratio divides two *arithmetic* figures — published list
+prices multiplied by exact token counts — so a decimal place on it is simply
+correct.
+
+`avoided_usd_pct` is **null, never `0%`**, in exactly three cases: no baseline
+could be resolved, the baseline's own cost for these tokens is zero (a
+misconfigured `BENCH_EMISSIONS_BASELINE_MODEL` pointed at a free model has no
+denominator to divide by), or the run predates the money comparison entirely.
+It is exactly **`0.0`** only when the run genuinely used the baseline model
+itself — comparing a run to itself is a real zero, not a missing one. A window
+rollup follows the same rule at bucket scale: `avoided_usd_pct` there is
+computed from **summed dollars** (`sum(avoided_usd) / sum(baseline_usd)`), never
+by averaging each run's own percentage — averaging percentages would let a
+handful of small-baseline runs swamp a window whose dollars are dominated by a
+few large ones, which is not the same number and is not honest.
+
+### List prices, not your prices
+
+`prices_are_exact` is true of the *prices*, not of what any particular operator
+actually pays. The catalog carries published per-token list rates; a negotiated
+enterprise agreement, committed-spend discount, or promotional credit is not
+modelled, so `avoided_usd`/`avoided_usd_pct` describe list-price API spend, not
+an operator's actual invoice.
+
+### The same-token caveat applies here too
+
+The counterfactual behind `avoided_usd`/`avoided_usd_pct` is still an
+assumption, and it is the *same* assumption the carbon comparison makes (see
+[The counterfactual](#the-counterfactual) below): these are the tokens *this*
+run actually produced, re-priced through the baseline model. A different model
+would not have produced identical token counts — it might need more turns, or
+produce a worse answer someone redoes. Money and carbon can also disagree: a
+cheap reasoning model saves dollars while costing more carbon, and bench
+reports both rather than picking the flattering one.
+
+### Zero-cost (local) models: a real 100%, and a deliberate asymmetry
+
+A self-hosted model bills **$0** through bench's token API, so it can
+legitimately read `avoided_usd_pct: 100.0` — "100% cheaper than frontier." That
+figure is correct as far as it goes, and it does not go very far: it is **list-
+price API spend only**. It excludes the electricity the machine actually drew
+and any amortized hardware cost — bench does not model self-hosting's
+electricity bill or capital cost, so those are not zero, they are simply not
+counted in this figure. Every run with a zero-cost model carries a named caveat
+saying exactly this, `money_excludes_self_hosting_costs`, with
+`direction: "overstates"` — the real economic saving is smaller than 100% once
+those costs are counted, even though bench cannot say by how much.
+
+This is a **deliberate asymmetry** with the carbon accounting above, worth
+stating plainly: the emissions model *does* attribute Scope 2 electricity (and,
+if `BENCH_EMBODIED_G_PER_RUN` is set, embodied hardware) to a self-hosted run.
+So the same run that reads "100% cheaper than frontier" in dollars can — and
+typically does — carry a real, nonzero `co2e_g`. Money tracks what bench's
+token API bills; carbon tracks what running the model actually draws. Neither
+figure is wrong; they are answering different questions, and bench reports both
+rather than letting the flattering one stand alone.
 
 ## Uncertainty: a band, not an interval
 
@@ -407,7 +586,8 @@ operator**, not the model provider and not bench-the-project.
   a claim you can check.
 - **Scope 2** is purchased energy. Self-hosting means the operator buys the kWh,
   so those emissions are theirs at the second scope. This is where
-  `BENCH_LOCAL_GRID_CO2E_G_PER_KWH` belongs.
+  `BENCH_GRID_FACTORS={"local":{…}}` belongs — or the legacy
+  `BENCH_LOCAL_GRID_CO2E_G_PER_KWH`, which still works.
 - **Scope 3** covers cloud inference as a *purchased service*: the provider's own
   Scope 1/2 becomes the operator's Scope 3 Category 1 (purchased goods and
   services). They never bought the electricity — they bought tokens. Local
@@ -443,6 +623,13 @@ carbon and dollars.
 - **An unresolvable baseline reports `null`, not 0.** If the configured baseline
   names a model the catalog does not have, bench reports no comparison rather than
   silently substituting one.
+- **The comparison can cross a basis, and says when it does.** The counterfactual
+  is priced at the factor the *baseline model's* provider carries, which is honest
+  per side but means a run on a location-based factor can be compared against a
+  market-based baseline. That difference is not a GHG Protocol quantity, so such a
+  run carries the `baseline_crosses_grid_basis` caveat and the baseline block
+  records its own `grid_co2e_basis` and `grid_co2e_source`. Configure one basis
+  across your providers if you need the comparison to be like for like.
 
 ## Exclusions, stated plainly
 
@@ -526,16 +713,47 @@ order of payoff:
 
 ### 1. Grid intensity (biggest single win)
 
+Per provider, which is the shape a real deployment has:
+
+```
+BENCH_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based","label":"Ontario grid, IESO 2024"},"anthropic":{"g_per_kwh":120,"basis":"market_based","label":"provider PPA disclosure"}}
+```
+
+Or globally, which is still the fallback for every provider without an entry:
+
 ```
 BENCH_GRID_CO2E_G_PER_KWH=<your region or supplier>
 BENCH_GRID_CO2E_BASIS=location_based|market_based
+```
+
+The legacy self-hosted pair still works and is not going away:
+
+```
 BENCH_LOCAL_GRID_CO2E_G_PER_KWH=<your site factor>
 BENCH_LOCAL_GRID_CO2E_BASIS=market_based
 ```
-Get it from eGRID (US subregional), your national inventory, your supplier's
-disclosure, or Electricity Maps / WattTime if you accept their terms. **Say which
-basis it is** — a market-based figure mixed into a location-based total is not a
-smaller number, it is a meaningless one.
+
+Get the numbers from eGRID (US subregional), your national inventory, your
+supplier's disclosure, a provider's own published factor, or Electricity Maps /
+WattTime if you accept their terms. **Say which basis each one is** — a
+market-based figure mixed into a location-based total is not a smaller number, it
+is a meaningless one, and bench will withhold the combined total rather than print
+it (see [Basis separation](#basis-separation-what-may-be-added-to-what)).
+
+A worked example. You self-host on an Ontario grid you have a published factor
+for, and you also call Anthropic, whose PPA disclosure you accept:
+
+```
+BENCH_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based","label":"Ontario grid, IESO 2024"},"anthropic":{"g_per_kwh":120,"basis":"market_based","label":"provider PPA disclosure"}}
+```
+
+A local run then records `grid_co2e_g_per_kwh: 42`, `grid_co2e_basis:
+location_based`, `grid_co2e_source: provider:local`, `grid_co2e_label: "Ontario
+grid, IESO 2024"`; an Anthropic run records 120 / `market_based` /
+`provider:anthropic`. A window containing both has an energy total and a dollar
+total but **no carbon total** — it has two, one per basis, in `by_basis`. That is
+not bench being awkward; it is the GHG Protocol, and it is the reason the label
+travels with every number.
 
 ### 2. Energy class per model
 
@@ -597,15 +815,35 @@ Each run's `energy_accounting` block carries, additively:
   `deployment`, `embodied_g`, `scopes`, `baseline`;
 - the split: `input_weight`, `output_weight`, `energy_wh_per_mtok_input`,
   `energy_wh_per_mtok_output`, `tokens`, `energy_wh_by_bucket`;
-- resolution: `pue_profile`, `grid_co2e_basis`, `reasoning_tier`;
-- `cost` — money against the same-token baseline;
+- resolution: `pue_profile`, `grid_co2e_basis`, `reasoning_tier`, plus
+  `grid_co2e_source` (which precedence rule chose the grid factor:
+  `provider:<name>` | `local_setting` | `global_default` | `run_override`) and
+  `grid_co2e_label` (the operator's own note about it). A run recorded before
+  these existed carries neither — read them as unknown, never as
+  `global_default`;
+- `cost` — money against the same-token baseline, including `avoided_pct` (the
+  share of frontier spend avoided, one decimal place, null rather than `0%`
+  when there is no baseline or the baseline itself costs nothing) — also
+  reachable as `baseline.avoided_usd_pct`, the same figure;
 - `uncertainty` — the band and its per-factor sensitivity;
 - `factors` — **a list** (not an object: JSONB does not preserve key order) with
   one record per constant, each carrying `value`, `unit`, `source`, `url`, `date`,
   `confidence` and a `setting` to change it. Confidence is one of `exact`,
-  `structural`, `calibrated`, `low`, `placeholder`, `excluded`;
+  `structural`, `calibrated`, `low`, `placeholder`, `excluded`. The
+  `grid_intensity` record additionally carries `basis`, `overridden`,
+  `source_key`, `source_rule` and `source_label`, and its `setting` names the one
+  setting that actually applied rather than the three that might have;
 - `caveats` — the named biases that apply to this particular run, each with a
-  `direction` (`understates` / `overstates` / `either`).
+  `direction` (`understates` / `overstates` / `either`). Includes
+  `money_excludes_self_hosting_costs` (`direction: "overstates"`) on any run
+  whose model billed nothing through the token API — see
+  [Zero-cost (local) models](#zero-cost-local-models-a-real-100-and-a-deliberate-asymmetry)
+  above.
+
+`avoided_usd_pct` travels the same additive path as `avoided_usd` outside this
+block too: a run summary, a run detail, the SSE `usage`/`done` events, and a
+chat message all carry it, and `GET /api/analytics/emissions` carries it on the
+window totals and on each `by_model`/`by_harness` row.
 
 Nothing downstream needs to hardcode a source string or a constant: every number
 in the block explains itself.
@@ -622,7 +860,13 @@ makes the aggregate disagree with the per-run figures the runs API and deliverab
 provenance already show. So:
 
 - `totals` are plain sums of stored per-run values, including `avoided_usd` and
-  the band (`co2e_g_low` / `co2e_g_high`).
+  the band (`co2e_g_low` / `co2e_g_high`). `totals.avoided_usd_pct`, and the same
+  field on each `by_model`/`by_harness` row, is computed from those **summed
+  dollars** (`avoided_usd` over the also-summed `baseline_usd`) — never from
+  averaging each run's own percentage, which would let a handful of
+  small-baseline runs outweigh a window whose spend is actually dominated by a
+  few large ones. It is `null`, not `0%`, wherever a bucket has no baseline
+  spend to divide by — including a window of entirely zero-cost local runs.
 - Summing a band low-with-low assumes the factors are wrong in the *same*
   direction for every run — the honest assumption, since it is the same class
   table, PUE and grid factor being applied throughout.
@@ -635,6 +879,26 @@ provenance already show. So:
   factor, or cloud with self-hosted runs, or **location-based with market-based
   factors**, has no single honest factor behind its total — and the last of those
   is not summable under the GHG Protocol at all.
+- `factors.mixed_grid_bases` is the stronger, separate flag for exactly that last
+  case, and it is a different claim: `mixed_factors` means "no single factor sits
+  behind these totals"; `mixed_grid_bases` means "there is no total". When it is
+  true, `totals.co2e_g`, the three scope figures, `baseline_co2e_g`,
+  `avoided_co2e_g`, `avoided_pct` and the band are `null`,
+  `totals.carbon_is_summable` is `false`, `totals.not_summable_note` says why, and
+  the subtotals are in **`by_basis`** — one row per basis (`location_based`,
+  `market_based`, `unspecified`, then `null` for runs that recorded none), each
+  with its own runs count, energy, carbon, scope split and baseline comparison.
+  `totals.energy_wh`, `energy_wh_compute`, `avoided_usd` and `baseline_usd` are
+  unaffected: those sum across bases legitimately.
+- Every `by_model` / `by_harness` / `by_day` row carries its own `grid_bases` and
+  `carbon_is_summable`, and withholds its carbon on the same rule. A `by_model` row
+  usually keeps its figure — a model belongs to one provider — which is what makes
+  a basis-mixed window still readable. Rows are ordered by summed carbon even
+  where that sum is not published: an ordering is not a claim.
+- `factors.grid_factors` reports the per-provider overrides configured **right
+  now**, with the same reference-only status as the rest of that block, and
+  `factors.recorded` gains `grid_co2e_source` and `grid_co2e_label` so a mixed
+  window shows which rule produced each combination rather than only its value.
 - Runs with **no** estimate are excluded from every total and counted in
   `totals.runs_without_estimate`. `null` is not `0`.
 - Runs recorded before the scope split, the baseline, money or the band existed

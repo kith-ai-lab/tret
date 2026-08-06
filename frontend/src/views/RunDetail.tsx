@@ -212,6 +212,7 @@ export function RunDetailView() {
         co2eGLow={co2eGLow}
         co2eGHigh={co2eGHigh}
         avoidedUsd={live?.avoided_usd ?? run.avoided_usd}
+        avoidedUsdPct={live?.avoided_usd_pct ?? run.avoided_usd_pct}
       />
 
       {run.energy && <EnergyDetail energy={run.energy} />}

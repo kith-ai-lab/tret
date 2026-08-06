@@ -19,9 +19,13 @@ What is here, and what each part is worth:
   (hyperscaler cloud / workstation / on-prem facility). `energy_wh` stays the
   *compute* (IT-load) figure it has always been; `energy_wh_total` is
   compute x PUE.
-* **Grid intensity** — a cited IEA global average by default, carrying an
-  explicit GHG Protocol **basis** label (location-based / market-based /
-  unspecified) because mixing the two is meaningless.
+* **Grid intensity** — a cited IEA global average by default, optionally
+  replaced **per provider** by operator configuration (`BENCH_GRID_FACTORS`),
+  carrying an explicit GHG Protocol **basis** label (location-based /
+  market-based / unspecified) because mixing the two is meaningless, and a
+  stable `grid_co2e_source` key saying *which* rule chose the factor. It is
+  configuration, never inference: bench does not geolocate anything and makes
+  no network call to resolve a factor (`GRID_NO_INFERENCE_NOTE`).
 * **Scopes** — the GHG Protocol mapping for the *bench operator*: Scope 1 is
   always 0, self-hosted electricity is Scope 2, cloud inference is Scope 3
   (purchased service), and amortized local hardware is Scope 3 (capital goods).
@@ -61,7 +65,15 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from bench.config import Settings, get_settings
+from bench.config import (
+    GRID_BASES,
+    GRID_BASIS_LOCATION,
+    GRID_BASIS_MARKET,
+    GRID_BASIS_UNSPECIFIED,
+    GridFactor,
+    Settings,
+    get_settings,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from bench.providers.catalog import ModelCatalog, ModelInfo
@@ -274,10 +286,72 @@ PUE_REFERENCE = {
 # interchangeable and they must not be summed. Google's published 0.03
 # gCO2e/prompt is market-based and roughly 3x below its own location-based
 # figure, which is exactly why the label has to travel with the number.
-GRID_BASIS_LOCATION = "location_based"
-GRID_BASIS_MARKET = "market_based"
-GRID_BASIS_UNSPECIFIED = "unspecified"
-GRID_BASES = (GRID_BASIS_LOCATION, GRID_BASIS_MARKET, GRID_BASIS_UNSPECIFIED)
+#
+# The three labels themselves are defined in bench/config.py (Settings has to
+# validate against them and config.py cannot import this module) and re-exported
+# here, which is where a reader looks for what they mean.
+GRID_BASIS_MEANING = {
+    GRID_BASIS_LOCATION: "the physical grid that served the load",
+    GRID_BASIS_MARKET: "contractual renewable claims — PPAs, RECs, GOs",
+    GRID_BASIS_UNSPECIFIED: "not stated; bench will not guess a basis on your behalf",
+}
+
+# ── which rule chose the factor ──────────────────────────────────────────────
+# A run records not just the grid factor it used but *why* that factor applied,
+# as a stable machine-readable key. Without it a provenance table can show the
+# value and not the reason, which is the more interesting half when an operator
+# has configured several factors and one run looks wrong.
+#
+# Precedence, highest first:
+#   run_override    — a factor passed straight into the accounting call. No
+#                     provenance and no basis: bench was handed a number.
+#   provider:<name> — BENCH_GRID_FACTORS entry for the run's provider.
+#   local_setting   — the legacy BENCH_LOCAL_GRID_CO2E_G_PER_KWH, on a
+#                     self-hosted run.
+#   global_default  — BENCH_GRID_CO2E_G_PER_KWH.
+GRID_SOURCE_RUN_OVERRIDE = "run_override"
+GRID_SOURCE_PROVIDER = "provider"
+GRID_SOURCE_LOCAL_SETTING = "local_setting"
+GRID_SOURCE_GLOBAL_DEFAULT = "global_default"
+# The rule keys, in precedence order. A `provider:<name>` source key starts with
+# GRID_SOURCE_PROVIDER + ":"; the bare word is the rule, the suffix is which
+# provider matched.
+GRID_SOURCE_RULES = (
+    GRID_SOURCE_RUN_OVERRIDE,
+    GRID_SOURCE_PROVIDER,
+    GRID_SOURCE_LOCAL_SETTING,
+    GRID_SOURCE_GLOBAL_DEFAULT,
+)
+GRID_PRECEDENCE_NOTE = (
+    "Precedence: BENCH_GRID_FACTORS entry for the run's provider, then "
+    "BENCH_LOCAL_GRID_CO2E_G_PER_KWH for a self-hosted run (legacy, still "
+    "honoured), then BENCH_GRID_CO2E_G_PER_KWH. A factor passed directly into the "
+    "accounting call outranks all three and carries no basis claim."
+)
+# Why this is configuration and not geolocation. Recorded on the factor so the
+# question a reviewer always asks is answered from the stored run.
+GRID_NO_INFERENCE_NOTE = (
+    "Operator configuration, never inference: bench does not derive a grid region "
+    "from an IP address. For a cloud API call the caller's location says nothing "
+    "about which data centre served the request, providers do not disclose the "
+    "serving region, and a router such as OpenRouter sends the call to whichever "
+    "upstream has capacity — attributing the caller's regional factor to that "
+    "would be confidently arbitrary. Location is knowable when the operator knows "
+    "it (they self-host somewhere, or they pin a provider to a region), so it "
+    "comes from them. No network call is involved."
+)
+
+
+def provider_grid_source(provider: str) -> str:
+    """The stable source key for a per-provider override, e.g. `provider:anthropic`."""
+    return f"{GRID_SOURCE_PROVIDER}:{provider}"
+
+
+def grid_source_rule(source: str | None) -> str | None:
+    """The rule half of a source key: `provider:anthropic` -> `provider`."""
+    if not source:
+        return None
+    return source.split(":", 1)[0]
 
 GRID_REFERENCE = {
     "default": {
@@ -302,7 +376,10 @@ GRID_REFERENCE = {
 # deliberately ships **no** external API call for grid intensity: a live
 # dependency in the accounting path would make a stored run's carbon figure
 # depend on a third party's uptime, and every one of these sources has licence
-# or coverage limits an operator has to accept for themselves.
+# or coverage limits an operator has to accept for themselves. The seam is
+# configuration — BENCH_GRID_FACTORS (per provider), BENCH_LOCAL_GRID_CO2E_G_PER_KWH
+# (legacy, self-hosted) and BENCH_GRID_CO2E_G_PER_KWH — into which an operator
+# pastes a figure they sourced and can defend. Nothing here is geolocated.
 GRID_DATA_SOURCES = (
     {
         "name": "Electricity Maps",
@@ -516,11 +593,20 @@ _ACCOUNTING_BASIS = (
 _COST_BASIS = (
     "Actual token cost against the same-token baseline-model cost, from the "
     "catalog's published per-token list prices. This is the one figure here that "
-    "is arithmetic rather than estimation: the prices are exact. The "
-    "counterfactual is not — a different model would not have produced these "
-    "token counts — so avoided_usd is signed and is a model-selection "
-    "indicator, not booked savings. Excludes everything bench does not bill "
-    "through the token API."
+    "is arithmetic rather than estimation: the prices are exact, so avoided_pct "
+    "is reported to one decimal place rather than the coarse multiple used for "
+    "the carbon comparison. The counterfactual is not exact — a different model "
+    "would not have produced these token counts — so avoided_usd/avoided_pct are "
+    "signed and are a model-selection indicator, not booked savings. Prices are "
+    "list prices: published per-token rates, not a negotiated or committed-spend "
+    "rate an operator may actually pay. avoided_pct is null, never 0%, when there "
+    "is no baseline or the baseline itself costs nothing. This is list-price API "
+    "spend only — it excludes electricity and hardware amortization for "
+    "self-hosted (local) inference, so a zero-cost local run can legitimately "
+    "read 100% cheaper than the frontier baseline while still carrying a real, "
+    "nonzero carbon figure; see the money_excludes_self_hosting_costs caveat on "
+    "such runs. Excludes everything else bench does not bill through the token "
+    "API."
 )
 
 _UNCERTAINTY_BASIS = (
@@ -700,22 +786,125 @@ def pue_for(deployment: str, settings: Settings | None = None) -> Decimal:
     return pue if pue >= 1 else Decimal(1)
 
 
-def grid_factor_for(deployment: str, settings: Settings | None = None) -> float:
-    """gCO2e/kWh to apply to this deployment's electricity.
+def normalize_grid_basis(raw: str | None) -> str:
+    """A recorded basis label, or `unspecified` for anything unrecognised."""
+    basis = (raw or "").strip().lower()
+    return basis if basis in GRID_BASES else GRID_BASIS_UNSPECIFIED
 
-    Self-hosted inference may use the operator's own site/market-based factor
-    (`local_grid_co2e_g_per_kwh`); unset, it falls back to the single
-    `grid_co2e_g_per_kwh`. Cloud inference always uses `grid_co2e_g_per_kwh`,
-    since bench does not know which region served the request.
+
+def grid_factor_override_for(
+    provider: str | None, settings: Settings | None = None
+) -> tuple[str, GridFactor] | None:
+    """(provider name, entry) from `BENCH_GRID_FACTORS`, or None.
+
+    Keyed on the bench provider name, which is the only thing bench actually
+    knows about where a request went. An entry naming a provider the catalog does
+    not have simply never matches — it warned at startup and is otherwise inert.
+    """
+    if not provider:
+        return None
+    settings = settings or get_settings()
+    name = provider.strip().lower()
+    entry = (settings.grid_factors or {}).get(name)
+    return (name, entry) if entry is not None else None
+
+
+def resolve_grid_factor(
+    provider: str | None,
+    deployment: str | None = None,
+    settings: Settings | None = None,
+    *,
+    override: float | None = None,
+) -> dict[str, Any]:
+    """Which grid factor applies, and — recorded on the run — *why*.
+
+    Returns `{value, basis, source, rule, provider, label, setting}` where
+    `source` is the stable machine-readable key (`provider:anthropic`,
+    `local_setting`, `global_default`, `run_override`) and `label` is the
+    operator's own note about the factor, when they set one.
+
+    The precedence is `GRID_PRECEDENCE_NOTE`, and it is deliberately ordered
+    most-specific-first: an operator who has configured a factor for a provider
+    has said something more precise than either the legacy local setting or the
+    global default, so it wins. The legacy `local_grid_*` settings keep working
+    exactly as they always have for any provider with no entry of its own.
+
+    `provider=None` skips the per-provider lookup entirely, which is what makes
+    every pre-existing call site behave as it did before this existed.
     """
     settings = settings or get_settings()
+    if deployment is None:
+        deployment = deployment_for(provider) if provider else DEPLOYMENT_CLOUD
+
+    if override is not None:
+        # A number handed to the accounting call. bench cannot state its
+        # provenance and must not borrow a basis from a setting that was not used.
+        return {
+            "value": float(override),
+            "basis": GRID_BASIS_UNSPECIFIED,
+            "source": GRID_SOURCE_RUN_OVERRIDE,
+            "rule": GRID_SOURCE_RUN_OVERRIDE,
+            "provider": provider,
+            "label": None,
+            "setting": None,
+        }
+
+    entry = grid_factor_override_for(provider, settings)
+    if entry is not None:
+        name, factor = entry
+        return {
+            "value": float(factor.g_per_kwh),
+            "basis": normalize_grid_basis(factor.basis),
+            "source": provider_grid_source(name),
+            "rule": GRID_SOURCE_PROVIDER,
+            "provider": name,
+            "label": factor.label,
+            "setting": f"BENCH_GRID_FACTORS[{name}]",
+        }
+
     if deployment == DEPLOYMENT_LOCAL and settings.local_grid_co2e_g_per_kwh is not None:
-        return float(settings.local_grid_co2e_g_per_kwh)
-    return float(settings.grid_co2e_g_per_kwh)
+        return {
+            "value": float(settings.local_grid_co2e_g_per_kwh),
+            "basis": normalize_grid_basis(settings.local_grid_co2e_basis),
+            "source": GRID_SOURCE_LOCAL_SETTING,
+            "rule": GRID_SOURCE_LOCAL_SETTING,
+            "provider": provider,
+            "label": None,
+            "setting": "BENCH_LOCAL_GRID_CO2E_G_PER_KWH",
+        }
+
+    return {
+        "value": float(settings.grid_co2e_g_per_kwh),
+        "basis": normalize_grid_basis(settings.grid_co2e_basis),
+        "source": GRID_SOURCE_GLOBAL_DEFAULT,
+        "rule": GRID_SOURCE_GLOBAL_DEFAULT,
+        "provider": provider,
+        "label": None,
+        "setting": "BENCH_GRID_CO2E_G_PER_KWH",
+    }
+
+
+def grid_factor_for(
+    deployment: str, settings: Settings | None = None, *, provider: str | None = None
+) -> float:
+    """gCO2e/kWh to apply to this deployment's electricity.
+
+    A per-provider `BENCH_GRID_FACTORS` entry wins when `provider` is given.
+    Self-hosted inference may otherwise use the operator's own site/market-based
+    factor (`local_grid_co2e_g_per_kwh`); unset, it falls back to the single
+    `grid_co2e_g_per_kwh`. Cloud inference with no entry of its own always uses
+    `grid_co2e_g_per_kwh`, since bench does not know which region served the
+    request and refuses to infer one.
+    """
+    return float(resolve_grid_factor(provider, deployment, settings)["value"])
 
 
 def grid_basis_for(
-    deployment: str, settings: Settings | None = None, *, overridden: bool = False
+    deployment: str,
+    settings: Settings | None = None,
+    *,
+    overridden: bool = False,
+    provider: str | None = None,
 ) -> str:
     """The GHG Protocol basis label for the factor actually applied.
 
@@ -727,13 +916,7 @@ def grid_basis_for(
     """
     if overridden:
         return GRID_BASIS_UNSPECIFIED
-    settings = settings or get_settings()
-    if deployment == DEPLOYMENT_LOCAL and settings.local_grid_co2e_g_per_kwh is not None:
-        raw = settings.local_grid_co2e_basis
-    else:
-        raw = settings.grid_co2e_basis
-    basis = (raw or "").strip().lower()
-    return basis if basis in GRID_BASES else GRID_BASIS_UNSPECIFIED
+    return str(resolve_grid_factor(provider, deployment, settings)["basis"])
 
 
 def embodied_g_for(deployment: str, settings: Settings | None = None) -> Decimal:
@@ -993,6 +1176,9 @@ def factor_records(
     embodied_g: Decimal,
     deployment: str,
     settings: Settings,
+    grid_source: str = GRID_SOURCE_GLOBAL_DEFAULT,
+    grid_source_label: str | None = None,
+    grid_setting: str | None = None,
 ) -> list[dict]:
     """Every constant that went into this run, with where it came from.
 
@@ -1135,10 +1321,15 @@ def factor_records(
             float(grid),
             "gCO2e/kWh",
             # Only claim the IEA as the source when the shipped IEA value is what
-            # was actually applied. An operator's own figure is theirs to source.
+            # was actually applied. An operator's own figure is theirs to source —
+            # and where they gave it a label, that label IS the source they cited.
             (
                 grid_ref["source"]
-                if not grid_overridden and float(grid) == grid_ref["value"]
+                if grid_source == GRID_SOURCE_GLOBAL_DEFAULT
+                and not grid_overridden
+                and float(grid) == grid_ref["value"]
+                else f"operator-supplied — {grid_source_label}"
+                if grid_source_label
                 else "operator-supplied"
             ),
             grid_ref["url"] if float(grid) == grid_ref["value"] else None,
@@ -1151,6 +1342,23 @@ def factor_records(
                 )
                 if grid_overridden
                 else (
+                    "Configured per provider"
+                    + (
+                        f" ({grid_source.split(':', 1)[1]})"
+                        if ":" in grid_source
+                        else ""
+                    )
+                    + ", which outranks both the self-hosted setting and the global "
+                    "default for this run's provider. "
+                )
+                if grid_source_rule(grid_source) == GRID_SOURCE_PROVIDER
+                else (
+                    "The operator's self-hosted factor (BENCH_LOCAL_GRID_CO2E_G_PER_KWH, "
+                    "the legacy setting), applied because this run ran locally and its "
+                    "provider has no BENCH_GRID_FACTORS entry. "
+                )
+                if grid_source == GRID_SOURCE_LOCAL_SETTING
+                else (
                     f"The shipped default, {grid_ref['value']} gCO2e/kWh, is the IEA "
                     "2024 global power-sector average (reported as ~460-480; 470 is "
                     "the midpoint). "
@@ -1162,14 +1370,27 @@ def factor_records(
                 )
             )
             + (
-                "A regional or supplier factor is strictly better than any global "
-                "average: eGRID subregions span more than 10x. Basis matters as much "
-                "as the value — location-based and market-based factors are not "
-                "interchangeable and must never be summed."
-            ),
-            "BENCH_GRID_CO2E_G_PER_KWH / BENCH_LOCAL_GRID_CO2E_G_PER_KWH",
+                f"Basis: {grid_basis} — {GRID_BASIS_MEANING.get(grid_basis, 'unrecognised')}. "
+                "Basis matters as much as the value: location-based and market-based "
+                "factors are not interchangeable and must never be summed. A regional or "
+                "supplier factor is strictly better than any global average — eGRID "
+                "subregions span more than 10x. "
+            )
+            + GRID_PRECEDENCE_NOTE
+            + " "
+            + GRID_NO_INFERENCE_NOTE,
+            # The one setting that actually applied — not a list of candidates.
+            # None for a factor handed to the accounting call: there is no setting
+            # to change. The precedence order is in the note above.
+            grid_setting,
             basis=grid_basis,
             overridden=bool(grid_overridden),
+            # Which rule chose this factor, as a stable key, plus the operator's own
+            # label for it. `source` above is a citation string for humans; these two
+            # are what a UI groups and explains by.
+            source_key=grid_source,
+            source_rule=grid_source_rule(grid_source),
+            source_label=grid_source_label,
         ),
         _factor(
             "embodied_hardware",
@@ -1242,7 +1463,14 @@ def factor_records(
     return factors
 
 
-def caveat_records(*, reasoning_tier: bool, deployment: str) -> list[dict]:
+def caveat_records(
+    *,
+    reasoning_tier: bool,
+    deployment: str,
+    cost_usd: Decimal | None = None,
+    grid_basis: str | None = None,
+    baseline_grid_basis: str | None = None,
+) -> list[dict]:
     """Named biases that travel with the figures instead of living only in a doc.
 
     Every one of these is a known way the number is wrong. They are structured
@@ -1327,6 +1555,48 @@ def caveat_records(*, reasoning_tier: bool, deployment: str) -> list[dict]:
             "note": TRAINING_AMORTIZATION_EXCLUDED,
         },
         {
+            "key": "money_excludes_self_hosting_costs",
+            "label": "Money comparison excludes self-hosting costs",
+            # The reported saving is more flattering than the real one: the true
+            # cost of running this model is understated in dollars, so the
+            # percentage cheaper than frontier overstates how cheap it really is.
+            "direction": "overstates",
+            "applies": deployment == DEPLOYMENT_LOCAL and (cost_usd or Decimal(0)) <= 0,
+            "note": (
+                "The money comparison is list-price API spend only — published "
+                "per-token prices, nothing else. A self-hosted run's zero dollar "
+                "cost excludes the electricity and hardware amortization that "
+                "actually running it costs, so a figure such as \"100% cheaper "
+                "than frontier\" is true of billed API spend only, not of total "
+                "cost. This is a deliberate asymmetry with the carbon accounting "
+                "above, which DOES attribute Scope 2 electricity (and, if "
+                "BENCH_EMBODIED_G_PER_RUN is set, embodied hardware) to this same "
+                "run — so a run that reads 100% cheaper here can still carry a "
+                "real, nonzero carbon figure. Money tracks what bench's token API "
+                "bills; carbon tracks what running the model actually draws."
+            ),
+        },
+        {
+            "key": "baseline_crosses_grid_basis",
+            "label": "The baseline comparison spans two GHG Protocol bases",
+            "direction": "either",
+            "applies": bool(
+                grid_basis
+                and baseline_grid_basis
+                and grid_basis != baseline_grid_basis
+            ),
+            "note": (
+                f"This run's electricity is accounted {grid_basis}; the baseline "
+                f"counterfactual was priced {baseline_grid_basis}, because the two "
+                "providers carry different configured factors. Under the GHG Protocol "
+                "those figures answer different questions and may not be summed or "
+                "netted, so avoided_co2e_g here is a model-selection signal only and is "
+                "not a difference between two comparable inventories. Configure one "
+                "basis across your providers if you need the comparison to be like for "
+                "like."
+            ),
+        },
+        {
             "key": "out_of_scope_energy",
             "label": "Only the execution model's turns are counted",
             "direction": "understates",
@@ -1380,6 +1650,10 @@ def _no_baseline() -> dict:
         "cost_usd": None,
         "avoided_usd": None,
         "avoided_usd_pct": None,
+        # No comparison, so no factor behind one either. Null, not the run's own.
+        "grid_co2e_g_per_kwh": None,
+        "grid_co2e_basis": None,
+        "grid_co2e_source": None,
         "basis": _NO_BASELINE_BASIS,
     }
 
@@ -1398,6 +1672,15 @@ def _baseline_block(
     baseline = resolve_baseline_model(settings, catalog)
     if baseline is None:
         return _no_baseline()
+    # The counterfactual is "these tokens through *that* model", so it is priced at
+    # the factor that model's provider would have carried — including a
+    # BENCH_GRID_FACTORS entry of its own. That is honest per-side, and it means the
+    # two sides of the comparison can sit on different GHG Protocol bases; when they
+    # do, the run carries the `baseline_crosses_grid_basis` caveat saying so.
+    baseline_deployment = deployment_for(baseline.provider)
+    baseline_grid = resolve_grid_factor(
+        baseline.provider, baseline_deployment, settings, override=grid_g_per_kwh
+    )
     if baseline.id == model.id:
         # The run *is* the baseline. Avoided is 0 by construction, not by
         # arithmetic: comparing a run to itself has no counterfactual in it.
@@ -1412,13 +1695,16 @@ def _baseline_block(
             "cost_usd": _f(actual_cost_usd),
             "avoided_usd": 0.0,
             "avoided_usd_pct": 0.0,
+            "grid_co2e_g_per_kwh": float(baseline_grid["value"]),
+            "grid_co2e_basis": baseline_grid["basis"],
+            "grid_co2e_source": baseline_grid["source"],
             "basis": (
                 _BASELINE_BASIS + " This run used the baseline model itself, so avoided is 0."
             ),
         }
-    deployment = deployment_for(baseline.provider)
+    deployment = baseline_deployment
     pue = pue_for(deployment, settings)
-    grid = grid_g_per_kwh if grid_g_per_kwh is not None else grid_factor_for(deployment, settings)
+    grid = baseline_grid["value"]
     compute_wh = baseline.energy_wh(*tokens)
     total_wh = compute_wh * pue
     electricity_g = round(co2e_grams(total_wh, grid), _PLACES)
@@ -1428,8 +1714,11 @@ def _baseline_block(
     avoided_pct = _f(Decimal(100) * avoided / baseline_co2e, 3) if baseline_co2e > 0 else 0.0
     baseline_cost = round(baseline.cost_usd(*tokens), _PLACES)
     avoided_usd = baseline_cost - round(actual_cost_usd, _PLACES)
+    # Null, not 0.0, when the baseline itself costs nothing: a percentage needs a
+    # nonzero denominator, and a misconfigured baseline pointed at a free model
+    # must not render as "0% cheaper" (which would read as "no difference").
     avoided_usd_pct = (
-        _f(Decimal(100) * avoided_usd / baseline_cost, 3) if baseline_cost > 0 else 0.0
+        _f(Decimal(100) * avoided_usd / baseline_cost, 3) if baseline_cost > 0 else None
     )
     return {
         "model": baseline.id,
@@ -1446,6 +1735,12 @@ def _baseline_block(
         "cost_usd": _f(baseline_cost),
         "avoided_usd": _f(avoided_usd),
         "avoided_usd_pct": avoided_usd_pct,
+        # The factor the counterfactual side was priced at, and its basis. Recorded
+        # because a comparison across two bases is not a GHG Protocol total, and a
+        # reader has to be able to see that from the stored run.
+        "grid_co2e_g_per_kwh": float(grid),
+        "grid_co2e_basis": baseline_grid["basis"],
+        "grid_co2e_source": baseline_grid["source"],
         "basis": _BASELINE_BASIS,
     }
 
@@ -1517,7 +1812,10 @@ def energy_accounting(
       *output-equivalent* tokens (see `weighted_tokens`); the chain
       `energy_wh = energy_wh_per_mtok x weighted_tokens / 1e6` is unchanged.
     * `grid_co2e_g_per_kwh` — the factor actually applied to this run's
-      electricity (the local override, when a local run has one configured).
+      electricity: the operator's per-provider entry when there is one, else the
+      legacy local override on a self-hosted run, else the global default.
+      `grid_co2e_source` records which of those applied and `grid_co2e_label`
+      carries the operator's own note about it.
     * `co2e_g` — the run's **total** estimated carbon, and always exactly
       `scopes.scope1_g + scope2_g + scope3_g`.
     * `pue`, `energy_wh_total`, `deployment`, `embodied_g`, `scopes`,
@@ -1525,16 +1823,22 @@ def energy_accounting(
 
     Added, all additive: `input_weight`, `output_weight`,
     `energy_wh_per_mtok_input`, `tokens`, `energy_wh_by_bucket`,
-    `reasoning_tier`, `pue_profile`, `grid_co2e_basis`, `cost`, `uncertainty`,
-    `factors`, `caveats`.
+    `reasoning_tier`, `pue_profile`, `grid_co2e_basis`, `grid_co2e_source`,
+    `grid_co2e_label`, `cost`, `uncertainty`, `factors`, `caveats`.
     """
     settings = settings or get_settings()
     deployment = deployment_for(model.provider)
     pue = pue_for(deployment, settings)
     profile = pue_profile_for(deployment, settings)
     grid_overridden = grid_g_per_kwh is not None
-    grid = grid_g_per_kwh if grid_overridden else grid_factor_for(deployment, settings)
-    grid_basis = grid_basis_for(deployment, settings, overridden=grid_overridden)
+    # One resolution, used for the arithmetic, the recorded factor, the provenance
+    # record and the rollup key — so "which rule applied" cannot drift from "which
+    # number was used".
+    grid_resolution = resolve_grid_factor(
+        model.provider, deployment, settings, override=grid_g_per_kwh
+    )
+    grid = grid_resolution["value"]
+    grid_basis = grid_resolution["basis"]
 
     tokens = (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
     wh_per_mtok = wh_per_mtok_for_model(model)
@@ -1608,6 +1912,13 @@ def energy_accounting(
         # ── added: factor resolution ──
         "pue_profile": profile,
         "grid_co2e_basis": grid_basis,
+        # Which precedence rule chose the grid factor, as a stable key
+        # (`provider:anthropic` | `local_setting` | `global_default` |
+        # `run_override`), and the operator's own label for it when they set one.
+        # A run recorded before these existed carries neither — read them as
+        # unknown, never as `global_default`.
+        "grid_co2e_source": grid_resolution["source"],
+        "grid_co2e_label": grid_resolution["label"],
         # ── added: money and uncertainty ──
         "cost": _cost_block(cost_usd, baseline),
         "uncertainty": uncertainty_band(
@@ -1630,8 +1941,17 @@ def energy_accounting(
             embodied_g=embodied_g,
             deployment=deployment,
             settings=settings,
+            grid_source=grid_resolution["source"],
+            grid_source_label=grid_resolution["label"],
+            grid_setting=grid_resolution["setting"],
         ),
-        "caveats": caveat_records(reasoning_tier=reasoning_tier, deployment=deployment),
+        "caveats": caveat_records(
+            reasoning_tier=reasoning_tier,
+            deployment=deployment,
+            cost_usd=cost_usd,
+            grid_basis=grid_basis,
+            baseline_grid_basis=baseline.get("grid_co2e_basis"),
+        ),
     }
 
 
@@ -1655,6 +1975,10 @@ def emission_summary_fields(accounting: dict | None) -> dict[str, Any]:
         # Added: money saved, and the band around the carbon figure. Null on any
         # run recorded before they existed, for the same reason as the above.
         "avoided_usd": baseline.get("avoided_usd"),
+        # Added: the share of frontier spend avoided. Signed like avoided_usd;
+        # null (never 0%) when there is no baseline, the baseline itself costs
+        # nothing, or cost data is missing — see _baseline_block.
+        "avoided_usd_pct": baseline.get("avoided_usd_pct"),
         "co2e_g_low": band.get("co2e_g_low"),
         "co2e_g_high": band.get("co2e_g_high"),
     }
@@ -1674,6 +1998,7 @@ def emission_event_fields(accounting: dict | None) -> dict[str, Any]:
         "avoided_co2e_g": baseline.get("avoided_co2e_g"),
         # Added, same additive rule as the summary.
         "avoided_usd": baseline.get("avoided_usd"),
+        "avoided_usd_pct": baseline.get("avoided_usd_pct"),
         "co2e_g_low": band.get("co2e_g_low"),
         "co2e_g_high": band.get("co2e_g_high"),
     }
