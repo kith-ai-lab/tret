@@ -66,6 +66,15 @@ export interface RunSummary {
   scope2_g: number | null
   scope3_g: number | null
   avoided_co2e_g: number | null
+  // Money against the same-token baseline, signed: negative is a surcharge.
+  // Firmer footing than the carbon figure — per-token prices are exact — but the
+  // counterfactual behind it is the same assumption. null on older runs.
+  avoided_usd: number | null
+  // The judgment band around co2e_g. NOT a confidence interval and not a sigma;
+  // `uncertainty.is_confidence_interval` is false and the wording must match.
+  // null on runs recorded before the band existed.
+  co2e_g_low: number | null
+  co2e_g_high: number | null
   iterations: number
   error: string | null
   created_at: string | null
@@ -130,17 +139,131 @@ export interface EmissionsBaseline {
   // figure. Never render its absolute value.
   avoided_co2e_g: number | null
   avoided_pct: number | null
+  // Money on the same signed same-token basis. Added with the money comparison,
+  // so absent on runs recorded before it.
+  cost_usd?: number | null
+  avoided_usd?: number | null
+  avoided_usd_pct?: number | null
   basis: string
 }
 
+/** How much a factor's value is worth believing. The backend's vocabulary,
+ *  reproduced exactly — see `emissions.py::_factor`. A `placeholder` or
+ *  `excluded` factor must never be presented as solidly as an `exact` one. */
+export type FactorConfidence =
+  | 'exact'
+  | 'structural'
+  | 'calibrated'
+  | 'low'
+  | 'placeholder'
+  | 'excluded'
+
+/** One constant that went into a run, with where it came from.
+ *
+ *  Arrives as a **list** rather than an object because `energy_accounting` is
+ *  JSONB and Postgres does not preserve object key order — the array order is
+ *  meaningful and is the order the provenance table renders in. Each record
+ *  carries its own `key`.
+ *
+ *  `value` is a number for most factors, a two-element `[low, high]` array for
+ *  the uncertainty band factor, and null for the per-token price record (whose
+ *  values are per-model, not a single figure). Extras after `setting` are
+ *  factor-specific and only present on the factor they belong to. */
+export interface EmissionsFactor {
+  key: string
+  label: string
+  value: number | number[] | null
+  unit: string | null
+  source: string
+  url: string | null
+  date: string | null
+  confidence: FactorConfidence
+  note: string
+  setting: string | null
+  // energy_class
+  anchor_model?: string | null
+  measured_anchor?: boolean
+  reasoning_tier?: boolean
+  // grid_intensity
+  basis?: string
+  overridden?: boolean
+  // pue
+  profile?: string
+  // embodied_hardware
+  gpu_h100_kg?: number
+  server_excluding_gpus_kg?: number
+  lifetime_years?: number
+  batch_size?: number
+}
+
+/** What moves if this one input is wrong. A sensitivity view — the product of
+ *  these multipliers is deliberately NOT the headline band. */
+export interface EmissionsUncertaintyContribution {
+  key: string
+  label: string
+  low_multiplier: number
+  high_multiplier: number
+  dominant: boolean
+  note: string
+}
+
+/** The band around a run's figures.
+ *
+ *  `is_confidence_interval` is false and stays false: this is a multiplicative
+ *  judgment band matching field practice. No renderer may call it a confidence
+ *  interval, a standard deviation, or a margin of error. `basis` says so at
+ *  length and is rendered verbatim wherever the band is explained. */
+export interface EmissionsUncertainty {
+  kind: string // "judgment_band"
+  is_confidence_interval: boolean // false
+  band_factor_low: number
+  band_factor_high: number
+  co2e_g_low: number
+  co2e_g_high: number
+  energy_wh_low: number
+  energy_wh_high: number
+  energy_wh_total_low: number
+  energy_wh_total_high: number
+  contributions: EmissionsUncertaintyContribution[]
+  basis: string
+}
+
+/** Money against the same-token baseline. The firmest figure in the block:
+ *  `prices_are_exact` is true of the *prices*, not of the counterfactual. */
+export interface EmissionsCost {
+  usd: number
+  baseline_model: string | null
+  baseline_usd: number | null
+  avoided_usd: number | null
+  avoided_pct: number | null
+  prices_are_exact: boolean
+  basis: string
+}
+
+/** A named, directional bias that applies to this run. `direction` is
+ *  "understates" | "overstates" | "either" — which way the figure is wrong. */
+export interface EmissionsCaveat {
+  key: string
+  label: string
+  direction: string
+  applies: boolean
+  note: string
+}
+
+export type TokenBucket = 'input' | 'output' | 'cache_read' | 'cache_write'
+export type TokenCounts = Record<TokenBucket, number>
+
 /** The auditable energy/carbon derivation on a run. Every field is an estimate.
- *  The keys after `basis` were added with scope accounting: they are optional
- *  because runs recorded before it exists genuinely do not carry them. */
+ *  The keys after `basis` were added with scope accounting; the keys after
+ *  `baseline` were added with the calibrated model (token weighting, money,
+ *  uncertainty and provenance). All are optional because runs recorded before
+ *  each addition genuinely do not carry them — and a missing field must render as
+ *  an em-dash, never as 0. */
 export interface EnergyAccounting {
   estimated: boolean
   model: string
-  energy_class: string // S | M | L | XL
-  energy_wh_per_mtok: number
+  energy_class: string // S | M | L | XL | R
+  energy_wh_per_mtok: number // per million *output-equivalent* tokens
   weighted_tokens: number
   cache_read_weight: number
   cache_write_weight: number
@@ -154,6 +277,23 @@ export interface EnergyAccounting {
   embodied_g?: number
   scopes?: EmissionScopes
   baseline?: EmissionsBaseline | null
+  // ── the input/output split: buckets are NOT equally expensive ──
+  input_weight?: number
+  output_weight?: number
+  energy_wh_per_mtok_input?: number
+  energy_wh_per_mtok_output?: number
+  output_to_input_energy_ratio?: number
+  tokens?: TokenCounts
+  energy_wh_by_bucket?: TokenCounts // compute Wh per bucket; sums to energy_wh
+  reasoning_tier?: boolean
+  // ── factor resolution ──
+  pue_profile?: string // hyperscaler_cloud | workstation | onprem_datacenter
+  grid_co2e_basis?: string // location_based | market_based | unspecified
+  // ── money, uncertainty, provenance ──
+  cost?: EmissionsCost
+  uncertainty?: EmissionsUncertainty
+  factors?: EmissionsFactor[]
+  caveats?: EmissionsCaveat[]
 }
 
 export interface RunDetail extends RunSummary {
@@ -449,6 +589,10 @@ export interface ChatMessage {
   scope2_g?: number | null
   scope3_g?: number | null
   avoided_co2e_g?: number | null
+  // Money saved and the judgment band, same nullability rule as the above.
+  avoided_usd?: number | null
+  co2e_g_low?: number | null
+  co2e_g_high?: number | null
   // Full derivation and full routing decision, exactly as recorded — for the
   // expanded/click-through view (EmissionsCalc/EnergyDetail, RoutingBadge).
   energy?: EnergyAccounting | null
@@ -530,6 +674,10 @@ export interface EmissionsTotals {
   runs_without_estimate: number
   runs_without_scope_split: number
   runs_without_baseline: number
+  // Runs carrying a carbon figure but no money comparison / no band. Counted,
+  // never back-filled with zeros.
+  runs_without_money_comparison: number
+  runs_without_uncertainty_band: number
   energy_wh: number // total, PUE-inclusive
   energy_wh_compute: number // IT load only
   co2e_g: number
@@ -539,6 +687,12 @@ export interface EmissionsTotals {
   baseline_co2e_g: number
   avoided_co2e_g: number // signed
   avoided_pct: number // signed
+  // Signed money against the same-token baseline, summed as recorded.
+  avoided_usd: number
+  // The summed judgment band — low-with-low, high-with-high. Not an interval.
+  // A run with no band contributes its central figure to both ends.
+  co2e_g_low: number
+  co2e_g_high: number
 }
 
 /** Shared metric shape for the by_model / by_harness rollups. */
@@ -548,6 +702,9 @@ export interface EmissionsBucket {
   co2e_g: number
   baseline_co2e_g: number
   avoided_co2e_g: number
+  avoided_usd: number
+  co2e_g_low: number
+  co2e_g_high: number
 }
 
 export interface EmissionsByModel extends EmissionsBucket {
@@ -572,6 +729,10 @@ export interface EmissionsRecordedFactor {
   deployment: string | null
   grid_co2e_g_per_kwh: number | null
   pue: number | null
+  /** The GHG Protocol basis the factor was recorded under. Part of the
+   *  combination key: a window mixing location-based with market-based factors is
+   *  not summable at all, which is stronger than merely "mixed". */
+  grid_co2e_basis: string | null
   runs: number
 }
 
@@ -584,6 +745,15 @@ export interface EmissionsFactors {
   mixed_factors: boolean
   note: string
   recorded: EmissionsRecordedFactor[]
+  // Reference-only, like the rest of this block — nothing above was computed
+  // from these; each run carries the factors it was recorded under.
+  grid_co2e_basis?: string
+  local_grid_co2e_basis?: string
+  onprem_pue?: number
+  local_deployment_profile?: string
+  uncertainty_band_low?: number
+  uncertainty_band_high?: number
+  provenance_note?: string
 }
 
 export interface EmissionsScan {
@@ -605,6 +775,33 @@ export interface EmissionsAnalytics {
   /** Rendered verbatim, never paraphrased. */
   disclaimer: string
 }
+
+// ── Reference documentation ──────────────────────────────────────────────
+// GET /api/docs/{slug}. Markdown read out of the repository's docs/ directory on
+// every request, so the prose shown in-product is the prose in the repo — there
+// is no bundled copy to go stale. The *numbers* never come from here: the
+// methodology dialog renders its factor table from a run's own
+// energy_accounting.factors, so a constant changing in Python cannot leave the UI
+// quoting an old value out of this prose.
+
+export interface DocPage {
+  slug: string
+  title: string
+  summary: string
+  /** Where the same file lives in the repository. */
+  repo_path: string
+  format: string // "markdown"
+  /** False when this build does not carry docs/ — render `note`, not an error. */
+  available: boolean
+  markdown: string | null
+  bytes: number | null
+  /** Lets a reader pin exactly which revision they read. */
+  sha256: string | null
+  note: string | null
+}
+
+/** The one document the emissions UI links to, everywhere it shows a figure. */
+export const EMISSIONS_METHODOLOGY_SLUG = 'emissions-methodology'
 
 // ── Fetch wrapper ────────────────────────────────────────────────────────
 
@@ -759,6 +956,9 @@ export const api = {
   listModels: () => request<ModelInfo[]>('/models'),
   listTools: () => request<ToolInfo[]>('/tools'),
   routerSettings: () => request<RouterSettings>('/settings/router'),
+
+  // reference docs
+  doc: (slug: string) => request<DocPage>(`/docs/${encodeURIComponent(slug)}`),
 
   // analytics
   guardrailAnalytics: (days = 30, projectId?: string) => {

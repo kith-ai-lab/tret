@@ -8,25 +8,48 @@
  *
  *  Nothing here is a measurement, and nothing here is computed from anything the
  *  backend did not send — the only client-side arithmetic is the electricity
- *  figure (total minus embodied) and the scope-sum check, both identities over
- *  returned values. */
-import type { EnergyAccounting } from '../../api/client'
+ *  figure (total minus embodied), the scope-sum check and the baseline ratio, all
+ *  identities over returned values.
+ *
+ *  Two things this file is careful about, because both were wrong before:
+ *
+ *  1. **The derivation is generated from the payload, never written out here.**
+ *     The token buckets no longer weigh the same — input is 1/20 of an output
+ *     token, a cache read a tenth of that again — so a hardcoded
+ *     "input + output + …" string was both wrong and unfixable-in-place. The
+ *     weights come from the run's own `factors`, the counts from `tokens`, and the
+ *     per-bucket energy from `energy_wh_by_bucket`. A run recorded before the
+ *     split says so instead of borrowing today's weights.
+ *  2. **Carbon appears with its range.** A single figure implies precision this
+ *     model does not have; the range is a judgment band and is labelled as one.
+ */
+import type { EmissionsFactor, EnergyAccounting, TokenBucket } from '../../api/client'
+import { CaveatList, FactorTable, SensitivityTable } from './FactorProvenance'
+import { MethodologyLink } from './MethodologyDialog'
 import {
+  BAND_LABEL,
+  BAND_SHORT,
   COUNTERFACTUAL_NOTE,
   ESTIMATE_NOTE,
-  METHODOLOGY_DOC,
+  MONEY_EXACT_NOTE,
   SCOPE_META,
+  TOKEN_BUCKET_LABELS,
   avoidedFraming,
+  avoidedMoneyFraming,
+  coarseComparison,
+  gridBasisLabel,
   share,
 } from './emissions'
 import {
   NO_ESTIMATE,
   NO_ESTIMATE_HINT,
   formatCo2e,
+  formatCo2eBand,
+  formatCostSigned,
   formatFactor,
-  formatPct,
   formatTokens,
   formatWh,
+  formatWhBand,
   orDash,
 } from './format'
 
@@ -35,17 +58,67 @@ interface Step {
   step: string
   derivation: string
   result: string
+  /** The judgment band on this step's result, when the run recorded one. */
+  band?: string | null
   source: string
   sourceHint?: string
   muted?: boolean
 }
 
+const BUCKETS: TokenBucket[] = ['input', 'output', 'cache_read', 'cache_write']
+
 /** Where each factor comes from, spelled out once under the table. */
 const FACTOR_SOURCES =
-  'Factor sources — “catalog” values ship with bench (heuristic energy-class buckets, overridable per model in models.yaml); ' +
-  '“instance setting” values are operator-configured (BENCH_GRID_CO2E_G_PER_KWH, BENCH_DATACENTER_PUE, BENCH_LOCAL_PUE, ' +
-  'BENCH_EMBODIED_G_PER_RUN) and fall back to bench’s documented defaults when unset. This run shows the values that were in ' +
+  'Factor sources — every value below is read from this run’s own stored accounting, with its source, date and confidence marker in the provenance table further down. ' +
+  '“catalog” values ship with bench (energy classes calibrated against published per-model measurements, overridable per model in models.yaml); ' +
+  '“instance setting” values are operator-configured and fall back to bench’s documented defaults when unset. This run shows the values that were in ' +
   'force when it ran — later changes to a setting do not rewrite it.'
+
+/** A token weight as the run recorded it: preferring the provenance record, then
+ *  the top-level key, and reporting nothing rather than a guess. */
+function recordedWeight(
+  factors: EmissionsFactor[] | undefined,
+  key: string,
+  fallback: number | undefined,
+): number | undefined {
+  const factor = factors?.find((f) => f.key === key)
+  if (typeof factor?.value === 'number') return factor.value
+  return fallback
+}
+
+/** The four bucket weights, as recorded. `undefined` where the run has none. */
+function bucketWeights(energy: EnergyAccounting): Partial<Record<TokenBucket, number>> {
+  const f = energy.factors
+  return {
+    input: recordedWeight(f, 'token_weight_input', energy.input_weight),
+    output: recordedWeight(f, 'token_weight_output', energy.output_weight),
+    cache_read: recordedWeight(f, 'token_weight_cache_read', energy.cache_read_weight),
+    cache_write: recordedWeight(f, 'token_weight_cache_write', energy.cache_write_weight),
+  }
+}
+
+/** The weighted-token derivation, written from the payload.
+ *
+ *  Reads "0.05 x 1,240 input + 1 x 412 output" — the real weighting, in the
+ *  run's own numbers. A run that recorded no input weight predates the split and
+ *  says so, because for those runs the buckets genuinely were weighted equally
+ *  and printing today's weights would misreport history. */
+function weightedTokenDerivation(energy: EnergyAccounting): string {
+  const tokens = energy.tokens
+  const weights = bucketWeights(energy)
+  if (!tokens || weights.input === undefined || weights.output === undefined) {
+    return energy.input_weight === undefined
+      ? 'input + output + weighted cache buckets, as recorded — this run predates the separate input/output weighting'
+      : 'as recorded — the per-bucket token counts were not stored on this run'
+  }
+  const parts = BUCKETS.filter((b) => (tokens[b] ?? 0) > 0).map((b) => {
+    const weight = weights[b]
+    const shown = weight === undefined ? '?' : formatFactor(weight, 4)
+    return `${shown} x ${formatTokens(tokens[b])} ${TOKEN_BUCKET_LABELS[b]}`
+  })
+  if (parts.length === 0) return 'no tokens recorded on this run'
+  return parts.join(' + ')
+}
 
 function buildSteps(energy: EnergyAccounting): Step[] {
   const weighted = energy.weighted_tokens
@@ -54,6 +127,7 @@ function buildSteps(energy: EnergyAccounting): Step[] {
   const total = energy.energy_wh_total
   const grid = energy.grid_co2e_g_per_kwh
   const embodied = energy.embodied_g
+  const band = energy.uncertainty
   // Identity over returned figures: the run total less amortized hardware is the
   // part that came from electricity.
   const electricity = energy.co2e_g - (embodied ?? 0)
@@ -63,13 +137,11 @@ function buildSteps(energy: EnergyAccounting): Step[] {
     {
       n: 1,
       step: 'Weighted tokens',
-      derivation: `input + output + ${formatFactor(energy.cache_read_weight)}x cache read + ${formatFactor(
-        energy.cache_write_weight,
-      )}x cache write`,
+      derivation: weightedTokenDerivation(energy),
       result: `${formatTokens(weighted)} tok`,
       source: 'provider usage, weighted',
       sourceHint:
-        'Token counts as reported by the provider, weighted by how much forward-pass work each bucket costs: a cache read re-uses stored state, a cache write is a full pass.',
+        'Token counts as reported by the provider, weighted by how much forward-pass work each bucket costs. The unit is an output-equivalent token: generation pays a full forward pass per token, prefill processes the prompt in parallel, a cache read re-uses stored state, and a cache write is a full prefill pass.',
     },
     {
       n: 2,
@@ -78,13 +150,14 @@ function buildSteps(energy: EnergyAccounting): Step[] {
       result: `${formatFactor(energy.energy_wh_per_mtok, 1)} Wh / Mtok`,
       source: 'catalog',
       sourceHint:
-        'An order-of-magnitude bucket, not a measurement: no provider publishes per-model energy draw. Uncertainty here is roughly a factor of two to five.',
+        'Wh per million output-equivalent tokens, calibrated by least-squares against published per-model figures and then generalised beyond them. Being one class out is the expected failure mode; classes are roughly 2-5x apart.',
     },
     {
       n: 3,
       step: 'Compute energy',
       derivation: `${formatTokens(weighted)} / 1,000,000 x ${formatFactor(energy.energy_wh_per_mtok, 1)} Wh`,
       result: orDash(formatWh(compute)),
+      band: formatWhBand(band?.energy_wh_low, band?.energy_wh_high),
       source: 'derived',
       sourceHint: 'IT load only — this figure excludes data-centre overhead.',
     },
@@ -106,9 +179,12 @@ function buildSteps(energy: EnergyAccounting): Step[] {
       step: 'Facility overhead (PUE)',
       derivation: `${formatWh(compute)} x PUE ${formatFactor(pue)}`,
       result: orDash(formatWh(total)),
-      source: `instance setting · ${energy.deployment ?? 'deployment not recorded'}`,
+      band: formatWhBand(band?.energy_wh_total_low, band?.energy_wh_total_high),
+      source: `instance setting · ${energy.deployment ?? 'deployment not recorded'}${
+        energy.pue_profile ? ` · ${energy.pue_profile.replace(/_/g, ' ')}` : ''
+      }`,
       sourceHint:
-        'Power Usage Effectiveness: total facility energy divided by IT-load energy. Heuristic — bench cannot see the facility that served the request.',
+        'Power Usage Effectiveness: total facility energy divided by IT-load energy, resolved per deployment profile. bench cannot see the facility that served the request, so the cloud default sits above every hyperscaler self-report on purpose.',
     })
   }
 
@@ -117,9 +193,9 @@ function buildSteps(energy: EnergyAccounting): Step[] {
     step: 'Electricity carbon',
     derivation: `${formatWh(energyForGrid)} / 1,000 x ${formatFactor(grid, 2)} gCO₂e/kWh`,
     result: orDash(formatCo2e(electricity)),
-    source: 'instance setting',
+    source: `instance setting · ${gridBasisLabel(energy.grid_co2e_basis)}`,
     sourceHint:
-      'Grid intensity as configured when this run happened. The default is a rough world average; a region- or supplier-specific factor is less wrong.',
+      'Grid intensity as configured when this run happened, with its GHG Protocol basis. Location-based and market-based factors answer different questions and must never be summed. A region- or supplier-specific factor is the single biggest improvement available here.',
   })
 
   if (embodied !== undefined && embodied > 0) {
@@ -130,7 +206,7 @@ function buildSteps(energy: EnergyAccounting): Step[] {
       result: orDash(formatCo2e(embodied)),
       source: 'instance setting',
       sourceHint:
-        'GHG Protocol Scope 3 Cat. 2 (capital goods). Counted only for self-hosted inference; 0 unless the operator set it, which understates local runs.',
+        'GHG Protocol Scope 3 Cat. 2 (capital goods). Counted only for self-hosted inference; 0 unless the operator set it, which understates local runs. Its provenance is marked "placeholder" for a reason — see the factor table.',
     })
   }
 
@@ -142,6 +218,7 @@ function buildSteps(energy: EnergyAccounting): Step[] {
         ? 'electricity + embodied hardware'
         : 'electricity carbon',
     result: orDash(formatCo2e(energy.co2e_g)),
+    band: formatCo2eBand(band?.co2e_g_low, band?.co2e_g_high),
     source: 'derived',
     sourceHint: 'The run total, and by construction the sum of the three scopes below.',
   })
@@ -151,48 +228,170 @@ function buildSteps(energy: EnergyAccounting): Step[] {
 
 export function EmissionsCalc({ energy }: { energy: EnergyAccounting }) {
   const steps = buildSteps(energy)
+  const hasProvenance = Boolean(energy.factors?.length || energy.caveats?.length)
   return (
     <div className="stack" style={{ gap: 14 }}>
       <div>
         <div className="mono-label" style={{ marginBottom: 6 }}>
           Derivation — every figure estimated
         </div>
-        <table className="mono-table">
-          <thead>
-            <tr>
-              <th style={{ width: 28 }}>#</th>
-              <th>Step</th>
-              <th>How it is derived</th>
-              <th className="num">Result (est.)</th>
-              <th>Factor source</th>
-            </tr>
-          </thead>
-          <tbody>
-            {steps.map((s) => (
-              <tr key={s.n} style={s.muted ? { color: 'var(--text-muted)' } : undefined}>
-                <td style={{ color: 'var(--text-muted)' }}>{s.n}</td>
-                <td>{s.step}</td>
-                <td style={{ color: 'var(--text-muted)' }}>{s.derivation}</td>
-                <td className="num">{s.result}</td>
-                <td style={{ color: 'var(--text-muted)' }} title={s.sourceHint}>
-                  {s.source}
-                </td>
+        <div className="md-table-wrap">
+          <table className="mono-table">
+            <thead>
+              <tr>
+                <th style={{ width: 28 }}>#</th>
+                <th>Step</th>
+                <th>How it is derived</th>
+                <th className="num">Result (est.)</th>
+                <th>Factor source</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {steps.map((s) => (
+                <tr key={s.n} style={s.muted ? { color: 'var(--text-muted)' } : undefined}>
+                  <td style={{ color: 'var(--text-muted)' }}>{s.n}</td>
+                  <td>{s.step}</td>
+                  <td style={{ color: 'var(--text-muted)' }}>{s.derivation}</td>
+                  <td className="num">
+                    {s.result}
+                    {s.band && (
+                      <span className="band-under" title={BAND_SHORT}>
+                        {s.band}
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ color: 'var(--text-muted)' }} title={s.sourceHint}>
+                    {s.source}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
         <div className="fine-print" style={{ marginTop: 6 }}>
           {FACTOR_SOURCES}
+          {/* Only explain the second line when there is one: a run recorded
+              before the band carries no range, and saying otherwise would imply
+              a figure it does not have. */}
+          {energy.uncertainty && (
+            <>
+              <br />
+              Second figures under a result are the {BAND_LABEL}. {BAND_SHORT}
+            </>
+          )}
         </div>
       </div>
 
+      <TokenBuckets energy={energy} />
+
       {energy.scopes && <RunScopes energy={energy} />}
-      {energy.baseline && <RunBaseline baseline={energy.baseline} />}
+      {energy.baseline && <RunBaseline energy={energy} />}
+
+      {hasProvenance && (
+        <details className="tool-row">
+          <summary>
+            <span className="tool-name">factor provenance, caveats and sensitivity</span>
+            <span style={{ color: 'var(--text-muted)', fontSize: 10.5 }}>
+              {formatTokens(energy.factors?.length ?? 0)} factors ·{' '}
+              {formatTokens(energy.caveats?.length ?? 0)} named biases
+            </span>
+          </summary>
+          <div className="stack" style={{ gap: 16, padding: '10px 10px 12px' }}>
+            <div>
+              <div className="mono-label" style={{ marginBottom: 4 }}>
+                Every constant this run used, and where it came from
+              </div>
+              <FactorTable factors={energy.factors ?? []} />
+            </div>
+            {energy.uncertainty && (
+              <div>
+                <div className="mono-label" style={{ marginBottom: 4 }}>
+                  What drives the range
+                </div>
+                <SensitivityTable uncertainty={energy.uncertainty} />
+              </div>
+            )}
+            <div>
+              <div className="mono-label" style={{ marginBottom: 4 }}>
+                Known biases on this run
+              </div>
+              <CaveatList caveats={energy.caveats ?? []} />
+            </div>
+          </div>
+        </details>
+      )}
 
       <div className="fine-print">
         {energy.basis}
         <br />
-        {ESTIMATE_NOTE} Method: <code>{METHODOLOGY_DOC}</code>
+        {ESTIMATE_NOTE} Method: <MethodologyLink energy={energy} />
+      </div>
+    </div>
+  )
+}
+
+/** The token buckets and what each contributed, which is the whole reason the
+ *  derivation above cannot be a fixed string any more. Rendered only when the run
+ *  recorded the split; a legacy run simply does not get this table. */
+function TokenBuckets({ energy }: { energy: EnergyAccounting }) {
+  const tokens = energy.tokens
+  const byBucket = energy.energy_wh_by_bucket
+  if (!tokens) return null
+  const weights = bucketWeights(energy)
+  const bucketSum = byBucket
+    ? BUCKETS.reduce((total, b) => total + (byBucket[b] ?? 0), 0)
+    : null
+  // The backend guarantees the buckets sum to energy_wh; check it, don't trust it.
+  const sumMatches = bucketSum === null ? null : Math.abs(bucketSum - energy.energy_wh) < 1e-6
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 6 }}>
+        Token buckets — not equally expensive
+      </div>
+      <div className="md-table-wrap">
+        <table className="mono-table">
+          <thead>
+            <tr>
+              <th>Bucket</th>
+              <th className="num">Tokens</th>
+              <th className="num">Weight</th>
+              <th className="num">Output-equiv.</th>
+              <th className="num">Compute Wh (est.)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {BUCKETS.map((bucket) => {
+              const count = tokens[bucket] ?? 0
+              const weight = weights[bucket]
+              return (
+                <tr key={bucket} style={count === 0 ? { color: 'var(--text-muted)' } : undefined}>
+                  <td>{TOKEN_BUCKET_LABELS[bucket]}</td>
+                  <td className="num">{formatTokens(count)}</td>
+                  <td className="num">{weight === undefined ? NO_ESTIMATE : formatFactor(weight, 4)}</td>
+                  <td className="num">
+                    {weight === undefined ? NO_ESTIMATE : formatTokens(Math.round(count * weight))}
+                  </td>
+                  <td className="num">{orDash(formatWh(byBucket?.[bucket]))}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="fine-print" style={{ marginTop: 6 }}>
+        {energy.output_to_input_energy_ratio !== undefined && (
+          <>
+            An output token is treated as {formatFactor(energy.output_to_input_energy_ratio, 0)}x an
+            input token: prefill runs in parallel, generation pays a full forward pass per token.{' '}
+          </>
+        )}
+        {sumMatches !== null && (
+          <span style={{ color: sumMatches ? undefined : 'var(--amber)' }}>
+            {sumMatches
+              ? `Buckets sum to ${orDash(formatWh(bucketSum))}, matching compute energy, as the accounting guarantees.`
+              : `Buckets sum to ${orDash(formatWh(bucketSum))}, which does NOT match this run’s compute energy — treat the split as unreliable.`}
+          </span>
+        )}
       </div>
     </div>
   )
@@ -213,32 +412,34 @@ function RunScopes({ energy }: { energy: EnergyAccounting }) {
       <ScopeBar
         values={{ scope1_g: scopes.scope1_g, scope2_g: scopes.scope2_g, scope3_g: scopes.scope3_g }}
       />
-      <table className="mono-table" style={{ marginTop: 8 }}>
-        <thead>
-          <tr>
-            <th>Scope</th>
-            <th>What it covers</th>
-            <th className="num">gCO₂e (est.)</th>
-            <th className="num">Share</th>
-          </tr>
-        </thead>
-        <tbody>
-          {SCOPE_META.map((meta) => {
-            const value = scopes[meta.key]
-            return (
-              <tr key={meta.key}>
-                <td style={{ whiteSpace: 'nowrap' }}>
-                  <span className="swatch" style={{ background: meta.color }} />
-                  {meta.label}
-                </td>
-                <td style={{ color: 'var(--text-muted)' }}>{meta.what}</td>
-                <td className="num">{orDash(formatCo2e(value))}</td>
-                <td className="num">{share(value, sum).toFixed(1)}%</td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+      <div className="md-table-wrap">
+        <table className="mono-table" style={{ marginTop: 8 }}>
+          <thead>
+            <tr>
+              <th>Scope</th>
+              <th>What it covers</th>
+              <th className="num">gCO₂e (est.)</th>
+              <th className="num">Share</th>
+            </tr>
+          </thead>
+          <tbody>
+            {SCOPE_META.map((meta) => {
+              const value = scopes[meta.key]
+              return (
+                <tr key={meta.key}>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <span className="swatch" style={{ background: meta.color }} />
+                    {meta.label}
+                  </td>
+                  <td style={{ color: 'var(--text-muted)' }}>{meta.what}</td>
+                  <td className="num">{orDash(formatCo2e(value))}</td>
+                  <td className="num">{share(value, sum).toFixed(1)}%</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
       <div className="fine-print" style={{ marginTop: 6 }}>
         Sum {orDash(formatCo2e(sum))} ·{' '}
         <span style={{ color: matches ? undefined : 'var(--amber)' }}>
@@ -253,9 +454,22 @@ function RunScopes({ energy }: { energy: EnergyAccounting }) {
   )
 }
 
-/** The frontier-baseline counterfactual for one run. */
-function RunBaseline({ baseline }: { baseline: NonNullable<EnergyAccounting['baseline']> }) {
+/** The frontier-baseline counterfactual for one run, in carbon and in money.
+ *
+ *  The carbon comparison is stated coarsely — it is the ratio of two estimated
+ *  constants, so "98.3% lighter" claimed a precision the inputs never had. The
+ *  money comparison is stated exactly, because per-token prices are published and
+ *  the arithmetic is not an estimate. Both are signed, and both are efficiency
+ *  indicators rather than savings. */
+function RunBaseline({ energy }: { energy: EnergyAccounting }) {
+  const baseline = energy.baseline
+  if (!baseline) return null
+  const band = energy.uncertainty
   const framing = avoidedFraming(baseline.avoided_co2e_g)
+  const comparison = coarseComparison(energy.co2e_g, baseline.co2e_g)
+  const cost = energy.cost
+  const avoidedUsd = cost?.avoided_usd ?? baseline.avoided_usd
+  const money = avoidedMoneyFraming(avoidedUsd)
   const unavailable = baseline.co2e_g === null || baseline.co2e_g === undefined
   return (
     <div>
@@ -283,10 +497,23 @@ function RunBaseline({ baseline }: { baseline: NonNullable<EnergyAccounting['bas
             title={framing.note}
           />
           <Stat
-            label="Difference"
-            value={orDash(formatPct(baseline.avoided_pct))}
-            color={framing.color}
-            title={framing.note}
+            label="Difference (order of magnitude)"
+            value={comparison.text}
+            color={comparison.color}
+            title={comparison.note}
+          />
+          <Stat
+            label={money.label}
+            value={formatCostSigned(avoidedUsd)}
+            color={money.color}
+            title={money.note}
+            sub={
+              avoidedUsd === null || avoidedUsd === undefined
+                ? undefined
+                : `exact prices · ${formatCostSigned(cost?.usd)} vs ${formatCostSigned(
+                    cost?.baseline_usd ?? baseline.cost_usd,
+                  )}`
+            }
           />
         </div>
       )}
@@ -294,6 +521,18 @@ function RunBaseline({ baseline }: { baseline: NonNullable<EnergyAccounting['bas
         {framing.note} {COUNTERFACTUAL_NOTE}
         <br />
         {baseline.basis}
+        {(cost?.basis || avoidedUsd !== null) && (
+          <>
+            <br />
+            {cost?.basis ?? MONEY_EXACT_NOTE}
+          </>
+        )}
+        {band && (
+          <>
+            <br />
+            Carbon figures on this panel carry a {BAND_LABEL}: {band.basis}
+          </>
+        )}
       </div>
     </div>
   )
@@ -337,11 +576,13 @@ function Stat({
   value,
   title,
   color,
+  sub,
 }: {
   label: string
   value: string
   title?: string
   color?: string
+  sub?: string
 }) {
   return (
     <div className="config-stat">
@@ -349,6 +590,7 @@ function Stat({
       <div className="mono-body" style={{ color }} title={title}>
         {value}
       </div>
+      {sub && <div className="band-under">{sub}</div>}
     </div>
   )
 }

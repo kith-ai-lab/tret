@@ -1,7 +1,12 @@
 /** Compact provenance summary: what produced this artifact, from what inputs,
  *  at what cost — in dollars and in estimated watt-hours. Everything auditable
- *  at a glance. */
-import { footprintText, formatCost, formatTokens } from './format'
+ *  at a glance.
+ *
+ *  The dollar figure is exact and the carbon figure is not, so the carbon figure
+ *  carries its judgment band on a second line wherever the run recorded one. A
+ *  bare point estimate is the one thing this card must not show. */
+import { BAND_SHORT, MONEY_SHORT, avoidedMoneyFraming } from './emissions'
+import { footprintText, formatCo2eBand, formatCost, formatCostSigned, formatTokens } from './format'
 
 export function ProvenanceCard({
   model,
@@ -15,6 +20,9 @@ export function ProvenanceCard({
   costUsd,
   energyWh,
   co2eG,
+  co2eGLow,
+  co2eGHigh,
+  avoidedUsd,
 }: {
   model: string | null | undefined
   doctrineSha: string | null | undefined
@@ -27,8 +35,15 @@ export function ProvenanceCard({
   costUsd?: number
   energyWh?: number | null
   co2eG?: number | null
+  /** The judgment band around co2eG. Absent on runs recorded before it. */
+  co2eGLow?: number | null
+  co2eGHigh?: number | null
+  /** Signed money against the same-token baseline. Exact, unlike the carbon. */
+  avoidedUsd?: number | null
 }) {
   const footprint = footprintText(energyWh, co2eG)
+  const band = formatCo2eBand(co2eGLow, co2eGHigh)
+  const money = avoidedMoneyFraming(avoidedUsd)
   const showCache = cacheReadTokens !== undefined || cacheWriteTokens !== undefined
   return (
     <div className="panel">
@@ -50,12 +65,29 @@ export function ProvenanceCard({
             title="Prompt-cache tokens: reads bill at 0.1x the input price, writes at 1.25x."
           />
         )}
-        {costUsd !== undefined && <Stat label="Cost" value={formatCost(costUsd)} />}
+        {costUsd !== undefined && (
+          <Stat
+            label="Cost"
+            value={formatCost(costUsd)}
+            title="Exact: per-token list prices are published, so this is arithmetic rather than an estimate."
+          />
+        )}
         {footprint && (
           <Stat
             label="Footprint (est.)"
             value={footprint}
-            title="Heuristic estimate from token counts and the model's energy class — not a measurement."
+            sub={band}
+            subTitle={BAND_SHORT}
+            title="Estimated from token counts and the model's calibrated energy class — not a measurement."
+          />
+        )}
+        {avoidedUsd !== null && avoidedUsd !== undefined && (
+          <Stat
+            label={money.label}
+            value={formatCostSigned(avoidedUsd)}
+            sub="exact prices"
+            subTitle={MONEY_SHORT}
+            title={money.note}
           />
         )}
       </div>
@@ -63,13 +95,30 @@ export function ProvenanceCard({
   )
 }
 
-function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
+function Stat({
+  label,
+  value,
+  title,
+  sub,
+  subTitle,
+}: {
+  label: string
+  value: string
+  title?: string
+  sub?: string | null
+  subTitle?: string
+}) {
   return (
     <div className="config-stat">
       <div className="mono-label">{label}</div>
       <div className="mono-body" title={title}>
         {value}
       </div>
+      {sub && (
+        <span className="band-under" title={subTitle}>
+          {sub}
+        </span>
+      )}
     </div>
   )
 }

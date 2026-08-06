@@ -14,7 +14,13 @@ services:
       retries: 20
 
   backend:
-    build: ./backend
+    # Root context, not ./backend: the image also carries the repository's docs/
+    # so GET /api/docs can serve the emissions methodology to the in-product
+    # dialog (backend/bench/api/docs.py). The root .dockerignore keeps the wider
+    # context from dragging .venv / node_modules into the build.
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     environment:
       BENCH_DATABASE_URL: postgresql+asyncpg://bench:bench@postgres:5432/bench
       BENCH_SECRET_KEY: ${BENCH_SECRET_KEY:-dev-secret-change-me}
@@ -47,13 +53,26 @@ services:
       BENCH_LOCAL_DISPLAY_NAME: ${BENCH_LOCAL_DISPLAY_NAME:-Local}
       BENCH_LOCAL_PROBE_TOOLS: ${BENCH_LOCAL_PROBE_TOOLS:-true}
       # Eco accounting — docs/eco-accounting.md, docs/emissions-methodology.md.
-      BENCH_GRID_CO2E_G_PER_KWH: ${BENCH_GRID_CO2E_G_PER_KWH:-400.0}
+      # 470 gCO2e/kWh is the IEA 2024 global power-sector average.
+      BENCH_GRID_CO2E_G_PER_KWH: ${BENCH_GRID_CO2E_G_PER_KWH:-470.0}
+      # GHG Protocol Scope 2 basis of that factor: location_based | market_based
+      # | unspecified. The default factor is a physical-grid average.
+      BENCH_GRID_CO2E_BASIS: ${BENCH_GRID_CO2E_BASIS:-location_based}
       # Blank on purpose: unset means "use BENCH_GRID_CO2E_G_PER_KWH for local
       # inference too". A number here would silently defeat that fallback.
       BENCH_LOCAL_GRID_CO2E_G_PER_KWH: ${BENCH_LOCAL_GRID_CO2E_G_PER_KWH:-}
+      BENCH_LOCAL_GRID_CO2E_BASIS: ${BENCH_LOCAL_GRID_CO2E_BASIS:-unspecified}
       BENCH_DATACENTER_PUE: ${BENCH_DATACENTER_PUE:-1.2}
       BENCH_LOCAL_PUE: ${BENCH_LOCAL_PUE:-1.05}
+      # Uptime Institute 2024 industry average, for self-hosting in a real
+      # machine room rather than on a desk.
+      BENCH_ONPREM_PUE: ${BENCH_ONPREM_PUE:-1.56}
+      BENCH_LOCAL_DEPLOYMENT_PROFILE: ${BENCH_LOCAL_DEPLOYMENT_PROFILE:-workstation}
       BENCH_EMBODIED_G_PER_RUN: ${BENCH_EMBODIED_G_PER_RUN:-0.0}
+      # Multiplicative judgment band (central/2.5 .. central x 2.5), NOT a
+      # confidence interval.
+      BENCH_UNCERTAINTY_BAND_LOW: ${BENCH_UNCERTAINTY_BAND_LOW:-2.5}
+      BENCH_UNCERTAINTY_BAND_HIGH: ${BENCH_UNCERTAINTY_BAND_HIGH:-2.5}
       BENCH_EMISSIONS_BASELINE_MODEL: ${BENCH_EMISSIONS_BASELINE_MODEL:-}
       # Local inference server (Ollama, LM Studio, vLLM, llama.cpp), for running
       # with no cloud provider at all — docs/local-models.md. From inside this

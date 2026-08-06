@@ -22,6 +22,11 @@ COPY backend/alembic.ini ./
 RUN pip install --no-cache-dir .
 
 COPY packs /packs
+# Reference documentation, served read-only by GET /api/docs/{slug} — the
+# methodology dialog reads this directory, so the prose in the product is the
+# prose in the repo with no copy in between. tests/test_docs_api.py fails if this
+# line is dropped.
+COPY docs /app/docs
 COPY --from=frontend /fe/dist /app/frontend-dist
 
 # This image is a real deployment, so it declares itself one: BENCH_ENVIRONMENT

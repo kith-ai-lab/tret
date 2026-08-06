@@ -11,8 +11,18 @@ import {
 } from '../api/client'
 import { useRunStream } from '../api/useRunStream'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
-import { avoidedFraming } from '../components/shared/emissions'
-import { formatCo2e, formatCost, formatPct, formatTokens, orDash } from '../components/shared/format'
+import {
+  BAND_SHORT,
+  avoidedFraming,
+  avoidedMoneyFraming,
+  coarseComparison,
+} from '../components/shared/emissions'
+import {
+  formatCo2eWithBand,
+  formatCost,
+  formatCostSigned,
+  formatTokens,
+} from '../components/shared/format'
 import { LiveFootprint } from '../components/shared/LiveFootprint'
 import { RoutingBadge, shortModelName } from '../components/shared/RoutingBadge'
 import { Markdown } from './Packs'
@@ -465,21 +475,30 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
   )
 }
 
-/** The compact, always-rendered line: model, cost, estimated carbon, and the
- *  same-token counterfactual — an em-dash (never 0) for whatever part the
- *  backend did not estimate, and the surcharge case named and colored, sign
- *  preserved, never shown as a positive "saving". */
+/** The compact, always-rendered line: model, cost, estimated carbon with its
+ *  range, the same-token counterfactual in coarse language, and money saved — an
+ *  em-dash (never 0) for whatever part the backend did not estimate, and the
+ *  surcharge case named and colored, sign preserved, never shown as a positive
+ *  "saving".
+ *
+ *  The comparison used to read "98.3% lighter than frontier". That decimal was
+ *  the ratio of two estimated constants and implied a precision neither side has,
+ *  so it now reads "~50x lighter than frontier" — the size of the difference,
+ *  which is the part that is actually reliable. */
 function FootprintChipLine({ message }: { message: ChatMessage }) {
   const framing = avoidedFraming(message.avoided_co2e_g)
-  const pct = message.energy?.baseline?.avoided_pct
-  const pctText = pct === null || pct === undefined ? null : formatPct(pct)
+  const comparison = coarseComparison(message.co2e_g, message.energy?.baseline?.co2e_g)
+  const money = avoidedMoneyFraming(message.avoided_usd)
+  // Coarse language when both sides of the ratio are there; otherwise the tone
+  // alone, which is all a run recorded before the baseline existed supports.
   let avoidedText = '—'
   let avoidedColor: string | undefined
-  if (framing.tone === 'saving') {
-    avoidedText = `${pctText ? `${pctText} ` : ''}lighter than frontier`
-    avoidedColor = framing.color
-  } else if (framing.tone === 'surcharge') {
-    avoidedText = `${pctText ? `${pctText} ` : ''}surcharge vs frontier`
+  if (comparison.tone !== 'unknown') {
+    avoidedText =
+      comparison.tone === 'even' ? 'level with frontier' : `${comparison.text} than frontier`
+    avoidedColor = comparison.color
+  } else if (framing.tone === 'saving' || framing.tone === 'surcharge') {
+    avoidedText = framing.tone === 'saving' ? 'lighter than frontier' : 'surcharge vs frontier'
     avoidedColor = framing.color
   } else if (framing.tone === 'even') {
     avoidedText = 'level with frontier'
@@ -488,15 +507,29 @@ function FootprintChipLine({ message }: { message: ChatMessage }) {
     <span className="chip-footprint">
       {message.model_used && <span>{shortModelName(message.model_used)}</span>}
       <span className="sep">·</span>
-      <span>{formatCost(message.cost_usd)}</span>
-      <span className="sep">·</span>
-      <span title="Estimated from token counts — never measured.">
-        {orDash(formatCo2e(message.co2e_g))} CO₂e (est.)
+      <span title="Exact: per-token list prices are published, so the dollar figure is arithmetic.">
+        {formatCost(message.cost_usd)}
       </span>
       <span className="sep">·</span>
-      <span style={{ color: avoidedColor }} title={framing.note}>
+      <span
+        title={`Estimated from token counts — never measured. ${
+          message.co2e_g_low === null || message.co2e_g_low === undefined ? '' : BAND_SHORT
+        }`}
+      >
+        {formatCo2eWithBand(message.co2e_g, message.co2e_g_low, message.co2e_g_high)} CO₂e (est.)
+      </span>
+      <span className="sep">·</span>
+      <span style={{ color: avoidedColor }} title={`${framing.note} ${comparison.note}`}>
         {avoidedText}
       </span>
+      {message.avoided_usd !== null && message.avoided_usd !== undefined && (
+        <>
+          <span className="sep">·</span>
+          <span style={{ color: money.color }} title={money.note}>
+            {formatCostSigned(message.avoided_usd)} vs frontier
+          </span>
+        </>
+      )}
     </span>
   )
 }

@@ -79,9 +79,86 @@ export function formatEnergyScaled(wh: number | null | undefined): string | null
   return `${magnitude(wh)} Wh`
 }
 
-/** A backend-supplied percentage. Never computed here from other figures. */
+/** A backend-supplied percentage. Never computed here from other figures.
+ *
+ *  NOT for the avoided-emissions comparison: a decimal place on the ratio of two
+ *  estimated constants is false precision. Use `coarseComparison` from
+ *  ./emissions for that, and keep this for shares of a total. */
 export function formatPct(pct: number | null | undefined): string | null {
   return pct === null || pct === undefined ? null : `${pct.toFixed(1)}%`
+}
+
+// ── uncertainty bands ────────────────────────────────────────────────────
+// A carbon figure is shown as a range wherever the backend recorded one. Both
+// ends print in the *same* unit, chosen from the high end, so the two numbers can
+// be read against each other. A range with either end missing is not a range: it
+// renders as the central figure alone rather than half a band.
+
+/** "0.42 – 2.6 g CO₂e", or null when the run carries no band. */
+export function formatCo2eBand(
+  low: number | null | undefined,
+  high: number | null | undefined,
+): string | null {
+  if (low === null || low === undefined || high === null || high === undefined) return null
+  const scale = co2eScaleFor(high)
+  const lowText = formatCo2eAt(low, scale)
+  const highText = formatCo2eAt(high, scale)
+  if (lowText === null || highText === null) return null
+  // Strip the unit off the low end: one unit for the pair reads as one figure.
+  return `${lowText.replace(` ${scale.unit}`, '')} – ${highText}`
+}
+
+/** "~1.0 g CO₂e (0.42 – 2.6)" — central figure with its band in brackets, or the
+ *  central figure alone when no band was recorded. Never invents a band. */
+export function formatCo2eWithBand(
+  central: number | null | undefined,
+  low: number | null | undefined,
+  high: number | null | undefined,
+): string {
+  const centralText = formatCo2eScaled(central)
+  if (centralText === null) return NO_ESTIMATE
+  if (low === null || low === undefined || high === null || high === undefined) return centralText
+  const scale = co2eScaleFor(Math.max(Math.abs(high), Math.abs(central ?? 0)))
+  const lowText = formatCo2eAt(low, scale)?.replace(` ${scale.unit}`, '')
+  const highText = formatCo2eAt(high, scale)?.replace(` ${scale.unit}`, '')
+  if (!lowText || !highText) return centralText
+  return `${centralText} (${lowText} – ${highText})`
+}
+
+/** Energy shown as a range, same rules as carbon. */
+export function formatWhBand(
+  low: number | null | undefined,
+  high: number | null | undefined,
+): string | null {
+  if (low === null || low === undefined || high === null || high === undefined) return null
+  const lowText = formatEnergyScaled(low)
+  const highText = formatEnergyScaled(high)
+  if (lowText === null || highText === null) return null
+  // Units may differ across a 6.25x span (e.g. 0.9 Wh … 5.6 Wh stays Wh, but
+  // 800 Wh … 5 kWh does not), so both ends keep their own unit here.
+  return `${lowText} – ${highText}`
+}
+
+// ── money ────────────────────────────────────────────────────────────────
+
+/** A signed dollar figure, sign preserved: "-$0.0120" is a surcharge and reads
+ *  as one. Money is the one place a precise figure is defensible — per-token
+ *  prices are published — so this keeps four decimals where carbon does not. */
+export function formatCostSigned(usd: number | null | undefined): string {
+  if (usd === null || usd === undefined) return NO_ESTIMATE
+  const sign = usd < 0 ? '-' : ''
+  return `${sign}$${Math.abs(usd).toFixed(4)}`
+}
+
+/** Window-scale money: cents matter at run scale, not at window scale, but the
+ *  figure is still exact so it is never rounded to an order of magnitude. */
+export function formatCostScaled(usd: number | null | undefined): string {
+  if (usd === null || usd === undefined) return NO_ESTIMATE
+  const sign = usd < 0 ? '-' : ''
+  const abs = Math.abs(usd)
+  if (abs >= 100) return `${sign}$${abs.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+  if (abs >= 1) return `${sign}$${abs.toFixed(2)}`
+  return `${sign}$${abs.toFixed(4)}`
 }
 
 /** Plain number with thousands separators and up to `places` decimals — for

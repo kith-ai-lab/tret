@@ -6,7 +6,8 @@ import { api, type Msg, type RunDetail } from '../api/client'
 import { type StreamItem, useRunStream } from '../api/useRunStream'
 import { ContextComposition } from '../components/shared/ContextComposition'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
-import { footprintText, formatCost, formatTokens } from '../components/shared/format'
+import { BAND_SHORT } from '../components/shared/emissions'
+import { footprintText, formatCo2eBand, formatCost, formatTokens } from '../components/shared/format'
 import { LiveFootprint } from '../components/shared/LiveFootprint'
 import { ProvenanceCard } from '../components/shared/ProvenanceCard'
 import { RoutingBadge } from '../components/shared/RoutingBadge'
@@ -75,8 +76,13 @@ export function RunDetailView() {
   const costUsd = live?.cost_usd ?? run.cost_usd
   const energyWh = live?.energy_wh ?? run.energy_wh
   const co2eG = live?.co2e_g ?? run.co2e_g
+  // The judgment band travels with the carbon figure everywhere it is shown, so
+  // no surface prints a bare point estimate. Null on runs recorded before it.
+  const co2eGLow = live?.co2e_g_low ?? run.co2e_g_low
+  const co2eGHigh = live?.co2e_g_high ?? run.co2e_g_high
   const iterations = live?.iteration ?? run.iterations
   const footprint = footprintText(energyWh, co2eG)
+  const footprintBand = formatCo2eBand(co2eGLow, co2eGHigh)
 
   return (
     <div className="stack">
@@ -203,6 +209,9 @@ export function RunDetailView() {
         costUsd={costUsd}
         energyWh={energyWh}
         co2eG={co2eG}
+        co2eGLow={co2eGLow}
+        co2eGHigh={co2eGHigh}
+        avoidedUsd={live?.avoided_usd ?? run.avoided_usd}
       />
 
       {run.energy && <EnergyDetail energy={run.energy} />}
@@ -219,8 +228,13 @@ export function RunDetailView() {
         )}
         <span>cost {formatCost(costUsd)}</span>
         {footprint && (
-          <span title="Heuristic estimate from token counts and the model's energy class — not a measurement.">
+          <span
+            title={`Estimated from token counts and the model's calibrated energy class — not a measurement. ${
+              footprintBand ? BAND_SHORT : ''
+            }`}
+          >
             {footprint}
+            {footprintBand && ` · range ${footprintBand}`}
           </span>
         )}
         {run.started_at && run.finished_at && (

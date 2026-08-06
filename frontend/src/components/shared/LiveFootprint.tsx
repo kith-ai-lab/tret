@@ -6,8 +6,23 @@
  *  disappears or reflows mid-stream. Second, a missing figure is an em-dash and
  *  never a zero — the engine reports null when it has no estimate. */
 import type { UsageInfo } from '../../api/useRunStream'
-import { COUNTERFACTUAL_SHORT, ESTIMATE_NOTE, avoidedFraming } from './emissions'
-import { NO_ESTIMATE_HINT, formatCo2e, formatWh, orDash } from './format'
+import {
+  BAND_LABEL,
+  BAND_SHORT,
+  COUNTERFACTUAL_SHORT,
+  ESTIMATE_NOTE,
+  MONEY_SHORT,
+  avoidedFraming,
+  avoidedMoneyFraming,
+} from './emissions'
+import {
+  NO_ESTIMATE_HINT,
+  formatCo2e,
+  formatCo2eBand,
+  formatCostSigned,
+  formatWh,
+  orDash,
+} from './format'
 
 export function LiveFootprint({
   usage,
@@ -17,6 +32,7 @@ export function LiveFootprint({
   label?: string
 }) {
   const framing = avoidedFraming(usage?.avoided_co2e_g)
+  const money = avoidedMoneyFraming(usage?.avoided_usd)
   const scopeTitle =
     'GHG Protocol split so far: Scope 2 is purchased electricity for self-hosted inference, Scope 3 is cloud inference as a purchased service plus embodied hardware. Scope 1 is always zero.'
 
@@ -28,6 +44,15 @@ export function LiveFootprint({
         <span className="t-key">co₂e</span>
         <span className="t-val" style={{ minWidth: '11ch' }}>
           {orDash(formatCo2e(usage?.co2e_g))}
+        </span>
+      </span>
+
+      {/* The range is its own fixed-width cell rather than an inline suffix, so
+          the row does not reflow when the first band arrives mid-stream. */}
+      <span className="t-item" title={`${BAND_SHORT} ${NO_ESTIMATE_HINT}`}>
+        <span className="t-key">{BAND_LABEL}</span>
+        <span className="t-val" style={{ minWidth: '15ch' }}>
+          {orDash(formatCo2eBand(usage?.co2e_g_low, usage?.co2e_g_high))}
         </span>
       </span>
 
@@ -53,6 +78,17 @@ export function LiveFootprint({
         </span>
         <span className="t-val" style={{ minWidth: '11ch', color: framing.color }}>
           {orDash(formatCo2e(usage?.avoided_co2e_g))}
+        </span>
+      </span>
+
+      {/* Money is exact where everything else on this row is estimated, so it is
+          labelled as the firmer figure rather than left to look like the rest. */}
+      <span className="t-item" title={`${money.note} ${MONEY_SHORT}`}>
+        <span className="t-key">
+          {money.tone === 'surcharge' ? 'cost surcharge (exact)' : 'money vs baseline (exact)'}
+        </span>
+        <span className="t-val" style={{ minWidth: '10ch', color: money.color }}>
+          {formatCostSigned(usage?.avoided_usd)}
         </span>
       </span>
     </div>

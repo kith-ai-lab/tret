@@ -3,13 +3,21 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { api, type RunSummary } from '../api/client'
-import { COUNTERFACTUAL_SHORT, avoidedFraming } from '../components/shared/emissions'
+import {
+  BAND_SHORT,
+  COUNTERFACTUAL_SHORT,
+  MONEY_SHORT,
+  avoidedFraming,
+  avoidedMoneyFraming,
+} from '../components/shared/emissions'
 import {
   NO_ESTIMATE,
   NO_ESTIMATE_HINT,
   footprintText,
   formatCo2e,
+  formatCo2eBand,
   formatCost,
+  formatCostSigned,
   formatTokens,
   orDash,
 } from '../components/shared/format'
@@ -145,24 +153,31 @@ export function Runs() {
   )
 }
 
-/** The run's estimated footprint, with its scope split and signed baseline
- *  difference in the tooltip. A run with no estimate shows an em-dash, never 0 —
- *  the full derivation is on the run page. */
+/** The run's estimated footprint, with its scope split, judgment band, signed
+ *  baseline difference and signed money in the tooltip. A run with no estimate
+ *  shows an em-dash, never 0 — the full derivation is on the run page.
+ *
+ *  The carbon figure carries its range on a second line: at list density there is
+ *  no room for prose, but there is room to not print a bare point estimate. */
 function Footprint({ run }: { run: RunSummary }) {
   const text = footprintText(run.energy_wh, run.co2e_g)
   if (!text) {
     return <span title={NO_ESTIMATE_HINT}>{NO_ESTIMATE}</span>
   }
   const framing = avoidedFraming(run.avoided_co2e_g)
+  const money = avoidedMoneyFraming(run.avoided_usd)
+  const band = formatCo2eBand(run.co2e_g_low, run.co2e_g_high)
   const hasScopes = run.scope2_g !== null || run.scope3_g !== null
   const scopePart = hasScopes
     ? `scope 1 ${formatCo2e(0)} · scope 2 ${orDash(formatCo2e(run.scope2_g))} · scope 3 ${orDash(formatCo2e(run.scope3_g))}. `
     : 'No scope split recorded for this run. '
+  const bandPart = band ? `Range ${band} — ${BAND_SHORT} ` : ''
   return (
     <span
-      title={`${scopePart}${framing.label} ${orDash(formatCo2e(run.avoided_co2e_g))} — ${COUNTERFACTUAL_SHORT}`}
+      title={`${scopePart}${bandPart}${framing.label} ${orDash(formatCo2e(run.avoided_co2e_g))} — ${COUNTERFACTUAL_SHORT} ${money.label} ${formatCostSigned(run.avoided_usd)} — ${MONEY_SHORT}`}
     >
       {text}
+      {band && <span className="band-under">{band}</span>}
     </span>
   )
 }

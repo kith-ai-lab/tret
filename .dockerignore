@@ -1,0 +1,18 @@
+# Keeps the repository-root build context small. Both images build from the root
+# (backend/Dockerfile needs docs/, which is a sibling of backend/; Dockerfile.fly
+# needs frontend/ and packs/), and without this file the context would include a
+# ~200 MB virtualenv and a ~80 MB node_modules that neither image uses — both
+# reinstall their dependencies inside the image.
+#
+# Nothing listed here is COPYed by either Dockerfile. Check before adding a line.
+.git
+.github
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+frontend/dist
+# Secrets never belong in an image layer; compose passes them as environment.
+.env

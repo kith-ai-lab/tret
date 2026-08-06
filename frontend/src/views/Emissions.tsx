@@ -20,13 +20,22 @@ import {
   type EmissionsTotals,
 } from '../api/client'
 import { ScopeBar } from '../components/shared/EmissionsCalc'
+import { MethodologyLink } from '../components/shared/MethodologyDialog'
 import {
+  BAND_LABEL,
+  BAND_SHORT,
+  BAND_WHY,
   COUNTERFACTUAL_NOTE,
   ESTIMATE_NOTE,
-  METHODOLOGY_DOC,
   MIXED_FACTORS_CAVEAT,
+  MONEY_EXACT_NOTE,
+  MONEY_SHORT,
   SCOPE_META,
   avoidedFraming,
+  avoidedMoneyFraming,
+  bandFactorText,
+  coarseComparison,
+  gridBasisLabel,
   share,
 } from '../components/shared/emissions'
 import {
@@ -35,10 +44,11 @@ import {
   co2eScaleFor,
   formatCo2e,
   formatCo2eAt,
+  formatCo2eBand,
   formatCo2eScaled,
+  formatCostScaled,
   formatEnergyScaled,
   formatFactor,
-  formatPct,
   formatTokens,
   orDash,
 } from '../components/shared/format'
@@ -53,12 +63,27 @@ function bucketAvoided(b: { baseline_co2e_g: number; avoided_co2e_g: number }): 
   return b.baseline_co2e_g === 0 && b.avoided_co2e_g === 0 ? null : b.avoided_co2e_g
 }
 
-/** Heavier class, hotter badge. An editorial cue over the backend's own class. */
+/** Heavier class, hotter badge. An editorial cue over the backend's own class.
+ *  R is the reasoning tier and is an order of magnitude above XL, not a step. */
 const CLASS_BADGE: Record<string, string> = {
   S: 'badge-green',
   M: 'badge-blue',
   L: 'badge-amber',
   XL: 'badge-red',
+  R: 'badge-red',
+}
+
+/** A rollup's summed band, or null when nothing in it recorded one. The backend
+ *  substitutes a run's central figure at both ends when it has no band, so a
+ *  window with no bands at all comes back with low == high == central; showing
+ *  that as a range would fake a band nobody recorded. */
+function bucketBand(b: {
+  co2e_g: number
+  co2e_g_low: number
+  co2e_g_high: number
+}): { low: number; high: number } | null {
+  if (b.co2e_g_low === b.co2e_g_high) return null
+  return { low: b.co2e_g_low, high: b.co2e_g_high }
 }
 
 export function Emissions() {
@@ -151,21 +176,85 @@ export function Emissions() {
 /** The backend's disclaimer, verbatim, above everything it qualifies — plus the
  *  mixed-factors caveat when the window has no single recording basis. */
 function Disclaimer({ data }: { data: EmissionsAnalytics }) {
+  const bases = new Set(
+    data.factors.recorded.map((r) => r.grid_co2e_basis).filter((b): b is string => Boolean(b)),
+  )
+  const mixedBases = bases.size > 1
   return (
     <div className="stack" style={{ gap: 10 }}>
       <div className="callout callout-note">
         <span className="callout-title">Read before quoting any figure on this page</span>
         {data.disclaimer}
         <div style={{ marginTop: 6 }}>
-          Methodology: <code>{METHODOLOGY_DOC}</code>
+          Methodology: <MethodologyLink factorsSlot={<WindowFactors data={data} />} /> — the full
+          document, plus the factor combinations behind this window.
         </div>
       </div>
       {data.factors.mixed_factors && (
         <div className="callout callout-warn">
           <span className="callout-title">Mixed emission factors in this window</span>
           {MIXED_FACTORS_CAVEAT}
+          {mixedBases && (
+            <div style={{ marginTop: 6 }}>
+              This window mixes <strong>{[...bases].map(gridBasisLabel).join(' and ')}</strong> grid
+              factors. Those answer different questions under the GHG Protocol and may never be
+              summed — this total is not a total. Split the window by deployment, or set one basis.
+            </div>
+          )}
         </div>
       )}
+    </div>
+  )
+}
+
+/** What the methodology dialog shows on this page in place of a run's factor
+ *  records: per-factor provenance is recorded per run, so the window-scale view
+ *  offers the combinations actually present instead of pretending to have one. */
+function WindowFactors({ data }: { data: EmissionsAnalytics }) {
+  const f = data.factors
+  const t = data.totals
+  return (
+    <div className="stack" style={{ gap: 14 }}>
+      <div className="callout callout-note">
+        <span className="callout-title">Provenance is per run, not per window</span>
+        Every constant's value, source, date and confidence marker is recorded on the run that used
+        it. Open any run's <em>step-by-step derivation</em> for the full factor table. What follows
+        is what this window contains, and the settings in force right now — nothing above was
+        computed from them.
+      </div>
+      <div>
+        <div className="mono-label" style={{ marginBottom: 6 }}>
+          Recording bases present in this window
+        </div>
+        <MonoTable
+          columns={RECORDED_COLUMNS}
+          rows={f.recorded}
+          rowKey={(r) =>
+            `${r.deployment}-${r.grid_co2e_g_per_kwh}-${r.pue}-${r.grid_co2e_basis ?? 'none'}`
+          }
+          empty="No runs with an estimate in this window."
+        />
+      </div>
+      <div>
+        <div className="mono-label" style={{ marginBottom: 6 }}>
+          Coverage
+        </div>
+        <div className="fine-print">
+          {formatTokens(t.runs_with_estimate)} of {formatTokens(t.runs)} run(s) carry an estimate.{' '}
+          {formatTokens(t.runs_without_scope_split)} carry no scope split,{' '}
+          {formatTokens(t.runs_without_baseline)} no baseline comparison,{' '}
+          {formatTokens(t.runs_without_money_comparison)} no money comparison, and{' '}
+          {formatTokens(t.runs_without_uncertainty_band)} no {BAND_LABEL}. None of those are
+          back-filled with zeros.
+          {f.uncertainty_band_low !== undefined && f.uncertainty_band_high !== undefined && (
+            <>
+              {' '}
+              The band currently configured is{' '}
+              {bandFactorText(f.uncertainty_band_low, f.uncertainty_band_high)}. {BAND_SHORT}
+            </>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -216,11 +305,16 @@ function NoEstimates({ totals }: { totals: EmissionsTotals }) {
 function TotalsStrip({ totals }: { totals: EmissionsTotals }) {
   const avoided = bucketAvoided(totals)
   const framing = avoidedFraming(avoided)
+  const band = bucketBand(totals)
+  const money = avoidedMoneyFraming(totals.avoided_usd)
   return (
-    <div className="panel config-stats" style={{ gap: 34 }}>
+    <div className="panel stack" style={{ gap: 10 }}>
+      <div className="config-stats" style={{ gap: 34 }}>
       <Stat
         label="Total CO₂e (est.)"
         value={orDash(formatCo2eScaled(totals.co2e_g))}
+        sub={band ? formatCo2eBand(band.low, band.high) : undefined}
+        subTitle={`${BAND_SHORT} Summed low-with-low and high-with-high, which assumes the factors are wrong in the same direction for every run in the window.`}
         title="Summed from each run's as-recorded figure, never recomputed at today's factors."
       />
       <Stat
@@ -250,6 +344,32 @@ function TotalsStrip({ totals }: { totals: EmissionsTotals }) {
         color={framing.color}
         title={`${framing.note} ${COUNTERFACTUAL_NOTE}`}
       />
+      <Stat
+        label={money.label}
+        value={formatCostScaled(totals.avoided_usd)}
+        color={money.color}
+        sub="exact prices"
+        subTitle={MONEY_EXACT_NOTE}
+        title={money.note}
+      />
+      </div>
+      <div className="fine-print">
+        {BAND_WHY} {BAND_SHORT}
+        {totals.runs_without_uncertainty_band > 0 && (
+          <>
+            {' '}
+            {formatTokens(totals.runs_without_uncertainty_band)} run(s) here recorded no range; they
+            contribute their central figure to both ends rather than widening or narrowing it.
+          </>
+        )}
+        {totals.runs_without_money_comparison > 0 && (
+          <>
+            {' '}
+            {formatTokens(totals.runs_without_money_comparison)} run(s) recorded no money comparison
+            and contribute nothing to the dollar figure.
+          </>
+        )}
+      </div>
     </div>
   )
 }
@@ -333,6 +453,8 @@ function BaselineComparison({ data }: { data: EmissionsAnalytics }) {
   const t = data.totals
   const avoided = bucketAvoided(t)
   const framing = avoidedFraming(avoided)
+  const comparison = coarseComparison(t.co2e_g, t.baseline_co2e_g)
+  const money = avoidedMoneyFraming(t.avoided_usd)
   const baselineModel = data.factors.baseline_model
   const noBaseline = avoided === null
   const scale = Math.max(t.co2e_g, t.baseline_co2e_g)
@@ -405,10 +527,18 @@ function BaselineComparison({ data }: { data: EmissionsAnalytics }) {
                 title={framing.note}
               />
               <Stat
-                label="Difference"
-                value={orDash(formatPct(t.avoided_pct))}
-                color={framing.color}
-                title="Signed share of the baseline total, as reported by the backend."
+                label="Difference (order of magnitude)"
+                value={comparison.text}
+                color={comparison.color}
+                title={comparison.note}
+              />
+              <Stat
+                label={money.label}
+                value={formatCostScaled(t.avoided_usd)}
+                color={money.color}
+                sub="exact prices"
+                subTitle={MONEY_EXACT_NOTE}
+                title={money.note}
               />
             </div>
           </>
@@ -418,6 +548,10 @@ function BaselineComparison({ data }: { data: EmissionsAnalytics }) {
           <span className="callout-title">What this comparison is and is not</span>
           {COUNTERFACTUAL_NOTE}
           {!noBaseline && ` ${framing.note}`}
+          <div style={{ marginTop: 6 }}>
+            The difference is stated coarsely on purpose. {comparison.note} Money is the firmer of
+            the two figures — {MONEY_SHORT}
+          </div>
           {t.runs_without_baseline > 0 && (
             <div style={{ marginTop: 6 }}>
               {formatTokens(t.runs_without_baseline)} run(s) in this window have no baseline figure.
@@ -478,7 +612,7 @@ function ByModel({ rows, localModels }: { rows: EmissionsByModel[]; localModels:
       key: 'co2e',
       header: 'CO₂e (est.)',
       align: 'right',
-      render: (r) => orDash(formatCo2eScaled(r.co2e_g)),
+      render: (r) => <Co2eWithBand bucket={r} />,
     },
     {
       key: 'baseline',
@@ -497,6 +631,12 @@ function ByModel({ rows, localModels }: { rows: EmissionsByModel[]; localModels:
       header: 'Avoided (signed)',
       align: 'right',
       render: (r) => <Avoided grams={bucketAvoided(r)} />,
+    },
+    {
+      key: 'money',
+      header: 'Money (signed)',
+      align: 'right',
+      render: (r) => <AvoidedMoney usd={r.avoided_usd} />,
     },
   ]
   return (
@@ -528,7 +668,7 @@ function ByHarness({ rows }: { rows: EmissionsByHarness[] }) {
       key: 'co2e',
       header: 'CO₂e (est.)',
       align: 'right',
-      render: (r) => orDash(formatCo2eScaled(r.co2e_g)),
+      render: (r) => <Co2eWithBand bucket={r} />,
     },
     {
       key: 'baseline',
@@ -547,6 +687,12 @@ function ByHarness({ rows }: { rows: EmissionsByHarness[] }) {
       header: 'Avoided (signed)',
       align: 'right',
       render: (r) => <Avoided grams={bucketAvoided(r)} />,
+    },
+    {
+      key: 'money',
+      header: 'Money (signed)',
+      align: 'right',
+      render: (r) => <AvoidedMoney usd={r.avoided_usd} />,
     },
   ]
   return (
@@ -637,27 +783,44 @@ function ByDay({ rows }: { rows: EmissionsByDay[] }) {
 
 // ── factors ──────────────────────────────────────────────────────────────
 
+/** The (deployment, grid factor, PUE, GHG Protocol basis) combinations a window
+ *  actually contains. Shared with the methodology dialog, which shows the same
+ *  rows in place of a single run's factor provenance. The basis column is not
+ *  decoration: two rows differing only in basis are not summable at all. */
+const RECORDED_COLUMNS: Column<EmissionsRecordedFactor>[] = [
+  { key: 'deployment', header: 'Deployment', render: (r) => r.deployment ?? NO_ESTIMATE },
+  {
+    key: 'grid',
+    header: 'Grid intensity',
+    align: 'right',
+    render: (r) =>
+      r.grid_co2e_g_per_kwh === null
+        ? NO_ESTIMATE
+        : `${formatFactor(r.grid_co2e_g_per_kwh, 2)} gCO₂e/kWh`,
+  },
+  {
+    key: 'basis',
+    header: 'GHG basis',
+    render: (r) => (
+      <span
+        title="Location-based describes the physical grid; market-based describes contractual renewable claims. They answer different questions and may never be summed."
+        style={r.grid_co2e_basis === 'market_based' ? { color: 'var(--amber)' } : undefined}
+      >
+        {gridBasisLabel(r.grid_co2e_basis)}
+      </span>
+    ),
+  },
+  {
+    key: 'pue',
+    header: 'PUE',
+    align: 'right',
+    render: (r) => (r.pue === null ? NO_ESTIMATE : formatFactor(r.pue)),
+  },
+  { key: 'runs', header: 'Runs', align: 'right', render: (r) => formatTokens(r.runs) },
+]
+
 function Factors({ data }: { data: EmissionsAnalytics }) {
   const f = data.factors
-  const columns: Column<EmissionsRecordedFactor>[] = [
-    { key: 'deployment', header: 'Deployment', render: (r) => r.deployment ?? NO_ESTIMATE },
-    {
-      key: 'grid',
-      header: 'Grid intensity',
-      align: 'right',
-      render: (r) =>
-        r.grid_co2e_g_per_kwh === null
-          ? NO_ESTIMATE
-          : `${formatFactor(r.grid_co2e_g_per_kwh, 2)} gCO₂e/kWh`,
-    },
-    {
-      key: 'pue',
-      header: 'PUE',
-      align: 'right',
-      render: (r) => (r.pue === null ? NO_ESTIMATE : formatFactor(r.pue)),
-    },
-    { key: 'runs', header: 'Runs', align: 'right', render: (r) => formatTokens(r.runs) },
-  ]
   return (
     <Section
       title="Factors"
@@ -695,9 +858,11 @@ function Factors({ data }: { data: EmissionsAnalytics }) {
             </summary>
             <div style={{ padding: '6px 10px 10px' }}>
               <MonoTable
-                columns={columns}
+                columns={RECORDED_COLUMNS}
                 rows={f.recorded}
-                rowKey={(r) => `${r.deployment}-${r.grid_co2e_g_per_kwh}-${r.pue}`}
+                rowKey={(r) =>
+                  `${r.deployment}-${r.grid_co2e_g_per_kwh}-${r.pue}-${r.grid_co2e_basis ?? 'none'}`
+                }
                 empty="Nothing recorded in this window."
               />
             </div>
@@ -710,6 +875,50 @@ function Factors({ data }: { data: EmissionsAnalytics }) {
 }
 
 // ── small pieces ─────────────────────────────────────────────────────────
+
+/** A rollup's carbon with its summed range beneath it. The range is the reason a
+ *  single number is not printed alone anywhere on this page. */
+function Co2eWithBand({
+  bucket,
+}: {
+  bucket: { co2e_g: number; co2e_g_low: number; co2e_g_high: number }
+}) {
+  const band = bucketBand(bucket)
+  return (
+    <>
+      {orDash(formatCo2eScaled(bucket.co2e_g))}
+      {band && (
+        <span className="band-under" title={BAND_SHORT}>
+          {formatCo2eBand(band.low, band.high)}
+        </span>
+      )}
+    </>
+  )
+}
+
+/** A rollup's signed money figure. Exact, unlike everything around it, and said
+ *  so — but an exact **zero** in a rollup is ambiguous: the runs in it may carry
+ *  no money comparison at all, or the comparison may have come out even, and the
+ *  summed total cannot tell those apart. Rather than assert "$0 saved", it renders
+ *  as no figure and the tooltip names both possibilities. */
+function AvoidedMoney({ usd }: { usd: number | null | undefined }) {
+  if (usd === null || usd === undefined || usd === 0) {
+    return (
+      <span
+        style={{ color: 'var(--text-muted)' }}
+        title="No money comparison in this rollup — either these runs recorded none (runs predating it do not), or the comparison came out exactly even. A summed rollup cannot distinguish the two, so it reports no figure rather than claiming zero."
+      >
+        {NO_ESTIMATE}
+      </span>
+    )
+  }
+  const framing = avoidedMoneyFraming(usd)
+  return (
+    <span style={{ color: framing.color }} title={framing.note}>
+      {formatCostScaled(usd)}
+    </span>
+  )
+}
 
 /** A signed avoided figure with its direction stated, never its absolute. */
 function Avoided({ grams }: { grams: number | null | undefined }) {
@@ -751,11 +960,16 @@ function Stat({
   value,
   title,
   color,
+  sub,
+  subTitle,
 }: {
   label: string
   value: string
   title?: string
   color?: string
+  /** A second line under the figure: the judgment band, or "exact prices". */
+  sub?: string | null
+  subTitle?: string
 }) {
   return (
     <div className="config-stat">
@@ -763,6 +977,11 @@ function Stat({
       <div className="mono-body" style={{ color }} title={title}>
         {value}
       </div>
+      {sub && (
+        <span className="band-under" title={subTitle}>
+          {sub}
+        </span>
+      )}
     </div>
   )
 }

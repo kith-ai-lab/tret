@@ -44,6 +44,13 @@ export interface UsageInfo {
   baseline_co2e_g: number | null
   // Signed: negative means heavier than the baseline. Never take its absolute.
   avoided_co2e_g: number | null
+  // Money against the same-token baseline, signed the same way. Firmer than the
+  // carbon figure: per-token prices are exact arithmetic, not estimation.
+  avoided_usd: number | null
+  // The judgment band around co2e_g — NOT a confidence interval. null until the
+  // engine reports one.
+  co2e_g_low: number | null
+  co2e_g_high: number | null
 }
 
 export interface RunStreamState {
@@ -145,6 +152,9 @@ export function useRunStream(runId: string | null): RunStreamState {
           scope3_g: numberOrNull(d.scope3_g),
           baseline_co2e_g: numberOrNull(d.baseline_co2e_g),
           avoided_co2e_g: numberOrNull(d.avoided_co2e_g),
+          avoided_usd: numberOrNull(d.avoided_usd),
+          co2e_g_low: numberOrNull(d.co2e_g_low),
+          co2e_g_high: numberOrNull(d.co2e_g_high),
         },
       })),
     )
@@ -165,6 +175,9 @@ export function useRunStream(runId: string | null): RunStreamState {
               scope3_g: numberOrNull(d.scope3_g) ?? s.usage.scope3_g,
               baseline_co2e_g: numberOrNull(d.baseline_co2e_g) ?? s.usage.baseline_co2e_g,
               avoided_co2e_g: numberOrNull(d.avoided_co2e_g) ?? s.usage.avoided_co2e_g,
+              avoided_usd: numberOrNull(d.avoided_usd) ?? s.usage.avoided_usd,
+              co2e_g_low: numberOrNull(d.co2e_g_low) ?? s.usage.co2e_g_low,
+              co2e_g_high: numberOrNull(d.co2e_g_high) ?? s.usage.co2e_g_high,
             }
           : s.usage,
       }))
