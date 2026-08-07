@@ -117,7 +117,7 @@ or the legacy case above.
 
 ## Opting out of the automatic step
 
-`BENCH_SKIP_MIGRATIONS=1` skips it entirely, for operators who run migrations as
+`BENCH_SKIP_MIGRATIONS=true` skips it entirely, for operators who run migrations as
 a separate deploy step (or from a job with elevated DDL rights). bench then
 assumes the database is already at head and will fail on the first query that
 needs a missing column, so pair it with `alembic upgrade head` in the deploy

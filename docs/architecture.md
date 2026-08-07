@@ -100,8 +100,19 @@ harness carries the `run_harness_task` tool: the assistant delegates
 structured work to a specialist harness, which runs with its own doctrine,
 routing, validation, and audit trail. Delegated findings stay drafts behind
 the approval gate; the chat agent is instructed (and its tool results
-reiterate) to report them as such. Chat/freeform task types cannot be
-delegated to, so delegation cannot recurse.
+reiterate) to report them as such.
+
+Delegation **can** recurse, and is bounded by a hop counter rather than by what
+may be delegated to: any pack task type may list `run_harness_task` among its
+tools (or a harness may enable it), so A can delegate to B, B back to A, or a
+task to itself. `MAX_DELEGATION_DEPTH` in `engine/tools.py` (2) is the ceiling.
+The depth travels with the child run in its `task_input` under
+`_delegation_depth`, so the chain is bounded however it was reached: a chat turn
+may delegate (0 → 1) and a specialist may delegate one further hop (1 → 2), and
+`run_harness_task` refuses past that. Refusing to delegate *to* chat/freeform
+task types would not have bounded anything on its own — each hop is a whole
+extra agent loop spending its own budget, with only the per-run cost cap in the
+way.
 
 ## Providers
 
@@ -137,10 +148,14 @@ Two integrity layers sit alongside it:
 - `packs/safety.py` AST-scans every method entrypoint and fails the pack on
   network access, process spawning, FFI, dynamic import/code, or namespace
   escapes. A deterrent against accidents, explicitly **not** a sandbox.
-- `packs/integrity.py` hashes every file in the pack at install into
+- `packs/integrity.py` hashes every entry in the pack at install into
   `packs.content_hash` (exposed on `GET /api/packs`) and re-verifies it before
   each method execution, so pack code edited under a running deployment fails
-  loudly instead of silently changing results. Re-pin by reinstalling.
+  loudly instead of silently changing results. Regular files contribute their
+  bytes; **symlinks contribute their target string** and are never followed, so
+  re-pointing one changes the hash — what a directory hash cannot cover is the
+  content a link resolves to *outside* the pack, which is pinned by reference
+  only (see docs/pack-authoring.md). Re-pin by reinstalling.
 
 `services/methods.py` is the deterministic compute lane: each method runs as a
 short-lived isolated subprocess (`python -I`, empty environment, rlimits, wall

@@ -10,9 +10,14 @@ Two token-economy properties, tested without a DB:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
+
+from bench.api.harnesses import _validate_tool_names
 from bench.db.models import Harness, Pack
 from bench.engine.context import (
     assemble_context,
@@ -251,3 +256,49 @@ def test_the_shipped_climate_pack_declarations_all_resolve():
     for task in pack.manifest["task_types"]:
         for block in _blocks_by_kind(_context(task["slug"], pack=pack).blocks, "doctrine"):
             assert block.note is None, block.note
+
+
+# ── harness tool names are validated on write ─────────────────────────────────
+# The pack-level counterpart is above (`validate_pack` rejects a task whose
+# `terminal_tool`/`tools` name something the engine has no builtin for). A
+# harness is the *other* place a tool name is written by hand, and it went
+# unchecked: the engine offers only the tools it can resolve, so a typo silently
+# removed a capability instead of failing, and the builder UI echoed the bad name
+# straight back.
+def test_a_harness_tool_name_with_no_builtin_is_rejected():
+    with pytest.raises(HTTPException) as exc:
+        _validate_tool_names(["read_document", "read_documents"])
+    assert exc.value.status_code == 422
+    # Names the offender, and lists what is actually available.
+    assert "read_documents" in exc.value.detail
+    assert "read_document" in exc.value.detail
+    # The valid name in the same list is not reported as unknown.
+    assert exc.value.detail.count("read_documents") == 1
+
+
+def test_every_real_builtin_is_accepted_and_an_empty_list_is_fine():
+    _validate_tool_names([])
+    _validate_tool_names(sorted(get_builtin_tools()))
+
+
+def test_duplicate_tool_names_are_left_alone():
+    """Harmless — the engine builds a spec list, and a repeat is not evidence of
+    the mistake an unknown name is."""
+    _validate_tool_names(["read_document", "read_document"])
+
+
+def test_the_seeded_harnesses_name_only_real_tools():
+    """The bootstrap's own harnesses must satisfy the rule the API now enforces.
+
+    A seeded harness naming a tool the engine dropped would fail its very first
+    run under the loud run-time guard, on a fresh install, before an operator had
+    touched anything. Parsed out of the source rather than by booting the
+    bootstrap, which needs a database.
+    """
+    source = (Path(__file__).parent.parent / "bench/services/bootstrap.py").read_text()
+    builtins = set(get_builtin_tools())
+    seeded: set[str] = set()
+    for literal in re.findall(r"tool_names=\[(.*?)\]", source, re.DOTALL):
+        seeded |= set(re.findall(r'"([^"]+)"', literal))
+    assert seeded, "no seeded tool_names found — has bootstrap.py changed shape?"
+    assert seeded <= builtins, f"bootstrap seeds unknown tool(s): {sorted(seeded - builtins)}"

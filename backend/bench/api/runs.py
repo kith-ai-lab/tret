@@ -14,7 +14,7 @@ from bench.db.engine import get_db
 from bench.db.models import Harness, Project, Run, User
 from bench.engine.events import get_event_bus
 from bench.engine.harness import get_harness_engine
-from bench.services.emissions import emission_summary_fields
+from bench.services.emissions import emission_summary_fields, energy_wh_field
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
@@ -48,7 +48,7 @@ def _run_summary(run: Run) -> dict:
         # Estimated ecological cost alongside the dollar cost. None (not 0) for
         # runs that predate eco accounting: no estimate is not the same as none
         # drawn. Full derivation is in the detail view's "energy" block.
-        "energy_wh": float(run.energy_wh) if run.energy_wh is not None else None,
+        "energy_wh": energy_wh_field(run.energy_wh),
         # co2e_g (run total), scope2_g, scope3_g, avoided_co2e_g, avoided_usd and
         # the judgment band (co2e_g_low/high) — read as recorded from the run's
         # own accounting block, never recomputed at today's factors, and null

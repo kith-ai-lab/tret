@@ -37,20 +37,68 @@ a rotation.
 - Terminate TLS in front of bench (reverse proxy, or the platform's edge).
 - Set `BENCH_COOKIE_SECURE=true`. The session cookie is already `httponly` and
   `samesite=lax`; `secure` is the part that depends on your deployment.
-- The admin user is created on first boot only. Change its password from the UI
-  afterwards; `BENCH_ADMIN_PASSWORD` is not a live credential store.
+- The admin user is created on first boot only. Change its password afterwards
+  with `POST /api/auth/password` (your own account; the current password is
+  required, and the check is rate limited so it cannot be used as an oracle).
+  `BENCH_ADMIN_PASSWORD` is not a live credential store — it is read only when
+  no users exist.
+
+### Credential lifecycle and session revocation
+
+Sessions are stateless signed cookies, so there is no session table to delete
+rows from. Revocation is bound to the credential instead: every cookie carries a
+short fingerprint of the password hash it was minted against, and a request whose
+fingerprint no longer matches is refused (`bench/api/auth.py::credential_version`).
+argon2 salts every hash, so **setting a password always invalidates every session
+for that account**, immediately:
+
+| Endpoint | Who | Effect |
+| --- | --- | --- |
+| `POST /api/auth/password` | the account holder, current password required | password changed; every other session for the account ends, the caller's own cookie is re-issued |
+| `POST /api/auth/users/{id}/password` | admin | rotation after an incident, or restoring a deactivated account; ends every session that account holds |
+| `POST /api/auth/users/{id}/deactivate` | admin | clears the credential entirely — no login, no valid session. The row is kept (approvals and runs point at it); reversible by setting a password. Refused for your own account, and for the last active admin |
+
+Two consequences worth planning for:
+
+- **Upgrading to this behaviour logs everyone out once.** Cookies minted before
+  credential-bound sessions carried a bare user id and are refused rather than
+  honoured — accepting the old shape would be a way around revocation. The cost
+  is one re-login per user, once.
+- Password change and deactivation are the revocation primitives. Rotating
+  `BENCH_SECRET_KEY` also invalidates every session, but it is the blunt
+  instrument: it makes DB-stored provider keys undecryptable too (§1).
 
 ## 3. Login rate limiting
 
-The login endpoint applies an in-memory sliding window keyed by client IP +
-email: `BENCH_LOGIN_MAX_ATTEMPTS` (default 10) failures per
-`BENCH_LOGIN_WINDOW_SECONDS` (default 300) yields `429` with `Retry-After`.
-A successful login clears the window for that key.
+The login endpoint applies an in-memory sliding window over
+`BENCH_LOGIN_WINDOW_SECONDS` (default 300), and counts each failed attempt in
+**two** buckets:
+
+| Key | Limit | What it stops |
+| --- | --- | --- |
+| `src\|<peer>\|<email>` | `BENCH_LOGIN_MAX_ATTEMPTS` (default 10) | one host guessing at one account |
+| `acct\|<email>` | 5x that (`ACCOUNT_BURST_MULTIPLE`) | the same account attacked from many source addresses |
+
+Exceeding either yields `429` with `Retry-After`. A successful login clears both
+windows for that account.
+
+Why two: `request.client.host` is the *socket* peer, so behind the reverse proxy
+this document requires, it is the proxy's address for every request and an
+IP-keyed bucket silently collapses into one bucket for the whole internet. The
+first key therefore **degrades into a per-account bucket behind a proxy**, which
+is the guarantee actually worth keeping; the second is the ceiling the first
+loses when an attacker has many addresses.
+
+`X-Forwarded-For` is deliberately **not** consulted. It is client-settable, so
+trusting it would let an attacker mint a fresh bucket per attempt by varying a
+header — a limiter that can be stepped around is worse than one that is merely
+uninformative, and bench has no trusted-proxy configuration with which to tell a
+forged hop from a real one.
 
 Limits: the counter is **per process** and in memory — it resets on restart and
-does not coordinate across workers (bench pins `workers=1`), and an attacker
-with many source addresses is only mildly inconvenienced. It stops credential
-stuffing against one account from one host. For anything internet-facing, put a
+does not coordinate across workers (bench pins `workers=1`). Neither key contains
+anything the client controls except the email already being attacked, so a
+lockout can only ever affect one account. For anything internet-facing, put a
 proxy/WAF limit in front as well.
 
 ## 4. Deterministic methods: the actual sandbox
@@ -121,11 +169,17 @@ casual abuse. Treat installing a pack as deploying code you reviewed.
 
 ## 6. Pack integrity pinning
 
-At install time bench hashes every file in the pack directory (sorted relative
-path + bytes, build artefacts excluded) and stores it on `packs.content_hash`.
+At install time bench hashes every entry in the pack directory (sorted by
+relative path; regular files contribute their bytes, symlinks contribute their
+target string, build artefacts excluded) and stores it on `packs.content_hash`.
 Before a method executes, the hash is recomputed and compared; a mismatch fails
 the run with a message naming the pack and both hashes, and records a failed
 `method_runs` row.
+
+Symlinks are pinned by target and never followed, so adding, removing or
+re-pointing one changes the hash. What the pin cannot cover is the *content*
+behind a link that leaves the pack directory — keep pack content inside the pack
+(docs/pack-authoring.md).
 
 This catches tampering and accidental drift by whoever can write to the pack
 directory — it is **not** a signature, since the same person can reinstall to
@@ -170,7 +224,8 @@ see [eco-accounting.md](eco-accounting.md).
   see [upgrading.md](upgrading.md). That role therefore needs DDL rights on its
   own schema. To keep DDL out of the app's role instead, run
   `alembic upgrade head` from a deploy step under a privileged role and set
-  `BENCH_SKIP_MIGRATIONS=1` on the app.
+  `BENCH_SKIP_MIGRATIONS=true` on the app (documented in `.env.example` and
+  passed through by `docker-compose.yml`).
 - Back the database up **before** an upgrade that migrates it. A failed migration
   rolls back (Postgres DDL is transactional), but a downgrade discards the columns
   it removes.

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { type FormEvent, type ReactNode, useState } from 'react'
+import { type FormEvent, type ReactNode, useEffect, useState } from 'react'
 
-import { api, ApiError, type LocalProviderTest, type User } from '../api/client'
+import { api, ApiError, type LocalProviderTest, takesApiKey, type User } from '../api/client'
 import { formatDateTime } from '../components/shared/format'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { StatusBadge } from '../components/shared/StatusBadge'
@@ -251,8 +251,24 @@ function ProviderKeys() {
   const queryClient = useQueryClient()
   const providersQuery = useQuery({ queryKey: ['providers'], queryFn: api.providerStatus })
 
-  const [provider, setProvider] = useState('anthropic')
+  // The roster comes from the backend, which derives it from
+  // providers/catalog.py::PROVIDER_SPECS — this view keeps no provider list of
+  // its own, so adding a provider stays a one-place change. Key-optional
+  // providers (local: a base URL, not a key) are excluded: there is nothing to
+  // submit for them here.
+  const keyProviders = (providersQuery.data ?? [])
+    .map((p) => p.provider)
+    .filter(takesApiKey)
+
+  const [provider, setProvider] = useState('')
   const [apiKey, setApiKey] = useState('')
+
+  // Select the first provider once the roster loads; never overwrite a choice
+  // the user made, and never leave a stale name selected if the roster changes.
+  useEffect(() => {
+    if (keyProviders.length === 0) return
+    setProvider((curr) => (curr && keyProviders.includes(curr) ? curr : keyProviders[0]))
+  }, [keyProviders.join(',')]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const setKeyMutation = useMutation({
     mutationFn: () => api.setProviderKey(provider, apiKey),
@@ -265,7 +281,7 @@ function ProviderKeys() {
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    if (apiKey.trim()) setKeyMutation.mutate()
+    if (provider && apiKey.trim()) setKeyMutation.mutate()
   }
 
   const setKeyError = setKeyMutation.error as ApiError | null
@@ -294,7 +310,7 @@ function ProviderKeys() {
               {(providersQuery.data ?? []).map((p) => {
                 // "local" has no API key: a configured base URL is the credential,
                 // and an unset one is a normal state, not a misconfiguration.
-                const isLocal = p.provider === 'local'
+                const isLocal = !takesApiKey(p.provider)
                 return (
                   <tr key={p.provider}>
                     <td>{p.provider}</td>
@@ -360,9 +376,11 @@ function ProviderKeys() {
           <div className="field" style={{ marginBottom: 0, width: 160 }}>
             <label className="mono-label">Provider</label>
             <select value={provider} onChange={(e) => setProvider(e.target.value)}>
-              <option value="anthropic">anthropic</option>
-              <option value="kimi">kimi</option>
-              <option value="openrouter">openrouter</option>
+              {keyProviders.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
             </select>
           </div>
           <div className="field" style={{ marginBottom: 0, flex: 1 }}>
@@ -375,7 +393,11 @@ function ProviderKeys() {
               autoComplete="off"
             />
           </div>
-          <button className="btn btn-primary" type="submit" disabled={setKeyMutation.isPending || !apiKey.trim()}>
+          <button
+            className="btn btn-primary"
+            type="submit"
+            disabled={setKeyMutation.isPending || !provider || !apiKey.trim()}
+          >
             {setKeyMutation.isPending ? 'Saving…' : 'Save key'}
           </button>
         </div>

@@ -181,14 +181,23 @@ def test_known_tables_covers_every_model_table():
 
 # ── the escape hatches ────────────────────────────────────────────────────────
 async def test_skip_env_var_short_circuits_the_whole_step(monkeypatch):
+    from bench import config
+
     monkeypatch.setenv("BENCH_SKIP_MIGRATIONS", "1")
+    # BENCH_SKIP_MIGRATIONS is a Settings field, and get_settings() is lru_cached,
+    # so the env var only lands in a freshly built Settings.
+    config.get_settings.cache_clear()
 
     class Exploding:
         @property
         def dialect(self):  # pragma: no cover - must never be reached
             raise AssertionError("ensure_schema touched the engine despite the skip flag")
 
-    assert await ensure_schema(Exploding()) is None
+    try:
+        assert await ensure_schema(Exploding()) is None
+    finally:
+        monkeypatch.undo()
+        config.get_settings.cache_clear()
 
 
 async def test_non_postgres_url_creates_tables_from_the_models_and_skips_alembic(

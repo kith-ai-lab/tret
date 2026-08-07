@@ -50,6 +50,36 @@ export const COST_TIER_DESCRIPTIONS: Record<CostTier, string> = {
   premium: 'no ceiling — any model in the catalog (default)',
 }
 
+/** Rank of a cost tier in the backend's total order.
+ *
+ *  Mirrors `router_llm/objectives.py::TIER_ORDER.get(tier, 2)`: an unrecognized
+ *  tier reads as `premium`, on either side of the comparison, exactly as the
+ *  backend reads it. */
+function costTierRank(tier: string | undefined): number {
+  const index = COST_TIERS.indexOf(tier as CostTier)
+  return index === -1 ? COST_TIERS.indexOf(DEFAULT_MAX_COST_TIER) : index
+}
+
+/** Whether a per-request `model_override` naming this model would be accepted.
+ *
+ *  This is a **mirror** of `router_llm/router.py::_assert_override_within_policy`,
+ *  not a substitute for it. A per-request override — the Workbench picker and the
+ *  chat composer both set one — may choose *within* the harness policy and no
+ *  further: it must be on the `allowed` list when the harness has one, and at or
+ *  below `max_cost_tier`. (A harness's own `mode: pinned` model is exempt from
+ *  the ceiling, but that is the harness's statement about itself, not something a
+ *  request can borrow, so it does not widen this.) The backend refuses anything
+ *  else with `RoutingUnavailable`, which surfaces as a failed run; the picker
+ *  filtering to the same set is what stops a user selecting a model that is
+ *  guaranteed to fail. If the two ever disagree, the backend wins — it is the one
+ *  enforcing the guarantee. */
+export function overrideAllowedByPolicy(model: ModelInfo, policy?: ModelPolicy): boolean {
+  if (!policy) return true
+  const allowed = policy.allowed ?? []
+  if (allowed.length > 0 && !allowed.includes(model.id)) return false
+  return costTierRank(model.cost_tier) <= costTierRank(policy.max_cost_tier)
+}
+
 export interface RoutingDecision {
   router_model: string | null
   routing_prompt_version: string
@@ -565,6 +595,23 @@ export interface ProviderStatus {
   configured: boolean
   source: 'env' | 'db' | null
   last4: string | null
+}
+
+/** Providers credentialed by something other than an API key.
+ *
+ *  The provider *list* is not duplicated here — it comes from
+ *  `GET /api/settings/providers`, which the backend derives from
+ *  `providers/catalog.py::PROVIDER_SPECS`, so adding a provider stays a
+ *  one-place change. What the frontend still has to know is that "local" is
+ *  credentialed by `BENCH_LOCAL_BASE_URL` rather than a key: it has no key to
+ *  submit, an unset one is a normal state rather than a misconfiguration, and it
+ *  must not appear in the write-only key form. That is a fact about the kind of
+ *  credential, not a second copy of the roster. */
+export const KEY_OPTIONAL_PROVIDERS = ['local']
+
+/** Can this provider be given an API key through the settings UI? */
+export function takesApiKey(provider: string): boolean {
+  return !KEY_OPTIONAL_PROVIDERS.includes(provider)
 }
 
 /** One model found on the local server, as reported by the connection test. */

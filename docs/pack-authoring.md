@@ -187,11 +187,39 @@ installing it. See [hardening.md](hardening.md) for what is and is not isolated
 
 ## Integrity pinning and how to re-pin
 
-At install, bench hashes **every file** in the pack directory — methods,
+At install, bench hashes **every entry** in the pack directory — methods,
 schemas, datasets, templates, `pack.yaml`, doctrine — and stores it as
 `packs.content_hash` (visible on `GET /api/packs`). Before any method executes,
 the hash is recomputed and compared. A mismatch fails the run, names both
 hashes, and records a failed `method_runs` row.
+
+Build artefacts and editor/VCS noise are excluded (`__pycache__`, `.git`,
+`.venv`, `node_modules`, `*.pyc`, `.DS_Store`, …) so the pin survives working in
+the directory. Everything else a method could read is in.
+
+### Symlinks are pinned by target, and never followed
+
+A symlink contributes its **path and its target string** to the digest, under a
+tag that keeps it distinct from a file whose bytes happen to equal that target.
+Adding, removing, or re-pointing a link therefore changes the hash. Links are
+never traversed — including symlinked directories, whose *identity* is pinned but
+whose contents are not walked (which also makes the walk immune to link cycles).
+
+This closed a hole: symlinks used to be skipped by the walk entirely, so a pinned
+pack could ship `analysis.py -> ../elsewhere/analysis.py` and re-pointing that
+link swapped the code a method executes without changing a single byte the hash
+covered.
+
+The limit is worth stating plainly, because a directory hash cannot fix it:
+**content outside the pack directory cannot be pinned.** bench refuses to follow
+a link out of the pack (a pack could otherwise aim the hasher at `/dev/urandom`,
+or at a file it has no business reading), so a pack whose data lives behind an
+external symlink is pinned *by reference only* — the link still points where it
+did, but nothing detects an edit to the file at the far end. **Keep pack content
+inside the pack.**
+
+Packs with no symlinks are hashed exactly as they were before symlink coverage
+existed, so they keep their existing pin and need no reinstall for it.
 
 Two consequences for authoring:
 

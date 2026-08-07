@@ -45,7 +45,7 @@ from bench.providers.catalog import (
     get_catalog,
 )
 from bench.router_llm.router import ModelRouter, RoutingUnavailable
-from bench.services.emissions import emission_event_fields
+from bench.services.emissions import emission_event_fields, energy_wh_field
 
 DEFAULT_MAX_ITERATIONS = 24
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
@@ -191,7 +191,25 @@ class HarnessEngine:
                 "lookup_dataset",
                 "list_prior_findings",
             ]
-        tool_specs = [builtins[n] for n in enabled_names if n in builtins]
+        # A name with no builtin behind it is refused before the first token,
+        # never quietly dropped. `api/harnesses.py` and `packs/loader.py` both
+        # reject unknown names on write, so reaching this means a row predating
+        # that validation (or a tool removed from the engine since it was
+        # written) — and running anyway would execute a harness stripped of a
+        # capability its author declared, while reporting `completed`. The same
+        # argument, and the same handling, as an unknown task type above.
+        unknown_tools = [n for n in enabled_names if n not in builtins]
+        if unknown_tools:
+            await self._fail_before_start(
+                db,
+                run,
+                f"unknown_tool: {sorted(set(unknown_tools))} — this run's tool list names "
+                f"tool(s) the engine has no builtin for (available: {sorted(builtins)}). "
+                "Fix the harness's tool_names (or the pack task's `tools`) rather than "
+                "running without them.",
+            )
+            return
+        tool_specs = [builtins[n] for n in enabled_names]
 
         # ── context, accounted ───────────────────────────────────────────────
         assembled = assemble_context(
@@ -568,7 +586,7 @@ class HarnessEngine:
                     {
                         "status": run.status,
                         "cost_usd": float(run.cost_usd or 0),
-                        "energy_wh": float(run.energy_wh) if run.energy_wh is not None else None,
+                        "energy_wh": energy_wh_field(run.energy_wh),
                         # co2e_g / scope2_g / scope3_g / baseline_co2e_g /
                         # avoided_co2e_g, as recorded. Null when there is no
                         # estimate — never 0.

@@ -22,7 +22,7 @@ from bench.db.engine import get_db, get_session_factory
 from bench.db.models import Conversation, Dataset, Harness, Pack, Project, Run, User
 from bench.engine.harness import get_harness_engine
 from bench.router_llm.objectives import OBJECTIVES
-from bench.services.emissions import emission_summary_fields
+from bench.services.emissions import emission_summary_fields, energy_wh_field
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -300,7 +300,7 @@ def _assistant_message(run: Run) -> dict:
         "output_tokens": run.output_tokens,
         "cache_read_tokens": run.cache_read_tokens,
         "cache_write_tokens": run.cache_write_tokens,
-        "energy_wh": float(run.energy_wh) if run.energy_wh is not None else None,
+        "energy_wh": energy_wh_field(run.energy_wh),
         # co2e_g, scope2_g, scope3_g, avoided_co2e_g — read as recorded, never
         # recomputed at today's factors; null wherever the run has no figure.
         **emission_summary_fields(run.energy_accounting),

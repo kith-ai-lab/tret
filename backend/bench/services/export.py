@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bench.config import get_settings
 
 from bench.db.models import Finding, Run
+from bench.services.emissions import energy_wh_field
 from bench.services.html_sanitize import render_markdown
 
 
@@ -76,9 +77,7 @@ async def assemble_deliverable(
                 "run_id": str(f.run_id) if f.run_id else None,
                 # Estimated compute footprint of the run that drafted this
                 # section. None where the run predates eco accounting.
-                "energy_wh": float(run.energy_wh)
-                if run is not None and run.energy_wh is not None
-                else None,
+                "energy_wh": energy_wh_field(run.energy_wh) if run is not None else None,
                 "co2e_g": (run.energy_accounting or {}).get("co2e_g") if run is not None else None,
             }
         )

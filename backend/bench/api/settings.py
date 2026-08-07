@@ -17,14 +17,25 @@ from bench.config import get_settings
 from bench.db.engine import get_db
 from bench.db.models import ProviderCredential, User, Workspace
 from bench.engine.tools import get_builtin_tools
-from bench.providers.catalog import ProviderRegistry, get_catalog
+from bench.providers.catalog import (
+    KEY_PROVIDERS,
+    PROVIDER_SPECS,
+    ProviderRegistry,
+    get_catalog,
+)
 from bench.services.credentials import get_fernet, load_db_keys
 
 log = logging.getLogger("bench.settings")
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
-PROVIDERS = ("anthropic", "kimi", "openrouter")
+# The providers a workspace can store an API key for, straight from the catalog's
+# ProviderSpec table — not a second hand-maintained list. Adding a provider is
+# meant to be a one-place change (an advertised extension path, README/
+# docs/architecture.md), and this endpoint used to be one of the places that
+# quietly had to be edited too: a provider missing from here was unreachable from
+# the settings UI even though the registry could build it.
+PROVIDERS = KEY_PROVIDERS
 
 # Cap for the catalog refresh behind `GET /api/models`. Discovery reaches out to
 # OpenRouter and to the configured local server, and local discovery probes each
@@ -45,10 +56,13 @@ LOCAL_TEST_TIMEOUT_SECONDS = 45.0
 async def provider_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     settings = get_settings()
     db_keys = await load_db_keys(db)
+    # Which Settings attribute holds each provider's env key: read off the same
+    # ProviderSpec rows the registry constructs providers from, so the two can no
+    # longer disagree about where a key lives.
     env_keys = {
-        "anthropic": settings.anthropic_api_key,
-        "kimi": settings.moonshot_api_key,
-        "openrouter": settings.openrouter_api_key,
+        spec.name: getattr(settings, spec.env_key_attr)
+        for spec in PROVIDER_SPECS
+        if spec.env_key_attr
     }
     out = []
     for p in PROVIDERS:
@@ -62,16 +76,22 @@ async def provider_status(user: User = Depends(current_user), db: AsyncSession =
                 "last4": effective[-4:] if effective else None,
             }
         )
-    # "local" has no API key concept — a configured base URL is the credential,
-    # so there is nothing to keep write-only or DB-store the way cloud keys are.
-    out.append(
-        {
-            "provider": "local",
-            "configured": bool(settings.local_base_url),
-            "source": "env" if settings.local_base_url else None,
-            "last4": None,
-        }
-    )
+    # Key-optional providers ("local" today) have no API key concept — a
+    # configured base URL is the credential, so there is nothing to keep
+    # write-only or DB-store the way cloud keys are. Same response shape, driven
+    # by the spec's `enabled_attr` rather than a hardcoded name.
+    for spec in PROVIDER_SPECS:
+        if not spec.key_optional:
+            continue
+        enabled = bool(getattr(settings, spec.enabled_attr))
+        out.append(
+            {
+                "provider": spec.name,
+                "configured": enabled,
+                "source": "env" if enabled else None,
+                "last4": None,
+            }
+        )
     return out
 
 

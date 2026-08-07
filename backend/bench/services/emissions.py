@@ -1956,6 +1956,28 @@ def energy_accounting(
 
 
 # ── reading a stored block back ──────────────────────────────────────────────
+def energy_wh_field(energy_wh: Decimal | float | None) -> float | None:
+    """A run's stored `energy_wh` column as a JSON number — or None, never 0.
+
+    One line, copied at five call sites before this existed (api/runs.py,
+    api/chat.py, services/export.py, engine/harness.py, engine/tools.py). The
+    conditional is the whole point and is easy to drop when copying: `float(None)`
+    raises, so the tempting `float(run.energy_wh or 0)` "fix" turns "this run has
+    no estimate" into "this run drew no power", which is the one claim bench must
+    never make by accident. It lives here, next to `emission_summary_fields`,
+    because the null-not-zero rule is the same rule that function exists to
+    enforce.
+
+    Deliberately NOT folded into `emission_summary_fields`: that function reads
+    the run's stored `energy_accounting` block, while this reads the `energy_wh`
+    *column*. They are written together (engine/harness.py sets the column from
+    `accounting["energy_wh"]`) but they are not the same field, and two of the
+    five call sites — the `done` SSE event and the `run_harness_task` result —
+    carry the column without carrying a summary block at all.
+    """
+    return float(energy_wh) if energy_wh is not None else None
+
+
 def emission_summary_fields(accounting: dict | None) -> dict[str, Any]:
     """The carbon fields a run *summary* carries, read as recorded.
 

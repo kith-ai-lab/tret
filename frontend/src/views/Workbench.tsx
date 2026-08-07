@@ -4,10 +4,13 @@ import { Link, useNavigate } from 'react-router-dom'
 
 import {
   api,
+  DEFAULT_MAX_COST_TIER,
   DEFAULT_OBJECTIVE,
   type InputFieldSchema,
   type ModelInfo,
+  type ModelPolicy,
   objectiveDescription,
+  overrideAllowedByPolicy,
   type TaskType,
 } from '../api/client'
 import { QueryError } from '../components/shared/MonoTable'
@@ -91,6 +94,11 @@ export function Workbench() {
 
   const models = modelsQuery.data ?? []
   const documents = documentsQuery.data ?? []
+  // The policy a per-request override is confined to. Undefined until the
+  // harness detail loads, which is the honest state: filtering the picker
+  // against a policy we have not read yet would be guessing.
+  const harnessPolicy = harnessDetailQuery.data?.model_policy
+  const overrideProblem = overrideWarning(modelOverride, models, harnessPolicy)
   const canRun =
     !!harnessId && !runMutation.isPending && (isFreeform ? freeText.trim().length > 0 : true)
 
@@ -203,7 +211,13 @@ export function Workbench() {
                 value={modelOverride}
                 onChange={setModelOverride}
                 emptyLabel="— route automatically —"
+                policy={harnessPolicy}
               />
+              {overrideProblem && (
+                <div className="error-text" style={{ marginTop: 4 }}>
+                  {overrideProblem}
+                </div>
+              )}
             </div>
 
             {runMutation.isError && (
@@ -309,32 +323,99 @@ export function modelUnavailableLabel(m: ModelInfo): string {
   return m.provider === 'local' ? 'no local base URL' : 'no key'
 }
 
-/** Model picker grouped by provider; unavailable providers are disabled. */
+/** Why a selected per-request override would be refused by the router, or null.
+ *
+ *  Rendered next to the picker rather than discovered after a wasted run. The
+ *  cases are distinct on purpose: a model the catalog no longer has fails
+ *  differently from one the harness policy excludes, and telling the user which
+ *  is the difference between a fixable message and a mystery. */
+export function overrideWarning(
+  value: string,
+  models: ModelInfo[],
+  policy?: ModelPolicy,
+): string | null {
+  if (!value) return null
+  const model = models.find((m) => m.id === value)
+  if (!model) {
+    return `'${value}' is not in the model catalog — the run would fail. Pick another model.`
+  }
+  if (!model.available) {
+    return `'${model.display_name}' has no configured credential (${modelUnavailableLabel(model)}) — the run would fail.`
+  }
+  if (!overrideAllowedByPolicy(model, policy)) {
+    const allowed = policy?.allowed ?? []
+    const reason =
+      allowed.length > 0 && !allowed.includes(model.id)
+        ? "it is not on this harness's allowed model list"
+        : `its cost tier '${model.cost_tier}' is above this harness's ceiling '${policy?.max_cost_tier ?? DEFAULT_MAX_COST_TIER}'`
+    return (
+      `'${model.display_name}' cannot be used for this harness: ${reason}. A per-request ` +
+      'override may only choose among the models the harness policy already permits — ' +
+      'widening it is a harness setting. The run would fail with RoutingUnavailable.'
+    )
+  }
+  return null
+}
+
+/** Model picker grouped by provider; unavailable providers are disabled.
+ *
+ *  With `policy`, the list is narrowed to what a per-request `model_override` may
+ *  actually name under that harness policy (see `overrideAllowedByPolicy`), so a
+ *  user cannot pick a model the router is going to refuse. Omit `policy` where
+ *  the selection is *not* a per-request override — the harness builder's own
+ *  `mode: pinned` model is written on the harness and is deliberately allowed to
+ *  exceed that harness's ceiling, so it must not be filtered here.
+ *
+ *  A value that is already selected but no longer permitted stays visible as a
+ *  disabled option instead of vanishing: dropping it would make the select fall
+ *  back to whatever sits first in the list, silently running a different model
+ *  than the one the user chose. */
 export function ModelSelect({
   models,
   value,
   onChange,
   emptyLabel,
+  policy,
 }: {
   models: ModelInfo[]
   value: string
   onChange: (v: string) => void
   emptyLabel?: string
+  policy?: ModelPolicy
 }) {
-  const providers = [...new Set(models.map((m) => m.provider))]
+  const permitted = policy ? models.filter((m) => overrideAllowedByPolicy(m, policy)) : models
+  const selectionExcluded = !!value && !permitted.some((m) => m.id === value)
+  const excluded = selectionExcluded ? models.find((m) => m.id === value) : undefined
+  const listed = excluded ? [...permitted, excluded] : permitted
+  const providers = [...new Set(listed.map((m) => m.provider))]
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)}>
       <option value="">{emptyLabel ?? '— none —'}</option>
+      {/* A stored id the catalog no longer has: kept as its own disabled option
+          so the select still reflects the stored choice rather than appearing to
+          have been set to something else. */}
+      {selectionExcluded && !excluded && (
+        <option value={value} disabled>
+          {value} (not in the catalog)
+        </option>
+      )}
       {providers.map((p) => (
         <optgroup key={p} label={p}>
-          {models
+          {listed
             .filter((m) => m.provider === p)
-            .map((m) => (
-              <option key={m.id} value={m.id} disabled={!m.available}>
-                {m.display_name} · {m.cost_tier} · {modelPriceLabel(m)} · energy {m.energy_class}
-                {m.available ? '' : ` (${modelUnavailableLabel(m)})`}
-              </option>
-            ))}
+            .map((m) => {
+              const outsidePolicy = m.id === excluded?.id
+              return (
+                <option key={m.id} value={m.id} disabled={!m.available || outsidePolicy}>
+                  {m.display_name} · {m.cost_tier} · {modelPriceLabel(m)} · energy {m.energy_class}
+                  {outsidePolicy
+                    ? ' (outside the harness policy)'
+                    : m.available
+                      ? ''
+                      : ` (${modelUnavailableLabel(m)})`}
+                </option>
+              )
+            })}
         </optgroup>
       ))}
     </select>

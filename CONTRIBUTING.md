@@ -101,8 +101,12 @@ Adding a guarantee? Add the scenario in the same PR. Details, including the
 - **The trust doctrine is not negotiable** (docs/trust-doctrine.md). PRs that
   let the model bypass dataset-only numbers, self-approve findings, or skip
   provenance will be declined regardless of how convenient they are.
-- New providers implement `bench/providers/base.py` and add curated entries
-  to `models.yaml` with honest prices and strengths.
+- New providers implement `bench/providers/base.py`, add **one row** to
+  `PROVIDER_SPECS` in `bench/providers/catalog.py`, and add curated entries to
+  `models.yaml` with honest prices and strengths. That row is the single source:
+  the registry builds from it, `GET /api/settings/providers` derives its list and
+  env-key map from it, and the settings UI renders that response — so there is no
+  fourth place to remember.
 - New packs must pass `bench packs validate` and ship enough fictional
   sample data to demo every task type. No real client data, ever.
 - Keep the single-worker event-bus constraint in mind (docs/architecture.md)

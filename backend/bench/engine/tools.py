@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bench.db.models import DataRequest, Dataset, DatasetRow, Document, Finding
 from bench.engine.validation import validate_cited_values, validate_payload
 from bench.providers.base import ToolSpec
+from bench.services.emissions import energy_wh_field
 
 
 @dataclass
@@ -623,7 +624,7 @@ async def run_harness_task(
             # The delegated run's own ecological line, so a chat turn that
             # delegates can report the full cost of the work it caused rather
             # than only the dollars. Estimated — docs/eco-accounting.md.
-            "energy_wh": float(done.energy_wh) if done.energy_wh is not None else None,
+            "energy_wh": energy_wh_field(done.energy_wh),
             "co2e_g": (done.energy_accounting or {}).get("co2e_g"),
             "error": done.error,
             "findings": [

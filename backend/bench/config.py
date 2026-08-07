@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     storage_dir: str = "./storage"  # uploaded documents
     cookie_secure: bool = False  # set true behind TLS (any real deployment)
     serve_frontend_dir: str = ""  # if set, serve the built SPA from this dir
+    # Skip the boot-time `alembic upgrade head` step (bench/db/migrate.py), for
+    # operators who migrate from a separate deploy step under a privileged role.
+    # bench then assumes the database is already at head and fails on the first
+    # query that needs a missing column — docs/upgrading.md, docs/hardening.md §8.
+    skip_migrations: bool = False
 
     # First-boot admin bootstrap (used only if no users exist)
     admin_email: str = "admin@example.com"
@@ -135,7 +140,10 @@ class Settings(BaseSettings):
     # Logged-and-ignored elsewhere (e.g. macOS dev machines).
     methods_network_isolation: bool = True
 
-    # Login rate limit (in-memory sliding window, per IP + email)
+    # Login rate limit. `login_max_attempts` is the per-(source, account) limit;
+    # a second, account-wide bucket is allowed ACCOUNT_BURST_MULTIPLE times that,
+    # so the limit survives a reverse proxy collapsing every peer into one
+    # address. See bench/api/auth.py::_login_buckets.
     login_max_attempts: int = 10
     login_window_seconds: float = 300.0
 

@@ -11,6 +11,7 @@ from bench.api.auth import current_user
 from bench.db.engine import get_db
 from bench.db.models import Harness, Pack, User, Workspace
 from bench.engine.context import assemble_system_prompt
+from bench.engine.tools import get_builtin_tools
 from bench.providers.catalog import get_catalog
 from bench.router_llm.objectives import DEFAULT_OBJECTIVE, OBJECTIVES
 from bench.router_llm.router import TIER_ORDER
@@ -44,6 +45,32 @@ def _out(h: Harness, pack: Pack | None = None) -> dict:
         "is_archived": h.is_archived,
         "updated_at": h.updated_at.isoformat() if h.updated_at else None,
     }
+
+
+def _validate_tool_names(tool_names: list[str]) -> None:
+    """Reject a harness tool the engine has no builtin for.
+
+    The engine offers a run exactly the tools it can resolve
+    (`engine/harness.py`: `builtins[n] for n in enabled_names`), so before this
+    check a single typo — `read_documents` for `read_document` — silently removed
+    a capability rather than failing: the harness saved, the builder UI echoed the
+    name back, and the model simply never saw the tool. That is the same failure
+    mode `packs/loader.py` already rejects at install for a *pack*-declared tool
+    list; a harness is the other place a tool name is written by hand, so it gets
+    the identical treatment.
+
+    Duplicates are left alone — they are harmless (the engine builds a spec list
+    the provider dedupes by name) and are not evidence of a mistake the way an
+    unknown name is.
+    """
+    builtins = get_builtin_tools()
+    unknown = [n for n in tool_names if n not in builtins]
+    if unknown:
+        raise HTTPException(
+            422,
+            f"unknown tool name(s): {', '.join(sorted(set(unknown)))}. "
+            f"Available tools: {', '.join(sorted(builtins))}",
+        )
 
 
 def _validate_policy(policy: dict) -> None:
@@ -109,6 +136,7 @@ async def create_harness(
     body: HarnessBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
 ):
     _validate_policy(body.model_policy)
+    _validate_tool_names(body.tool_names)
     workspace = (await db.execute(select(Workspace))).scalars().first()
     dupe = (
         await db.execute(
@@ -140,6 +168,7 @@ async def update_harness(
     if h is None:
         raise HTTPException(404, "Harness not found")
     _validate_policy(body.model_policy)
+    _validate_tool_names(body.tool_names)
     for field, value in body.model_dump().items():
         setattr(h, field, value)
     await db.commit()

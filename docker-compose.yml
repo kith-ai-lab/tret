@@ -110,6 +110,10 @@ services:
       #   BENCH_ADMIN_PASSWORD=<strong password>
       BENCH_ENVIRONMENT: ${BENCH_ENVIRONMENT:-development}
       BENCH_COOKIE_SECURE: ${BENCH_COOKIE_SECURE:-false}
+      # Skip the boot-time `alembic upgrade head`. Leave false unless you run
+      # migrations as a separate deploy step — bench then assumes the database
+      # is already at head (docs/upgrading.md).
+      BENCH_SKIP_MIGRATIONS: ${BENCH_SKIP_MIGRATIONS:-false}
     volumes:
       - ./packs:/packs:ro
       - storage:/data/storage

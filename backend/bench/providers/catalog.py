@@ -606,9 +606,13 @@ class ProviderSpec:
     maps (the env-key map, the `has_key` special cases, and the if/elif
     construction chain), where forgetting one produced a provider that was
     "configured" but unbuildable, or buildable but never offered. One row here
-    now drives all three, so the only other edits a new provider needs are its
-    models.yaml entries and the settings UI's own list (bench/api/settings.py's
-    `PROVIDERS` and the frontend picker, which are not imported from here).
+    now drives all three.
+
+    It also drives the settings endpoint: `bench/api/settings.py` derives its
+    `PROVIDERS` tuple from `KEY_PROVIDERS` and its env-key map from these rows'
+    `env_key_attr`, and the frontend's key picker is rendered from that
+    endpoint's response rather than from a list of its own. So a new provider
+    needs a row here and its models.yaml entries, and nothing else.
     """
 
     name: str

@@ -6,6 +6,7 @@ import {
   api,
   type ChatMessage,
   type ModelInfo,
+  type ModelPolicy,
   objectiveDescription,
   ROUTING_OBJECTIVES,
 } from '../api/client'
@@ -28,7 +29,7 @@ import {
 import { LiveFootprint } from '../components/shared/LiveFootprint'
 import { MarkdownDoc } from '../components/shared/MarkdownDoc'
 import { RoutingBadge, shortModelName } from '../components/shared/RoutingBadge'
-import { ModelSelect } from './Workbench'
+import { ModelSelect, overrideWarning } from './Workbench'
 
 // localStorage keys for the composer's per-turn overrides. Both persist across
 // reloads for the session; either can be cleared back to "harness default" by
@@ -70,6 +71,11 @@ export function Chat() {
   })
   const conversations = conversationsQuery.data ?? []
   const modelsQuery = useQuery({ queryKey: ['models'], queryFn: api.listModels })
+  // Read for the composer's model picker only: a per-turn `model_override` is
+  // confined to the chat harness's own policy (router.py's
+  // `_assert_override_within_policy`), so the picker has to know that policy or
+  // it will happily offer a model the run is going to be refused for.
+  const harnessesQuery = useQuery({ queryKey: ['harnesses'], queryFn: api.listHarnesses })
 
   // Per-turn routing overrides for the composer. Empty string means "use the
   // harness's configured default" — that default is never silently guessed
@@ -167,6 +173,17 @@ export function Chat() {
   )
 
   const conversation = selectedId ? conversationQuery.data : undefined
+  // The policy the composer's override is bound by: this conversation's own
+  // harness, or — on the landing screen, before a conversation exists — the
+  // seeded chat harness the backend would pick (api/chat.py::create_conversation
+  // selects the first non-archived `task_profile == 'chat'` harness). Undefined
+  // if neither resolves, which leaves the picker unfiltered rather than
+  // filtering against a guess.
+  const chatPolicy: ModelPolicy | undefined = (() => {
+    const list = harnessesQuery.data ?? []
+    const own = conversation && list.find((h) => h.id === conversation.harness_id)
+    return (own ?? list.find((h) => h.task_profile === 'chat'))?.model_policy
+  })()
   const messages = conversation?.messages ?? []
   const showLive = !!pending && pending.conversationId === selectedId
   const isLanding = !selectedId && !inFlight && messages.length === 0
@@ -217,6 +234,7 @@ export function Chat() {
             onObjectiveChange={setObjective}
             modelOverride={modelOverride}
             onModelOverrideChange={setModelOverride}
+            policy={chatPolicy}
           />
         ) : (
           <>
@@ -241,6 +259,7 @@ export function Chat() {
                   onObjectiveChange={setObjective}
                   modelOverride={modelOverride}
                   onModelOverrideChange={setModelOverride}
+                  policy={chatPolicy}
                 />
                 <div className="chat-hint">
                   Responses are drafts — structured findings go to Approvals before they count.
@@ -322,6 +341,7 @@ function Landing({
   onObjectiveChange,
   modelOverride,
   onModelOverrideChange,
+  policy,
 }: {
   draft: string
   onDraft: (v: string) => void
@@ -332,6 +352,7 @@ function Landing({
   onObjectiveChange: (v: string) => void
   modelOverride: string
   onModelOverrideChange: (v: string) => void
+  policy?: ModelPolicy
 }) {
   return (
     <div className="chat-landing">
@@ -356,6 +377,7 @@ function Landing({
           onObjectiveChange={onObjectiveChange}
           modelOverride={modelOverride}
           onModelOverrideChange={onModelOverrideChange}
+          policy={policy}
         />
         <div className="chat-cards">
           {EXAMPLE_PROMPTS.map((ex) => (
@@ -701,6 +723,7 @@ function Composer({
   onObjectiveChange,
   modelOverride,
   onModelOverrideChange,
+  policy,
 }: {
   value: string
   onChange: (v: string) => void
@@ -713,6 +736,7 @@ function Composer({
   onObjectiveChange: (v: string) => void
   modelOverride: string
   onModelOverrideChange: (v: string) => void
+  policy?: ModelPolicy
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -745,6 +769,7 @@ function Composer({
         onObjectiveChange={onObjectiveChange}
         modelOverride={modelOverride}
         onModelOverrideChange={onModelOverrideChange}
+        policy={policy}
       />
       <div className={`chat-inputbox${disabled ? ' disabled' : ''}`}>
         <textarea
@@ -781,13 +806,18 @@ function ComposerControls({
   onObjectiveChange,
   modelOverride,
   onModelOverrideChange,
+  policy,
 }: {
   models: ModelInfo[]
   objective: string
   onObjectiveChange: (v: string) => void
   modelOverride: string
   onModelOverrideChange: (v: string) => void
+  policy?: ModelPolicy
 }) {
+  // A per-turn override the chat harness's policy would refuse is called out
+  // here rather than discovered as a failed run after the message is sent.
+  const overrideProblem = overrideWarning(modelOverride, models, policy)
   return (
     <div className="chat-controls">
       <span className="chat-control">
@@ -812,8 +842,14 @@ function ComposerControls({
           value={modelOverride}
           onChange={onModelOverrideChange}
           emptyLabel="model: using harness default"
+          policy={policy}
         />
       </span>
+      {overrideProblem && (
+        <span className="error-text" style={{ flexBasis: '100%', fontSize: 11 }}>
+          {overrideProblem}
+        </span>
+      )}
     </div>
   )
 }

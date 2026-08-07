@@ -181,6 +181,38 @@ async def test_freeform_still_runs_without_a_pack_declaration(world):
     assert result.run.status == "completed", result.run.error
 
 
+async def test_a_harness_tool_with_no_builtin_fails_the_run_rather_than_vanishing(world):
+    """A stored tool name the engine cannot resolve is refused, never dropped.
+
+    `api/harnesses.py` now rejects unknown names on write, so this can only be a
+    harness row written before that validation existed (or one naming a tool the
+    engine has since removed) — which is exactly the case that must not run. The
+    engine used to filter the list down to what it could resolve, so the harness
+    ran stripped of a capability its author declared and still reported
+    `completed`. Created straight in the DB, bypassing the API, to reproduce it.
+    """
+    harness_id = await world.create_harness(
+        tool_names=["read_document", "summarise_everything"], with_pack=False
+    )
+    provider = ReplayProvider([ScriptedTurn(text="Should never be asked anything.")])
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={"message": "Anything at all."},
+    )
+
+    assert result.run.status == "failed"
+    assert "unknown_tool" in result.run.error
+    assert "summarise_everything" in result.run.error
+    assert "read_document" in result.run.error  # names what IS available
+    # Refused before the first token: no model call, no cost, no transcript.
+    assert result.provider.turns_played == 0
+    assert result.run.messages == []
+    assert result.run.cost_usd == 0
+    assert result.event_types == ["error"]
+
+
 # ── (d) delegation is bounded ─────────────────────────────────────────────────
 DELEGATING_PACK_YAML = """\
 pack: delegation-test

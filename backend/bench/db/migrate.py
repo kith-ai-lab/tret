@@ -32,12 +32,13 @@ currently exercised in production.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 from sqlalchemy import inspect, text
+
+from bench.config import get_settings
 
 log = logging.getLogger("bench.schema")
 
@@ -46,6 +47,12 @@ log = logging.getLogger("bench.schema")
 # future release would stop serialising against a running older one.
 SCHEMA_LOCK_KEY = 0x62656E6368_5343  # "bench" + "SC"
 
+# The opt-out, as an env var name for messages. It is a declared Settings field
+# (`skip_migrations`), not a bare os.environ read: an undeclared knob never
+# reaches the container under `docker compose up` and is invisible to
+# .env.example, so an operator could set it in .env and watch bench migrate the
+# database anyway. tests/test_compose_env.py holds Settings, docker-compose.yml
+# and .env.example in agreement in both directions.
 SKIP_ENV_VAR = "BENCH_SKIP_MIGRATIONS"
 
 
@@ -293,7 +300,7 @@ async def ensure_schema(engine) -> MigrationPlan | None:
     non-Postgres fallback below). Raises SchemaUpgradeError when the database
     cannot be classified — startup must not continue in that case.
     """
-    if os.environ.get(SKIP_ENV_VAR) == "1":
+    if get_settings().skip_migrations:
         log.warning(
             "%s=1: skipping the schema migration step. The database is assumed to already "
             "be at head; bench will fail later if it is not.",
