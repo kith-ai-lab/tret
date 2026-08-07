@@ -299,6 +299,128 @@ async def test_a_pin_above_the_ceiling_is_still_honoured_and_recorded(no_llm_rou
     assert decision.override == "user_pin"
 
 
+# ── per-request overrides are bounded by the harness policy ──────────────────
+# `_model_override` reaches route() from POST /api/runs and the chat composer,
+# i.e. from any signed-in caller with no admin check and no harness edit. A
+# harness pin and a harness ceiling are written on the harness itself. The two
+# must therefore not have the same power — see ModelRouter's module docstring and
+# `_assert_override_within_policy`.
+CLOUD_MODEL = "openrouter/openai/gpt-5.6-terra"
+
+
+async def test_a_per_run_override_cannot_lift_the_cost_ceiling(no_llm_router):
+    """`max_cost_tier: local` is a confidentiality control: no request body may
+    talk a local-only harness into a cloud call."""
+    catalog = _catalog_with_locals("m1")
+    router = ModelRouter(catalog, _Registry({"local", "openrouter"}))
+
+    with pytest.raises(RoutingUnavailable) as exc:
+        await router.route(
+            model_policy={"mode": "auto", "max_cost_tier": "local"},
+            run_override=CLOUD_MODEL,
+            **ROUTE_ARGS,
+        )
+    assert "cost ceiling" in str(exc.value)
+    assert CLOUD_MODEL in str(exc.value)
+
+
+async def test_a_per_run_override_within_the_ceiling_is_honoured(no_llm_router):
+    catalog = _catalog_with_locals("m1", "m2")
+    router = ModelRouter(catalog, _Registry({"local", "openrouter"}))
+
+    decision = await router.route(
+        model_policy={"mode": "auto", "max_cost_tier": "local"},
+        run_override="local/m2",
+        **ROUTE_ARGS,
+    )
+
+    assert decision.chosen_model == "local/m2"
+    assert decision.override == "run_override"  # still recorded as an override
+    assert decision.fallback_used is False
+
+
+async def test_a_per_run_override_cannot_escape_the_allowed_list(no_llm_router):
+    router = ModelRouter(ModelCatalog(), _Registry({"openrouter", "kimi"}))
+
+    with pytest.raises(RoutingUnavailable) as exc:
+        await router.route(
+            model_policy={"mode": "auto", "allowed": ["kimi/kimi-k2"]},
+            run_override=CLOUD_MODEL,
+            **ROUTE_ARGS,
+        )
+    assert "allowed" in str(exc.value)
+
+
+async def test_a_per_run_override_on_the_allowed_list_is_honoured(no_llm_router):
+    router = ModelRouter(ModelCatalog(), _Registry({"openrouter", "kimi"}))
+    decision = await router.route(
+        model_policy={"mode": "auto", "allowed": ["kimi/kimi-k2", CLOUD_MODEL]},
+        run_override=CLOUD_MODEL,
+        **ROUTE_ARGS,
+    )
+    assert decision.chosen_model == CLOUD_MODEL
+    assert decision.override == "run_override"
+
+
+async def test_an_unrestricted_harness_still_takes_any_per_run_override(no_llm_router):
+    """No `allowed` list and no ceiling: the override behaves exactly as before."""
+    router = ModelRouter(ModelCatalog(), _Registry({"openrouter"}))
+    decision = await router.route(
+        model_policy={"mode": "auto"}, run_override=CLOUD_MODEL, **ROUTE_ARGS
+    )
+    assert decision.chosen_model == CLOUD_MODEL
+    assert decision.override == "run_override"
+
+
+async def test_a_harness_pin_keeps_its_exemption(no_llm_router):
+    """The asymmetry is the point: a pin is a harness setting and may exceed that
+    harness's own ceiling and allowed list; a request body may not."""
+    router = ModelRouter(ModelCatalog(), _Registry({"openrouter"}))
+    decision = await router.route(
+        model_policy={
+            "mode": "pinned",
+            "model": CLOUD_MODEL,
+            "max_cost_tier": "local",
+            "allowed": ["kimi/kimi-k2"],
+        },
+        **ROUTE_ARGS,
+    )
+    assert decision.chosen_model == CLOUD_MODEL
+    assert decision.override == "user_pin"
+
+
+# ── cold start: routing does not require someone to open the UI ──────────────
+class _ColdCatalog(ModelCatalog):
+    """A catalog whose local models exist only once a discovery pass runs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.passes = 0
+
+    async def warm(self) -> None:
+        self.passes += 1
+        self._warmed = True
+        self._local = {"local/m1": _local("m1")}
+
+
+async def test_route_runs_a_discovery_pass_on_a_cold_catalog(no_llm_router):
+    """Local (and dynamic) models reach the catalog only through discovery, which
+    used to happen exclusively in GET /api/models — so a harness capped at `local`
+    could not route on a fresh process until an operator opened the UI."""
+    catalog = _ColdCatalog()
+    router = ModelRouter(catalog, _Registry({"local"}))
+
+    decision = await router.route(
+        model_policy={"mode": "auto", "max_cost_tier": "local"}, **ROUTE_ARGS
+    )
+
+    assert decision.chosen_model == "local/m1"
+    assert catalog.passes == 1
+    # And the pass is not repeated on the next run of the same process.
+    await router.route(model_policy={"mode": "auto", "max_cost_tier": "local"}, **ROUTE_ARGS)
+    assert catalog.passes == 1
+
+
 # ── the shared predicate ─────────────────────────────────────────────────────
 def test_within_cost_tier_places_local_below_every_cap():
     local = _local()

@@ -1,10 +1,31 @@
 /** Live run stream: subscribes to /api/runs/{id}/events (SSE) and accumulates
- *  streamed text, tool activity, the routing decision, and usage/done state.
- *  The backend replays the full backlog on (re)connect, so on transport error
- *  we reset accumulated state before the automatic EventSource reconnect. */
-import { useEffect, useState } from 'react'
+ *  streamed text, tool activity, the routing decision, the context composition,
+ *  budget warnings, and usage/done state.
+ *
+ *  **Two different things are both called "error" here, and conflating them lies
+ *  to the user.** The engine publishes a semantic `event: error` frame when a run
+ *  actually fails (harness.py — routing unavailable, cost cap, output budget,
+ *  provider error). EventSource *also* fires an event named `error` on its own
+ *  object for any transport problem: a dropped connection, a proxy timeout, a
+ *  laptop lid closing. Both are delivered to an `error` listener, and both invoke
+ *  `onerror` — so neither hook alone can tell them apart.
+ *
+ *  What tells them apart is the payload. A server-sent frame arrives as a
+ *  `MessageEvent` carrying a `data` **string** (the engine always sends a JSON
+ *  body). A transport failure arrives as a bare `Event` with no `data` at all.
+ *  `isServerFrame` is that check, and it is the only thing standing between a
+ *  network blip and the UI announcing that a healthy run failed.
+ *
+ *  Reconnects: EventSource reconnects on its own and the backend replays the run's
+ *  full backlog from the start, so accumulated state is dropped at the moment of
+ *  the drop rather than duplicated on replay. `connection` reports that as
+ *  `reconnecting` — a transport state, never a run verdict, and `error`/`status`
+ *  are left untouched. A server that keeps ending the stream without a terminal
+ *  event (a finished run whose backlog the bus has already released) would
+ *  otherwise reconnect forever, so consecutive silent reconnects are capped. */
+import { useEffect, useRef, useState } from 'react'
 
-import type { RoutingDecision } from './client'
+import type { ContextComposition, RoutingDecision } from './client'
 
 export interface ToolCallItem {
   kind: 'tool_call'
@@ -27,6 +48,21 @@ export interface FindingRecordedItem {
 }
 
 export type StreamItem = ToolCallItem | ToolResultItem | FindingRecordedItem
+
+/** The engine crossed a run's soft output budget and told the model to finalize
+ *  (harness.py). Not a failure — the run continues — but the user is entitled to
+ *  know their answer is being wrapped up early. A run that then keeps going is
+ *  stopped by the hard multiple and reports a semantic `error` instead. */
+export interface BudgetWarning {
+  kind: string // "output_tokens"
+  output_tokens: number
+  budget: number
+}
+
+/** Transport state of the SSE connection. Says nothing about the run: a run can
+ *  be perfectly healthy while this reads `reconnecting`, and `closed` after a
+ *  clean `done` is the normal end state. */
+export type StreamConnection = 'connecting' | 'open' | 'reconnecting' | 'closed'
 
 export interface UsageInfo {
   iteration: number
@@ -61,20 +97,47 @@ export interface RunStreamState {
   text: string
   items: StreamItem[]
   routing: RoutingDecision | null
+  /** Where the prompt tokens went, as published right after routing — so the
+   *  breakdown is available at second one of the run rather than only after it
+   *  finishes and the persisted run refetches. */
+  composition: ContextComposition | null
+  /** The most recent budget nudge, if the run has crossed its soft output budget. */
+  budget: BudgetWarning | null
   usage: UsageInfo | null
   status: string | null
   done: boolean
+  /** A run-level failure **the engine reported**. Never set by a transport
+   *  problem — see the module docstring. */
   error: string | null
+  /** Connection health. Purely about the socket; read `error` for the run. */
+  connection: StreamConnection
 }
 
 const initialState: RunStreamState = {
   text: '',
   items: [],
   routing: null,
+  composition: null,
+  budget: null,
   usage: null,
   status: null,
   done: false,
   error: null,
+  connection: 'connecting',
+}
+
+/** How many times in a row the transport may drop and reconnect without a single
+ *  event arriving in between before we stop trying. Guards the one case that
+ *  would otherwise spin forever: the server ends the stream immediately (the run
+ *  is over and the event bus has already released its backlog), so every
+ *  reconnect is answered with another immediate close. */
+const MAX_SILENT_RECONNECTS = 5
+
+/** Is this `error` event a frame the server sent, or EventSource's own transport
+ *  failure? The engine's frames always carry a JSON `data` string; a transport
+ *  failure is a bare Event with no data. */
+function isServerFrame(event: Event): boolean {
+  return typeof (event as MessageEvent).data === 'string'
 }
 
 /** Estimates are nullable on the wire: a missing estimate is not zero draw. */
@@ -84,6 +147,8 @@ function numberOrNull(value: unknown): number | null {
 
 export function useRunStream(runId: string | null): RunStreamState {
   const [state, setState] = useState<RunStreamState>(initialState)
+  // Consecutive transport drops with no event in between. Reset by any frame.
+  const silentReconnects = useRef(0)
 
   useEffect(() => {
     if (!runId) {
@@ -91,12 +156,17 @@ export function useRunStream(runId: string | null): RunStreamState {
       return
     }
     setState(initialState)
+    silentReconnects.current = 0
     const es = new EventSource(`/api/runs/${runId}/events`)
 
     // Payloads are typed loosely by design: they are engine-defined JSON.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const on = (type: string, handler: (data: any) => void) => {
       es.addEventListener(type, (e) => {
+        // A frame arrived, so the transport is working: forget any earlier drops
+        // and stop reporting `reconnecting`.
+        silentReconnects.current = 0
+        setState((s) => (s.connection === 'open' || s.done ? s : { ...s, connection: 'open' }))
         let data: unknown = {}
         try {
           data = JSON.parse((e as MessageEvent).data as string)
@@ -107,8 +177,33 @@ export function useRunStream(runId: string | null): RunStreamState {
       })
     }
 
+    es.addEventListener('open', () => {
+      silentReconnects.current = 0
+      setState((s) => (s.done ? s : { ...s, connection: 'open' }))
+    })
+
+    // Never published by the engine today (status travels on `done`/`error`), but
+    // handled so a future status frame is not silently dropped.
     on('status', (d) => setState((s) => ({ ...s, status: typeof d.status === 'string' ? d.status : s.status })))
     on('routing', (d) => setState((s) => ({ ...s, routing: d as RoutingDecision })))
+    // Published immediately after routing, with the same shape the persisted run
+    // carries. Guarded on `blocks` so a malformed frame cannot render a half
+    // composition with a NaN total.
+    on('context_composition', (d) =>
+      setState((s) =>
+        Array.isArray(d?.blocks) ? { ...s, composition: d as ContextComposition } : s,
+      ),
+    )
+    on('budget_warning', (d) =>
+      setState((s) => ({
+        ...s,
+        budget: {
+          kind: String(d.kind ?? 'output_tokens'),
+          output_tokens: Number(d.output_tokens ?? 0),
+          budget: Number(d.budget ?? 0),
+        },
+      })),
+    )
     on('text_delta', (d) => setState((s) => ({ ...s, text: s.text + (typeof d.text === 'string' ? d.text : '') })))
     on('tool_call', (d) =>
       setState((s) => ({
@@ -167,6 +262,7 @@ export function useRunStream(runId: string | null): RunStreamState {
       setState((s) => ({
         ...s,
         done: true,
+        connection: 'closed',
         status: typeof d.status === 'string' ? d.status : 'completed',
         // `done` carries the final cost/energy totals; keep the last usage
         // frame's token counts, which `done` does not repeat.
@@ -189,26 +285,56 @@ export function useRunStream(runId: string | null): RunStreamState {
       }))
       es.close()
     })
-    on('error', (d) => {
-      setState((s) => ({
-        ...s,
-        done: true,
-        error: typeof d.message === 'string' ? d.message : 'run failed',
-        status: typeof d.status === 'string' ? d.status : 'failed',
-      }))
-      es.close()
-    })
     on('ping', () => {
       /* keepalive */
     })
 
-    es.onerror = () => {
-      // EventSource will reconnect and the server replays the backlog from the
-      // start — drop what we accumulated so nothing is duplicated.
-      if (es.readyState !== EventSource.CLOSED) {
-        setState((s) => (s.done ? s : { ...initialState, status: s.status }))
+    // ── the one listener that has to tell two things apart ──────────────────
+    // Registered directly rather than through `on` so the transport branch is
+    // reached before anything tries to parse a body that does not exist. Both
+    // EventSource's transport failure and the engine's `event: error` frame are
+    // delivered here (and to `onerror`, which is therefore left unused).
+    es.addEventListener('error', (event) => {
+      if (isServerFrame(event)) {
+        // The engine says the run failed. This is a verdict.
+        silentReconnects.current = 0
+        let data: { message?: unknown; status?: unknown } = {}
+        try {
+          data = JSON.parse((event as MessageEvent).data as string)
+        } catch {
+          /* malformed frame — fall back to the generic wording below */
+        }
+        setState((s) => ({
+          ...s,
+          done: true,
+          connection: 'closed',
+          error: typeof data.message === 'string' ? data.message : 'run failed',
+          status: typeof data.status === 'string' ? data.status : 'failed',
+        }))
+        es.close()
+        return
       }
-    }
+
+      // A transport problem. The run is not implicated: say nothing about it.
+      if (es.readyState === EventSource.CLOSED) {
+        // EventSource gave up (or we closed it after a terminal frame).
+        setState((s) => (s.done ? s : { ...s, connection: 'closed' }))
+        return
+      }
+      silentReconnects.current += 1
+      if (silentReconnects.current > MAX_SILENT_RECONNECTS) {
+        // Reconnecting is not getting us anywhere; stop rather than loop.
+        es.close()
+        setState((s) => (s.done ? s : { ...s, connection: 'closed' }))
+        return
+      }
+      // EventSource will reconnect and the server replays this run's backlog from
+      // the start — drop what we accumulated so the replay cannot duplicate it.
+      // `status` survives as the last thing we knew; `error` stays null.
+      setState((s) =>
+        s.done ? s : { ...initialState, status: s.status, connection: 'reconnecting' },
+      )
+    })
 
     return () => es.close()
   }, [runId])

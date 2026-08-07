@@ -3,10 +3,10 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api, ApiError } from '../api/client'
+import { formatDateTime } from '../components/shared/format'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { ProvenanceCard } from '../components/shared/ProvenanceCard'
 import { StatusBadge } from '../components/shared/StatusBadge'
-import { formatDateTime } from './Runs'
 
 const TABS = ['draft', 'approved', 'rejected'] as const
 

@@ -1,8 +1,12 @@
 """Builtin tools + the tool registry.
 
 Tools receive a RunContext and return a string result for the model. The
-registry is code-first: builtins registered here, pack tools loaded by the
-pack loader. Per-harness enablement is `harnesses.tool_names[]`.
+registry is code-first and closed: every tool in the loop is a builtin
+registered in this module. Installing a pack deliberately adds **no** tool code
+— a pack only declares which builtins each task type may use
+(`task_types[].tools`, checked against this registry at install time), and a
+harness narrows that further with `harnesses.tool_names[]`. So the set of
+things an agent can do is auditable by reading this file.
 
 Trust-doctrine notes:
 - `lookup_dataset` is the ONLY way numbers enter the conversation, and every
@@ -52,6 +56,11 @@ class RunContext:
     findings_created: list[uuid.UUID] = field(default_factory=list)
     repair_attempts: dict[str, int] = field(default_factory=dict)
     max_repair_attempts: int = 3
+    # How many delegation hops led to this run: 0 for a run a human started,
+    # 1 for one `run_harness_task` call away from it, and so on. The engine reads
+    # it off the run's own task_input and `run_harness_task` refuses to go past
+    # MAX_DELEGATION_DEPTH.
+    delegation_depth: int = 0
 
 
 ToolHandler = Callable[..., Awaitable[str]]
@@ -73,6 +82,20 @@ def get_builtin_tools() -> dict[str, ToolSpec]:
 
 class ToolError(Exception):
     """Returned to the model as a tool error message (not fatal to the run)."""
+
+
+# ── delegation depth ──────────────────────────────────────────────────────────
+# `run_harness_task` starts a whole new run, so delegation is the one tool whose
+# cost is another entire agent loop. Refusing chat/freeform task types does NOT
+# make it non-recursive: any pack task type may list `run_harness_task` in its
+# tools (or a harness may enable it), and then A can delegate to B, B to A, or a
+# task to itself — an unbounded chain of runs, each burning its own budget, with
+# only the cost cap of the *individual* runs standing in the way. The depth is
+# carried in the child run's task_input under `_delegation_depth` and enforced
+# here: a chat turn may delegate (depth 0 -> 1) and a specialist may delegate one
+# further hop (1 -> 2), and that is the end of it.
+MAX_DELEGATION_DEPTH = 2
+DELEGATION_DEPTH_KEY = "_delegation_depth"
 
 
 # ── result caps ───────────────────────────────────────────────────────────────
@@ -527,6 +550,13 @@ async def run_harness_task(
     if task_type in ("chat", "freeform"):
         raise ToolError("run_harness_task is for specialist pack tasks, not chat/freeform")
 
+    if ctx.delegation_depth >= MAX_DELEGATION_DEPTH:
+        raise ToolError(
+            f"Delegation limit reached: this run is already {ctx.delegation_depth} delegation(s) "
+            f"deep and the ceiling is {MAX_DELEGATION_DEPTH}. Finish the work here with the tools "
+            "you have, or report what the delegated runs already found and say what is missing."
+        )
+
     harnesses = (
         (await ctx.db.execute(select(Harness).where(Harness.is_archived.is_(False))))
         .scalars()
@@ -565,7 +595,9 @@ async def run_harness_task(
         harness_id=harness.id,
         pack_id=harness.pack_id,
         task_type=task_type,
-        task_input=task_input,
+        # The hop counter travels with the child, so the chain is bounded however
+        # it was reached; the engine reads it back off task_input.
+        task_input={**task_input, DELEGATION_DEPTH_KEY: ctx.delegation_depth + 1},
         created_by=parent.created_by if parent else None,
     )
     ctx.db.add(child)

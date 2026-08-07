@@ -85,13 +85,16 @@ prevent that:
 ### `test_golden_runs.py` — the flagship verdict task
 
 All of these use *Signal divergence assessment* for site `S-003` (Alder Point) ×
-`flood`.
+`flood`, except `test_method_output_is_citable_but_the_same_number_alone_is_not`,
+which drives the `portfolio_divergence_rate` method on a `freeform` harness
+instead — see [Known gaps](#known-gaps) for why the method-citation scenario
+does not run on a shipped verdict task.
 
 | Test | Guarantee |
 | --- | --- |
 | `test_happy_path_records_a_grounded_schema_valid_verdict` | The AI never invents numbers. Every `cited_values` entry matches a `(dataset, row_ref, value)` the run actually retrieved, the payload is schema-valid, the finding is a `draft`, and provenance carries the model and doctrine hash. |
 | `test_happy_path_run_events_form_an_audit_trail` | Every tool call, tool result, usage tick, recorded finding, and the terminal `done` event is published — the audit trail the UI and the export read. |
-| `test_happy_path_context_carries_doctrine_schema_and_pack_tools` | The prompt contract: platform rules, both doctrine files with content hashes, the task instructions, the output schema, and exactly the tool set the pack's task type declares. Reword the preamble or drop a doctrine file and this fails. |
+| `test_happy_path_context_carries_doctrine_schema_and_pack_tools` | The prompt contract: platform rules, doctrine loaded with per-file content hashes, the task instructions, the output schema, and exactly the tool set the pack's task type declares. `divergence_assessment` declares no [task-scoped doctrine](pack-authoring.md#task-scoped-doctrine) of its own, so it gets every doctrine file the pack has (three, today) rather than a subset; the test checks two of them by name (the principles and the divergence procedure) as a representative sample, not an exhaustive count. Reword the preamble or drop a doctrine file this task relies on and this fails. |
 | `test_hallucinated_number_is_a_validation_error_not_a_finding` | A cited value that was never retrieved is rejected with the exact failure text, no finding is written, the error is fed back in-loop for repair, and the engine nudges once for the missing terminal verdict. |
 | `test_hallucination_repair_budget_is_finite` | Three bad attempts exhaust the repair budget and say so, rather than looping. |
 | `test_a_run_that_records_its_verdict_is_plainly_completed` | The pair to the two above: a run that lands no valid verdict ends `completed_without_output` (not `completed`, not `failed`), keeps `error` null, and still emits `done` carrying that status — while a run that does record its verdict stays plainly `completed`. |

@@ -5,6 +5,7 @@ connection diagnostic.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -19,9 +20,19 @@ from bench.engine.tools import get_builtin_tools
 from bench.providers.catalog import ProviderRegistry, get_catalog
 from bench.services.credentials import get_fernet, load_db_keys
 
+log = logging.getLogger("bench.settings")
+
 router = APIRouter(prefix="/api", tags=["settings"])
 
 PROVIDERS = ("anthropic", "kimi", "openrouter")
+
+# Cap for the catalog refresh behind `GET /api/models`. Discovery reaches out to
+# OpenRouter and to the configured local server, and local discovery probes each
+# model it finds for tool support — so without a cap one hung local inference
+# server holds the model picker (and everything that waits for it) for as long as
+# it likes. Past this the honest answer is the catalog as it stands: the picker
+# renders the cloud models, and the next call re-tries discovery.
+MODELS_DISCOVERY_TIMEOUT_SECONDS = 12.0
 
 # Whole-request cap for the local connection test: one /models GET (10s) plus a
 # forced tool-call probe per discovered model (8s each) can otherwise add up on
@@ -169,8 +180,23 @@ async def set_provider_key(
 @router.get("/models")
 async def list_models(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     catalog = get_catalog()
-    await catalog.refresh_dynamic()
-    await catalog.refresh_local()
+    try:
+        # Concurrent and capped: a refresh that does not finish in time is
+        # abandoned, and the catalog is served as it stands rather than the
+        # request hanging. Both refreshes are best-effort by design — each
+        # publishes its result only on success — so an abandoned one leaves no
+        # half-updated catalog behind.
+        await asyncio.wait_for(
+            asyncio.gather(catalog.refresh_dynamic(), catalog.refresh_local()),
+            timeout=MODELS_DISCOVERY_TIMEOUT_SECONDS,
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        log.warning(
+            "model discovery did not finish within %.0fs; serving the catalog as it stands. "
+            "A slow or hung local inference server (BENCH_LOCAL_BASE_URL) is the usual cause — "
+            "use POST /api/settings/providers/local/test to diagnose it.",
+            MODELS_DISCOVERY_TIMEOUT_SECONDS,
+        )
     registry = ProviderRegistry(await load_db_keys(db))
     return [
         {**m.to_json(), "available": registry.has_key(m.provider)}

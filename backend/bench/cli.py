@@ -24,14 +24,19 @@ def _validate(path: Path) -> None:
 
 
 def _hash(path: Path) -> None:
-    from bench.packs.integrity import iter_pack_files, pack_content_hash
+    from bench.packs.integrity import iter_pack_entries, pack_content_hash
 
     if not path.is_dir():
         print(f"not a directory: {path}")
         sys.exit(1)
-    files = iter_pack_files(path)
+    entries = iter_pack_entries(path)
+    links = sum(1 for e in entries if e.is_symlink)
     print(pack_content_hash(path))
-    print(f"  {len(files)} files under {path}", file=sys.stderr)
+    # Counted from the same walk the hash uses, symlinks included, so the number
+    # printed here is always what was actually pinned.
+    covered = f"{len(entries)} entries under {path}"
+    print(f"  {covered}{f' ({links} symlink(s), pinned by target)' if links else ''}",
+          file=sys.stderr)
     print(
         "  This is the hash an install pins on the pack row. Reinstall the pack "
         "(restart bench, or POST /api/packs/install) to re-pin after an intentional edit.",

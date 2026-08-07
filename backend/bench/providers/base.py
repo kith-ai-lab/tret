@@ -1,8 +1,11 @@
 """Provider-neutral types and the Provider ABC.
 
 The engine speaks only these types; each provider translates to/from its wire
-format internally. Adding a provider means implementing `stream()` and
-(optionally overriding) `complete_json()`.
+format internally. Adding a provider means implementing *both* abstract methods,
+`stream()` and `complete_json()` — the router and the QA graders call
+`complete_json()` on whatever provider they are handed, so a provider without it
+cannot be routed to at all. `mark_cache_breakpoint` below is shared wire-format
+help for the providers whose upstream honours Anthropic-style `cache_control`.
 """
 from __future__ import annotations
 
@@ -73,6 +76,36 @@ class Usage:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+
+
+# ── prompt-cache breakpoints ──────────────────────────────────────────────────
+def mark_cache_breakpoint(message: dict) -> bool:
+    """Attach `cache_control` to a message's final content part, in place.
+
+    Shared by the Anthropic provider and by OpenRouter (which forwards
+    Anthropic-style `cache_control` upstream), because it is the same wire
+    format in both places — the two providers used to carry byte-identical
+    private copies, which is one copy too many for a budget-sensitive
+    detail: the request limit of four breakpoints is enforced by counting
+    the `True` returns.
+
+    A plain string body is promoted to a single text part first. Returns False
+    when there is nothing markable (empty body, or a part that already carries a
+    breakpoint), so callers can keep an accurate budget.
+    """
+    content = message.get("content")
+    if isinstance(content, str):
+        if not content:
+            return False
+        content = [{"type": "text", "text": content}]
+        message["content"] = content
+    if not isinstance(content, list) or not content:
+        return False
+    part = content[-1]
+    if not isinstance(part, dict) or "cache_control" in part:
+        return False
+    part["cache_control"] = {"type": "ephemeral"}
+    return True
 
 
 # ── streaming events ──────────────────────────────────────────────────────────

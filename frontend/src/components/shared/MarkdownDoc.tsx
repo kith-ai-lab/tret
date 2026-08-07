@@ -1,27 +1,34 @@
-/** A small, deliberately incomplete markdown renderer for bench's reference docs.
+/** A small, deliberately incomplete markdown renderer.
+ *
+ *  It is the app's only markdown renderer, used for three kinds of source: bench's
+ *  own reference docs (the methodology dialog), pack-authored doctrine (the Packs
+ *  viewer), and **model-authored** deliverable sections (the Deliverables
+ *  preview). Written for the first; the other two replaced a second, weaker
+ *  renderer that covered headings, paragraphs and lists only and printed a
+ *  deliverable's section rules as literal `---` and any table as a wall of pipes.
  *
  *  Why not a library: this repo takes no new dependencies, and a full CommonMark
- *  implementation is a large amount of parsing surface for one dialog. Why not
- *  the existing `Markdown` in views/Packs.tsx: it covers headings, paragraphs and
- *  lists only, and `docs/emissions-methodology.md` is mostly *tables* (88 rows of
- *  them), code fences and links — it would render as a wall of pipes.
+ *  implementation is a large amount of parsing surface.
  *
- *  **Safety.** Every piece of the document becomes a React text node or element.
- *  `dangerouslySetInnerHTML` appears nowhere in this file, so React escapes the
- *  content for us: the doc's own `BENCH_GRID_CO2E_G_PER_KWH=<your region>` shows
- *  up as that text rather than as an unknown element, and a `<script>` in a doc
- *  would render as visible characters. Link targets are additionally filtered to
- *  http/https/mailto, so a `javascript:` URL cannot become a live anchor.
+ *  **Safety — the property that must not regress.** Every piece of the document
+ *  becomes a React text node or element. `dangerouslySetInnerHTML` appears nowhere
+ *  in this file, so React escapes the content for us: the methodology doc's own
+ *  `BENCH_GRID_CO2E_G_PER_KWH=<your region>` shows up as that text rather than as
+ *  an unknown element, and a `<script>` in a doc — or in a model-drafted section
+ *  built from an uploaded PDF — renders as visible characters. Link targets are
+ *  additionally filtered to http/https/mailto, so a `javascript:` URL cannot
+ *  become a live anchor. This matters more, not less, now that the input can be
+ *  model-authored: it is the same guarantee the backend's export path makes with
+ *  `services/html_sanitize`.
  *
- *  **Scope is what the document actually uses**, checked against the file rather
- *  than guessed: ATX headings (levels 1-4), paragraphs with hard wraps, `-`
- *  bullets and `1.` numbered lists (both with indented continuation lines),
- *  GitHub pipe tables with a separator row, fenced code blocks, inline code,
- *  bold, `*italic*`, and inline links. Not supported, because the document
- *  contains none: nested lists, block quotes, images, HTML blocks, reference
- *  links, setext headings, and `_underscore italics_` — that last one is omitted
- *  on purpose, since the doc is full of `snake_case` identifiers that a naive
- *  underscore rule would silently turn into italics.
+ *  **Scope**, checked against the sources rather than guessed: ATX headings
+ *  (levels 1-4) and `---` setext H2, paragraphs with hard wraps, `-` bullets and
+ *  `1.` numbered lists (both with indented continuation lines), GitHub pipe tables
+ *  with a separator row, thematic breaks, single-level block quotes, fenced code
+ *  blocks, inline code, bold, `*italic*`, and inline links. Not supported: nested
+ *  lists, images, HTML blocks, reference links, and `_underscore italics_` — that
+ *  last one is omitted on purpose, since these documents are full of `snake_case`
+ *  identifiers that a naive underscore rule would silently turn into italics.
  */
 import { type ReactNode, useMemo } from 'react'
 
@@ -93,6 +100,11 @@ function isTableSeparator(line: string): boolean {
   return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line)
 }
 
+/** A thematic break: a line of nothing but three or more `-`, `*` or `_`. */
+function isThematicBreak(line: string): boolean {
+  return /^\s{0,3}(-{3,}|\*{3,}|_{3,})\s*$/.test(line)
+}
+
 function tableCells(line: string): string[] {
   return line
     .replace(/^\s*\|/, '')
@@ -112,21 +124,34 @@ function render(source: string): ReactNode[] {
   const blocks: ReactNode[] = []
   let list: ListState | null = null
   let paragraph: string[] = []
-  let key = 0
+  let counter = 0
+
+  /** One block key, taken *before* the element is built.
+   *
+   *  Every block must call this exactly once, and must not read the counter
+   *  again while assembling its children. Inlining `key++` into JSX does not
+   *  work: the JSX transform passes `key` as an argument *after* the props
+   *  object, so a `key++` inside the children is evaluated first and the two
+   *  forms (`key={\`b${key++}\`}` vs `key={\`b${key}\`}` with the increment in
+   *  the children) hand out the same number. That collided in practice — a
+   *  paragraph followed by a heading both came out as `b7` — and React's
+   *  duplicate-key warning is the least of it: it reuses one element's state for
+   *  the other. */
+  const nextKey = () => `b${counter++}`
 
   const flushList = () => {
     if (!list) return
-    const items = list.items.map((item, i) => <li key={i}>{inline(item, `l${key}-${i}-`)}</li>)
-    blocks.push(
-      list.ordered ? <ol key={`b${key++}`}>{items}</ol> : <ul key={`b${key++}`}>{items}</ul>,
-    )
+    const k = nextKey()
+    const items = list.items.map((item, i) => <li key={i}>{inline(item, `${k}-l${i}-`)}</li>)
+    blocks.push(list.ordered ? <ol key={k}>{items}</ol> : <ul key={k}>{items}</ul>)
     list = null
   }
 
   const flushParagraph = () => {
     if (paragraph.length === 0) return
+    const k = nextKey()
     // Hard wraps inside a paragraph are joins, as markdown says.
-    blocks.push(<p key={`b${key}`}>{inline(paragraph.join(' '), `p${key++}-`)}</p>)
+    blocks.push(<p key={k}>{inline(paragraph.join(' '), `${k}-p`)}</p>)
     paragraph = []
   }
 
@@ -151,7 +176,7 @@ function render(source: string): ReactNode[] {
       }
       blocks.push(
         // Scrolls on its own axis so a wide line cannot widen the dialog.
-        <pre className="md-pre" key={`b${key++}`}>
+        <pre className="md-pre" key={nextKey()}>
           <code>{body.join('\n')}</code>
         </pre>,
       )
@@ -169,13 +194,14 @@ function render(source: string): ReactNode[] {
         i++
       }
       i-- // the loop's own i++ consumes the terminating line
+      const tk = nextKey()
       blocks.push(
-        <div className="md-table-wrap" key={`b${key}`}>
+        <div className="md-table-wrap" key={tk}>
           <table className="mono-table md-table">
             <thead>
               <tr>
                 {header.map((cell, c) => (
-                  <th key={c}>{inline(cell, `th${key}-${c}-`)}</th>
+                  <th key={c}>{inline(cell, `${tk}-th${c}-`)}</th>
                 ))}
               </tr>
             </thead>
@@ -185,7 +211,7 @@ function render(source: string): ReactNode[] {
                   {/* Pad short rows rather than dropping cells: the doc has a
                       few rows with an intentionally empty trailing cell. */}
                   {header.map((_, c) => (
-                    <td key={c}>{inline(row[c] ?? '', `td${key}-${r}-${c}-`)}</td>
+                    <td key={c}>{inline(row[c] ?? '', `${tk}-td${r}-${c}-`)}</td>
                   ))}
                 </tr>
               ))}
@@ -193,7 +219,48 @@ function render(source: string): ReactNode[] {
           </table>
         </div>,
       )
-      key++
+      continue
+    }
+
+    // ── thematic break, or the setext heading it would otherwise swallow ──
+    // The deliverable export separates every section with `\n---\n`, so this is
+    // not optional decoration: without it the assembled preview printed literal
+    // dashes between sections. A dash rule directly under paragraph text is a
+    // setext H2 in markdown, and that is honoured rather than turned into a rule
+    // that eats the title.
+    if (isThematicBreak(line)) {
+      if (paragraph.length > 0 && /^\s{0,3}-{3,}\s*$/.test(line)) {
+        const text = paragraph.join(' ')
+        paragraph = []
+        flushList()
+        const sk = nextKey()
+        blocks.push(<h2 key={sk}>{inline(text, `${sk}-h`)}</h2>)
+        continue
+      }
+      flushAll()
+      blocks.push(<hr key={nextKey()} />)
+      continue
+    }
+
+    // ── block quote ──
+    // Model-authored deliverable sections quote source documents, and this
+    // renderer now shows their content (not just bench's own reference docs), so
+    // a `>` line renders as a quote instead of as a visible angle bracket.
+    // Consecutive quote lines join into one; nesting is not supported.
+    const quote = /^\s{0,3}>\s?(.*)$/.exec(line)
+    if (quote) {
+      flushAll()
+      const quoted: string[] = [quote[1]]
+      while (i + 1 < lines.length) {
+        const next = /^\s{0,3}>\s?(.*)$/.exec(lines[i + 1].trimEnd())
+        if (!next) break
+        quoted.push(next[1])
+        i++
+      }
+      const qk = nextKey()
+      blocks.push(
+        <blockquote key={qk}>{inline(quoted.join(' ').trim(), `${qk}-q`)}</blockquote>,
+      )
       continue
     }
 
@@ -202,8 +269,8 @@ function render(source: string): ReactNode[] {
     if (heading) {
       flushAll()
       const level = heading[1].length
-      const content = inline(heading[2], `h${key}-`)
-      const k = `b${key++}`
+      const k = nextKey()
+      const content = inline(heading[2], `${k}-h`)
       if (level === 1) blocks.push(<h1 key={k}>{content}</h1>)
       else if (level === 2) blocks.push(<h2 key={k}>{content}</h2>)
       else if (level === 3) blocks.push(<h3 key={k}>{content}</h3>)

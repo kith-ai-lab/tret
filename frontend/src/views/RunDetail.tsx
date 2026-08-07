@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { api, type Msg, type RunDetail } from '../api/client'
-import { type StreamItem, useRunStream } from '../api/useRunStream'
+import { type StreamConnection, type StreamItem, useRunStream } from '../api/useRunStream'
 import { ContextComposition } from '../components/shared/ContextComposition'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
 import { BAND_SHORT } from '../components/shared/emissions'
@@ -58,6 +58,9 @@ export function RunDetailView() {
 
   const routing = stream.routing ?? run.routing
   const status = isLive ? (stream.status ?? run.status) : run.status
+  // Streamed at second one of the run; the persisted copy is the fallback for a
+  // finished run (and for a live one whose composition frame we missed).
+  const composition = stream.composition ?? run.context_composition
   const streamedFindings = stream.items.filter((i) => i.kind === 'finding_recorded')
   const findings = findingsQuery.data ?? []
 
@@ -111,6 +114,26 @@ export function RunDetailView() {
       {isLive && (
         <div className="panel" style={{ padding: '10px 14px' }}>
           <LiveFootprint usage={stream.usage} label="live footprint (est., cumulative)" />
+        </div>
+      )}
+
+      {/* A dropped connection is a connection problem, not a failed run: it is
+          reported here, in transport language, and never as an error. */}
+      {isLive && <StreamConnectionNote connection={stream.connection} />}
+
+      {/* The engine crossed the run's soft output budget and asked the model to
+          finalize. Not a failure — but the user should know why an answer is
+          being wrapped up. */}
+      {stream.budget && (
+        <div className="panel" style={{ borderColor: 'var(--amber)', padding: '8px 12px' }}>
+          <span className="mono-label" style={{ color: 'var(--amber)' }}>
+            output budget reached
+          </span>{' '}
+          <span className="mono-body" style={{ fontSize: 11.5 }}>
+            {formatTokens(stream.budget.output_tokens)} of {formatTokens(stream.budget.budget)}{' '}
+            budgeted output tokens — the model has been asked to finalize with what it already
+            retrieved.
+          </span>
         </div>
       )}
 
@@ -195,7 +218,7 @@ export function RunDetailView() {
       )}
 
       {/* Context composition — where the prompt tokens went */}
-      {run.context_composition && <ContextComposition composition={run.context_composition} />}
+      {composition && <ContextComposition composition={composition} />}
 
       {/* Provenance + footer */}
       <ProvenanceCard
@@ -244,6 +267,27 @@ export function RunDetailView() {
           </span>
         )}
       </div>
+    </div>
+  )
+}
+
+/** Transport state, in transport words. `connecting` and `open` say nothing —
+ *  they are the normal case. `reconnecting` explains why the panel above just
+ *  emptied. `closed` on a run still marked live means the live view stopped
+ *  updating, which is not the same claim as "the run failed". */
+function StreamConnectionNote({ connection }: { connection: StreamConnection }) {
+  if (connection === 'connecting' || connection === 'open') return null
+  const reconnecting = connection === 'reconnecting'
+  return (
+    <div className="panel" style={{ borderColor: 'var(--amber)', padding: '8px 12px' }}>
+      <span className={`mono-label${reconnecting ? ' pulse' : ''}`} style={{ color: 'var(--amber)' }}>
+        {reconnecting ? 'reconnecting to the live stream' : 'live stream disconnected'}
+      </span>{' '}
+      <span className="mono-body" style={{ fontSize: 11.5 }}>
+        {reconnecting
+          ? 'The run is unaffected — it keeps executing on the server. Streamed output is replayed from the start once the connection is back.'
+          : 'The run is unaffected and keeps executing on the server; this page has simply stopped receiving updates. Reload to catch up.'}
+      </span>
     </div>
   )
 }

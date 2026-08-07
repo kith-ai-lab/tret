@@ -1,15 +1,23 @@
 import { useQuery } from '@tanstack/react-query'
 import { type ReactNode, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import {
   api,
+  type GuardrailEnergyStat,
   type GuardrailHarnessStat,
   type GuardrailMethodError,
   type GuardrailMethodStat,
 } from '../api/client'
-import { formatTokens } from '../components/shared/format'
+import {
+  formatCo2eScaled,
+  formatDateTime,
+  formatEnergyScaled,
+  formatFactor,
+  formatTokens,
+  orDash,
+} from '../components/shared/format'
 import { type Column, MonoTable } from '../components/shared/MonoTable'
-import { formatDateTime } from './Runs'
 
 const WINDOWS = [7, 30, 90, 365]
 
@@ -30,8 +38,8 @@ export function Analytics() {
       <div>
         <h1 className="view-title">Analytics</h1>
         <div className="view-sub">
-          Guardrails for code execution: how often the deterministic method lane fails, and how hard
-          structured-output validation is pushing back.
+          Guardrails for code execution: how often the deterministic method lane fails, how hard
+          structured-output validation is pushing back, and what the window drew in compute.
         </div>
       </div>
 
@@ -105,6 +113,52 @@ export function Analytics() {
               empty="No method errors in this window."
             />
           </Section>
+
+          {/* The energy rollup this endpoint has always returned. It is NOT the
+              same figure as the Emissions view's: this one is compute-only and
+              recomputed at today's grid factor, that one sums each run's
+              as-recorded carbon. The difference is stated rather than smoothed
+              over, and the link points at the authoritative view. */}
+          <Section
+            title="Compute energy per harness"
+            hint="Estimated compute energy over every run in the window — not the bounded scan above. Runs with no estimate are excluded, never counted as zero."
+          >
+            <MonoTable
+              columns={ENERGY_COLUMNS}
+              rows={data.energy}
+              rowKey={(e) => e.harness_id}
+              empty="No run in this window carries an energy estimate."
+            />
+            <div className="panel config-stats" style={{ marginTop: 10 }}>
+              <Stat label="Runs with an estimate" value={formatTokens(data.totals.runs_with_energy)} />
+              <Stat
+                label="Compute energy (est.)"
+                value={orDash(formatEnergyScaled(data.totals.energy_wh))}
+              />
+              <Stat
+                label="Carbon at today's factor (est.)"
+                value={orDash(formatCo2eScaled(data.totals.co2e_g))}
+              />
+              <Stat
+                label="Grid factor"
+                value={`${formatFactor(data.energy_basis.grid_co2e_g_per_kwh, 1)} g/kWh`}
+              />
+            </div>
+            <div
+              style={{
+                marginTop: 8,
+                fontFamily: 'var(--mono)',
+                fontSize: 10.5,
+                color: 'var(--text-muted)',
+              }}
+            >
+              {/* The backend's own wording, verbatim — it is the thing that keeps
+                  this carbon column from being read as the as-recorded figure. */}
+              {data.energy_basis.estimated ? 'Estimated, never metered. ' : ''}
+              {data.energy_basis.co2e_basis} — the <Link to="/emissions">Emissions</Link> view is
+              that rollup.
+            </div>
+          </Section>
         </>
       )}
     </div>
@@ -155,6 +209,38 @@ const HARNESS_COLUMNS: Column<GuardrailHarnessStat>[] = [
     align: 'right',
     render: (h) => (
       <span style={{ color: rateColor(h.run_error_rate_pct) }}>{h.run_error_rate_pct}%</span>
+    ),
+  },
+]
+
+const ENERGY_COLUMNS: Column<GuardrailEnergyStat>[] = [
+  { key: 'harness', header: 'Harness', render: (e) => e.harness_name },
+  {
+    key: 'runs',
+    header: 'Runs w/ estimate',
+    align: 'right',
+    render: (e) => formatTokens(e.runs_with_energy),
+  },
+  {
+    key: 'energy',
+    header: 'Compute energy (est.)',
+    align: 'right',
+    render: (e) => orDash(formatEnergyScaled(e.energy_wh)),
+  },
+  {
+    key: 'per_run',
+    header: 'Per run (est.)',
+    align: 'right',
+    render: (e) => orDash(formatEnergyScaled(e.energy_wh_per_run)),
+  },
+  {
+    key: 'co2e',
+    header: 'Carbon (est.)',
+    align: 'right',
+    render: (e) => (
+      <span title="Compute energy at the CURRENT grid factor — excludes PUE, embodied hardware and the scope split. The Emissions view sums each run's as-recorded figure instead.">
+        {orDash(formatCo2eScaled(e.co2e_g))}
+      </span>
     ),
   },
 ]

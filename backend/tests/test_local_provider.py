@@ -215,6 +215,60 @@ async def test_probe_marks_supports_tools_false_on_failure(monkeypatch):
     assert catalog.get("local/bad-model").supports_tools is False
 
 
+def _probe_returns(value):
+    """A `complete_json` stand-in that answers the probe with `value`."""
+
+    async def probe(*args, **kwargs):
+        return value
+
+    return probe
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {},  # forced tool call "honoured" with no arguments at all
+        {"ok": False},
+        {"ok": None},
+        {"other": True},  # a different field, not the one the schema requires
+        {"ok": "no"},
+        "ok",  # not even an object
+        None,
+    ],
+)
+async def test_probe_requires_the_schema_field_to_be_filled_in(monkeypatch, answer):
+    """An empty-arguments answer is exactly what a model that ignores `tools`
+    produces, so accepting any dict at all marked those models tool-capable — and
+    bench's whole trust model (grading, extraction, terminal actions) runs through
+    tool calls."""
+    _patch_settings(monkeypatch, _settings())
+    monkeypatch.setattr(
+        catalog_module.LocalProvider, "complete_json", _probe_returns(answer)
+    )
+    fake_client = _FakeGetClient(payload={"data": [{"id": "empty-args-model"}]})
+    monkeypatch.setattr(catalog_module.httpx, "AsyncClient", fake_client)
+
+    catalog = ModelCatalog()
+    await catalog.refresh_local()
+    assert catalog.get("local/empty-args-model").supports_tools is False
+
+
+@pytest.mark.parametrize("answer", [{"ok": True}, {"ok": "true"}, {"ok": "TRUE "}, {"ok": 1}])
+async def test_probe_accepts_a_boolean_a_local_runtime_stringified(monkeypatch, answer):
+    """Several local runtimes stringify booleans on the way out of the tool-call
+    serializer; rejecting those would exclude genuinely capable models."""
+    _patch_settings(monkeypatch, _settings())
+    monkeypatch.setattr(
+        catalog_module.LocalProvider, "complete_json", _probe_returns(answer)
+    )
+    fake_client = _FakeGetClient(payload={"data": [{"id": "stringy-model"}]})
+    monkeypatch.setattr(catalog_module.httpx, "AsyncClient", fake_client)
+
+    catalog = ModelCatalog()
+    await catalog.refresh_local()
+    assert catalog.get("local/stringy-model").supports_tools is True
+
+
 async def test_probe_skipped_when_disabled(monkeypatch):
     _patch_settings(monkeypatch, _settings(local_probe_tools=False))
     monkeypatch.setattr(catalog_module.LocalProvider, "complete_json", _always_fails)

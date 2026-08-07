@@ -3,6 +3,9 @@
 No DB — `execute_method` only needs a session that can get/add/flush, so a fake
 stands in (the same stance as tests/test_methods.py running scripts directly).
 """
+import asyncio
+import logging
+import sys
 import uuid
 
 import pytest
@@ -136,6 +139,51 @@ async def test_timeout_is_enforced(tmp_path):
         await _run(FakeSession(FakePack(None)), pack_dir, spec=spec)
 
 
+async def test_output_over_the_size_cap_is_killed_mid_stream(tmp_path, monkeypatch):
+    """The cap must stop the writer, not merely reject it afterwards.
+
+    stdout used to be buffered whole by `communicate()` and measured after, so a
+    method emitting gigabytes exhausted the process's memory instead of being
+    capped. This method writes past the cap and then sleeps well past the run's
+    timeout: capping at the cap ends it immediately, while buffering-then-checking
+    waits for the child and reports a timeout instead.
+    """
+    monkeypatch.setattr(methods, "MAX_OUTPUT_BYTES", 1000)
+    pack_dir = _pack_dir(
+        tmp_path,
+        "import sys, time\nsys.stdout.write('x' * 400_000)\nsys.stdout.flush()\ntime.sleep(30)\n",
+    )
+    with pytest.raises(MethodError, match="exceeds size cap"):
+        await _run(FakeSession(FakePack(None)), pack_dir, spec={**SPEC, "timeout_seconds": 2})
+
+
+async def test_output_exactly_at_the_size_cap_is_accepted(tmp_path, monkeypatch):
+    """The cap is a limit, not an off-by-one: output at the cap still counts."""
+    body = '{"rows": [{"pad": "%s"}]}'
+    padding = "p" * 200
+    monkeypatch.setattr(methods, "MAX_OUTPUT_BYTES", len(body % padding))
+    pack_dir = _pack_dir(tmp_path, f"import sys\nsys.stdout.write('{body % padding}')\n")
+    record = await _run(FakeSession(FakePack(None)), pack_dir)
+    assert record.status == "completed"
+    assert record.output == [{"pad": padding}]
+
+
+async def test_stderr_beyond_its_cap_does_not_stall_the_method(tmp_path, monkeypatch):
+    """A chatty method still returns its rows: stderr is drained, not blocked."""
+    monkeypatch.setattr(methods, "MAX_STDERR_BYTES", 256)
+    pack_dir = _pack_dir(
+        tmp_path,
+        "import json, sys\n"
+        "sys.stderr.write('noise ' * 50_000)\n"
+        'json.dump({"rows": [{"got": 7}]}, sys.stdout)\n',
+    )
+    record = await _run(
+        FakeSession(FakePack(None)), pack_dir, spec={**SPEC, "timeout_seconds": 10}
+    )
+    assert record.status == "completed"
+    assert record.output == [{"got": 7}]
+
+
 async def test_network_isolation_disabled_yields_no_prefix(monkeypatch):
     monkeypatch.setattr(methods.get_settings(), "methods_network_isolation", False)
     assert await network_isolation_prefix() == []
@@ -143,8 +191,72 @@ async def test_network_isolation_disabled_yields_no_prefix(monkeypatch):
 
 async def test_network_isolation_is_probed_once(monkeypatch):
     monkeypatch.setattr(methods.get_settings(), "methods_network_isolation", True)
+    probes = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def counting_exec(*args, **kwargs):
+        probes.append(args)
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", counting_exec)
     first = await network_isolation_prefix()
-    assert first == await network_isolation_prefix()  # cached, no re-probe
+    second = await network_isolation_prefix()
+    assert second is first  # cached: the second call spawns nothing
+    assert len(probes) <= 1  # 1 on Linux (the `unshare --net true` probe), 0 elsewhere
     # Off Linux (or without a usable `unshare`) the documented fallback is
     # "no isolation", never a hard failure.
     assert first == [] or first[-2:] == ["--net", "--"]
+
+
+@pytest.mark.skipif(
+    sys.platform == "linux", reason="the off-Linux fallback only exists off Linux"
+)
+async def test_off_linux_isolation_falls_back_but_says_so(monkeypatch, caplog):
+    """Where isolation cannot work, asking for it must warn — silence is the bug.
+
+    This is the honest half of the pair below: on this platform there is no
+    network boundary to assert, so what is asserted is that the operator who
+    asked for one is told they did not get it.
+    """
+    monkeypatch.setattr(methods.get_settings(), "methods_network_isolation", True)
+    with caplog.at_level(logging.WARNING, logger="bench.methods"):
+        assert await network_isolation_prefix() == []
+    assert "WITHOUT network isolation" in caplog.text
+    assert sys.platform in caplog.text
+
+
+NETWORK_PROBE = """
+import json
+import socket
+import sys
+
+try:
+    socket.create_connection(("1.1.1.1", 443), timeout=3).close()
+    reachable = True
+except OSError:
+    reachable = False
+json.dump({"rows": [{"reachable": reachable}]}, sys.stdout)
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="`unshare --net` is Linux-only")
+async def test_isolated_method_cannot_reach_the_network(tmp_path, monkeypatch):
+    """Where isolation is supposed to work, prove a method really has no network.
+
+    Skipped honestly when the host cannot create a network namespace (no
+    `unshare`, or no permission) — the same condition the runtime warns about.
+    """
+    monkeypatch.setattr(methods.get_settings(), "methods_network_isolation", True)
+    prefix = await network_isolation_prefix()
+    if not prefix:
+        pytest.skip("unshare --net is not usable here; the runtime warns and falls back")
+    assert prefix[0].endswith("unshare") and prefix[1:] == ["--net", "--"]
+
+    pack_dir = _pack_dir(tmp_path, NETWORK_PROBE)
+    record = await _run(
+        FakeSession(FakePack(None)), pack_dir, spec={**SPEC, "timeout_seconds": 20}
+    )
+    assert record.status == "completed"
+    assert record.output == [{"reachable": False}], (
+        "a method opened a socket inside what should be an empty network namespace"
+    )

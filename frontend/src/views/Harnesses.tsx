@@ -4,6 +4,10 @@ import { type FormEvent, useEffect, useState } from 'react'
 import {
   api,
   ApiError,
+  COST_TIER_DESCRIPTIONS,
+  COST_TIERS,
+  type CostTier,
+  DEFAULT_MAX_COST_TIER,
   DEFAULT_OBJECTIVE,
   type Harness,
   type HarnessBody,
@@ -14,6 +18,7 @@ import {
   type RoutingObjective,
 } from '../api/client'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
+import { QueryError } from '../components/shared/MonoTable'
 import { ModelSelect, modelPriceLabel, modelUnavailableLabel } from './Workbench'
 
 const NEW_ID = '__new__'
@@ -31,7 +36,7 @@ const emptyForm: HarnessBody = {
   pack_id: null,
   task_profile: 'freeform',
   system_prompt_extra: null,
-  model_policy: { mode: 'auto', max_cost_tier: 'premium', objective: DEFAULT_OBJECTIVE },
+  model_policy: { mode: 'auto', max_cost_tier: DEFAULT_MAX_COST_TIER, objective: DEFAULT_OBJECTIVE },
   tool_names: [],
   loop_config: { ...DEFAULT_LOOP },
 }
@@ -61,6 +66,10 @@ export function Harnesses() {
 
       {harnessesQuery.isLoading ? (
         <div className="empty pulse">Loading harnesses…</div>
+      ) : harnessesQuery.isError ? (
+        // Not an empty list: offering "+ New harness" over a failed fetch invites
+        // the user to recreate harnesses that already exist.
+        <QueryError error={harnessesQuery.error} what="the harness list" />
       ) : (
         <ListDetail
           listWidth={230}
@@ -168,6 +177,14 @@ function HarnessEditor({
   const tools = toolsQuery.data ?? []
   const selectedPack = packs.find((p) => p.id === form.pack_id) ?? null
   const taskProfiles = ['freeform', ...(selectedPack?.task_types ?? []).map((t) => t.slug)]
+
+  const costTier = form.model_policy.max_cost_tier ?? DEFAULT_MAX_COST_TIER
+  // A stored tier is a plain string on the wire, so narrowing is a check, not a
+  // cast: a value this build does not know about must reach the "as stored"
+  // option rather than be assumed to be one of the four.
+  const knownTier = (COST_TIERS as readonly string[]).includes(costTier)
+    ? (costTier as CostTier)
+    : null
 
   const setPolicy = (patch: Partial<ModelPolicy>) =>
     setForm((f) => ({ ...f, model_policy: { ...f.model_policy, ...patch } }))
@@ -301,16 +318,30 @@ function HarnessEditor({
           </div>
         ) : (
           <>
+            {/* Every tier the backend accepts is offered, `local` included: it is
+                the documented zero-cloud policy (docs/local-models.md), and a
+                select whose value matches no option renders blank and invites the
+                user to overwrite a setting they cannot see. A stored value the
+                catalog does not know about gets its own option for the same
+                reason — the control must never be the thing that loses it. */}
             <div className="field">
               <label className="mono-label">Max cost tier</label>
               <select
-                value={form.model_policy.max_cost_tier ?? 'premium'}
+                value={costTier}
                 onChange={(e) => setPolicy({ max_cost_tier: e.target.value })}
               >
-                <option value="economy">economy</option>
-                <option value="standard">standard</option>
-                <option value="premium">premium</option>
+                {COST_TIERS.map((tier) => (
+                  <option key={tier} value={tier}>
+                    {tier}
+                  </option>
+                ))}
+                {!knownTier && <option value={costTier}>{costTier} (as stored)</option>}
               </select>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+                {knownTier
+                  ? COST_TIER_DESCRIPTIONS[knownTier]
+                  : 'Not a tier this build recognizes — kept exactly as stored unless you change it.'}
+              </div>
             </div>
             <div className="field" style={{ marginBottom: 0 }}>
               <label className="mono-label">

@@ -2,6 +2,24 @@
  *  energy/carbon figures. Energy is never metered — anything derived from it is
  *  labelled "(est.)" at every call site. */
 
+/** A timestamp as a short local date-time. Lives here rather than in a view
+ *  module because six views render one: it used to be exported from views/Runs,
+ *  which made Analytics, Approvals, Deliverables, Documents and SettingsView all
+ *  import a *view* for a formatter. Falls back to the raw ISO string rather than
+ *  throwing on an unparseable value. */
+export function formatDateTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return iso
+  }
+}
+
 /** Token counts always carry thousands separators. */
 export function formatTokens(n: number | null | undefined): string {
   return (n ?? 0).toLocaleString('en-US')
@@ -79,14 +97,12 @@ export function formatEnergyScaled(wh: number | null | undefined): string | null
   return `${magnitude(wh)} Wh`
 }
 
-/** A backend-supplied percentage. Never computed here from other figures.
- *
- *  NOT for the avoided-emissions comparison: a decimal place on the ratio of two
- *  estimated constants is false precision. Use `coarseComparison` from
- *  ./emissions for that, and keep this for shares of a total. */
-export function formatPct(pct: number | null | undefined): string | null {
-  return pct === null || pct === undefined ? null : `${pct.toFixed(1)}%`
-}
+// A `formatPct` helper lived here and had no caller: percentages in this app are
+// either the money share (`moneyPctPhrase`/`moneyPctCompact` in ./emissions, which
+// carry the precision caveat with them) or the coarse carbon comparison
+// (`coarseComparison`, deliberately not a decimal). A general one-decimal
+// percentage formatter is the wrong default for both, so it is gone rather than
+// sitting here waiting to be reached for.
 
 // ── uncertainty bands ────────────────────────────────────────────────────
 // A carbon figure is shown as a range wherever the backend recorded one. Both
@@ -178,12 +194,6 @@ export function footprintText(
   return `${parts.map((p) => `~${p}`).join(' · ')} (est.)`
 }
 
-/** "$0.0420 · ~1.3 Wh · ~0.5 g CO₂e (est.)" — the cost line with its footprint. */
-export function costWithFootprint(
-  costUsd: number | null | undefined,
-  energyWh: number | null | undefined,
-  co2eG: number | null | undefined,
-): string {
-  const footprint = footprintText(energyWh, co2eG)
-  return footprint ? `${formatCost(costUsd)} · ${footprint}` : formatCost(costUsd)
-}
+// `costWithFootprint` (cost and footprint joined into one string) also had no
+// caller: every surface that shows both renders them as separate elements so the
+// carbon half can carry its own band and tooltip, which a single string cannot.

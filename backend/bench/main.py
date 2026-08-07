@@ -1,8 +1,9 @@
 """bench — an open-source AI harness platform for non-technical knowledge work."""
 from __future__ import annotations
 
+import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -22,6 +23,7 @@ from bench.api import (
 from bench.config import enforce_production_safety
 from bench.db.engine import get_engine, get_session_factory
 from bench.db.migrate import ensure_schema
+from bench.providers.catalog import get_catalog
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bench")
@@ -39,8 +41,22 @@ async def lifespan(app: FastAPI):
 
     async with get_session_factory()() as db:
         await bootstrap(db)
+    # Discover local + dynamic models in the background. Deliberately *not*
+    # awaited: a boot must never depend on a reachable Ollama or on
+    # openrouter.ai, and a slow or hanging model server must not hold the socket
+    # closed. Scheduling it here is what makes a headless run on a fresh process
+    # able to route to a local or dynamic model without anyone opening the UI
+    # first (the router also calls `warm_once()` as a backstop, for the run that
+    # arrives before this task finishes).
+    warm_task = asyncio.create_task(get_catalog().warm())
     log.info("bench is ready")
-    yield
+    try:
+        yield
+    finally:
+        # Shutdown: stop waiting on a network call nobody needs the answer to.
+        warm_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await warm_task
 
 
 def _safe_static_file(root: Path, request_path: str) -> Path | None:

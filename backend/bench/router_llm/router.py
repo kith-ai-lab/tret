@@ -1,13 +1,19 @@
 """The LLM model router. Every decision — including user pins and overrides —
 is persisted as a RoutingDecision on the run, so routing is always auditable.
 
-Two invariants hold across every path through `route()`:
+Three invariants hold across every path through `route()`:
 
 * The harness cost ceiling (`model_policy["max_cost_tier"]`) binds the automatic
   paths — the candidate list, the deterministic fallback, and the choice of
-  router model itself. Only an explicit pin or per-run override may exceed it,
-  and those are recorded as overrides. A capped harness with nothing to run
-  raises `RoutingUnavailable` rather than escalating.
+  router model itself. A capped harness with nothing to run raises
+  `RoutingUnavailable` rather than escalating.
+* The two kinds of override are not equally powerful, because they do not come
+  from the same place. A harness pin (`model_policy["mode"] == "pinned"`) is
+  written on the harness and may exceed that harness's own ceiling. A per-request
+  override (`_model_override` on a run's task_input, settable by any signed-in
+  caller of POST /api/runs or the chat composer) may choose *within* the harness
+  policy — its `allowed` list and its `max_cost_tier` — and nothing more. See
+  `_assert_override_within_policy`.
 * The persisted decision describes what actually happened: `chosen_model` is
   always one of `candidates` on the automatic paths, and `router_model` is null
   whenever no router was consulted.
@@ -181,9 +187,18 @@ class ModelRouter:
     ) -> RoutingDecision:
         objective = objective_of(model_policy)
         max_tier = _max_cost_tier(model_policy)
-        # 1. Overrides short-circuit — but are still logged as decisions.
+        # Local and dynamic models reach the catalog only through a discovery
+        # pass. On a fresh process this is the first thing that needs them, so
+        # make sure one has been attempted before deciding there are no
+        # candidates. Idempotent, and a no-op once main.py's startup warm-up has
+        # run or when neither source is configured.
+        await self._catalog.warm_once()
+        # 1. Overrides short-circuit — but are still logged as decisions, and a
+        # per-request override is confined to the harness policy.
         if run_override:
-            return self._validated_override(run_override, "run_override", objective)
+            return self._validated_override(
+                run_override, "run_override", objective, model_policy=model_policy
+            )
         if model_policy.get("mode") == "pinned":
             return self._validated_override(model_policy.get("model", ""), "user_pin", objective)
 
@@ -292,10 +307,11 @@ class ModelRouter:
     def _assert_within_ceiling(self, model_id: str, max_tier: str) -> None:
         """Belt and braces: no decision leaves this router above the ceiling.
 
-        Pins and per-run overrides are deliberately exempt — they are explicit
-        operator choices, and they are recorded as overrides in the audit trail.
-        This guards the *automatic* paths, where a future selection rule could
-        otherwise reintroduce silent escalation.
+        A harness pin is deliberately exempt — it is the operator's own statement,
+        made on the harness itself, and it is recorded as an override in the audit
+        trail. Per-request overrides are *not* exempt (see
+        `_assert_override_within_policy`). This guards the *automatic* paths, where
+        a future selection rule could otherwise reintroduce silent escalation.
         """
         info = self._catalog.get(model_id)
         if info is not None and not within_cost_tier(info, max_tier):
@@ -304,8 +320,50 @@ class ModelRouter:
                 f"cost ceiling is '{max_tier}'."
             )
 
+    def _assert_override_within_policy(self, info: ModelInfo, model_policy: dict) -> None:
+        """A per-request override picks a model; it may not widen the policy.
+
+        Who can set one is the whole argument. `_model_override` arrives on a
+        run's `task_input` from POST /api/runs and from the chat composer
+        (bench/api/runs.py, bench/api/chat.py): any signed-in caller, no admin
+        check, no harness edit, no persistence beyond that run. A harness's
+        `mode: pinned` model and its `max_cost_tier` are by contrast written on
+        the harness row by whoever may edit harnesses. Treating both as "an
+        explicit operator choice" gave a request body the authority of a harness
+        setting, which made the documented policy guarantees — only models on the
+        `allowed` list, never above `max_cost_tier` — conditional on nobody
+        passing one extra JSON field. In particular `max_cost_tier: local` is a
+        confidentiality control (docs/local-models.md: no cloud provider may see
+        the task), and a request must not be able to lift it.
+
+        So a per-request override is confined to what the harness already allows,
+        and refusal is loud (`RoutingUnavailable`, surfacing as a failed run with
+        this message) rather than a silent downgrade to automatic routing: the
+        caller named a model, and quietly running a different one would be the
+        worse answer. Permitted overrides are unchanged, and still recorded in the
+        audit trail as `override: "run_override"`.
+        """
+        allowed = model_policy.get("allowed") or None
+        if allowed and info.id not in allowed:
+            raise RoutingUnavailable(
+                f"Model '{info.id}' is not on this harness's allowed model list. A per-run "
+                "override may choose among the models the harness policy permits; widening "
+                "that list is a harness setting."
+            )
+        max_tier = _max_cost_tier(model_policy)
+        if not within_cost_tier(info, max_tier):
+            raise RoutingUnavailable(
+                f"Refusing the per-run override to '{info.id}' (tier '{info.cost_tier}'): the "
+                f"harness cost ceiling is '{max_tier}'. Raise the ceiling on the harness, or "
+                "pin the model there, if that is the intent."
+            )
+
     def _validated_override(
-        self, model_id: str, kind: str, objective: str = DEFAULT_OBJECTIVE
+        self,
+        model_id: str,
+        kind: str,
+        objective: str = DEFAULT_OBJECTIVE,
+        model_policy: dict | None = None,
     ) -> RoutingDecision:
         info = self._catalog.get(model_id)
         if info is None:
@@ -314,6 +372,8 @@ class ModelRouter:
             raise RoutingUnavailable(
                 f"Model '{model_id}' requires provider '{info.provider}', which has no API key."
             )
+        if kind == "run_override":
+            self._assert_override_within_policy(info, model_policy or {})
         return RoutingDecision(
             router_model=None,
             routing_prompt_version=ROUTING_PROMPT_VERSION,

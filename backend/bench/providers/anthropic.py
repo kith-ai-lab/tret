@@ -25,6 +25,7 @@ from bench.providers.base import (
     ToolSpec,
     TurnComplete,
     Usage,
+    mark_cache_breakpoint,
 )
 
 # The API rejects requests carrying more than four cache_control blocks. One is
@@ -34,16 +35,35 @@ SYSTEM_CACHE_BREAKPOINTS = 1
 MESSAGE_CACHE_BREAKPOINTS = MAX_CACHE_BREAKPOINTS - SYSTEM_CACHE_BREAKPOINTS
 
 
+def _as_blocks(content) -> list[dict]:
+    """A message body as a block list, promoting a plain string."""
+    if isinstance(content, list):
+        return content
+    return [{"type": "text", "text": content or ""}]
+
+
 def _to_anthropic_messages(messages: list[Msg]) -> list[dict]:
     """Translate canonical Msg list to Anthropic content-block format.
 
     Consecutive tool-result messages are folded into a single user turn, as the
     API requires tool_result blocks to open the message that follows tool_use.
+
+    An assistant turn with neither text nor tool calls is *dropped* rather than
+    sent as an empty text block: the API rejects `{"type": "text", "text": ""}`
+    with a 400 ("text content blocks must be non-empty"), so a model that
+    returned nothing — a max_tokens stop before any output, a persisted chat turn
+    with an empty body — used to poison every subsequent request that re-sent the
+    history. Dropping one can leave two adjacent user turns, so user turns are
+    merged when that happens; nothing references an empty assistant turn (it has
+    no tool_use ids), so no id can dangle.
     """
     out: list[dict] = []
     for m in messages:
         if m.role == "user":
-            out.append({"role": "user", "content": m.content or ""})
+            if out and out[-1]["role"] == "user":
+                out[-1]["content"] = _as_blocks(out[-1]["content"]) + _as_blocks(m.content)
+            else:
+                out.append({"role": "user", "content": m.content or ""})
         elif m.role == "assistant":
             blocks: list[dict] = []
             if m.content:
@@ -52,7 +72,9 @@ def _to_anthropic_messages(messages: list[Msg]) -> list[dict]:
                 blocks.append(
                     {"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.arguments}
                 )
-            out.append({"role": "assistant", "content": blocks or [{"type": "text", "text": ""}]})
+            if not blocks:
+                continue
+            out.append({"role": "assistant", "content": blocks})
         elif m.role == "tool":
             block = {
                 "type": "tool_result",
@@ -64,27 +86,6 @@ def _to_anthropic_messages(messages: list[Msg]) -> list[dict]:
             else:
                 out.append({"role": "user", "content": [block]})
     return out
-
-
-def _mark_cache_breakpoint(message: dict) -> bool:
-    """Attach cache_control to a message's final content block.
-
-    Returns False when there is nothing markable (empty content, or a block that
-    already carries a breakpoint), so callers can keep an accurate budget.
-    """
-    content = message.get("content")
-    if isinstance(content, str):
-        if not content:
-            return False
-        content = [{"type": "text", "text": content}]
-        message["content"] = content
-    if not isinstance(content, list) or not content:
-        return False
-    block = content[-1]
-    if not isinstance(block, dict) or "cache_control" in block:
-        return False
-    block["cache_control"] = {"type": "ephemeral"}
-    return True
 
 
 def _apply_conversation_cache(messages: list[dict], budget: int = MESSAGE_CACHE_BREAKPOINTS) -> None:
@@ -101,7 +102,7 @@ def _apply_conversation_cache(messages: list[dict], budget: int = MESSAGE_CACHE_
         if marked >= budget:
             return
         if i == 0 or message.get("role") == "user":
-            if _mark_cache_breakpoint(message):
+            if mark_cache_breakpoint(message):
                 marked += 1
 
 

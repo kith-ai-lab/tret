@@ -385,6 +385,69 @@ async def test_hallucination_repair_budget_is_finite(world):
     assert result.run.status == "completed_without_output"
 
 
+def _wrong_column_verdict(messages) -> dict:
+    """Two real values from one real row — with one of them on the wrong field."""
+    score = rows_of(messages, "lookup_dataset", call_index=0)[0]
+    misattributed = cite(score, "vintage_year")
+    misattributed["column"] = "rating"  # 2018 presented as the flood rating
+    return {
+        "schema_slug": "divergence_verdict",
+        "subject": {"site_id": SITE, "peril": PERIL},
+        "payload": {
+            "verdict": "diverge_signal_higher",
+            "reason_code": "outdated_inputs",
+            "confidence": "high",
+            "methodology_note": DIVERGENCE_NOTE,
+            "cited_values": [cite(score, "rating"), misattributed],
+            "doctrine_citations": ["Divergence Assessment Procedure — Step 5"],
+        },
+    }
+
+
+async def test_a_retrieved_value_on_the_wrong_column_is_rejected(world):
+    """Grounded in the row is not grounded in the cell.
+
+    The cross-check compared (dataset, row_ref, value) and ignored `column`, so a
+    number that really was retrieved could be attributed to another field of the
+    same real row and still validate — a vintage year offered as a hazard rating
+    reads as a plausible figure, and the citation record existed precisely so no
+    reader has to go back to the dataset to catch that.
+    """
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Reading the vendor score.",
+                tool_calls=[_lookup("hazard_scores", site_id=SITE, peril=PERIL)],
+            ),
+            ScriptedTurn(
+                text="Recording the verdict.",
+                tool_calls=[ScriptedCall("record_verdict", _wrong_column_verdict)],
+            ),
+            ScriptedTurn(text="I cannot attribute that value correctly; stopping."),
+            ScriptedTurn(text="Standing down."),  # answers the engine's nudge
+        ]
+    )
+    result = await world.run(
+        provider=provider,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+
+    # Nothing was written, and the run does not claim an output it never landed.
+    assert result.findings == []
+    assert await world.findings_in_project() == []
+    assert result.run.status == "completed_without_output"
+
+    errors = result.tool_errors
+    assert len(errors) == 1
+    message = errors[0]["result"]
+    assert errors[0]["tool"] == "record_verdict"
+    assert "cited_values[1]: value '2018' was retrieved from row 'hazard_scores:" in message
+    assert "value of column ['vintage_year'], not 'rating'" in message
+    # The correctly attributed citation in the same payload is not the complaint.
+    assert "cited_values[0]" not in message
+
+
 async def test_a_run_that_records_its_verdict_is_plainly_completed(world):
     """The other side of the status: `completed` still means "there is output".
 

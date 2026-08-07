@@ -314,7 +314,16 @@ def doctrine_blocks(pack: Pack, task: dict | None) -> list[ContextBlock]:
     return blocks
 
 
-def _task_config(pack: Pack | None, task_type: str) -> dict | None:
+def task_config(pack: Pack | None, task_type: str) -> dict | None:
+    """The pack's declaration of this task type, or None if it declares no such task.
+
+    The single source of truth for what a task type means, shared with the engine
+    (`engine/harness.py`). It used to be duplicated there with a divergent
+    contract — the engine's copy fabricated a `{"shape": "freeform"}` config for
+    an unknown task type instead of returning None, so a typo'd or uninstalled
+    task type ran as a generic freeform turn with no task instructions, no output
+    schema and no terminal tool, and still reported `completed`.
+    """
     if pack is None:
         return None
     for t in pack.manifest.get("task_types", []):
@@ -336,7 +345,7 @@ def assemble_context(
         block_for("platform_preamble", "platform_preamble", PLATFORM_PREAMBLE)
     ]
 
-    task = _task_config(pack, task_type)
+    task = task_config(pack, task_type)
     if pack is not None:
         blocks.extend(doctrine_blocks(pack, task))
 
@@ -384,13 +393,18 @@ def assemble_system_prompt(
 
 
 def build_user_message(run: Run, pack: Pack | None, documents: list[Document]) -> str:
-    task = _task_config(pack, run.task_type)
+    task = task_config(pack, run.task_type)
     lines: list[str] = []
     if run.task_type == "chat":
         lines.append(str(run.task_input.get("message", "")))
     elif task and run.task_type != "freeform":
         lines.append(f"Task: {task.get('display_name', run.task_type)}")
-        lines.append(f"Parameters: {json.dumps(run.task_input)}")
+        # `_`-prefixed keys are the engine's own plumbing (history, capability
+        # catalog, model override, delegation depth), not task parameters: they
+        # are addressed elsewhere in the prompt and showing them here invites the
+        # model to reason about — or imitate — the harness's bookkeeping.
+        params = {k: v for k, v in run.task_input.items() if not k.startswith("_")}
+        lines.append(f"Parameters: {json.dumps(params)}")
     else:
         lines.append(str(run.task_input.get("message", "")))
 

@@ -14,6 +14,11 @@ docker run -d --name bench-pg -e POSTGRES_USER=bench -e POSTGRES_PASSWORD=bench 
 cd backend
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 BENCH_PACKS_DIR=../packs .venv/bin/uvicorn bench.main:app --reload
+# CI installs the same way but adds `-c constraints.txt`, pinning every
+# dependency (direct and transitive) to the versions CI is known to pass
+# against. If lint/tests are green for you but red in CI (or vice versa), a
+# dependency drift is the first thing to rule out:
+#   .venv/bin/pip install -e ".[dev]" -c constraints.txt
 
 # Frontend (proxies /api to :8000)
 cd frontend && npm install && npm run dev

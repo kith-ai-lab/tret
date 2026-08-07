@@ -2,9 +2,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type FormEvent, type ReactNode, useState } from 'react'
 
 import { api, ApiError, type LocalProviderTest, type User } from '../api/client'
-import { type Column, MonoTable } from '../components/shared/MonoTable'
+import { formatDateTime } from '../components/shared/format'
+import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { StatusBadge } from '../components/shared/StatusBadge'
-import { formatDateTime } from './Runs'
 
 export function SettingsView() {
   return (
@@ -41,6 +41,12 @@ function generatePassword(): string {
 function TeamSection() {
   const queryClient = useQueryClient()
   const usersQuery = useQuery({ queryKey: ['users'], queryFn: api.listUsers, retry: false })
+  // The signed-in user's own role, from the cache App already populated. Admin
+  // status is a property of the user, not of whether a list request happened to
+  // succeed: `isAdmin` used to be inferred as "the user list did not 403", so any
+  // *other* failure — a 500, a dropped connection — showed the admin-only user
+  // creation form (and its role picker and generated password) to an analyst.
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
 
   const [email, setEmail] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -65,7 +71,7 @@ function TeamSection() {
 
   const listError = usersQuery.error as ApiError | null
   const createError = createMutation.error as ApiError | null
-  const isAdmin = !(usersQuery.isError && listError?.status === 403)
+  const isAdmin = meQuery.data?.role === 'admin'
 
   const columns: Column<User>[] = [
     { key: 'email', header: 'Email', render: (u) => u.email },
@@ -98,9 +104,13 @@ function TeamSection() {
       {usersQuery.isLoading ? (
         <div className="empty pulse">Loading users…</div>
       ) : usersQuery.isError ? (
-        <div className="empty">
-          {listError?.status === 403 ? 'Admin only.' : listError?.message}
-        </div>
+        // 403 is the ordinary non-admin case and reads as a normal empty state;
+        // anything else genuinely failed and reads as an error.
+        listError?.status === 403 ? (
+          <div className="empty">Admin only.</div>
+        ) : (
+          <QueryError error={usersQuery.error} what="the team list" />
+        )
       ) : (
         <div style={{ marginBottom: 14 }}>
           <MonoTable
@@ -739,6 +749,8 @@ function DataRequests() {
       </div>
       {requestsQuery.isLoading ? (
         <div className="empty pulse">Loading data requests…</div>
+      ) : requestsQuery.isError ? (
+        <QueryError error={requestsQuery.error} what="the open data requests" />
       ) : requests.length === 0 ? (
         <div className="empty">No data requests — models file these when required data is missing.</div>
       ) : (

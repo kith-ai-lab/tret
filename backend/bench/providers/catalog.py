@@ -6,7 +6,9 @@ optional dynamic OpenRouter fetch adds clearly-marked "uncurated" entries.
 """
 from __future__ import annotations
 
+import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -38,6 +40,8 @@ from bench.services.emissions import (
     wh_per_mtok_for_model,
 )
 
+log = logging.getLogger("bench")
+
 _MODELS_YAML = Path(__file__).parent / "models.yaml"
 _OPENROUTER_CACHE_TTL = 60 * 60 * 24  # 24h
 _LOCAL_CACHE_TTL = 60 * 5  # 5min — local models/servers change far more often
@@ -51,6 +55,31 @@ _TOOL_PROBE_SCHEMA = {
     "properties": {"ok": {"type": "boolean", "description": "Always true."}},
     "required": ["ok"],
 }
+
+# Values a model may answer the probe's boolean `ok` with and still count as
+# having filled the schema in. `True` is the only correct answer; the strings and
+# 1 are here because several local runtimes stringify or integer-ify booleans on
+# the way out of the tool-call serializer, and rejecting those would exclude
+# genuinely tool-capable models from routing. Everything else — a missing key, an
+# empty object, `false`, null — is a failed probe: an empty `arguments` payload is
+# exactly what a model that ignores `tools` produces, so accepting any dict at all
+# marked those models tool-capable and let them into router candidacy, which is
+# the one thing the probe exists to prevent.
+_PROBE_TRUTHY = (True, 1, "true", "yes", "1")
+
+
+def _probe_answered(result) -> bool:
+    """Did the probe come back with the required field actually filled in?"""
+    if not isinstance(result, dict):
+        return False
+    for key in _TOOL_PROBE_SCHEMA["required"]:
+        value = result.get(key)
+        if isinstance(value, str):
+            value = value.strip().lower()
+        if value not in _PROBE_TRUTHY:
+            return False
+    return True
+
 
 # Prompt-cache pricing, expressed as multiples of a model's input price. These are
 # Anthropic's published ratios (reads 0.1x, writes 1.25x for the 5-minute TTL);
@@ -75,11 +104,15 @@ __all__ = [
     "ENERGY_CLASS_WH_PER_MTOK",
     "ENERGY_TOKEN_WEIGHT_INPUT",
     "ENERGY_TOKEN_WEIGHT_OUTPUT",
+    "KEY_PROVIDERS",
+    "PROVIDER_NAMES",
+    "PROVIDER_SPECS",
     "REASONING_ENERGY_CLASS",
     "LocalDiscovery",
     "ModelCatalog",
     "ModelInfo",
     "ProviderRegistry",
+    "ProviderSpec",
     "co2e_grams",
     "energy_accounting",
     "energy_class_for_tier",
@@ -240,6 +273,11 @@ def _describe_error(exc: Exception, limit: int = 300) -> str:
     return message[:limit] if len(message) > limit else message
 
 
+def _usable_price(price: Decimal) -> bool:
+    """Is this a price bench can tier and bill against? Finite and >= 0."""
+    return price.is_finite() and price >= 0
+
+
 def _tier_from_price(output_price: Decimal) -> str:
     if output_price >= Decimal("30"):
         return "premium"
@@ -260,6 +298,45 @@ class ModelCatalog:
         # property of the running server/weights, not something that flips
         # minute to minute, so there is no need to re-probe on every refresh.
         self._tool_probe_cache: dict[str, bool] = {}
+        # Has a discovery pass (local + dynamic) been attempted in this process?
+        # See `warm_once`.
+        self._warmed = False
+
+    async def warm(self) -> None:
+        """Run the discovery passes the catalog needs to be complete.
+
+        The curated static entries exist from import; local and dynamic
+        OpenRouter entries exist only after a discovery pass, which used to
+        happen *only* inside GET /api/models. On a freshly booted process a
+        harness run could therefore not route to a local model — or to any
+        dynamic one — until somebody opened the UI, which is not a dependency a
+        headless run should have. bench/main.py schedules this at startup as a
+        background task (never awaited, so it adds nothing to boot time) and
+        `warm_once` is the backstop for a run that beats it.
+
+        Best-effort throughout: both passes already treat an unreachable server
+        as "no models", and anything they do raise is logged, never propagated —
+        a failed refresh must not fail the caller that triggered it.
+        """
+        self._warmed = True
+        try:
+            await self.refresh_dynamic()
+        except Exception:  # noqa: BLE001 - warming is never fatal
+            log.warning("Dynamic model catalog refresh failed; continuing", exc_info=True)
+        # Only when configured: refresh_local() with no base URL *clears* the
+        # local catalog, which is the right behaviour for the settings path and
+        # the wrong one for a warm-up.
+        if get_settings().local_base_url:
+            try:
+                await self.refresh_local()
+            except Exception:  # noqa: BLE001 - warming is never fatal
+                log.warning("Local model discovery failed; continuing", exc_info=True)
+
+    async def warm_once(self) -> None:
+        """`warm()` unless some pass already ran in this process."""
+        if self._warmed:
+            return
+        await self.warm()
 
     @staticmethod
     def _load_static() -> dict[str, ModelInfo]:
@@ -299,10 +376,23 @@ class ModelCatalog:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.get("https://openrouter.ai/api/v1/models")
             resp.raise_for_status()
-        except httpx.HTTPError:
+            # Parsed inside the try: a 200 that is not JSON (a captive portal or
+            # proxy error page, an HTML maintenance notice) raises ValueError, and
+            # outside the try that made the whole of GET /api/models fail — the
+            # curated catalog with it — instead of degrading to "no dynamic
+            # models", which is what "best-effort" has to mean.
+            payload = resp.json()
+        except (httpx.HTTPError, ValueError):
             return  # dynamic catalog is best-effort
+        if not isinstance(payload, dict):
+            return
+        entries = payload.get("data")
+        if not isinstance(entries, list):
+            return
         dynamic: dict[str, ModelInfo] = {}
-        for m in resp.json().get("data", []):
+        for m in entries:
+            if not isinstance(m, dict):
+                continue
             wire_id = m.get("id", "")
             bench_id = f"openrouter/{wire_id}"
             if not wire_id or bench_id in self._static:
@@ -311,10 +401,21 @@ class ModelCatalog:
             if "tools" not in supported:
                 continue
             pricing = m.get("pricing", {})
+            if not isinstance(pricing, dict):
+                continue
             try:
                 in_price = Decimal(str(pricing.get("prompt", "0"))) * Decimal(1_000_000)
                 out_price = Decimal(str(pricing.get("completion", "0"))) * Decimal(1_000_000)
             except Exception:
+                continue
+            if not _usable_price(in_price) or not _usable_price(out_price):
+                # OpenRouter uses "-1" as a sentinel for variable/unknown pricing
+                # (auto-routers, some BYOK entries), and Decimal happily accepts
+                # "NaN"/"Infinity" as well. Any of those would put the entry in a
+                # cost tier by accident and then feed a nonsense number into cost
+                # accounting, so the entry is skipped: an absent model is honest,
+                # a negatively-priced one is not. Zero is kept — free models are
+                # real, and their energy figure is still positive.
                 continue
             created = m.get("created")
             released = None
@@ -478,7 +579,7 @@ class ModelCatalog:
                 max_tokens=64,
                 timeout=_LOCAL_PROBE_TIMEOUT,
             )
-            ok = isinstance(result, dict)
+            ok = _probe_answered(result)
         except Exception:
             ok = False
         self._tool_probe_cache[bench_id] = ok
@@ -497,64 +598,120 @@ class ModelCatalog:
         return items
 
 
+@dataclass(frozen=True)
+class ProviderSpec:
+    """Everything bench needs to know about one provider, in one place.
+
+    Adding a provider used to mean editing three parallel provider→something
+    maps (the env-key map, the `has_key` special cases, and the if/elif
+    construction chain), where forgetting one produced a provider that was
+    "configured" but unbuildable, or buildable but never offered. One row here
+    now drives all three, so the only other edits a new provider needs are its
+    models.yaml entries and the settings UI's own list (bench/api/settings.py's
+    `PROVIDERS` and the frontend picker, which are not imported from here).
+    """
+
+    name: str
+    # Settings attribute holding the env API key. Empty for a key-optional
+    # provider, whose credential is not an API key at all.
+    env_key_attr: str = ""
+    # Settings attribute that enables a key-optional provider instead of a key.
+    enabled_attr: str = ""
+    # (api_key, settings) -> Provider. Constructed lazily, once per registry.
+    factory: Callable[[str, object], Provider] = field(
+        default=lambda key, settings: None, repr=False
+    )
+
+    @property
+    def key_optional(self) -> bool:
+        return bool(self.enabled_attr)
+
+
+PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
+    ProviderSpec(
+        name="anthropic",
+        env_key_attr="anthropic_api_key",
+        factory=lambda key, settings: AnthropicProvider(key),
+    ),
+    ProviderSpec(
+        name="kimi",
+        env_key_attr="moonshot_api_key",
+        factory=lambda key, settings: KimiProvider(key),
+    ),
+    ProviderSpec(
+        name="openrouter",
+        env_key_attr="openrouter_api_key",
+        factory=lambda key, settings: OpenRouterProvider(
+            key, referer=settings.openrouter_referer, title=settings.openrouter_title
+        ),
+    ),
+    # "local" is deliberately key-optional: a configured base URL *is* the
+    # credential (most local servers ignore Authorization entirely), so a
+    # local-only installation with no cloud keys anywhere still routes.
+    ProviderSpec(
+        name="local",
+        enabled_attr="local_base_url",
+        factory=lambda key, settings: LocalProvider(
+            base_url=settings.local_base_url,
+            api_key=settings.local_api_key,
+            display_name=settings.local_display_name,
+        ),
+    ),
+)
+
+_SPECS_BY_NAME: dict[str, ProviderSpec] = {spec.name: spec for spec in PROVIDER_SPECS}
+# Provider names in catalog order. KEY_PROVIDERS are the ones a workspace can
+# store an API key for; "local" is not one of them.
+PROVIDER_NAMES: tuple[str, ...] = tuple(_SPECS_BY_NAME)
+KEY_PROVIDERS: tuple[str, ...] = tuple(
+    spec.name for spec in PROVIDER_SPECS if not spec.key_optional
+)
+
+
 class ProviderRegistry:
     """Constructs providers from configured keys. Env keys win over DB keys.
 
-    "local" is a special case: it has no API key at all in the usual sense.
-    Instead a configured `local_base_url` is itself the enabling credential —
-    `has_key("local")` is true whenever a base URL is set, key or no key, so a
-    local-only installation (no cloud provider keys anywhere) still routes.
+    Every provider-specific fact lives in PROVIDER_SPECS above; this class is the
+    generic machinery over it. "local" is the key-optional case: `has_key("local")`
+    is true whenever a base URL is set, key or no key.
     """
 
     def __init__(self, db_keys: dict[str, str] | None = None):
         settings = get_settings()
         db_keys = db_keys or {}
+        self._settings = settings
         self._keys = {
-            "anthropic": settings.anthropic_api_key or db_keys.get("anthropic", ""),
-            "kimi": settings.moonshot_api_key or db_keys.get("kimi", ""),
-            "openrouter": settings.openrouter_api_key or db_keys.get("openrouter", ""),
+            spec.name: getattr(settings, spec.env_key_attr) or db_keys.get(spec.name, "")
+            for spec in PROVIDER_SPECS
+            if spec.env_key_attr
         }
-        self._local_base_url = settings.local_base_url
-        self._local_api_key = settings.local_api_key
-        self._local_display_name = settings.local_display_name
+        self._enabled = {
+            spec.name: bool(getattr(settings, spec.enabled_attr))
+            for spec in PROVIDER_SPECS
+            if spec.key_optional
+        }
         self._instances: dict[str, Provider] = {}
 
     def has_key(self, provider: str) -> bool:
-        if provider == "local":
-            return bool(self._local_base_url)
+        if provider in self._enabled:
+            return self._enabled[provider]
         return bool(self._keys.get(provider))
 
     def available_providers(self) -> list[str]:
-        out = [p for p, k in self._keys.items() if k]
-        if self._local_base_url:
-            out.append("local")
-        return out
+        return [spec.name for spec in PROVIDER_SPECS if self.has_key(spec.name)]
 
     def get(self, provider: str) -> Provider:
         if provider not in self._instances:
-            if provider == "local":
-                if not self._local_base_url:
-                    raise KeyError("No base URL configured for provider 'local'")
-                self._instances[provider] = LocalProvider(
-                    base_url=self._local_base_url,
-                    api_key=self._local_api_key,
-                    display_name=self._local_display_name,
-                )
-                return self._instances[provider]
-            key = self._keys.get(provider, "")
-            if not key:
-                raise KeyError(f"No API key configured for provider '{provider}'")
-            settings = get_settings()
-            if provider == "anthropic":
-                self._instances[provider] = AnthropicProvider(key)
-            elif provider == "kimi":
-                self._instances[provider] = KimiProvider(key)
-            elif provider == "openrouter":
-                self._instances[provider] = OpenRouterProvider(
-                    key, referer=settings.openrouter_referer, title=settings.openrouter_title
-                )
-            else:
+            spec = _SPECS_BY_NAME.get(provider)
+            if spec is None:
                 raise KeyError(f"Unknown provider '{provider}'")
+            if not self.has_key(provider):
+                raise KeyError(
+                    f"No base URL configured for provider '{provider}'"
+                    if spec.key_optional
+                    else f"No API key configured for provider '{provider}'"
+                )
+            self._instances[provider] = spec.factory(self._keys.get(provider, ""), self._settings)
         return self._instances[provider]
 
 

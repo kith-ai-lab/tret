@@ -23,6 +23,7 @@ from bench.providers.base import (
     ToolSpec,
     TurnComplete,
     Usage,
+    mark_cache_breakpoint,
 )
 
 
@@ -50,6 +51,13 @@ def _to_openai_messages(system: str, messages: list[Msg]) -> list[dict]:
     return out
 
 
+def _token_count(value) -> int:
+    """A non-negative int from a wire field, or 0 for anything unexpected."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return max(int(value), 0)
+
+
 def _cached_prompt_tokens(usage: dict) -> int:
     """Read `usage.prompt_tokens_details.cached_tokens`, defensively.
 
@@ -59,46 +67,63 @@ def _cached_prompt_tokens(usage: dict) -> int:
     details = usage.get("prompt_tokens_details")
     if not isinstance(details, dict):
         return 0
-    cached = details.get("cached_tokens")
-    if isinstance(cached, bool) or not isinstance(cached, (int, float)):
-        return 0
-    return max(int(cached), 0)
+    return _token_count(details.get("cached_tokens"))
+
+
+# Field names a cache *write* (cache creation) can arrive under on an
+# OpenAI-shaped usage object. There is no standard one: OpenRouter forwards the
+# upstream Anthropic name at the top level, and some gateways nest it in
+# prompt_tokens_details next to cached_tokens. All of them are read, because
+# writing breakpoints (see OpenRouterProvider._apply_cache_control) and then
+# never reading the write count back means paying the 1.25x cache-write premium
+# and recording it as ordinary input — the one accounting error a cost-and-carbon
+# harness must not make.
+_CACHE_WRITE_KEYS = ("cache_creation_input_tokens", "cache_write_tokens", "cache_creation_tokens")
+
+
+def _cache_write_tokens(usage: dict) -> int:
+    """Cache-creation tokens reported anywhere in an OpenAI-style usage object."""
+    details = usage.get("prompt_tokens_details")
+    sources = [usage, details if isinstance(details, dict) else {}]
+    for source in sources:
+        for key in _CACHE_WRITE_KEYS:
+            if key in source:
+                count = _token_count(source[key])
+                if count:
+                    return count
+    return 0
 
 
 def _usage_from_openai(usage: dict) -> Usage:
     """Translate an OpenAI-style usage object into canonical Usage.
 
-    `prompt_tokens` counts cached tokens too, so they are subtracted to keep
-    Usage.input_tokens meaning "uncached input" as it does for Anthropic.
+    `prompt_tokens` counts the cache buckets too, so both of them are subtracted
+    to keep Usage.input_tokens meaning "uncached input" as it does for Anthropic,
+    and to keep the four buckets summing to what the provider billed rather than
+    double-counting a cached token as input as well.
     """
     prompt_tokens = int(usage.get("prompt_tokens") or 0)
     cache_read = min(_cached_prompt_tokens(usage), prompt_tokens)
+    cache_write = min(_cache_write_tokens(usage), prompt_tokens - cache_read)
     return Usage(
-        input_tokens=prompt_tokens - cache_read,
+        input_tokens=prompt_tokens - cache_read - cache_write,
         output_tokens=int(usage.get("completion_tokens") or 0),
         cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
     )
 
 
-def _mark_cache_breakpoint(message: dict) -> bool:
-    """Attach `cache_control` to a message's final content part, in place.
+def _index_of(entry: dict) -> int:
+    """The `index` field of a choice or tool-call delta, defaulting to 0.
 
-    A plain string body is promoted to a single text part first. Returns False
-    when there is nothing markable, so callers can keep an accurate budget.
+    Providers that stream a single completion sometimes omit it; a non-integer
+    (or a bool, which `isinstance(..., int)` would otherwise accept) reads as 0
+    rather than becoming a dict key that no later fragment can match.
     """
-    content = message.get("content")
-    if isinstance(content, str):
-        if not content:
-            return False
-        content = [{"type": "text", "text": content}]
-        message["content"] = content
-    if not isinstance(content, list) or not content:
-        return False
-    part = content[-1]
-    if not isinstance(part, dict) or "cache_control" in part:
-        return False
-    part["cache_control"] = {"type": "ephemeral"}
-    return True
+    idx = entry.get("index", 0)
+    if isinstance(idx, bool) or not isinstance(idx, int):
+        return 0
+    return idx
 
 
 def _to_openai_tools(tools: list[ToolSpec]) -> list[dict]:
@@ -161,8 +186,15 @@ class OpenAICompatProvider(Provider):
             body["tools"] = _to_openai_tools(tools)
         self._apply_cache_control(body)
 
-        # Aggregate tool-call deltas by index.
-        pending: dict[int, dict] = {}
+        # Aggregate tool-call deltas per (choice, tool index). The tool index is
+        # only unique *within* a choice, so keying on it alone concatenated the
+        # argument fragments of unrelated tool calls whenever a provider returned
+        # more than one choice — a silently corrupted (or unparseable) action in
+        # the agent loop. bench always asks for a single completion, so extra
+        # choices are dropped rather than merged or executed — `primary_choice`
+        # below is the first choice index the stream mentions.
+        pending: dict[tuple[int, int], dict] = {}
+        primary_choice: int | None = None
         usage = Usage()
         finish_reason = "end_turn"
 
@@ -187,15 +219,24 @@ class OpenAICompatProvider(Provider):
                         if chunk.get("usage"):
                             usage = _usage_from_openai(chunk["usage"])
                         for choice in chunk.get("choices", []):
+                            choice_idx = _index_of(choice)
+                            if primary_choice is None:
+                                primary_choice = choice_idx
+                            if choice_idx != primary_choice:
+                                # A second candidate completion for the same
+                                # request: its text would interleave with the
+                                # answer and its tool calls would be executed as
+                                # extra actions. Ignore it entirely.
+                                continue
                             if choice.get("finish_reason"):
                                 finish_reason = choice["finish_reason"]
                             delta = choice.get("delta") or {}
                             if delta.get("content"):
                                 yield TextDelta(delta["content"])
                             for tc in delta.get("tool_calls") or []:
-                                idx = tc.get("index", 0)
+                                idx = _index_of(tc)
                                 slot = pending.setdefault(
-                                    idx, {"id": None, "name": None, "args": ""}
+                                    (choice_idx, idx), {"id": None, "name": None, "args": ""}
                                 )
                                 if tc.get("id"):
                                     slot["id"] = tc["id"]
@@ -207,8 +248,9 @@ class OpenAICompatProvider(Provider):
             except httpx.HTTPError as e:
                 raise ProviderError(self.name, str(e)) from e
 
-        for idx in sorted(pending):
-            slot = pending[idx]
+        for key in sorted(pending):
+            _choice_idx, idx = key
+            slot = pending[key]
             if not slot["name"]:
                 continue
             try:
@@ -304,11 +346,11 @@ class OpenRouterProvider(OpenAICompatProvider):
         messages = body.get("messages") or []
         budget = self.max_cache_breakpoints
         if messages and messages[0].get("role") == "system":
-            if _mark_cache_breakpoint(messages[0]):
+            if mark_cache_breakpoint(messages[0]):
                 budget -= 1
             messages = messages[1:]
         for message in reversed(messages):
             if budget <= 0:
                 return
-            if message.get("role") == "user" and _mark_cache_breakpoint(message):
+            if message.get("role") == "user" and mark_cache_breakpoint(message):
                 budget -= 1

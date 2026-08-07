@@ -19,7 +19,9 @@ Every method runs as a separate short-lived process:
     only and truncated).
   * rlimits: CPU 30s, address space 768MB, 64 open files, low process count —
     each applied only where the platform supports it.
-  * wall-clock timeout from the manifest, output size and row caps.
+  * wall-clock timeout from the manifest, plus output size and row caps. The
+    size cap is applied *as stdout streams*: a method that over-produces is
+    killed at the cap rather than buffered whole and rejected afterwards.
   * no DB handle — inputs are materialized by the runner and passed on stdin.
   * pack integrity is re-verified before execution: a pack edited since install
     fails loudly rather than producing untrusted numbers.
@@ -61,6 +63,10 @@ log = logging.getLogger("bench.methods")
 MAX_OUTPUT_BYTES = 5 * 1024 * 1024
 MAX_OUTPUT_ROWS = 2000
 MAX_STDERR_CHARS = 2000
+# What we are willing to hold in memory from the child's stderr. Diagnostics are
+# truncated to MAX_STDERR_CHARS anyway; the rest is drained and dropped.
+MAX_STDERR_BYTES = 16 * 1024
+READ_CHUNK_BYTES = 64 * 1024
 RLIMIT_CPU_SECONDS = 30
 RLIMIT_ADDRESS_SPACE = 768 * 1024 * 1024
 RLIMIT_OPEN_FILES = 64  # stdin/stdout/stderr + imports; no room for socket farms
@@ -143,6 +149,75 @@ async def network_isolation_prefix() -> list[str]:
             err.decode(errors="replace").strip()[:200] or "no detail",
         )
     return _isolation_prefix
+
+
+# ── bounded I/O with the child ────────────────────────────────────────────────
+# `proc.communicate()` buffers the whole of stdout before returning, so the
+# output-size cap could only be applied to something already in memory: a method
+# that printed gigabytes took the process down with it instead of being capped —
+# the one failure mode a cap exists to prevent. Reading in bounded chunks costs
+# at most one chunk of overshoot and lets us kill the writer the moment it goes
+# over.
+async def _feed_stdin(proc, payload: bytes) -> None:
+    """Write the method's stdin and close it, tolerating a child that never reads."""
+    try:
+        proc.stdin.write(payload)
+        await proc.stdin.drain()
+    except OSError:
+        pass  # the method exited (or was killed) without consuming its input
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:  # pragma: no cover - transport already gone
+            pass
+
+
+async def _read_capped(stream, limit: int) -> tuple[bytes, bool]:
+    """Read up to `limit` bytes. Returns (data, overflowed) and stops at overflow."""
+    buf = bytearray()
+    while len(buf) <= limit:
+        chunk = await stream.read(READ_CHUNK_BYTES)
+        if not chunk:
+            return bytes(buf), False
+        buf.extend(chunk)
+    return bytes(buf), True
+
+
+async def _drain_capped(stream, keep: int) -> bytes:
+    """Read to EOF, keeping only the first `keep` bytes.
+
+    Unlike stdout this keeps reading past the cap and throws the rest away: a
+    pipe nobody drains blocks the child, which would turn a chatty method into a
+    wall-clock timeout instead of the honest result it produced.
+    """
+    buf = bytearray()
+    while True:
+        chunk = await stream.read(READ_CHUNK_BYTES)
+        if not chunk:
+            return bytes(buf)
+        if len(buf) < keep:
+            buf.extend(chunk[: keep - len(buf)])
+
+
+async def _exchange(proc, payload: bytes) -> tuple[bytes, bytes, bool]:
+    """Feed stdin and drain both pipes concurrently, capping what is buffered.
+
+    Returns (stdout, stderr, output_overflowed). On overflow the child is killed
+    where it stands — it has already forfeited the cap, and waiting for it to
+    finish writing is exactly what we are refusing to do.
+    """
+    feeder = asyncio.ensure_future(_feed_stdin(proc, payload))
+    errors = asyncio.ensure_future(_drain_capped(proc.stderr, MAX_STDERR_BYTES))
+    try:
+        stdout, overflowed = await _read_capped(proc.stdout, MAX_OUTPUT_BYTES)
+        if overflowed:
+            proc.kill()
+        stderr = await errors
+        await proc.wait()
+        return stdout, stderr, overflowed
+    finally:
+        for task in (feeder, errors):
+            task.cancel()
 
 
 async def _verify_pack(db: AsyncSession, pack_id: uuid.UUID, pack_dir: Path) -> None:
@@ -280,17 +355,21 @@ async def execute_method(
             preexec_fn=_set_limits,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(payload), timeout=float(method_spec.get("timeout_seconds", 60))
+            stdout, stderr, overflowed = await asyncio.wait_for(
+                _exchange(proc, payload), timeout=float(method_spec.get("timeout_seconds", 60))
             )
         except asyncio.TimeoutError:
             proc.kill()
             raise MethodError("Method timed out")
+        # Checked before the return code: a killed writer exits non-zero, and the
+        # honest diagnosis is the cap it broke, not the signal we sent it.
+        if overflowed:
+            raise MethodError(
+                f"Method output exceeds size cap ({MAX_OUTPUT_BYTES} bytes) and was cut off"
+            )
         if proc.returncode != 0:
             detail = stderr.decode(errors="replace")[:MAX_STDERR_CHARS]
             raise MethodError(f"Method exited {proc.returncode}: {detail}")
-        if len(stdout) > MAX_OUTPUT_BYTES:
-            raise MethodError("Method output exceeds size cap")
         try:
             result = json.loads(stdout.decode())
             rows = result["rows"]

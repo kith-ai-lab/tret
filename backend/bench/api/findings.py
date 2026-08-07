@@ -8,15 +8,30 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bench.api.auth import current_user, require_approver
 from bench.db.engine import get_db
-from bench.db.models import Approval, DataRequest, Finding, User
+from bench.db.models import Approval, DataRequest, Finding, Project, User
 
 router = APIRouter(prefix="/api", tags=["findings"])
+
+APPROVAL_ACTIONS = ("approve", "reject")
+
+
+async def _current_project(db: AsyncSession) -> Project | None:
+    """The project bench operates on.
+
+    bench is single-project today (bootstrap seeds exactly one, and the UI has no
+    project picker). This is the one place that assumption is written down, so the
+    deliverable listing and the deliverable export agree on *which* project they
+    mean — before this existed the listing spanned every project while the export
+    read the first one, so in a two-project database the UI offered deliverables
+    whose export could only 404.
+    """
+    return (await db.execute(select(Project).order_by(Project.created_at))).scalars().first()
 
 
 def _finding_out(f: Finding, approvals: list[Approval] | None = None) -> dict:
@@ -79,9 +94,15 @@ async def get_finding(
 
 
 class ApprovalBody(BaseModel):
+    # Deliberately NO approver field — identity comes from the session. `forbid`
+    # makes that refusal audible: a client that sends `approver`, `approver_id`
+    # or `user_id` gets a 422 naming the field instead of a silently ignored
+    # claim, so an attempt to sign someone else's name cannot look like a
+    # success. Keep this in step with the frontend, which sends {action, note}.
+    model_config = ConfigDict(extra="forbid")
+
     action: str  # approve | reject
     note: str | None = None
-    # Deliberately NO approver field — identity comes from the session.
 
 
 @router.post("/findings/{finding_id}/approval")
@@ -91,9 +112,15 @@ async def decide_finding(
     user: User = Depends(require_approver),
     db: AsyncSession = Depends(get_db),
 ):
-    if body.action not in ("approve", "reject"):
+    if body.action not in APPROVAL_ACTIONS:
         raise HTTPException(422, "action must be 'approve' or 'reject'")
-    f = await db.get(Finding, finding_id)
+    # Locked for the length of the decision: two approvers deciding the same
+    # draft at the same moment would otherwise both read 'draft', both write an
+    # approvals row, and the later commit would decide the status — so a reject
+    # could be overwritten by a concurrent approve with no 409 anywhere. The
+    # lock makes the second request re-read the committed status and lose to the
+    # 'already decided' branch below.
+    f = await db.get(Finding, finding_id, with_for_update=True)
     if f is None:
         raise HTTPException(404, "Finding not found")
     if f.status != "draft":
@@ -114,11 +141,18 @@ async def decide_finding(
 async def list_deliverables(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     """Deliverables = draft_section findings grouped by subject.deliverable,
     latest finding per section winning (same rule as assembly)."""
+    project = await _current_project(db)
+    if project is None:
+        return []
     findings = (
         (
             await db.execute(
                 select(Finding)
-                .where(Finding.schema_slug == "draft_section")
+                .where(
+                    # Same project as the export resolves — see _current_project.
+                    Finding.project_id == project.id,
+                    Finding.schema_slug == "draft_section",
+                )
                 .order_by(Finding.created_at)
             )
         )
@@ -162,12 +196,14 @@ async def export_deliverable(
     db: AsyncSession = Depends(get_db),
 ):
     from fastapi.responses import HTMLResponse, PlainTextResponse, Response
-    from sqlalchemy import select as _select
 
-    from bench.db.models import Project
     from bench.services.export import PdfUnavailable, assemble_deliverable, render_pdf
 
-    project = (await db.execute(_select(Project))).scalars().first()
+    if format not in ("markdown", "html", "json", "pdf"):
+        raise HTTPException(422, "format must be markdown|html|json|pdf")
+    project = await _current_project(db)
+    if project is None:
+        raise HTTPException(404, "No approved sections exist for this deliverable")
     result = await assemble_deliverable(db, project.id, deliverable_slug, include_draft)
     if not result["sections"]:
         raise HTTPException(404, "No approved sections exist for this deliverable")

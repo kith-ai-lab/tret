@@ -69,3 +69,58 @@ def test_cited_value_wrong_row_ref_flagged():
 def test_exact_citation_passes():
     cited = [{"dataset": "hazard_scores", "row_ref": "hazard_scores:4", "value": "2018"}]
     assert validate_cited_values(cited, RETRIEVED) == []
+
+
+def test_citation_with_the_right_column_passes():
+    cited = [
+        {
+            "dataset": "hazard_scores",
+            "row_ref": "hazard_scores:4",
+            "column": "vintage_year",
+            "value": "2018",
+        }
+    ]
+    assert validate_cited_values(cited, RETRIEVED) == []
+
+
+def test_value_attributed_to_the_wrong_column_is_flagged():
+    """A real value from a real row, pointed at the wrong field of it.
+
+    The cross-check ignored `column`, so "the flood rating is 2018" passed as a
+    grounded citation: the number was retrieved, the row was retrieved, and only
+    the field it belonged to was wrong — which is precisely the part a reader
+    cannot check without going back to the dataset.
+    """
+    cited = [
+        {
+            "dataset": "hazard_scores",
+            "row_ref": "hazard_scores:4",
+            "column": "rating",  # 2018 is the vintage year, not the rating
+            "value": "2018",
+        }
+    ]
+    errors = validate_cited_values(cited, RETRIEVED)
+    assert len(errors) == 1
+    assert "value of column ['vintage_year'], not 'rating'" in errors[0]
+
+
+def test_a_value_held_by_two_columns_may_cite_either():
+    retrieved = [
+        *RETRIEVED,
+        {
+            "dataset": "regional_signals",
+            "row_ref": "regional_signals:8",
+            "column": "magnitude_class",
+            "value": "increase",
+        },
+    ]
+    for column in ("direction", "magnitude_class"):
+        cited = [
+            {
+                "dataset": "regional_signals",
+                "row_ref": "regional_signals:8",
+                "column": column,
+                "value": "increase",
+            }
+        ]
+        assert validate_cited_values(cited, retrieved) == []

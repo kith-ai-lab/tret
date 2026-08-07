@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 
 import { objectiveDescription, type RoutingDecision } from '../../api/client'
 
@@ -18,11 +18,23 @@ function tierOf(routing: RoutingDecision): string | null {
 }
 
 /** Chip showing the routed model. Amber when the fallback path was used,
- *  violet when a human override/pin decided; click expands the full,
- *  auditable decision. */
+ *  violet when a human override/pin decided; activating it expands the full,
+ *  auditable decision.
+ *
+ *  **Keyboard.** The trigger is a real `<button>` with `aria-expanded` and
+ *  `aria-controls`, so Tab reaches it, Enter/Space open it, Escape closes it and
+ *  returns focus, and a screen reader announces both the control and its state.
+ *  It used to be a `<span onClick>`: the routing rationale — the single most
+ *  audit-relevant thing on the run list — was unreachable without a mouse.
+ *
+ *  The badge frequently sits inside a clickable table row, so activation stops
+ *  propagating: opening the disclosure must not also navigate away from it. That
+ *  applies to keyboard activation too, which arrives as a bubbling click. */
 export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | null; tier?: string }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLSpanElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const popId = useId()
 
   useEffect(() => {
     if (!open) return
@@ -30,7 +42,13 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key !== 'Escape') return
+      // Only claim the key if focus is actually in here, so this never eats an
+      // Escape meant for a dialog that happens to contain a routing badge.
+      if (!ref.current?.contains(document.activeElement)) return
+      e.stopPropagation()
+      setOpen(false)
+      triggerRef.current?.focus()
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
@@ -47,19 +65,29 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
 
   return (
     <span className="routing-wrap" ref={ref}>
-      <span
-        className={`badge ${color} clickable`}
+      <button
+        type="button"
+        ref={triggerRef}
+        className={`badge ${color} badge-button`}
+        aria-expanded={open}
+        aria-controls={open ? popId : undefined}
         onClick={(e) => {
           e.stopPropagation()
           setOpen((o) => !o)
         }}
-        title="Routing decision — click for full audit detail"
+        title="Routing decision — full audit detail"
       >
         {shortModelName(routing.chosen_model)}
         {suffix ? ` · ${suffix}` : ''}
-      </span>
+      </button>
       {open && (
-        <span className="routing-pop" onClick={(e) => e.stopPropagation()}>
+        <span
+          className="routing-pop"
+          id={popId}
+          // The panel sits inside a clickable row too: selecting text in it must
+          // not count as clicking the row.
+          onClick={(e) => e.stopPropagation()}
+        >
           <div className="mono-label" style={{ marginBottom: 8 }}>
             Routing decision
           </div>

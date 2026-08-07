@@ -19,10 +19,16 @@ from bench.engine.context import (
     block_for,
     build_user_message,
     composition_report,
+    task_config,
     tool_spec_block,
 )
 from bench.engine.events import RunEvent, get_event_bus
-from bench.engine.tools import RunContext, execute_tool, get_builtin_tools
+from bench.engine.tools import (
+    DELEGATION_DEPTH_KEY,
+    RunContext,
+    execute_tool,
+    get_builtin_tools,
+)
 from bench.providers.base import (
     Msg,
     ProviderError,
@@ -80,17 +86,14 @@ STATUS_COMPLETED = "completed"
 STATUS_COMPLETED_WITHOUT_OUTPUT = "completed_without_output"
 SUCCESS_STATUSES = (STATUS_COMPLETED, STATUS_COMPLETED_WITHOUT_OUTPUT)
 
+# The two task types the engine implements itself: a conversational turn and an
+# open-ended one. Every other task type must be declared by the run's pack —
+# there is no third source of a task's meaning (see `engine/context.task_config`).
+GENERIC_TASK_TYPES = ("chat", "freeform")
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _task_config(pack: Pack | None, task_type: str) -> dict:
-    if pack is not None:
-        for t in pack.manifest.get("task_types", []):
-            if t["slug"] == task_type:
-                return t
-    return {"slug": task_type, "shape": "freeform", "display_name": task_type}
 
 
 class HarnessEngine:
@@ -145,7 +148,27 @@ class HarnessEngine:
                 .all()
             )
 
-        task = _task_config(pack, run.task_type)
+        task = task_config(pack, run.task_type)
+        if task is None:
+            if run.task_type not in GENERIC_TASK_TYPES:
+                # A task type nobody declared has no instructions, no output
+                # schema and no terminal tool. The engine used to invent a
+                # freeform config for it, so a typo'd or uninstalled task type
+                # burned a full run and reported `completed` — a status that
+                # claimed the requested task had been done. Refuse before the
+                # first token instead.
+                declared = sorted(
+                    t["slug"] for t in (pack.manifest.get("task_types", []) if pack else [])
+                )
+                await self._fail_before_start(
+                    db,
+                    run,
+                    f"unknown_task_type: '{run.task_type}' is not declared by this run's pack "
+                    f"(declared: {declared or 'none'}; the engine's own task types are "
+                    f"{list(GENERIC_TASK_TYPES)})",
+                )
+                return
+            task = {}
         output_schemas: dict[str, dict] = (pack.manifest.get("schemas", {}) if pack else {})
 
         loop_cfg = {**(harness.loop_config or {})}
@@ -208,11 +231,7 @@ class HarnessEngine:
                 run_override=run.task_input.get("_model_override"),
             )
         except RoutingUnavailable as e:
-            run.status = "failed"
-            run.error = str(e)
-            run.finished_at = _utcnow()
-            await db.commit()
-            await self.bus.publish(run.id, RunEvent("error", {"message": run.error}))
+            await self._fail_before_start(db, run, str(e))
             return
 
         model_info = self.catalog.get(decision.chosen_model)
@@ -241,6 +260,7 @@ class HarnessEngine:
             pack_manifest=pack.manifest if pack else None,
             pack_dir=pack.source_path if pack else None,
             terminal_tool=task.get("terminal_tool"),
+            delegation_depth=int(run.task_input.get(DELEGATION_DEPTH_KEY) or 0),
         )
 
         # Chat turns carry prior conversation turns as history.
@@ -278,6 +298,28 @@ class HarnessEngine:
                     elif isinstance(event, TurnComplete):
                         turn = event
             except ProviderError as e:
+                # Keep what the provider did say before it died. The turn's text
+                # was already streamed to the watching client, so dropping it
+                # here left the persisted transcript ending one turn earlier than
+                # what the operator saw — and the reasoning that led into the
+                # failure is exactly what an audit of a failed run needs. Tool
+                # calls that arrived but were never executed are recorded as
+                # metadata rather than as `tool_calls`: an unanswered tool_call id
+                # would make the transcript unreplayable.
+                partial = "".join(assistant_text)
+                if partial or tool_calls:
+                    messages.append(
+                        Msg(
+                            role="assistant",
+                            content=partial or None,
+                            meta={
+                                "iteration": iteration,
+                                "partial": True,
+                                "provider_error": str(e),
+                                "unexecuted_tool_calls": [tc.name for tc in tool_calls],
+                            },
+                        )
+                    )
                 run.status = "failed"
                 run.error = str(e)
                 break
@@ -487,8 +529,29 @@ class HarnessEngine:
                 )
             await db.commit()
         else:
-            run.status = "failed"
-            run.error = f"max_iterations ({max_iterations}) reached without completion"
+            # The ceiling stopped the loop. Whether that is a failure depends on
+            # whether the run had already delivered: a validated terminal result
+            # is recorded, auditable output, and calling the run `failed` threw it
+            # away — the runs list, an operator's filter, and `run_harness_task`
+            # all report "this produced nothing" while a perfectly good draft sits
+            # on disk. The ceiling is still surfaced, as a budget warning and in
+            # the run's own `iterations`.
+            if ctx.terminal_recorded:
+                run.status = self._completion_status(ctx)
+                await self.bus.publish(
+                    run.id,
+                    RunEvent(
+                        "budget_warning",
+                        {
+                            "kind": "iterations",
+                            "iterations": max_iterations,
+                            "budget": max_iterations,
+                        },
+                    ),
+                )
+            else:
+                run.status = "failed"
+                run.error = f"max_iterations ({max_iterations}) reached without completion"
 
         # ── finish ───────────────────────────────────────────────────────────
         if run.status == "running":
@@ -518,6 +581,18 @@ class HarnessEngine:
             await self.bus.publish(
                 run.id, RunEvent("error", {"message": run.error or run.status, "status": run.status})
             )
+
+    async def _fail_before_start(self, db, run: Run, message: str) -> None:
+        """Fail a run that never reached the loop (bad task type, no route).
+
+        Nothing has been spent and nothing partial is pending, so this is a plain
+        terminal write plus the error event the client is waiting on.
+        """
+        run.status = "failed"
+        run.error = message
+        run.finished_at = _utcnow()
+        await db.commit()
+        await self.bus.publish(run.id, RunEvent("error", {"message": message}))
 
     @staticmethod
     def _completion_status(ctx: RunContext) -> str:

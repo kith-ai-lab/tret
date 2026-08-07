@@ -8,6 +8,8 @@ from decimal import Decimal
 
 import pytest
 
+from bench.providers import anthropic as anthropic_module
+from bench.providers import base as base_module
 from bench.providers import openai_compat
 from bench.providers.anthropic import (
     MAX_CACHE_BREAKPOINTS,
@@ -15,7 +17,7 @@ from bench.providers.anthropic import (
     _apply_conversation_cache,
     _to_anthropic_messages,
 )
-from bench.providers.base import Msg, ToolCall, Usage
+from bench.providers.base import Msg, ToolCall, ToolCallComplete, TextDelta, Usage
 from bench.providers.catalog import (
     CACHE_READ_MULTIPLIER,
     CACHE_WRITE_MULTIPLIER,
@@ -368,3 +370,223 @@ async def test_kimi_stream_sends_no_cache_control(monkeypatch):
     lines = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
     _, body = await _run_stream(monkeypatch, KimiProvider("k"), lines)
     assert _breakpoints(body["messages"]) == 0
+
+
+# ── one cache-breakpoint helper, not one per provider ─────────────────────────
+def test_both_providers_use_the_same_breakpoint_helper():
+    """It is the same wire format and the same four-per-request budget: two
+    byte-identical copies could drift into two different budgets."""
+    assert anthropic_module.mark_cache_breakpoint is base_module.mark_cache_breakpoint
+    assert openai_compat.mark_cache_breakpoint is base_module.mark_cache_breakpoint
+    assert not hasattr(anthropic_module, "_mark_cache_breakpoint")
+    assert not hasattr(openai_compat, "_mark_cache_breakpoint")
+
+
+# ── cache *writes* on an OpenAI-shaped usage object ───────────────────────────
+# OpenRouter writes cache breakpoints (above), so it is billed for cache
+# creation at a premium over input price. A translation that can only ever
+# report reads records those tokens as ordinary input and understates the run.
+def test_cache_creation_tokens_are_recorded_as_a_cache_write():
+    usage = _usage_from_openai(
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 10,
+            "cache_creation_input_tokens": 400,
+        }
+    )
+    assert usage.cache_write_tokens == 400
+    assert usage.input_tokens == 600  # not counted twice as input
+    assert usage.cache_read_tokens == 0
+
+
+def test_cache_writes_are_read_from_prompt_token_details_too():
+    usage = _usage_from_openai(
+        {
+            "prompt_tokens": 1000,
+            "prompt_tokens_details": {"cached_tokens": 300, "cache_creation_tokens": 200},
+        }
+    )
+    assert (usage.cache_read_tokens, usage.cache_write_tokens) == (300, 200)
+    assert usage.input_tokens == 500  # the four buckets still sum to prompt_tokens
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"prompt_tokens": 100},
+        {"prompt_tokens": 100, "cache_creation_input_tokens": None},
+        {"prompt_tokens": 100, "cache_creation_input_tokens": "400"},
+        {"prompt_tokens": 100, "cache_creation_input_tokens": True},
+        {"prompt_tokens": 100, "cache_creation_input_tokens": -5},
+    ],
+)
+def test_absent_or_junk_cache_writes_read_as_zero(usage):
+    translated = _usage_from_openai(usage)
+    assert translated.cache_write_tokens == 0
+    assert translated.input_tokens == 100
+
+
+def test_cache_writes_cannot_exceed_what_is_left_of_the_prompt():
+    usage = _usage_from_openai(
+        {
+            "prompt_tokens": 500,
+            "prompt_tokens_details": {"cached_tokens": 400},
+            "cache_creation_input_tokens": 9999,
+        }
+    )
+    assert (usage.cache_read_tokens, usage.cache_write_tokens) == (400, 100)
+    assert usage.input_tokens == 0
+
+
+async def test_stream_reports_cache_writes(monkeypatch):
+    lines = _sse(
+        {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+        {
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 2000,
+                "completion_tokens": 12,
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "cache_creation_input_tokens": 1500,
+            },
+        },
+    )
+    events, _ = await _run_stream(monkeypatch, OpenRouterProvider("k"), lines)
+    usage = events[-1].usage
+    assert usage.cache_write_tokens == 1500
+    assert usage.input_tokens == 500
+
+
+# ── tool-call aggregation is scoped to one choice ─────────────────────────────
+def _tool_delta(choice_index: int, tool_index: int, *, id=None, name=None, args=None) -> dict:
+    call: dict = {"index": tool_index, "function": {}}
+    if id:
+        call["id"] = id
+    if name:
+        call["function"]["name"] = name
+    if args is not None:
+        call["function"]["arguments"] = args
+    return {"index": choice_index, "delta": {"tool_calls": [call]}}
+
+
+async def test_tool_calls_from_separate_choices_are_never_merged(monkeypatch):
+    """The bug: `index` numbers tool calls *within* a choice, so aggregating on it
+    alone concatenated the argument fragments of two unrelated tool calls into one
+    unparseable action. A provider that returns a second candidate completion must
+    not be able to corrupt the first one's tool call."""
+    lines = _sse(
+        {
+            "choices": [
+                _tool_delta(0, 0, id="call_a", name="read_document", args='{"id": "'),
+                _tool_delta(1, 0, id="call_b", name="write_finding", args='{"claim": "'),
+            ]
+        },
+        {
+            "choices": [
+                _tool_delta(0, 0, args='doc-1"}'),
+                _tool_delta(1, 0, args='other"}'),
+            ]
+        },
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    events, _ = await _run_stream(monkeypatch, KimiProvider("k"), lines)
+
+    calls = [e.tool_call for e in events if isinstance(e, ToolCallComplete)]
+    assert len(calls) == 1  # only the primary choice is acted on
+    assert calls[0].id == "call_a"
+    assert calls[0].name == "read_document"
+    assert calls[0].arguments == {"id": "doc-1"}  # not a merged, unparseable blob
+    assert "_raw" not in calls[0].arguments
+    assert events[-1].stop_reason == "tool_use"
+
+
+async def test_text_from_a_second_choice_is_not_interleaved(monkeypatch):
+    lines = _sse(
+        {
+            "choices": [
+                {"index": 0, "delta": {"content": "the answer"}},
+                {"index": 1, "delta": {"content": "A DIFFERENT ANSWER"}},
+            ]
+        },
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    )
+    events, _ = await _run_stream(monkeypatch, KimiProvider("k"), lines)
+    assert [e.text for e in events if isinstance(e, TextDelta)] == ["the answer"]
+
+
+async def test_parallel_tool_calls_within_one_choice_still_both_arrive(monkeypatch):
+    """The fix must not break the normal case it looks like: two tool calls in the
+    same choice, distinguished by their own index."""
+    lines = _sse(
+        {
+            "choices": [
+                _tool_delta(0, 0, id="c1", name="read_document", args='{"id":"a"}'),
+                _tool_delta(0, 1, id="c2", name="lookup_dataset", args='{"name":"b"}'),
+            ]
+        },
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    events, _ = await _run_stream(monkeypatch, KimiProvider("k"), lines)
+    calls = [e.tool_call for e in events if isinstance(e, ToolCallComplete)]
+    assert [(c.id, c.name, c.arguments) for c in calls] == [
+        ("c1", "read_document", {"id": "a"}),
+        ("c2", "lookup_dataset", {"name": "b"}),
+    ]
+
+
+async def test_a_stream_that_omits_choice_index_still_aggregates(monkeypatch):
+    """Plenty of OpenAI-compatible servers omit `index` entirely on a single
+    completion; those fragments belong to one tool call, not several."""
+    lines = _sse(
+        {"choices": [{"delta": {"tool_calls": [{"id": "c1", "function": {"name": "read_document",
+                                                                        "arguments": '{"id":'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"function": {"arguments": '"a"}'}}]}}]},
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    )
+    events, _ = await _run_stream(monkeypatch, KimiProvider("k"), lines)
+    calls = [e.tool_call for e in events if isinstance(e, ToolCallComplete)]
+    assert [(c.id, c.arguments) for c in calls] == [("c1", {"id": "a"})]
+
+
+# ── Anthropic: an empty assistant turn ───────────────────────────────────────
+def test_an_empty_assistant_turn_is_dropped_not_sent_as_an_empty_text_block():
+    """The API rejects an empty text block ("text content blocks must be
+    non-empty"), so one empty assistant turn in the history would fail every
+    subsequent request of the run that re-sends it."""
+    messages = _to_anthropic_messages(
+        [
+            Msg(role="user", content="analyze this"),
+            Msg(role="assistant", content=""),  # model returned nothing
+            Msg(role="user", content="still there?"),
+        ]
+    )
+    assert all(
+        block.get("text") != ""
+        for message in messages
+        for block in (message["content"] if isinstance(message["content"], list) else [])
+    )
+    assert [m["role"] for m in messages] == ["user"]  # the two user turns merged
+    assert messages[0]["content"] == [
+        {"type": "text", "text": "analyze this"},
+        {"type": "text", "text": "still there?"},
+    ]
+
+
+def test_an_assistant_turn_with_only_tool_calls_is_still_sent():
+    messages = _to_anthropic_messages(
+        [Msg(role="assistant", tool_calls=[ToolCall("t1", "read_document", {"id": "d"})])]
+    )
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "t1", "name": "read_document",
+                         "input": {"id": "d"}}],
+        }
+    ]
+
+
+def test_a_trailing_empty_assistant_turn_leaves_a_valid_request():
+    messages = _to_anthropic_messages(
+        [Msg(role="user", content="hi"), Msg(role="assistant", content=None)]
+    )
+    assert messages == [{"role": "user", "content": "hi"}]

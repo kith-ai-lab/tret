@@ -29,6 +29,27 @@ export function objectiveDescription(objective: string | undefined): string {
   return OBJECTIVE_DESCRIPTIONS[(objective ?? DEFAULT_OBJECTIVE) as RoutingObjective] ?? ''
 }
 
+/** A harness's cost ceiling, in the backend's own total order
+ *  (`router_llm/objectives.py::TIER_ORDER`, validated by `api/harnesses.py`).
+ *
+ *  `local` ranks *below* economy rather than above premium, and that inversion is
+ *  the point: local inference is already free, so a spending ceiling has nothing
+ *  to protect there. Capping at `local` therefore leaves local models as the only
+ *  candidates — it is a confidentiality control (no cloud provider may be chosen),
+ *  not a budget one. */
+export const COST_TIERS = ['local', 'economy', 'standard', 'premium'] as const
+
+export type CostTier = (typeof COST_TIERS)[number]
+
+export const DEFAULT_MAX_COST_TIER: CostTier = 'premium'
+
+export const COST_TIER_DESCRIPTIONS: Record<CostTier, string> = {
+  local: 'local models only — nothing leaves the machine, and no cloud provider may be routed to',
+  economy: 'the cheapest cloud tier and below',
+  standard: 'mid-priced models and below',
+  premium: 'no ceiling — any model in the catalog (default)',
+}
+
 export interface RoutingDecision {
   router_model: string | null
   routing_prompt_version: string
@@ -498,6 +519,14 @@ export interface Pack {
   description: string
   frameworks: string[]
   doctrine_sha: string
+  /** The integrity pin: sha256 over the pack's files, **recorded at install** and
+   *  stored, not recomputed per request. It is what an operator compares against
+   *  the hash the pack author published, so it answers "is this the pack I think I
+   *  installed?" — not "has anything changed on disk since?" (nothing in this
+   *  response is re-read from disk). Null for packs installed before integrity
+   *  pinning landed; must never be rendered as if absence meant "unpinned but
+   *  fine". */
+  content_hash: string | null
   doctrine_files: string[]
   task_types: TaskType[]
   schemas: Record<string, unknown>
@@ -579,12 +608,34 @@ export interface DeliverableExportSection {
   status: string
   model: string | null
   doctrine_sha: string
+  /** The run that drafted this section, and that run's estimated compute
+   *  footprint. Null where the run predates eco accounting — never 0. Sections
+   *  drafted in one run all report that run's whole figure, so these do not sum:
+   *  the document-level total in `energy` is over *distinct* runs. */
+  run_id?: string | null
+  energy_wh?: number | null
+  co2e_g?: number | null
+}
+
+/** The whole document's estimated compute footprint, summed over the distinct
+ *  runs behind it. `runs` counts the runs that carried an estimate; runs without
+ *  one contribute nothing and are counted separately rather than as zero. The
+ *  same figure is printed inside the exported document itself. */
+export interface DeliverableExportEnergy {
+  estimated: boolean
+  runs: number
+  runs_without_estimate: number
+  energy_wh: number | null
+  co2e_g: number | null
+  grid_co2e_g_per_kwh: number
 }
 
 export interface DeliverableExport {
   markdown: string
   html: string
   sections: DeliverableExportSection[]
+  /** Absent when the deliverable has no sections at all (the empty-export shape). */
+  energy?: DeliverableExportEnergy
 }
 
 export interface ChatActivity {
@@ -672,6 +723,32 @@ export interface GuardrailHarnessStat {
   run_error_rate_pct: number
 }
 
+/** Estimated compute energy per harness over the window.
+ *
+ *  Unlike the validation-pressure rows, this is a grouped SUM over **every** run
+ *  in the window, not a bounded sample — `runs.energy_wh` is a plain numeric
+ *  column. Only runs carrying an estimate are counted (`runs_with_energy`): a run
+ *  storing NULL is not a run that drew no power. */
+export interface GuardrailEnergyStat {
+  harness_id: string
+  harness_name: string
+  runs_with_energy: number
+  energy_wh: number
+  /** Derived here from the *current* grid factor applied to the summed compute
+   *  energy — see `GuardrailEnergyBasis`. Not the as-recorded figure the Emissions
+   *  view reports, and smaller than it (no PUE, no embodied hardware, no scopes). */
+  co2e_g: number
+  energy_wh_per_run: number
+}
+
+/** What the energy rollup's carbon column actually is, travelling with it so the
+ *  number cannot be quoted without its basis. `co2e_basis` is rendered verbatim. */
+export interface GuardrailEnergyBasis {
+  estimated: boolean
+  grid_co2e_g_per_kwh: number
+  co2e_basis: string
+}
+
 export interface GuardrailTotals {
   method_runs: number
   method_failures: number
@@ -680,6 +757,10 @@ export interface GuardrailTotals {
   runs_scan_limit: number
   validation_errors: number
   unrecovered_validation_errors: number
+  // Energy covers every run in the window, not the bounded transcript scan above.
+  runs_with_energy: number
+  energy_wh: number
+  co2e_g: number
 }
 
 export interface GuardrailAnalytics {
@@ -689,6 +770,8 @@ export interface GuardrailAnalytics {
   methods: GuardrailMethodStat[]
   recent_method_errors: GuardrailMethodError[]
   harnesses: GuardrailHarnessStat[]
+  energy: GuardrailEnergyStat[]
+  energy_basis: GuardrailEnergyBasis
 }
 
 // ── Emissions analytics ──────────────────────────────────────────────────

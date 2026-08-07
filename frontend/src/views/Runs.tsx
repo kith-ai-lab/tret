@@ -16,6 +16,7 @@ import {
   NO_ESTIMATE,
   NO_ESTIMATE_HINT,
   footprintText,
+  formatDateTime,
   formatCo2e,
   formatCo2eBand,
   formatCost,
@@ -147,6 +148,9 @@ export function Runs() {
           columns={columns}
           rows={rows}
           rowKey={(r) => r.id}
+          rowLabel={(r) =>
+            `Open run: ${harnessName.get(r.harness_id) ?? r.harness_id.slice(0, 8)} · ${r.task_type} · ${r.status}`
+          }
           onRowClick={(r) => navigate(`/runs/${r.id}`)}
           empty="No runs yet — start one from the Workbench."
         />
@@ -189,17 +193,4 @@ function duration(r: RunSummary): string {
   const end = r.finished_at ? new Date(r.finished_at).getTime() : Date.now()
   const s = (end - new Date(r.started_at).getTime()) / 1000
   return s >= 60 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${s.toFixed(1)}s`
-}
-
-export function formatDateTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  } catch {
-    return iso
-  }
 }

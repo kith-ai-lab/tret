@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 
 import {
   api,
@@ -10,6 +10,7 @@ import {
   objectiveDescription,
   type TaskType,
 } from '../api/client'
+import { QueryError } from '../components/shared/MonoTable'
 import { shortModelName } from '../components/shared/RoutingBadge'
 
 const FREEFORM: TaskType = { slug: 'freeform', display_name: 'Freeform', shape: 'freeform' }
@@ -102,9 +103,14 @@ export function Workbench() {
 
       {harnessesQuery.isLoading ? (
         <div className="empty pulse">Loading harnesses…</div>
+      ) : harnessesQuery.isError ? (
+        <QueryError error={harnessesQuery.error} what="the harness list" />
       ) : (harnessesQuery.data ?? []).length === 0 ? (
         <div className="empty">
-          No harnesses yet — create one under <a href="/harnesses">Harnesses</a> first.
+          {/* A router Link, not a raw anchor: an <a href> here reloaded the whole
+              SPA — new bundle, lost react-query cache, re-auth round trip — to
+              reach a route the router already owns. */}
+          No harnesses yet — create one under <Link to="/harnesses">Harnesses</Link> first.
         </div>
       ) : (
         <form onSubmit={submit} style={{ maxWidth: 720 }}>

@@ -26,8 +26,8 @@ import {
   formatTokens,
 } from '../components/shared/format'
 import { LiveFootprint } from '../components/shared/LiveFootprint'
+import { MarkdownDoc } from '../components/shared/MarkdownDoc'
 import { RoutingBadge, shortModelName } from '../components/shared/RoutingBadge'
-import { Markdown } from './Packs'
 import { ModelSelect } from './Workbench'
 
 // localStorage keys for the composer's per-turn overrides. Both persist across
@@ -178,6 +178,7 @@ export function Chat() {
         <ConversationRail
           conversations={conversations}
           loading={conversationsQuery.isLoading}
+          error={conversationsQuery.error as Error | null}
           selectedId={selectedId}
           onSelect={(id) => {
             if (inFlight) return
@@ -222,6 +223,9 @@ export function Chat() {
             <Thread
               messages={messages}
               loading={threadLoading}
+              error={
+                selectedId && !pending ? (conversationQuery.error as Error | null) : null
+              }
               live={showLive ? { runId: pending.runId, stream } : null}
             />
             <div className="chat-composer-dock">
@@ -255,12 +259,14 @@ export function Chat() {
 function ConversationRail({
   conversations,
   loading,
+  error,
   selectedId,
   onSelect,
   onNewChat,
 }: {
   conversations: { id: string; title: string | null; message_count: number; updated_at: string | null }[]
   loading: boolean
+  error: Error | null
   selectedId: string | null
   onSelect: (id: string) => void
   onNewChat: () => void
@@ -275,6 +281,12 @@ function ConversationRail({
         {loading ? (
           <div className="empty pulse" style={{ padding: '8px 4px' }}>
             Loading…
+          </div>
+        ) : error ? (
+          // "No conversations yet" over a failed fetch reads as "your history is
+          // gone", which would send a user off to retype work they still have.
+          <div className="error-text" style={{ padding: '8px 4px', fontSize: 11 }}>
+            Could not load conversations — {error.message}
           </div>
         ) : conversations.length === 0 ? (
           <div className="empty" style={{ padding: '8px 4px', fontSize: 11 }}>
@@ -363,10 +375,14 @@ function Landing({
 function Thread({
   messages,
   loading,
+  error,
   live,
 }: {
   messages: ChatMessage[]
   loading: boolean
+  /** A failed fetch of the conversation. An empty thread and an unreachable one
+   *  look identical otherwise, and the second must not read as the first. */
+  error: Error | null
   live: { runId: string; stream: ReturnType<typeof useRunStream> } | null
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -392,6 +408,11 @@ function Thread({
         {loading && (
           <div className="empty pulse" style={{ padding: '24px 0' }}>
             Loading conversation…
+          </div>
+        )}
+        {error && (
+          <div className="error-text" style={{ padding: '24px 0' }}>
+            Could not load this conversation — {error.message}
           </div>
         )}
 
@@ -439,9 +460,11 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
             ))}
           </div>
         )}
-        <div className="chat-prose md">
-          <Markdown source={message.content || '_(no output)_'} />
-        </div>
+        {/* MarkdownDoc renders its own wrapper, so it *is* the prose element —
+            nesting it inside another `.chat-prose.md` would leave the
+            first-child/last-child margin rules pointing at the wrapper instead of
+            at the first heading. */}
+        <MarkdownDoc source={message.content || '_(no output)_'} className="chat-prose md" />
 
         {hasFootprint ? (
           <details className="chat-footprint">
@@ -585,6 +608,9 @@ function LiveTurn({ runId, stream }: { runId: string; stream: ReturnType<typeof 
   const toolCalls = stream.items.filter((i) => i.kind === 'tool_call')
   const finalizing = stream.done
   const usage = stream.usage
+  const reconnecting = stream.connection === 'reconnecting'
+  // `closed` before the run finished means the live view gave up, not the run.
+  const disconnected = stream.connection === 'closed' && !stream.done
   return (
     <div className="chat-turn assistant">
       <AssistantAvatar />
@@ -616,9 +642,29 @@ function LiveTurn({ runId, stream }: { runId: string; stream: ReturnType<typeof 
             <span className="chat-caret" /> {finalizing ? 'finalizing…' : 'thinking…'}
           </div>
         )}
+        {/* Only the engine's own verdict is rendered as an error. A dropped
+            connection is reported below in the status slot instead — telling a
+            user their turn failed because their wifi hiccuped is a lie. */}
         {stream.error && <div className="error-text" style={{ marginTop: 8 }}>{stream.error}</div>}
+        {stream.budget && (
+          <div
+            className="mono-label"
+            style={{ marginTop: 8, color: 'var(--amber)' }}
+            title={`${formatTokens(stream.budget.output_tokens)} of ${formatTokens(stream.budget.budget)} budgeted output tokens — the model was asked to finalize with what it already retrieved.`}
+          >
+            output budget reached — wrapping up
+          </div>
+        )}
         <div className="chat-turn-footer">
-          <span className="pulse">{finalizing ? 'finalizing' : 'streaming'}</span>
+          <span className={reconnecting || !disconnected ? 'pulse' : undefined}>
+            {reconnecting
+              ? 'reconnecting'
+              : disconnected
+                ? 'stream disconnected — the run continues'
+                : finalizing
+                  ? 'finalizing'
+                  : 'streaming'}
+          </span>
           {usage && (
             <span
               title={`cache ${formatTokens(usage.cache_read_tokens)} read / ${formatTokens(usage.cache_write_tokens)} write`}

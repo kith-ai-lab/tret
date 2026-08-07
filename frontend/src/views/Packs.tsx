@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query'
-import { Fragment, type ReactNode, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { api, type InputFieldSchema, type PackMethodRef } from '../api/client'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
-import { type Column, MonoTable } from '../components/shared/MonoTable'
+import { MarkdownDoc } from '../components/shared/MarkdownDoc'
+import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 
 export function Packs() {
   const packsQuery = useQuery({ queryKey: ['packs'], queryFn: api.listPacks })
@@ -24,6 +25,8 @@ export function Packs() {
 
       {packsQuery.isLoading ? (
         <div className="empty pulse">Loading packs…</div>
+      ) : packsQuery.isError ? (
+        <QueryError error={packsQuery.error} what="the installed packs" />
       ) : packs.length === 0 ? (
         <div className="empty">No packs installed — install one via the CLI or packs API.</div>
       ) : (
@@ -82,6 +85,32 @@ function PackDetailPane({ packId }: { packId: string }) {
           <div className="mono-body" title={pack.doctrine_sha}>
             {pack.doctrine_sha.slice(0, 12)}
           </div>
+        </div>
+        {/* The integrity pin, so the tamper-evidence signal exists somewhere other
+            than the HTTP response. Deliberately labelled "at install": it is a
+            stored value, not a live re-hash of the directory, so it answers "is
+            this the pack the author published?" and not "has anything changed
+            since?". A pack installed before pinning landed says so — absence is
+            not reassurance. */}
+        <div className="config-stat">
+          <div className="mono-label">Content hash (at install)</div>
+          {pack.content_hash ? (
+            <div
+              className="mono-body"
+              style={{ userSelect: 'all' }}
+              title={`sha256 ${pack.content_hash} — recorded when this pack was installed. Compare it against the hash the pack author published (docs/pack-authoring.md). Not recomputed on this request, so it does not detect later edits on disk.`}
+            >
+              {pack.content_hash.slice(0, 12)}
+            </div>
+          ) : (
+            <div
+              className="mono-body"
+              style={{ color: 'var(--amber)' }}
+              title="This pack was installed before integrity pinning existed, so there is no recorded hash to compare against. Reinstall it to pin one."
+            >
+              not pinned
+            </div>
+          )}
         </div>
         <div className="config-stat">
           <div className="mono-label">Frameworks</div>
@@ -151,8 +180,8 @@ function PackDetailPane({ packId }: { packId: string }) {
               ))}
             </div>
             {doctrineTab && (
-              <div className="panel md" style={{ maxHeight: 520, overflowY: 'auto' }}>
-                <Markdown source={pack.doctrine_contents[doctrineTab] ?? '(file unavailable)'} />
+              <div className="panel" style={{ maxHeight: 520, overflowY: 'auto' }}>
+                <MarkdownDoc source={pack.doctrine_contents[doctrineTab] ?? '(file unavailable)'} />
               </div>
             )}
           </>
@@ -242,14 +271,13 @@ function PackMethods({ packId }: { packId: string }) {
         <div className="empty pulse" style={{ padding: '6px 0' }}>
           Loading methods…
         </div>
-      ) : methodsQuery.isError ? (
-        <div className="error-text">{(methodsQuery.error as Error).message}</div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
           <MonoTable
             columns={columns}
             rows={methods}
             rowKey={(m) => m.slug}
+            error={methodsQuery.error}
             empty="This pack ships no deterministic methods."
           />
         </div>
@@ -269,88 +297,8 @@ function PackMethods({ packId }: { packId: string }) {
   )
 }
 
-// ── Minimal hand-rolled markdown: headings, lists, bold, inline code ─────
-
-function inline(text: string): ReactNode[] {
-  // Split on **bold** and `code` spans.
-  const out: ReactNode[] = []
-  const regex = /(\*\*[^*]+\*\*|`[^`]+`)/g
-  let last = 0
-  let match: RegExpExecArray | null
-  let key = 0
-  while ((match = regex.exec(text)) !== null) {
-    if (match.index > last) out.push(text.slice(last, match.index))
-    const token = match[0]
-    if (token.startsWith('**')) {
-      out.push(<strong key={key++}>{token.slice(2, -2)}</strong>)
-    } else {
-      out.push(<code key={key++}>{token.slice(1, -1)}</code>)
-    }
-    last = regex.lastIndex
-  }
-  if (last < text.length) out.push(text.slice(last))
-  return out
-}
-
-export function Markdown({ source }: { source: string }) {
-  const lines = source.split('\n')
-  const blocks: ReactNode[] = []
-  let list: { ordered: boolean; items: string[] } | null = null
-  let paragraph: string[] = []
-  let key = 0
-
-  const flushList = () => {
-    if (!list) return
-    const items = list.items.map((item, i) => <li key={i}>{inline(item)}</li>)
-    blocks.push(list.ordered ? <ol key={key++}>{items}</ol> : <ul key={key++}>{items}</ul>)
-    list = null
-  }
-
-  const flushParagraph = () => {
-    if (paragraph.length === 0) return
-    blocks.push(<p key={key++}>{inline(paragraph.join(' '))}</p>)
-    paragraph = []
-  }
-
-  for (const raw of lines) {
-    const line = raw.trimEnd()
-    const heading = /^(#{1,4})\s+(.*)$/.exec(line)
-    const bullet = /^\s*[-*]\s+(.*)$/.exec(line)
-    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line)
-
-    if (heading) {
-      flushList()
-      flushParagraph()
-      const level = heading[1].length
-      const content = inline(heading[2])
-      if (level === 1) blocks.push(<h1 key={key++}>{content}</h1>)
-      else if (level === 2) blocks.push(<h2 key={key++}>{content}</h2>)
-      else if (level === 3) blocks.push(<h3 key={key++}>{content}</h3>)
-      else blocks.push(<h4 key={key++}>{content}</h4>)
-    } else if (bullet) {
-      flushParagraph()
-      if (!list || list.ordered) {
-        flushList()
-        list = { ordered: false, items: [] }
-      }
-      list.items.push(bullet[1])
-    } else if (numbered) {
-      flushParagraph()
-      if (!list || !list.ordered) {
-        flushList()
-        list = { ordered: true, items: [] }
-      }
-      list.items.push(numbered[1])
-    } else if (line.trim() === '') {
-      flushList()
-      flushParagraph()
-    } else {
-      flushList()
-      paragraph.push(line.trim())
-    }
-  }
-  flushList()
-  flushParagraph()
-
-  return <Fragment>{blocks}</Fragment>
-}
+// The hand-rolled renderer that used to live here is gone: it covered headings,
+// paragraphs, bold and inline code only, so a pack doctrine table rendered as
+// pipes and a deliverable's `---` section rules as literal dashes.
+// components/shared/MarkdownDoc.tsx is the one renderer now — same no-innerHTML,
+// scheme-allowlisted safety, plus tables, code fences, quotes and rules.

@@ -19,6 +19,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bench.db.models import Dataset, DatasetRow, Pack
+
+# Boundary note: `doctrine:` selector syntax (`file.md#Heading`) is part of the
+# *pack format*, so parsing and validating it belongs beside the manifest schema
+# in this package rather than in the engine that consumes the result. It lives in
+# engine/context.py for historical reasons, and the same unit of doctrine is
+# called a `section` there and a "heading" in the validation messages here. Moving
+# the parser into bench/packs/ (engine importing from packs, not the reverse)
+# would fix both; it is an engine-side edit, so it is recorded here rather than
+# done piecemeal.
 from bench.engine.context import doctrine_sha, parse_doctrine_selector, select_doctrine_text
 from bench.engine.tools import get_builtin_tools
 from bench.packs.integrity import pack_content_hash

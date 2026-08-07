@@ -242,6 +242,52 @@ h1, h2, h3, h4 {
   cursor: pointer;
 }
 
+/* A badge that is also a disclosure trigger (RoutingBadge). It is a real
+   <button> so it is keyboard-operable; the .badge and .badge-* classes already
+   supply the font, padding, background and colour, so this only undoes the UA
+   button chrome and makes the focus ring visible. */
+.badge-button {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
+.badge-button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* A full-width row that is also a disclosure trigger (the dataset peek). A real
+   <button>, so it needs the UA button chrome undone and a visible focus ring. */
+.disclosure-row {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.disclosure-row:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
+/* A clickable table row is role="button" + tabIndex=0, so it needs a ring too. */
+.mono-table tr.clickable:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.mono-table tr.clickable:focus-visible td {
+  background: var(--bg-hover);
+}
+
 .chip {
   display: inline-flex;
   font-family: var(--mono);
@@ -1545,6 +1591,21 @@ summary:focus-visible {
 .md strong {
   color: var(--text);
   font-weight: 600;
+}
+
+/* Thematic breaks. The deliverable export separates every section with one, so
+   without this rule the assembled preview showed literal "---" lines. */
+.md hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 18px 0;
+}
+
+.md blockquote {
+  margin: 10px 0;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--border);
+  color: var(--text-muted);
 }
 
 .md-pre {

@@ -15,7 +15,13 @@ jobs:
           python-version: "3.12"
       - name: Install
         working-directory: backend
-        run: pip install -e ".[dev]"
+        # -c constraints.txt pins every dependency pip resolves here — direct and
+        # transitive — to the exact versions bench is tested against, so this
+        # step installs the same thing today and a year from now instead of
+        # "whatever currently satisfies pyproject.toml's >= ranges." See
+        # constraints.txt's own header for why this is a plain pip constraints
+        # file rather than a new lockfile tool, and how to regenerate it.
+        run: pip install -e ".[dev]" -c constraints.txt
       - name: Lint
         working-directory: backend
         # Tests are linted too: the eval suite is production-grade code.
@@ -75,7 +81,10 @@ jobs:
           python-version: "3.12"
       - name: Install
         working-directory: backend
-        run: pip install -e ".[dev]"
+        # Same pinned install as the backend job, and for the same reason: a
+        # schema-lifecycle run against a real Postgres is exactly the job that
+        # must not flake because a transitive dependency moved underneath it.
+        run: pip install -e ".[dev]" -c constraints.txt
       - name: Schema lifecycle (empty, legacy, drift, downgrade, app boot)
         working-directory: backend
         # Asserts, per its module docstring: empty -> head builds the schema;
@@ -116,11 +125,23 @@ jobs:
           node-version: "20"
       - name: Install
         working-directory: frontend
-        run: npm install
+        # npm ci installs exactly what package-lock.json resolved (and refuses to
+        # run if it and package.json have drifted), unlike npm install, which is
+        # free to re-resolve within the package.json ranges and can install a
+        # different tree than what was last committed.
+        run: npm ci
       - name: Typecheck and build
         working-directory: frontend
         run: npm run build
 
+  # /api/healthz only proves the process is up — it says nothing about whether
+  # the seeded pack actually installed or the app can serve an authenticated
+  # request. A bootstrap that silently drops the pack (a bad path, a validation
+  # error swallowed at startup) used to leave this job green. It now logs in
+  # with the shipped dev admin, and asserts on what login unlocks: the
+  # climate-risk pack present with its task types, and at least one seeded
+  # harness — the two things docs/demo-script.md promises a fresh
+  # `docker compose up` gives you.
   compose-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -133,5 +154,47 @@ jobs:
             curl -sf http://localhost:8000/api/healthz && exit 0
             sleep 2
           done
+          echo "::error::backend never reported healthy"
           docker compose logs backend
           exit 1
+      - name: Verify the seeded pack installed and the app is functional
+        run: |
+          set -e
+          login_status=$(curl -sS -o /tmp/login.json -w '%{http_code}' \
+            -c /tmp/cookies.txt -H 'Content-Type: application/json' \
+            -d '{"email":"admin@example.com","password":"bench-admin"}' \
+            http://localhost:8000/api/auth/login)
+          if [ "$login_status" != "200" ]; then
+            echo "::error::admin login failed (HTTP $login_status) — the seeded admin user is missing or bootstrap did not run"
+            cat /tmp/login.json
+            docker compose logs backend
+            exit 1
+          fi
+
+          # printf '%s', not echo "$var": these bodies are arbitrary JSON, and
+          # `echo` on some shells interprets backslash escapes inside a quoted
+          # variable (e.g. a literal `\n` in a pack description), corrupting the
+          # payload before jq ever sees it. printf never does that.
+          packs=$(curl -sSf -b /tmp/cookies.txt http://localhost:8000/api/packs)
+          printf '%s' "$packs" | jq -e '[.[] | select(.slug == "climate-risk")] | length == 1' > /dev/null || {
+            echo "::error::the climate-risk pack is not installed — GET /api/packs did not return it"
+            printf '%s\n' "$packs"
+            docker compose logs backend
+            exit 1
+          }
+          printf '%s' "$packs" | jq -e '[.[] | select(.slug == "climate-risk")][0].task_types | length > 0' > /dev/null || {
+            echo "::error::climate-risk pack installed with zero task types — bootstrap ran but the pack is broken"
+            printf '%s\n' "$packs"
+            exit 1
+          }
+
+          harnesses=$(curl -sSf -b /tmp/cookies.txt http://localhost:8000/api/harnesses)
+          printf '%s' "$harnesses" | jq -e 'length > 0' > /dev/null || {
+            echo "::error::no harnesses were seeded — the app booted but the demo bootstrap did not complete"
+            printf '%s\n' "$harnesses"
+            docker compose logs backend
+            exit 1
+          }
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs

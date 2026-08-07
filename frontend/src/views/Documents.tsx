@@ -2,9 +2,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type DragEvent, useRef, useState } from 'react'
 
 import { api, type BenchDocument, type Dataset } from '../api/client'
-import { type Column, MonoTable } from '../components/shared/MonoTable'
+import { formatDateTime } from '../components/shared/format'
+import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { StatusBadge } from '../components/shared/StatusBadge'
-import { formatDateTime } from './Runs'
 
 const PREVIEW_CHARS = 4000
 
@@ -101,10 +101,15 @@ export function Documents() {
           {documentsQuery.isLoading ? (
             <div className="empty pulse">Loading documents…</div>
           ) : (
+            // `error` is passed rather than falling through to `empty`: a failed
+            // fetch also yields zero rows, and "No documents yet" would tell the
+            // user their evidence does not exist.
             <MonoTable
               columns={columns}
               rows={documents}
               rowKey={(d) => d.id}
+              rowLabel={(d) => `Preview ${d.filename}`}
+              error={documentsQuery.error}
               onRowClick={(d) => setPreviewId(previewId === d.id ? null : d.id)}
               empty="No documents yet — upload evidence to attach to runs."
             />
@@ -121,6 +126,8 @@ export function Documents() {
         </div>
         {datasetsQuery.isLoading ? (
           <div className="empty pulse">Loading datasets…</div>
+        ) : datasetsQuery.isError ? (
+          <QueryError error={datasetsQuery.error} what="the datasets" />
         ) : (datasetsQuery.data ?? []).length === 0 ? (
           <div className="empty">No datasets — install a pack that seeds sample data.</div>
         ) : (
@@ -180,9 +187,12 @@ function DatasetRowPeek({ dataset }: { dataset: Dataset }) {
 
   return (
     <div className="panel" style={{ padding: '10px 14px' }}>
-      <div
-        className="row"
-        style={{ cursor: 'pointer' }}
+      {/* A real button, so the row is reachable by Tab and announced with its
+          expanded state — it used to be a div with an onClick. */}
+      <button
+        type="button"
+        className="row disclosure-row"
+        aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
       >
         <span className="mono-body" style={{ fontWeight: 600 }}>
@@ -195,7 +205,7 @@ function DatasetRowPeek({ dataset }: { dataset: Dataset }) {
         <span style={{ flex: 1 }} />
         {dataset.pack_seeded && <span className="badge badge-violet">pack</span>}
         <span className="mono-label">{open ? 'hide' : 'peek'}</span>
-      </div>
+      </button>
       {open && (
         <div style={{ marginTop: 10, overflowX: 'auto' }}>
           {rowsQuery.isLoading ? (

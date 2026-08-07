@@ -1,0 +1,101 @@
+# Pins every dependency pip resolves for `pip install -e ".[dev]"` — direct and
+# transitive alike — to the exact versions this repo is tested against, so CI
+# installs the same thing today and next year instead of "whatever satisfies
+# the >= ranges in pyproject.toml right now."
+#
+# This is deliberately NOT a lockfile tool (uv, pip-tools, Poetry): pyproject.toml
+# stays the single source of *what* bench depends on and stays installable the
+# ordinary way for a contributor who just wants `pip install -e ".[dev]"` to work
+# without learning a new tool. This file only narrows the *versions* pip is
+# allowed to pick, via pip's own `-c`/`--constraint` flag — no new tooling, no new
+# concept, one file:
+#
+#   pip install -e ".[dev]" -c constraints.txt
+#
+# A constraint never adds a dependency that pyproject.toml did not already ask
+# for; it only pins the version of one pip would otherwise have installed. If
+# pyproject.toml grows a new dependency, pip will still install it (unpinned)
+# rather than erroring — the two files are complementary, not required to be
+# perfectly in sync, though re-freezing after a dependency change is good
+# practice.
+#
+# Regenerate after intentionally upgrading a dependency, from a clean install:
+#
+#   cd backend && rm -rf .venv && python3.12 -m venv .venv \
+#     && .venv/bin/pip install -e ".[dev]" \
+#     && .venv/bin/pip freeze | grep -v '^-e ' > constraints.txt
+#
+# The `grep -v '^-e '` drops the editable self-install line pip freeze emits for
+# `bench` itself (a `file://` or `git+ssh://` reference to this checkout) — that
+# line describes the environment freeze was run in, not a dependency, and is
+# actively wrong to pin (it would freeze CI to installing over ssh from whoever
+# generated it).
+aiosqlite==0.22.1
+alembic==1.18.5
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anthropic==0.117.1
+anyio==4.14.2
+argon2-cffi==25.1.0
+argon2-cffi-bindings==25.1.0
+asyncpg==0.31.0
+attrs==26.1.0
+brotli==1.2.0
+certifi==2026.6.17
+cffi==2.1.0
+click==8.4.2
+cryptography==49.0.0
+cssselect2==0.9.0
+distro==1.9.0
+docstring_parser==0.18.0
+fastapi==0.139.2
+fonttools==4.63.0
+greenlet==3.5.3
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.18
+iniconfig==2.3.0
+itsdangerous==2.2.0
+jiter==0.16.0
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+lxml==6.1.1
+Mako==1.3.12
+Markdown==3.10.2
+MarkupSafe==3.0.3
+packaging==26.2
+pillow==12.3.0
+pluggy==1.6.0
+pycparser==3.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+pydantic_core==2.46.4
+pydyf==0.12.1
+Pygments==2.20.0
+pypdf==6.14.2
+pyphen==0.17.2
+pytest==9.1.1
+pytest-asyncio==1.4.0
+python-docx==1.2.0
+python-dotenv==1.2.2
+python-multipart==0.0.32
+PyYAML==6.0.3
+referencing==0.37.0
+rpds-py==2026.6.3
+ruff==0.15.22
+sniffio==1.3.1
+SQLAlchemy==2.0.51
+starlette==1.3.1
+tinycss2==1.5.1
+tinyhtml5==2.1.0
+typing-inspection==0.4.2
+typing_extensions==4.16.0
+uvicorn==0.51.0
+uvloop==0.22.1
+watchfiles==1.2.0
+weasyprint==69.0
+webencodings==0.5.1
+websockets==16.1.1
+zopfli==0.4.3

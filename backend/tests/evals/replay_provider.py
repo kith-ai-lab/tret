@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from bench.providers.base import (
     Msg,
     Provider,
+    ProviderError,
     ProviderEvent,
     TextDelta,
     ToolCall,
@@ -47,7 +48,12 @@ class ScriptedCall:
 
 @dataclass
 class ScriptedTurn:
-    """One assistant turn: some prose, then zero or more tool calls."""
+    """One assistant turn: some prose, then zero or more tool calls.
+
+    `provider_error` scripts a mid-stream provider failure: the text streams as
+    normal and then the provider raises, which is what a dropped connection or a
+    500 halfway through a response looks like to the engine.
+    """
 
     text: str = ""
     tool_calls: list[ScriptedCall] = field(default_factory=list)
@@ -55,6 +61,7 @@ class ScriptedTurn:
     output_tokens: int = 240
     cache_read_tokens: int = 0
     stop_reason: str | None = None  # defaults from whether tools were called
+    provider_error: str | None = None
 
 
 @dataclass
@@ -127,6 +134,11 @@ class ReplayProvider(Provider):
 
         for start in range(0, len(turn.text), self._chunk):
             yield TextDelta(turn.text[start : start + self._chunk])
+
+        if turn.provider_error is not None:
+            # A deliberate failure, not a script violation: the engine is expected
+            # to handle it, so it is not recorded in `violations`.
+            raise ProviderError(self.name, turn.provider_error)
 
         calls: list[ToolCall] = []
         for position, scripted in enumerate(turn.tool_calls, start=1):

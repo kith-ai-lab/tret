@@ -186,7 +186,12 @@ see [eco-accounting.md](eco-accounting.md).
 - [ ] `BENCH_ENVIRONMENT=production`
 - [ ] unique `BENCH_SECRET_KEY`, strong `BENCH_ADMIN_PASSWORD`
 - [ ] TLS in front, `BENCH_COOKIE_SECURE=true`
-- [ ] container/VM with a non-root user and controlled egress
+- [ ] container/VM with a non-root user and controlled egress —
+      [Dockerfile.fly](../Dockerfile.fly) does this already (a fixed-uid `bench`
+      user; `fly-entrypoint.sh` fixes ownership of the mounted volume at boot,
+      then drops root before exec'ing uvicorn), so this is a check on your
+      deployment only if you built your own image from `backend/Dockerfile`
+      instead, which does not set one
 - [ ] `unshare` available, or network policy denying method egress
 - [ ] packs reviewed as code, installed from a path only operators can write
 - [ ] DB and `storage/` backed up, and backed up again before an upgrade
