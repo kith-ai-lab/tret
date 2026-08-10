@@ -1,0 +1,5 @@
+# Launcher scripts must keep the right line endings on every platform:
+# cmd.exe needs CRLF in .bat files; bash needs LF in .sh/.command files.
+*.bat      text eol=crlf
+*.sh       text eol=lf
+*.command  text eol=lf
