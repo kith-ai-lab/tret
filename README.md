@@ -38,13 +38,23 @@ Five rules are built into the architecture, not just the prompts:
 
 ## Quickstart
 
+**Not a terminal person?** Double-click `start-bench.command` (macOS) or
+`start-bench.bat` (Windows) and bench sets itself up — Docker check, first-run
+config, browser open. [docs/easy-start.md](docs/easy-start.md) is the
+plain-language walkthrough, `stop-bench` the off switch. Or skip installing
+anything and [deploy to Render with one click](docs/deploy-render.md).
+
+Otherwise:
+
 ```bash
-cp .env.example .env       # add at least one provider key (OpenRouter alone works)
+cp .env.example .env       # defaults are fine — provider keys are added in-app
 docker compose up --build
 ```
 
-No key at hand? Set `BENCH_LOCAL_BASE_URL` to your own inference server instead
-and bench runs with no cloud provider at all — from the compose stack that is
+On first login bench asks for a provider key (one OpenRouter key alone works;
+Anthropic and Moonshot too) and stores it encrypted — no config file editing.
+Prefer no cloud at all? Set `BENCH_LOCAL_BASE_URL` to your own inference server
+and bench runs with no cloud provider — from the compose stack that is
 `http://host.docker.internal:11434/v1` for a host Ollama, not `localhost`.
 
 Open http://localhost:5180, log in (`admin@example.com` / `bench-admin` by
@@ -216,6 +226,14 @@ isolation for pack methods (rlimits, empty environment, and an empty network
 namespace where the platform allows it), and an honest account of what is *not*
 isolated.
 
+The fastest path to a real instance is one click:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/voiz-academy/bench)
+
+[render.yaml](render.yaml) provisions the app, a managed Postgres, and a
+persistent disk, with production secrets generated at deploy time —
+[docs/deploy-render.md](docs/deploy-render.md) walks through it (≈$13/mo).
+
 [docs/hardening.md](docs/hardening.md) is the checklist;
 [docs/deploy-fly.md](docs/deploy-fly.md) is a worked single-app deployment.
 
@@ -246,6 +264,8 @@ See [docs/architecture.md](docs/architecture.md) and
 | [hardening.md](docs/hardening.md) | production checklist |
 | [upgrading.md](docs/upgrading.md) | schema migrations, legacy databases, recovery |
 | [deploy-fly.md](docs/deploy-fly.md) | reference deployment |
+| [deploy-render.md](docs/deploy-render.md) | one-click hosted deployment |
+| [easy-start.md](docs/easy-start.md) | run bench locally without a terminal |
 | [demo-script.md](docs/demo-script.md) | a guided walkthrough of the seeded demo |
 
 ## Privacy
