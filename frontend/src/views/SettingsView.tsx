@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { type FormEvent, type ReactNode, useEffect, useState } from 'react'
+import { type FormEvent, type ReactNode, useState } from 'react'
 
 import { api, ApiError, type LocalProviderTest, takesApiKey, type User } from '../api/client'
 import { formatDateTime } from '../components/shared/format'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
+import { ProviderKeyForm } from '../components/shared/ProviderKeyForm'
 import { StatusBadge } from '../components/shared/StatusBadge'
 
 export function SettingsView() {
@@ -248,43 +249,7 @@ function TeamSection() {
 // ── Provider keys ─────────────────────────────────────────────────────────
 
 function ProviderKeys() {
-  const queryClient = useQueryClient()
   const providersQuery = useQuery({ queryKey: ['providers'], queryFn: api.providerStatus })
-
-  // The roster comes from the backend, which derives it from
-  // providers/catalog.py::PROVIDER_SPECS — this view keeps no provider list of
-  // its own, so adding a provider stays a one-place change. Key-optional
-  // providers (local: a base URL, not a key) are excluded: there is nothing to
-  // submit for them here.
-  const keyProviders = (providersQuery.data ?? [])
-    .map((p) => p.provider)
-    .filter(takesApiKey)
-
-  const [provider, setProvider] = useState('')
-  const [apiKey, setApiKey] = useState('')
-
-  // Select the first provider once the roster loads; never overwrite a choice
-  // the user made, and never leave a stale name selected if the roster changes.
-  useEffect(() => {
-    if (keyProviders.length === 0) return
-    setProvider((curr) => (curr && keyProviders.includes(curr) ? curr : keyProviders[0]))
-  }, [keyProviders.join(',')]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  const setKeyMutation = useMutation({
-    mutationFn: () => api.setProviderKey(provider, apiKey),
-    onSuccess: () => {
-      setApiKey('')
-      queryClient.invalidateQueries({ queryKey: ['providers'] })
-      queryClient.invalidateQueries({ queryKey: ['models'] })
-    },
-  })
-
-  const submit = (e: FormEvent) => {
-    e.preventDefault()
-    if (provider && apiKey.trim()) setKeyMutation.mutate()
-  }
-
-  const setKeyError = setKeyMutation.error as ApiError | null
 
   return (
     <div>
@@ -368,50 +333,9 @@ function ProviderKeys() {
         </>
       )}
 
-      <form onSubmit={submit} className="panel">
-        <div className="mono-label" style={{ marginBottom: 10 }}>
-          Set provider key (admin, write-only)
-        </div>
-        <div className="row" style={{ alignItems: 'flex-end' }}>
-          <div className="field" style={{ marginBottom: 0, width: 160 }}>
-            <label className="mono-label">Provider</label>
-            <select value={provider} onChange={(e) => setProvider(e.target.value)}>
-              {keyProviders.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="field" style={{ marginBottom: 0, flex: 1 }}>
-            <label className="mono-label">API key</label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-…"
-              autoComplete="off"
-            />
-          </div>
-          <button
-            className="btn btn-primary"
-            type="submit"
-            disabled={setKeyMutation.isPending || !provider || !apiKey.trim()}
-          >
-            {setKeyMutation.isPending ? 'Saving…' : 'Save key'}
-          </button>
-        </div>
-        {setKeyError && (
-          <div className="error-text" style={{ marginTop: 10 }}>
-            {setKeyError.status === 403 ? 'Requires admin role.' : setKeyError.message}
-          </div>
-        )}
-        {setKeyMutation.isSuccess && (
-          <div className="mono-label" style={{ marginTop: 10, color: 'var(--green)' }}>
-            key stored (encrypted at rest)
-          </div>
-        )}
-      </form>
+      {/* The write-only key form itself lives in components/shared/ProviderKeyForm
+          — shared with the first-run setup surface, which offers the same flow. */}
+      <ProviderKeyForm />
     </div>
   )
 }

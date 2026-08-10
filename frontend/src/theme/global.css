@@ -136,11 +136,37 @@ h1, h2, h3, h4 {
   margin-bottom: 8px;
 }
 
+/* Column wrapper for the content area: lets the first-run banner sit above
+   every view (chat's full-bleed layout included) without living inside any of
+   them. */
+.main-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .main {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   padding: 24px 28px 48px;
+}
+
+/* First-run notice: no provider configured, so nothing can run. Slim, amber,
+   and gone the moment a provider exists. */
+.first-run-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 28px;
+  background: var(--amber-dim);
+  border-bottom: 1px solid rgba(217, 166, 72, 0.3);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
 }
 
 .view-title {

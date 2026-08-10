@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { NavLink, useLocation } from 'react-router-dom'
 
 import { api, type User } from './api/client'
+import { FirstRunSetup } from './components/shared/FirstRunSetup'
 import { AppRoutes } from './router'
 import { Login } from './views/Login'
 
@@ -49,7 +50,13 @@ export default function App() {
           queryClient.clear()
         }}
       />
-      <Main />
+      {/* Column, not just <Main/>: the first-run setup banner sits above every
+          view (chat's full-bleed layout included) without living inside any of
+          them. It renders nothing on a configured install. */}
+      <div className="main-col">
+        <FirstRunSetup />
+        <Main />
+      </div>
     </div>
   )
 }
