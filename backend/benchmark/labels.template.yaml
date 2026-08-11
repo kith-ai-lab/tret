@@ -1,0 +1,47 @@
+# Blind expert labels — fill this in BEFORE any benchmark run is executed.
+#
+# Protocol (this is what makes the labels citable):
+#   1. Copy this file to labels.yaml.
+#   2. For each case, read ONLY the pack's sample data and doctrine
+#      (packs/climate-risk/sample-data/*, packs/climate-risk/doctrine/*) —
+#      the exact inputs both arms receive. Do not look at any model output.
+#   3. Record your verdict, reason code (only if the verdict is a divergence),
+#      and confidence, per the doctrine's seven-step procedure.
+#   4. Commit labels.yaml. The git timestamp proves labels predate runs.
+#
+# verdict:      agree | diverge_signal_higher | diverge_reference_higher | insufficient_data
+# reason_code:  site_specific_factor | outdated_inputs | methodology_choice | scale_mismatch | coverage_gap
+#               (required for divergence verdicts, omit otherwise)
+# confidence:   high | medium | low
+# note:         optional; one line on your reasoning, for the writeup's appendix
+labeler: ""          # name — appears in the methods writeup
+labeled_date: ""     # YYYY-MM-DD
+labels:
+  - { id: C01, verdict: "", confidence: "" }
+  - { id: C02, verdict: "", confidence: "" }
+  - { id: C03, verdict: "", confidence: "" }
+  - { id: C04, verdict: "", confidence: "" }
+  - { id: C05, verdict: "", confidence: "" }
+  - { id: C06, verdict: "", confidence: "" }
+  - { id: C07, verdict: "", confidence: "" }
+  - { id: C08, verdict: "", confidence: "" }
+  - { id: C09, verdict: "", confidence: "" }
+  - { id: C10, verdict: "", confidence: "" }
+  - { id: C11, verdict: "", confidence: "" }
+  - { id: C12, verdict: "", confidence: "" }
+  - { id: C13, verdict: "", confidence: "" }
+  - { id: C14, verdict: "", confidence: "" }
+  - { id: C15, verdict: "", confidence: "" }
+  - { id: C16, verdict: "", confidence: "" }
+  - { id: C17, verdict: "", confidence: "" }
+  - { id: C18, verdict: "", confidence: "" }
+  - { id: C19, verdict: "", confidence: "" }
+  - { id: C20, verdict: "", confidence: "" }
+  - { id: C21, verdict: "", confidence: "" }
+  - { id: C22, verdict: "", confidence: "" }
+  - { id: P01, verdict: "", confidence: "" }
+  - { id: P02, verdict: "", confidence: "" }
+  - { id: P03, verdict: "", confidence: "" }
+  - { id: P04, verdict: "", confidence: "" }
+  - { id: P05, verdict: "", confidence: "" }
+  - { id: P06, verdict: "", confidence: "" }

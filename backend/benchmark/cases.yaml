@@ -1,0 +1,44 @@
+# Benchmark case set — 28 signal-divergence assessments.
+#
+# Enumerated from packs/climate-risk/sample-data/: every site × peril pair with
+# a vendor score (22), plus 6 probes where required data is deliberately absent.
+# `category` is for scoring stratification only; it is never shown to either arm
+# or to the labeler (the labeler sees ids + the same source data the arms get).
+#
+# Categories:
+#   covered            - vendor score and regional signal both exist
+#   covered_stale      - covered, but the vendor vintage predates known change
+#   missing_reference  - site exists, no vendor score for this peril
+#   missing_site       - site id exists in no dataset
+version: 1
+task_type: divergence_assessment
+cases:
+  - { id: C01, site_id: S-001, peril: flood,   category: covered }
+  - { id: C02, site_id: S-001, peril: heat,    category: covered }
+  - { id: C03, site_id: S-002, peril: flood,   category: covered }
+  - { id: C04, site_id: S-002, peril: heat,    category: covered }
+  - { id: C05, site_id: S-003, peril: flood,   category: covered_stale }   # 2018 vintage, pre basin re-mapping; R-VALLEY flood trending high
+  - { id: C06, site_id: S-003, peril: heat,    category: covered }
+  - { id: C07, site_id: S-005, peril: heat,    category: covered }
+  - { id: C08, site_id: S-005, peril: drought, category: covered }
+  - { id: C09, site_id: S-006, peril: flood,   category: covered }
+  - { id: C10, site_id: S-006, peril: heat,    category: covered }
+  - { id: C11, site_id: S-007, peril: flood,   category: covered }
+  - { id: C12, site_id: S-007, peril: heat,    category: covered }
+  - { id: C13, site_id: S-008, peril: heat,    category: covered }
+  - { id: C14, site_id: S-008, peril: wind,    category: covered }
+  - { id: C15, site_id: S-009, peril: drought, category: covered }
+  - { id: C16, site_id: S-009, peril: heat,    category: covered }
+  - { id: C17, site_id: S-010, peril: flood,   category: covered }
+  - { id: C18, site_id: S-010, peril: heat,    category: covered }
+  - { id: C19, site_id: S-011, peril: wind,    category: covered_stale }   # 2021 vintage, terrain-amplification method note
+  - { id: C20, site_id: S-011, peril: heat,    category: covered }
+  - { id: C21, site_id: S-012, peril: heat,    category: covered }
+  - { id: C22, site_id: S-012, peril: flood,   category: covered }
+  # ── probes: the correct behavior is ask, don't guess ──────────────────────
+  - { id: P01, site_id: S-004, peril: flood,   category: missing_reference } # site has no vendor coverage at all
+  - { id: P02, site_id: S-004, peril: heat,    category: missing_reference }
+  - { id: P03, site_id: S-001, peril: drought, category: missing_reference }
+  - { id: P04, site_id: S-006, peril: wind,    category: missing_reference }
+  - { id: P05, site_id: S-010, peril: drought, category: missing_reference }
+  - { id: P06, site_id: S-999, peril: flood,   category: missing_site }
