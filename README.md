@@ -38,13 +38,26 @@ Five rules are built into the architecture, not just the prompts:
 
 ## Quickstart
 
+One command on macOS or Linux — it checks for Docker, clones bench into
+`~/kith-bench`, builds and starts it, and opens your browser:
+
+```bash
+curl -fsSL https://bench.kithailab.com/install.sh | bash
+```
+
+Re-run it later to update in place (it won't touch a checkout you've edited).
+That URL serves [install.sh](install.sh) from this repo verbatim, so
+`https://raw.githubusercontent.com/voiz-academy/bench/main/install.sh` is the
+same script — read it before piping it to bash if you'd rather not do that
+blind.
+
 **Not a terminal person?** Double-click `start-bench.command` (macOS) or
 `start-bench.bat` (Windows) and bench sets itself up — Docker check, first-run
 config, browser open. [docs/easy-start.md](docs/easy-start.md) is the
 plain-language walkthrough, `stop-bench` the off switch. Or skip installing
 anything and [deploy to Render with one click](docs/deploy-render.md).
 
-Otherwise:
+Already have a checkout, or want to drive it yourself:
 
 ```bash
 cp .env.example .env       # defaults are fine — provider keys are added in-app
