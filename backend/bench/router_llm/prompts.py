@@ -6,7 +6,14 @@ from __future__ import annotations
 from bench.providers.catalog import ModelInfo
 from bench.router_llm.objectives import DEFAULT_OBJECTIVE
 
-ROUTING_PROMPT_VERSION = "route-v3"
+# route-v4 adds the TRACK RECORD section below. Note what the bump does *not*
+# mean: with no recorded outcomes the section is omitted entirely and the
+# rendered prompt is byte-identical to v3's. The version records that an
+# evidence-capable renderer produced the prompt, which is the fact an auditor
+# reading an old decision needs — "could this run have seen a track record?" is a
+# different question from "did it?", and the answer to the second is in the
+# decision's own `evidence` field.
+ROUTING_PROMPT_VERSION = "route-v4"
 
 ROUTER_SYSTEM = """\
 You are a model-selection router for an analyst workbench. Pick the single best \
@@ -67,6 +74,62 @@ def objective_block(objective: str) -> list[str]:
     return ["", "OBJECTIVE", f"  objective: {objective}", *(f"  - {rule}" for rule in rules)]
 
 
+# ── track record ─────────────────────────────────────────────────────────────
+# How candidates' recorded outcomes are shown to the router. Three rules travel
+# with the numbers, because each corrects a way this evidence is easy to misread,
+# and the router is the reader most likely to misread it.
+TRACK_RECORD_RULES: tuple[str, ...] = (
+    "These are observed outcomes on this task shape, not a controlled "
+    "comparison. Harder work is already routed to stronger models, so a strong "
+    "model's rate partly reflects the tasks it was given.",
+    "A candidate with no record is untried here, not bad. Where recorded "
+    "candidates are close, prefer trying an unrecorded one — a record nobody "
+    "ever adds to is a record that never improves.",
+    "quality measures whether the work was right, never what it cost. The cost "
+    "figures are shown separately; weigh them according to the objective, not by "
+    "reading them into the quality number.",
+)
+
+
+def track_record_block(priors: dict) -> list[str]:
+    """The TRACK RECORD section, or [] when there is nothing to report.
+
+    Omitted wholesale rather than rendered empty, so an install with no history
+    produces exactly the prompt bench produced before any of this existed. The
+    unrecorded candidates are named only when at least one candidate *is*
+    recorded — the contrast is the whole content of that line, and on a cold
+    start it would just be a list of every candidate.
+    """
+    if not priors:
+        return []
+    lines = ["", "TRACK RECORD (observed outcomes on this task shape)"]
+    for prior in sorted(priors.values(), key=lambda p: -p.quality_mean):
+        human = (
+            f"{prior.approvals} approved / {prior.rejections} rejected by reviewers"
+            if (prior.approvals + prior.rejections)
+            else "no human review yet"
+        )
+        failures = (
+            " | failures: "
+            + ", ".join(f"{kind} x{count}" for kind, count in prior.error_kinds.items())
+            if prior.error_kinds
+            else ""
+        )
+        lines.append(
+            f"  - {prior.model_id}: {prior.runs} runs (effective {prior.effective_n:.1f}) | "
+            f"quality {prior.quality_mean:.2f} (lower bound {prior.quality_ci_low:.2f}) | "
+            f"delivered {prior.delivered_rate * 100:.0f}% | {human} | "
+            f"avg ${prior.mean_cost_usd:.4f}, {prior.mean_iterations:.1f} iterations{failures}"
+        )
+    return lines
+
+
+def unrecorded_block(unrecorded: list[str]) -> list[str]:
+    if not unrecorded:
+        return []
+    return ["  no record yet (untried here, not judged): " + ", ".join(sorted(unrecorded))]
+
+
 def choose_model_schema(candidate_ids: list[str]) -> dict:
     return {
         "type": "object",
@@ -90,6 +153,7 @@ def render_router_prompt(
     max_cost_tier: str,
     candidates: list[ModelInfo],
     objective: str = DEFAULT_OBJECTIVE,
+    priors: dict | None = None,
 ) -> str:
     lines = [
         "TASK",
@@ -118,4 +182,10 @@ def render_router_prompt(
         )
     lines += ["", "CONSTRAINTS", f"  max_cost_tier: {max_cost_tier}"]
     lines += objective_block(objective)
+
+    recorded = {mid: p for mid, p in (priors or {}).items() if mid in {m.id for m in candidates}}
+    if recorded:
+        lines += track_record_block(recorded)
+        lines += unrecorded_block([m.id for m in candidates if m.id not in recorded])
+        lines += [f"  - {rule}" for rule in TRACK_RECORD_RULES]
     return "\n".join(lines)

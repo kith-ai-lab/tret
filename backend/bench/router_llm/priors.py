@@ -124,11 +124,15 @@ class ModelPrior:
 
 
 class PriorsProvider(Protocol):
-    """What the router needs. Implemented by `OutcomePriors` and `NoPriors`."""
+    """What the router and the engine need. Implemented by both classes below."""
 
     async def for_key(
         self, *, task_shape: str, objective: str, size_band: str | None = None
     ) -> dict[str, ModelPrior]:
+        ...
+
+    def invalidate(self) -> None:
+        """Drop any cached aggregate. Called when a run adds new evidence."""
         ...
 
 
@@ -145,6 +149,9 @@ class NoPriors:
         self, *, task_shape: str, objective: str, size_band: str | None = None
     ) -> dict[str, ModelPrior]:
         return {}
+
+    def invalidate(self) -> None:
+        """No cache, nothing to drop — but the engine calls this on every run."""
 
 
 # ── aggregation ──────────────────────────────────────────────────────────────

@@ -6,6 +6,16 @@ wins. The ceiling is not advisory: nothing in this module may return a model the
 harness policy excludes, and "nothing qualifies" is answered with None so the
 caller can fail loudly.
 
+Recorded evidence has exactly one power on this path: it removes models with a
+proven-poor record from contention, and nothing else. It does not promote, and it
+does not reorder — the shape table and the objective still decide among whatever
+survives. That asymmetry is deliberate. This is the path taken when the LLM
+router could not be reached, so it is the path a struggling deployment runs on
+most; quietly substituting the router's judgment with a statistic there would
+replace one opinion with another under the operator's stated objective. Dropping
+a candidate that has demonstrably failed this shape over and over is a weaker
+claim, and it is the one worth acting on without a router in the loop.
+
 The shape table encodes the `balanced` objective. Under the thrift objectives
 (`token_conservation`, `eco`) the table is not the right answer — it is a list of
 capable-first picks — so those objectives rank the *available* catalog by the same
@@ -19,9 +29,12 @@ from bench.router_llm.objectives import (
     DEFAULT_MAX_COST_TIER,
     DEFAULT_OBJECTIVE,
     THRIFT_OBJECTIVES,
+    TIER_POOR,
     candidate_sort_key,
+    evidence_tier,
     within_cost_tier,
 )
+from bench.router_llm.priors import ModelPrior
 
 FALLBACK_TABLE: dict[str, list[str]] = {
     "verdict": [
@@ -62,6 +75,7 @@ def fallback_model(
     allowed: list[str] | None = None,
     objective: str = DEFAULT_OBJECTIVE,
     max_cost_tier: str = DEFAULT_MAX_COST_TIER,
+    priors: dict[str, ModelPrior] | None = None,
 ) -> str | None:
     """The model this shape falls back to, or None if the policy permits none.
 
@@ -76,6 +90,7 @@ def fallback_model(
     usable = _usable(catalog, registry, allowed, max_cost_tier)
     if not usable:
         return None
+    usable = _drop_proven_poor(usable, priors)
 
     if objective in THRIFT_OBJECTIVES:
         # Ranking the whole usable catalog *is* the fallback here: walking the
@@ -98,6 +113,24 @@ def fallback_model(
     # local-only installation entirely, since discovered local models are never
     # curated). This is what lets bench route with zero cloud provider keys.
     return min(usable, key=lambda m: (not m.curated, m.id)).id
+
+
+def _drop_proven_poor(
+    usable: list[ModelInfo], priors: dict[str, ModelPrior] | None
+) -> list[ModelInfo]:
+    """Remove candidates with a proven-poor record — unless that is all there is.
+
+    The guard matters more than the filter. A harness whose every permitted model
+    has a bad record still has to run: refusing would turn "these models perform
+    badly here" into "this harness is broken", which is a much stronger claim
+    than the evidence supports and not one a fallback path should be making. So
+    when nothing survives, everything survives, and the caller picks as it always
+    did.
+    """
+    if not priors:
+        return usable
+    kept = [m for m in usable if evidence_tier(priors.get(m.id)) != TIER_POOR]
+    return kept or usable
 
 
 def _usable(

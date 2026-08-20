@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bench.adaptive import validation_error as adaptive_validation_error
 from bench.api.auth import current_user
 from bench.db.engine import get_db
 from bench.db.models import Harness, Pack, User, Workspace
@@ -101,6 +102,14 @@ def _validate_policy(policy: dict) -> None:
     objective = policy.get("objective") or DEFAULT_OBJECTIVE
     if objective not in OBJECTIVES:
         raise HTTPException(422, f"model_policy.objective must be one of {'|'.join(OBJECTIVES)}")
+    # The adaptive block, same rule as everything above it: refused at the door,
+    # never read as a default. A misspelled key here would silently leave a
+    # behavior on that the operator believed they had turned off — and two of
+    # them (`escalation`, `compaction`) let a run change what it is doing
+    # mid-flight, which is exactly the kind of thing to be sure about.
+    problem = adaptive_validation_error(policy.get("adaptive"))
+    if problem:
+        raise HTTPException(422, problem)
 
 
 @router.get("")

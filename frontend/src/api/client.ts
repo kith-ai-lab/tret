@@ -80,6 +80,21 @@ export function overrideAllowedByPolicy(model: ModelInfo, policy?: ModelPolicy):
   return costTierRank(model.cost_tier) <= costTierRank(policy.max_cost_tier)
 }
 
+/** The track record a decision was made against, frozen at decision time.
+ *  Snapshotted rather than referenced: priors are a moving aggregate, so
+ *  re-deriving them later answers a different question than this run asked. */
+export interface RoutingEvidence {
+  version: string
+  size_band: string
+  priors: Record<string, RoutingModelPrior>
+  /** Sorted last for a demonstrably poor record — still candidates, not banned. */
+  demoted: string[]
+  /** Promoted on the pessimistic reading of a good record. */
+  proven: string[]
+  /** Candidates with no record: untried here, not judged. */
+  unrecorded: string[]
+}
+
 export interface RoutingDecision {
   router_model: string | null
   routing_prompt_version: string
@@ -88,6 +103,11 @@ export interface RoutingDecision {
   reasoning: string
   confidence: string | null
   objective: string // quality | balanced | token_conservation | eco
+  /** The shape the fallback table keys on, and the key evidence is grouped by. */
+  task_shape?: string
+  max_cost_tier?: string
+  /** Null when no evidence was read: learning off, no history, or an override. */
+  evidence?: RoutingEvidence | null
   fallback_used: boolean
   override: string | null // "user_pin" | "run_override" | null
   latency_ms: number

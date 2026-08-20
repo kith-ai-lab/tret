@@ -46,6 +46,7 @@ from bench.engine.harness import HarnessEngine
 from bench.packs.loader import install_pack
 from bench.providers.base import Provider
 from bench.providers.catalog import ModelCatalog
+from bench.router_llm.priors import NoPriors
 
 PACKS_DIR = Path(__file__).resolve().parents[3] / "packs"
 CLIMATE_PACK = PACKS_DIR / "climate-risk"
@@ -273,11 +274,19 @@ class GoldenWorld:
             document_ids=document_ids,
         )
 
+        # `NoPriors` is not incidental. Golden runs write `run_outcomes` rows like
+        # any other run, so an engine reading recorded evidence would let earlier
+        # cases in the same suite steer the routing of later ones — and a replay
+        # suite whose answers depend on how many runs the database happens to
+        # hold is not a replay suite. Adaptive routing is on by default
+        # everywhere except here and the benchmark arms, which pin their model
+        # outright (see backend/benchmark/arm_a.py).
+        engine = HarnessEngine(catalog=ModelCatalog(), priors=NoPriors())
         if provider is None:
-            await HarnessEngine(catalog=ModelCatalog()).execute(run_id)
+            await engine.execute(run_id)
         else:
             with patch("bench.engine.harness.ProviderRegistry", _replay_registry(provider)):
-                await HarnessEngine(catalog=ModelCatalog()).execute(run_id)
+                await engine.execute(run_id)
 
         violations = getattr(provider, "violations", [])
         if violations:

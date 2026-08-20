@@ -46,6 +46,7 @@ from bench.providers.catalog import (
     energy_accounting,
     get_catalog,
 )
+from bench.router_llm.priors import OutcomePriors, PriorsProvider
 from bench.router_llm.router import ModelRouter, RoutingUnavailable
 from bench.services.emissions import emission_event_fields, energy_wh_field
 from bench.services.outcomes import record_outcome
@@ -106,10 +107,19 @@ def _utcnow() -> datetime:
 
 
 class HarnessEngine:
-    def __init__(self, registry: ProviderRegistry | None = None, catalog: ModelCatalog | None = None):
+    def __init__(
+        self,
+        registry: ProviderRegistry | None = None,
+        catalog: ModelCatalog | None = None,
+        priors: PriorsProvider | None = None,
+    ):
         self.catalog = catalog or get_catalog()
         self.registry = registry or ProviderRegistry()
-        self.router = ModelRouter(self.catalog, self.registry)
+        # Held on the engine, not rebuilt per run, because its whole value is the
+        # short-lived cache: a burst of runs against the same harness asks the
+        # same question, and the aggregate does not move between them.
+        self.priors = priors or OutcomePriors()
+        self.router = ModelRouter(self.catalog, self.registry, self.priors)
         self.bus = get_event_bus()
         self._cancelled: set[uuid.UUID] = set()
 
@@ -126,7 +136,7 @@ class HarnessEngine:
             from bench.services.credentials import load_db_keys
 
             self.registry = ProviderRegistry(await load_db_keys(db))
-            self.router = ModelRouter(self.catalog, self.registry)
+            self.router = ModelRouter(self.catalog, self.registry, self.priors)
             try:
                 await self._execute_inner(db, run)
             except Exception as e:  # engine bug or provider hard failure
@@ -631,6 +641,10 @@ class HarnessEngine:
         # carry no lesson (cancelled, or never routed) — see services/outcomes.py.
         await record_outcome(db, run)
         await db.commit()
+        # This run is now evidence, and the cached aggregate predates it. Cheap
+        # to drop and the alternative is a bad look: a run finishing badly, and
+        # the very next run of the same shape routing as though it had not.
+        self.priors.invalidate()
         self._cancelled.discard(run.id)
         if run.status in SUCCESS_STATUSES:
             await self.bus.publish(

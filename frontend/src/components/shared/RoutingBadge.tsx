@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useRef, useState } from 'react'
 
 import { objectiveDescription, type RoutingDecision } from '../../api/client'
 
@@ -115,6 +115,47 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
             <span className="k">Candidates</span>
             <span>{routing.candidates.length ? routing.candidates.join(', ') : '—'}</span>
           </div>
+          {routing.evidence && (
+            <>
+              <div className="mono-label" style={{ margin: '10px 0 4px' }}>
+                Track record at decision time
+              </div>
+              <div className="kv">
+                {Object.values(routing.evidence.priors)
+                  .sort((a, b) => b.quality_mean - a.quality_mean)
+                  .map((p) => (
+                    <Fragment key={p.model_id}>
+                      <span className="k">{shortModelName(p.model_id)}</span>
+                      <span>
+                        quality {p.quality_mean.toFixed(2)} (floor{' '}
+                        {p.quality_ci_low.toFixed(2)}) · {p.runs} runs ·{' '}
+                        {(p.delivered_rate * 100).toFixed(0)}% delivered
+                        {p.approvals + p.rejections > 0
+                          ? ` · ${p.approvals} approved / ${p.rejections} rejected`
+                          : ''}
+                      </span>
+                    </Fragment>
+                  ))}
+                {routing.evidence.unrecorded.length > 0 && (
+                  <>
+                    {/* Named, because "no record" and "poor record" are
+                        different claims and the difference is what stops this
+                        panel reading as a complete ranking. */}
+                    <span className="k">No record</span>
+                    <span>{routing.evidence.unrecorded.map(shortModelName).join(', ')}</span>
+                  </>
+                )}
+                {routing.evidence.demoted.length > 0 && (
+                  <>
+                    <span className="k">Demoted</span>
+                    <span>{routing.evidence.demoted.map(shortModelName).join(', ')}</span>
+                  </>
+                )}
+                <span className="k">Size band</span>
+                <span>{routing.evidence.size_band}</span>
+              </div>
+            </>
+          )}
           <div className="mono-label" style={{ margin: '10px 0 4px' }}>
             Reasoning (verbatim)
           </div>

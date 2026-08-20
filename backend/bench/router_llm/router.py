@@ -17,6 +17,12 @@ Three invariants hold across every path through `route()`:
 * The persisted decision describes what actually happened: `chosen_model` is
   always one of `candidates` on the automatic paths, and `router_model` is null
   whenever no router was consulted.
+* Recorded evidence may reorder and demote, never widen. Priors from past runs
+  (`router_llm/priors.py`) steer which candidates are seen first and are shown to
+  the router model, but nothing derived from them can add a model to `allowed`,
+  lift `max_cost_tier`, or reach a model whose provider has no key. Whatever was
+  read is snapshotted onto the decision as `evidence`, because the priors move
+  and a decision has to stay explicable after they have.
 """
 from __future__ import annotations
 
@@ -28,13 +34,24 @@ from bench.config import get_settings
 from bench.providers.base import ProviderError
 from bench.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
 from bench.router_llm.fallback import fallback_model
+from bench.adaptive import adaptive_of
 from bench.router_llm.objectives import (
     DEFAULT_MAX_COST_TIER,
     DEFAULT_OBJECTIVE,
     TIER_ORDER,
+    TIER_POOR,
+    TIER_PROVEN,
     candidate_sort_key,
+    evidence_tier,
     objective_of,
     within_cost_tier,
+)
+from bench.router_llm.outcomes import size_band
+from bench.router_llm.priors import (
+    PRIORS_VERSION,
+    ModelPrior,
+    NoPriors,
+    PriorsProvider,
 )
 from bench.router_llm.prompts import (
     ROUTER_SYSTEM,
@@ -64,6 +81,34 @@ def _max_cost_tier(model_policy: dict) -> str:
     return tier if tier in TIER_ORDER else DEFAULT_MAX_COST_TIER
 
 
+def _evidence_snapshot(
+    priors: dict[str, ModelPrior], candidate_ids: list[str], est_input_tokens: int
+) -> dict | None:
+    """What this decision knew, frozen onto it. None when it knew nothing.
+
+    Only the candidates actually considered are included: a decision's evidence
+    should describe the choice that was made, and priors for models the policy
+    excluded are not part of it. `demoted` and `unrecorded` are called out by
+    name because they are the two things an operator asks about first — why a
+    model was passed over, and which models had no say.
+    """
+    shown = {mid: p for mid, p in priors.items() if mid in candidate_ids}
+    if not shown:
+        return None
+    return {
+        "version": PRIORS_VERSION,
+        "size_band": size_band(est_input_tokens),
+        "priors": {mid: p.to_json() for mid, p in shown.items()},
+        "demoted": sorted(
+            mid for mid, p in shown.items() if evidence_tier(p) == TIER_POOR
+        ),
+        "proven": sorted(
+            mid for mid, p in shown.items() if evidence_tier(p) == TIER_PROVEN
+        ),
+        "unrecorded": sorted(mid for mid in candidate_ids if mid not in shown),
+    }
+
+
 @dataclass
 class RoutingDecision:
     router_model: str | None
@@ -85,6 +130,13 @@ class RoutingDecision:
     # mattered. Defaulted so a decision built without them still validates.
     task_shape: str = "freeform"
     max_cost_tier: str = DEFAULT_MAX_COST_TIER
+    # The track record this decision was made against, snapshotted. Null when no
+    # evidence was read — a harness with learning off, an install with no
+    # history, or an override, which skips the automatic paths entirely. Stored
+    # rather than referenced because priors are a moving aggregate: re-deriving
+    # them next month answers a different question than the one this decision
+    # was answering.
+    evidence: dict | None = None
     fallback_used: bool = False
     override: str | None = None  # "user_pin" | "run_override" | None
     latency_ms: int = 0
@@ -104,11 +156,21 @@ class RoutingUnavailable(Exception):
 
 
 class ModelRouter:
-    def __init__(self, catalog: ModelCatalog, registry: ProviderRegistry):
+    def __init__(
+        self,
+        catalog: ModelCatalog,
+        registry: ProviderRegistry,
+        priors: PriorsProvider | None = None,
+    ):
         self._catalog = catalog
         self._registry = registry
+        # Defaults to no evidence, so a caller that never wires up priors — and
+        # every existing caller — routes exactly as it did before.
+        self._priors = priors or NoPriors()
 
-    def _candidates(self, model_policy: dict) -> list[ModelInfo]:
+    def _candidates(
+        self, model_policy: dict, priors: dict[str, ModelPrior] | None = None
+    ) -> list[ModelInfo]:
         allowed = model_policy.get("allowed") or None
         max_tier = _max_cost_tier(model_policy)
         objective = objective_of(model_policy)
@@ -123,8 +185,12 @@ class ModelRouter:
             if not within_cost_tier(m, max_tier):
                 continue
             out.append(m)
-        # Ordered by the harness objective; cap the list the router sees.
-        out.sort(key=candidate_sort_key(objective))
+        # Ordered by the harness objective, with any recorded evidence leading;
+        # cap the list the router sees. Note the order of operations: the
+        # `allowed` list, the provider-key check and the cost ceiling have all
+        # already been applied above, so evidence only ever reorders models the
+        # policy had already permitted.
+        out.sort(key=candidate_sort_key(objective, priors))
         return out[:CANDIDATE_LIMIT]
 
     def _resolve_router_model(self, max_tier: str) -> ModelInfo | None:
@@ -196,6 +262,7 @@ class ModelRouter:
     ) -> RoutingDecision:
         objective = objective_of(model_policy)
         max_tier = _max_cost_tier(model_policy)
+        learning = adaptive_of(model_policy).learn_from_outcomes
         # Local and dynamic models reach the catalog only through a discovery
         # pass. On a fresh process this is the first thing that needs them, so
         # make sure one has been attempted before deciding there are no
@@ -225,7 +292,18 @@ class ModelRouter:
                 max_cost_tier=max_tier,
             )
 
-        candidates = self._candidates(model_policy)
+        # Read once and reused for ordering, for the prompt, and for the
+        # fallback, so all three are reasoning about the same snapshot even if
+        # the aggregate moves mid-decision.
+        priors: dict[str, ModelPrior] = {}
+        if learning:
+            priors = await self._priors.for_key(
+                task_shape=task_shape,
+                objective=objective,
+                size_band=size_band(est_input_tokens),
+            )
+
+        candidates = self._candidates(model_policy, priors)
         if not candidates:
             raise RoutingUnavailable(
                 "No candidate models: check provider API keys and the harness model policy."
@@ -240,6 +318,7 @@ class ModelRouter:
                 objective=objective,
                 task_shape=task_shape,
                 max_cost_tier=max_tier,
+                evidence=_evidence_snapshot(priors, [candidates[0].id], est_input_tokens),
                 fallback_used=False,
             )
 
@@ -260,6 +339,7 @@ class ModelRouter:
                 max_cost_tier=max_tier,
                 candidates=candidates,
                 objective=objective,
+                priors=priors,
             )
             start = time.monotonic()
             for _attempt in range(2):  # one retry
@@ -286,6 +366,9 @@ class ModelRouter:
                             objective=objective,
                             task_shape=task_shape,
                             max_cost_tier=max_tier,
+                            evidence=_evidence_snapshot(
+                                priors, candidate_ids, est_input_tokens
+                            ),
                             latency_ms=int((time.monotonic() - start) * 1000),
                         )
                 except ProviderError:
@@ -302,6 +385,7 @@ class ModelRouter:
             model_policy.get("allowed"),
             objective=objective,
             max_cost_tier=max_tier,
+            priors=priors,
         )
         if chosen is None:
             raise RoutingUnavailable(
@@ -330,6 +414,7 @@ class ModelRouter:
             objective=objective,
             task_shape=task_shape,
             max_cost_tier=max_tier,
+            evidence=_evidence_snapshot(priors, candidate_ids, est_input_tokens),
             fallback_used=True,
         )
 

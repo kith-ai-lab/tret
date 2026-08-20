@@ -119,10 +119,11 @@ class SendMessageBody(BaseModel):
     model_override: str | None = None
     # `objective` is validated at the door (see `_validate_objective`) the same
     # way api/harnesses.py validates a harness's model_policy.objective, and is
-    # persisted onto the run's task_input for the audit trail. NOTE: unlike
-    # model_override, the engine has no per-run hook that reads it back out —
-    # only a harness's own model_policy.objective steers routing today — so this
-    # is recorded but does not yet change which model is chosen for the turn.
+    # persisted onto the run's task_input for the audit trail. The engine reads
+    # it back out in `engine/harness.effective_model_policy`, which overlays it
+    # on the harness policy for this run only — the harness row is never
+    # mutated, and the routing decision records the objective that actually
+    # applied.
     objective: str | None = None
 
 

@@ -243,7 +243,7 @@ def _prompt(objective: str | None = None, n: int = 3) -> str:
 
 
 def test_prompt_version_was_bumped():
-    assert ROUTING_PROMPT_VERSION == "route-v3"
+    assert ROUTING_PROMPT_VERSION == "route-v4"
 
 
 def test_the_default_objective_renders_the_historical_prompt_bytes():
