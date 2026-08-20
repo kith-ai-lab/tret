@@ -5,7 +5,8 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
                                       │
                                       ├─ engine/    the agent loop (provider-neutral)
                                       ├─ providers/ Anthropic | Kimi | OpenRouter | Local + catalog
-                                      ├─ router_llm/ LLM-as-router, objectives, deterministic fallback
+                                      ├─ router_llm/ LLM-as-router, objectives, deterministic fallback,
+                                      │             recorded outcomes and the priors built from them
                                       ├─ packs/     pack.yaml loader, doctrine hashing, safety scan,
                                       │             content-hash integrity pinning
                                       ├─ net/       the ONLY outbound network path: egress classes,
@@ -45,7 +46,53 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    The tier order is `local < economy < standard < premium`, so a `max_cost_tier`
    never excludes a zero-cost local model — and setting it *to* `local` excludes
    every cloud candidate, which is how a harness expresses "local only".
-4. **The loop** (`engine/harness.py`): streaming provider call → SSE events →
+   Routing also reads its own **track record**. Every finished run is scored into
+   `run_outcomes` (`router_llm/outcomes.py`) from its status, its transcript's
+   validation failures and nudges, and — weighted highest — the human
+   approve/reject record on the findings it produced. `router_llm/priors.py`
+   aggregates those into a per-model record for a (task shape, objective) key,
+   with time decay, shrinkage toward same-key peers, and an effective-sample
+   floor below which a model has no prior at all: an untried model keeps its
+   existing position rather than being ranked last for being untried. Evidence
+   enters in three places of deliberately different strength — a `TRACK RECORD`
+   section in the router prompt (`route-v4`; omitted entirely when there is no
+   evidence, so a fresh install renders the v3 bytes), an evidence tier ahead of
+   the objective in candidate ordering, and demotion-only in the deterministic
+   fallback. **Nothing derived from evidence can widen a policy**: it reorders
+   within `allowed` and under `max_cost_tier`, never past them. Each decision
+   snapshots what it read as `runs.routing.evidence`, because the aggregate moves
+   and a decision has to stay explicable after it has.
+
+5. **Adapting mid-run** (`engine/compaction.py`, `engine/supervisor.py`): the
+   model is chosen once, but a run is not stuck with the consequences.
+   Before each call the engine estimates what it is about to send and compares it
+   against the chosen model's context window (`model_policy.adaptive.
+   context_headroom`, default 0.8, minus the output reservation). Over budget, it
+   **compacts**: bulk retrieval results (`read_document`, `search_documents`) are
+   replaced by markers naming what was there, and optionally summarized by a
+   cheap model. Retrieved values (`lookup_dataset`, `run_method`) and recorded
+   results are never elidable — a model may only cite what it retrieved, so
+   eliding a dataset result would fail every finding that cited it.
+   `runs.messages` remains the **complete, unedited transcript**; compaction
+   produces a separate wire view, and `runs.compactions` records the gap.
+   Between iterations a deterministic supervisor may **change model**, either
+   because the run is over its window with nothing left to elide or because it
+   has stalled (repeated terminal-tool validation failures, the repeated-call
+   breaker firing, or most of the iteration budget spent with nothing recorded).
+   It makes no model call of its own — the priors above supply the judgment. Every
+   switch is bounded: within the same policy, never away from a pinned or
+   overridden model, never when the forced transcript re-send would not fit the
+   remaining cost cap, and at most `max_switches` (default 1) times. Refusals are
+   published as `switch_refused`. `runs.model_timeline` records each model's own
+   spend and its own energy accounting; `runs.energy_accounting` becomes a
+   roll-up whose per-model factors are null wherever the segments disagreed, and
+   `model_used` means *the model that produced the final answer*.
+   A switch is also the strongest evidence bench can collect — a within-task
+   comparison rather than an average across different tasks — so each segment
+   becomes its own `run_outcomes` row. A handoff for stalling counts against the
+   model; a handoff for running out of context window does not, because a window
+   is a size and not a failing.
+6. **The loop** (`engine/harness.py`): streaming provider call → SSE events →
    **sequential** tool execution → repeat. A turn's tool calls run one at a
    time, committing after each, and that is a correctness requirement rather
    than a simplification: tools write through the run's single `AsyncSession`,
@@ -63,12 +110,12 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    tasks terminate via a `record_verdict` tool call validated against the pack
    schema, with up to 3 in-loop repair attempts on validation errors; the
    cited-values cross-check runs in the same place.
-5. Transcript, tokens (input, output, cache read, cache write), cost, and
-   **estimated energy/carbon** (`runs.energy_wh`, `runs.energy_accounting`, from
-   the chosen model's energy class × weighted tokens × grid intensity) are
-   flushed to the DB after every iteration; failed runs keep their partial
-   transcripts for the audit view.
-6. **Terminal status.** `completed` | `completed_without_output` | `failed` |
+7. Transcript, tokens (input, output, cache read, cache write), cost, and
+   **estimated energy/carbon** (`runs.energy_wh`, `runs.energy_accounting`,
+   from each model's energy class × weighted tokens × grid intensity, summed per
+   segment) are flushed to the DB after every iteration; failed runs keep their
+   partial transcripts for the audit view.
+8. **Terminal status.** `completed` | `completed_without_output` | `failed` |
    `cancelled`. The middle one is the honest answer for a run that ended of its
    own accord but never recorded the terminal result its task type requires
    (`engine/harness.py::_completion_status`): not a failure — the engine and the
@@ -109,7 +156,8 @@ docs/hardening.md §9 and docs/trust-doctrine.md §1.
 
 `GET /api/runs/{id}/events` replays the in-memory backlog then streams live
 events (`routing`, `text_delta`, `tool_call`, `tool_result`,
-`finding_recorded`, `usage`, `done`, `error`). The event bus is in-process,
+`finding_recorded`, `usage`, `context_pressure`, `compaction`, `model_switch`,
+`switch_refused`, `budget_warning`, `done`, `error`). The event bus is in-process,
 so the backend runs **one worker by design**. The multi-worker upgrade path
 is Postgres LISTEN/NOTIFY behind the same `RunEventBus` interface.
 
