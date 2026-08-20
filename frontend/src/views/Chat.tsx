@@ -34,8 +34,8 @@ import { ModelSelect, overrideWarning } from './Workbench'
 // localStorage keys for the composer's per-turn overrides. Both persist across
 // reloads for the session; either can be cleared back to "harness default" by
 // picking the empty option.
-const OBJECTIVE_STORAGE_KEY = 'bench.chat.objective'
-const MODEL_OVERRIDE_STORAGE_KEY = 'bench.chat.modelOverride'
+const OBJECTIVE_STORAGE_KEY = 'tret.chat.objective'
+const MODEL_OVERRIDE_STORAGE_KEY = 'tret.chat.modelOverride'
 
 const EXAMPLE_PROMPTS = [
   {
@@ -216,7 +216,7 @@ export function Chat() {
             <PanelIcon />
           </button>
           <div className="chat-topbar-title">
-            {conversation?.title ?? (isLanding ? 'New chat' : 'bench')}
+            {conversation?.title ?? (isLanding ? 'New chat' : 'tret')}
           </div>
           <button className="icon-btn" title="New chat" onClick={startNewChat} aria-label="New chat">
             <PlusIcon />
@@ -358,7 +358,7 @@ function Landing({
     <div className="chat-landing">
       <div className="chat-column">
         <div className="chat-hero-mark">
-          bench<span>_</span>
+          tret<span>_</span>
         </div>
         <h1 className="chat-hero-title">What can I help you assess?</h1>
         <p className="chat-hero-sub">
@@ -777,7 +777,7 @@ function Composer({
           rows={1}
           value={value}
           disabled={disabled}
-          placeholder={disabled ? 'Waiting for bench…' : 'Message bench…'}
+          placeholder={disabled ? 'Waiting for tret…' : 'Message tret…'}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={onKeyDown}
           autoFocus={autoFocus}

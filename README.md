@@ -1,8 +1,8 @@
-# bench
+# tret
 
 **An open-source AI harness platform for non-technical knowledge work.**
 
-bench is what a coding agent is for engineers, built instead for analysts:
+tret is what a coding agent is for engineers, built instead for analysts:
 a workbench where AI does rigorous, auditable knowledge work — structured
 verdicts, evidence extraction, deliverable drafting — under rules that make
 its output trustworthy enough to put in front of a client, a credit officer,
@@ -11,7 +11,7 @@ or an auditor.
 The flagship domain pack is **climate risk assessment**; the core is
 domain-agnostic and packs are pluggable.
 
-## Why bench is different
+## Why tret is different
 
 Five rules are built into the architecture, not just the prompts:
 
@@ -38,23 +38,23 @@ Five rules are built into the architecture, not just the prompts:
 
 ## Quickstart
 
-One command on macOS or Linux — it checks for Docker, clones bench into
-`~/kith-bench`, builds and starts it, and opens your browser:
+One command on macOS or Linux — it checks for Docker, clones tret into
+`~/kith-tret`, builds and starts it, and opens your browser:
 
 ```bash
-curl -fsSL https://bench.kithailab.com/install.sh | bash
+curl -fsSL https://tret.kithailab.com/install.sh | bash
 ```
 
 Re-run it later to update in place (it won't touch a checkout you've edited).
 That URL serves [install.sh](install.sh) from this repo verbatim, so
-`https://raw.githubusercontent.com/voiz-academy/bench/main/install.sh` is the
+`https://raw.githubusercontent.com/voiz-academy/tret/main/install.sh` is the
 same script — read it before piping it to bash if you'd rather not do that
 blind.
 
-**Not a terminal person?** Double-click `start-bench.command` (macOS) or
-`start-bench.bat` (Windows) and bench sets itself up — Docker check, first-run
+**Not a terminal person?** Double-click `start-tret.command` (macOS) or
+`start-tret.bat` (Windows) and tret sets itself up — Docker check, first-run
 config, browser open. [docs/easy-start.md](docs/easy-start.md) is the
-plain-language walkthrough, `stop-bench` the off switch. Or skip installing
+plain-language walkthrough, `stop-tret` the off switch. Or skip installing
 anything and [deploy to Render with one click](docs/deploy-render.md).
 
 Already have a checkout, or want to drive it yourself:
@@ -64,13 +64,13 @@ cp .env.example .env       # defaults are fine — provider keys are added in-ap
 docker compose up --build
 ```
 
-On first login bench asks for a provider key (one OpenRouter key alone works;
+On first login tret asks for a provider key (one OpenRouter key alone works;
 Anthropic and Moonshot too) and stores it encrypted — no config file editing.
-Prefer no cloud at all? Set `BENCH_LOCAL_BASE_URL` to your own inference server
-and bench runs with no cloud provider — from the compose stack that is
+Prefer no cloud at all? Set `TRET_LOCAL_BASE_URL` to your own inference server
+and tret runs with no cloud provider — from the compose stack that is
 `http://host.docker.internal:11434/v1` for a host Ollama, not `localhost`.
 
-Open http://localhost:5180, log in (`admin@example.com` / `bench-admin` by
+Open http://localhost:5180, log in (`admin@example.com` / `tret-admin` by
 default — change in `.env`), and you're in a seeded demo:
 
 - a **Chat** front door — just ask ("*Is the vendor flood score for Alder
@@ -95,7 +95,7 @@ A guided walkthrough with the seeded cases: [docs/demo-script.md](docs/demo-scri
 
 ## Multi-provider, with an LLM router
 
-bench speaks to **Anthropic** (native SDK, prompt caching), **Kimi /
+tret speaks to **Anthropic** (native SDK, prompt caching), **Kimi /
 Moonshot**, **OpenRouter** (which fronts OpenAI, Google, Meta, DeepSeek, and
 open models), and **any local OpenAI-compatible server** — Ollama, LM Studio,
 vLLM, `llama.cpp`. A harness can pin a model — or set `auto`, where a small,
@@ -120,9 +120,9 @@ See [docs/eco-accounting.md](docs/eco-accounting.md).
 
 ## Zero-cloud operation
 
-Set one variable — `BENCH_LOCAL_BASE_URL` — and bench runs with no cloud
+Set one variable — `TRET_LOCAL_BASE_URL` — and tret runs with no cloud
 provider, no API key, and no egress past your own machine. Local models are
-discovered from the server, **probed for real tool-calling support** (bench's
+discovered from the server, **probed for real tool-calling support** (tret's
 trust model is almost entirely forced tool calls, so a model that fakes them is
 worse than useless), and priced at zero in a `local` cost tier. With no cloud
 keys configured at all, routing still works: the LLM router step is skipped and
@@ -140,7 +140,7 @@ container is slow — a native install is faster, especially on Apple Silicon).
 
 ## One door to the internet
 
-Everything bench sends outward goes through one module, `backend/bench/net/`,
+Everything tret sends outward goes through one module, `backend/tret/net/`,
 tagged with a destination **class** — cloud providers, the model catalog, your
 local model server, and *research* (web search and page fetch). Each class has
 its own switch, every switch narrows and none widens, and a test fails the build
@@ -152,7 +152,7 @@ model — from text that may have arrived in an uploaded document — so turning
 on is a deliberate act, and
 
 ```
-BENCH_EGRESS_RESEARCH=off
+TRET_EGRESS_RESEARCH=off
 ```
 
 takes it away again without disturbing anything else. Harnesses that use the web
@@ -173,16 +173,16 @@ account of what an app-level allowlist does and does not buy you.
 
 Every run carries an estimated **energy (Wh) and carbon (gCO₂e)** figure next to
 its dollar cost — live per turn in the run view, in the run's audit record, and
-in the provenance appendix of every exported deliverable. bench's flagship
+in the provenance appendix of every exported deliverable. tret's flagship
 domain is climate risk; a platform that produces TCFD sections cannot treat its
 own footprint as somebody else's problem.
 
-It is an estimate, and bench labels it one everywhere it prints it: a heuristic
+It is an estimate, and tret labels it one everywhere it prints it: a heuristic
 energy class per model times weighted tokens (cached reads weighted lower,
 because they are), converted with a grid intensity you set for your own region
-(`BENCH_GRID_CO2E_G_PER_KWH`). Nothing here is metered. What makes it worth
+(`TRET_GRID_CO2E_G_PER_KWH`). Nothing here is metered. What makes it worth
 reporting anyway is that it is *actionable* — model choice moves the number by
-more than an order of magnitude, and bench already picks the model. The `eco`
+more than an order of magnitude, and tret already picks the model. The `eco`
 objective is that knob. `GET /api/analytics/guardrails` rolls the figures up per
 harness over a window.
 
@@ -227,7 +227,7 @@ A pack is a directory: `pack.yaml` (task types, tools, datasets), versioned
 and sample data. No backend code. Validate yours with:
 
 ```bash
-bench packs validate ./my-pack
+tret packs validate ./my-pack
 ```
 
 Validation AST-scans every deterministic method and refuses the pack outright on
@@ -240,7 +240,7 @@ boundaries: installing a pack is deploying code you reviewed.
 
 See [docs/pack-authoring.md](docs/pack-authoring.md).
 
-## A bench for bench
+## A tret for tret
 
 The guarantees above are only worth something if they cannot quietly stop being
 true. Prompts get reworded, doctrine gets edited, a router change picks a
@@ -263,7 +263,7 @@ See [docs/evals.md](docs/evals.md).
 ## Running it for real
 
 The shipped defaults exist so `docker compose up` works in one step; they are
-unsafe on a network. Set `BENCH_ENVIRONMENT=production` and bench **refuses to
+unsafe on a network. Set `TRET_ENVIRONMENT=production` and tret **refuses to
 boot** while the default secret key or admin password is still in place, rather
 than serving insecurely. Also included: login rate limiting, subprocess
 isolation for pack methods (rlimits, empty environment, and an empty network
@@ -272,7 +272,7 @@ isolated.
 
 The fastest path to a real instance is one click:
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/voiz-academy/bench)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/voiz-academy/tret)
 
 [render.yaml](render.yaml) provisions the app, a managed Postgres, and a
 persistent disk, with production secrets generated at deploy time —
@@ -283,8 +283,8 @@ persistent disk, with production secrets generated at deploy time —
 
 ### Upgrading
 
-Pull the new version and start it. bench migrates its own database on boot —
-including a v0.1 database created before bench used migrations, which it detects
+Pull the new version and start it. tret migrates its own database on boot —
+including a v0.1 database created before tret used migrations, which it detects
 and adopts. Back up first, and read
 [docs/upgrading.md](docs/upgrading.md) for what the startup log tells you, how to
 check the current revision, and the manual recovery path.
@@ -309,15 +309,15 @@ See [docs/architecture.md](docs/architecture.md) and
 | [upgrading.md](docs/upgrading.md) | schema migrations, legacy databases, recovery |
 | [deploy-fly.md](docs/deploy-fly.md) | reference deployment |
 | [deploy-render.md](docs/deploy-render.md) | one-click hosted deployment |
-| [easy-start.md](docs/easy-start.md) | run bench locally without a terminal |
+| [easy-start.md](docs/easy-start.md) | run tret locally without a terminal |
 | [demo-script.md](docs/demo-script.md) | a guided walkthrough of the seeded demo |
 
 ## Privacy
 
-Configuration is env-only. bench makes no network calls except to the LLM
+Configuration is env-only. tret makes no network calls except to the LLM
 providers you configure (plus an optional OpenRouter model-catalog fetch you can
 disable, and web research if you switch it on — off by default). With
-`BENCH_EGRESS=off` and a local model server it makes none at all. Every one of
+`TRET_EGRESS=off` and a local model server it makes none at all. Every one of
 those goes through a single module you can read in an afternoon. No telemetry,
 ever.
 

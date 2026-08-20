@@ -2,8 +2,8 @@
 
 Skipped by default. These cost money and need network access:
 
-    BENCH_LIVE_EVALS=1 BENCH_EVAL_MODEL=anthropic/claude-sonnet-5 \\
-        BENCH_ANTHROPIC_API_KEY=sk-... \\
+    TRET_LIVE_EVALS=1 TRET_EVAL_MODEL=anthropic/claude-sonnet-5 \\
+        TRET_ANTHROPIC_API_KEY=sk-... \\
         .venv/bin/python -m pytest tests/evals -m live -q
 
 The scaffolding is deliberately identical to the golden runs: same world, same
@@ -23,7 +23,7 @@ from test_golden_runs import PERIL, SITE, assert_citations_grounded
 
 pytestmark = pytest.mark.live
 
-EVAL_MODEL_ENV = "BENCH_EVAL_MODEL"
+EVAL_MODEL_ENV = "TRET_EVAL_MODEL"
 
 
 @pytest.fixture

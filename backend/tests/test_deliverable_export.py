@@ -28,11 +28,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from bench.api import findings as findings_api
-from bench.api.auth import current_user
-from bench.db.engine import get_db
-from bench.db.models import Finding, Project, Run
-from bench.services.export import assemble_deliverable, render_pdf
+from tret.api import findings as findings_api
+from tret.api.auth import current_user
+from tret.db.engine import get_db
+from tret.db.models import Finding, Project, Run
+from tret.services.export import assemble_deliverable, render_pdf
 
 PROJECT_ID = uuid.uuid4()
 OTHER_PROJECT_ID = uuid.uuid4()

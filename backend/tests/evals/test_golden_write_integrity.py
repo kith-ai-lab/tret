@@ -226,7 +226,7 @@ async def test_evidence_extraction_completes_on_its_declared_terminal_tool(world
 
 
 def validate_evidence(world, finding) -> list[str]:
-    from bench.engine.validation import validate_payload
+    from tret.engine.validation import validate_payload
 
     return validate_payload(finding.payload, world.output_schema("evidence_finding"))
 
@@ -493,7 +493,7 @@ async def test_qa_review_completes_on_its_declared_terminal_tool(world):
     assert finding.payload["overall"] == "pass"
     assert len(finding.payload["criteria"]) == 4
 
-    from bench.engine.validation import validate_payload
+    from tret.engine.validation import validate_payload
 
     assert validate_payload(finding.payload, world.output_schema("qa_assessment")) == []
     # Reviewing is not re-deciding: the finding under review is untouched.

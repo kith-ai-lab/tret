@@ -2,16 +2,16 @@
 
 The properties worth defending here are all about direction. Every rule narrows;
 nothing widens. The master switch narrows a class, a runtime override narrows
-both, and the one exemption — `local`, so an air-gapped bench can still reach a
+both, and the one exemption — `local`, so an air-gapped tret can still reach a
 model server — is paid for by a *stricter* address check rather than by trust.
 """
 from __future__ import annotations
 
 import pytest
 
-from bench.config import Settings
-from bench.net import policy
-from bench.net.policy import (
+from tret.config import Settings
+from tret.net import policy
+from tret.net.policy import (
     CLASS_CATALOG,
     CLASS_LOCAL,
     CLASS_PROVIDER,
@@ -113,14 +113,14 @@ def test_every_provider_base_url_is_in_the_provider_allowlist():
     this is what stops it drifting from the URLs the providers actually use."""
     from urllib.parse import urlsplit
 
-    from bench.providers.openai_compat import KimiProvider, OpenRouterProvider
+    from tret.providers.openai_compat import KimiProvider, OpenRouterProvider
 
     pol = policy_for(CLASS_PROVIDER, _settings())
     for provider in (KimiProvider("k"), OpenRouterProvider("k")):
         host = urlsplit(provider._base_url).hostname
         assert host_allowed(host, pol), f"{host} is missing from PROVIDER_HOSTS"
     # The Anthropic SDK's default base URL is not read off an attribute here;
-    # it is the one hostname bench hard-codes in both places.
+    # it is the one hostname tret hard-codes in both places.
     assert host_allowed("api.anthropic.com", pol)
 
 
@@ -155,12 +155,12 @@ def test_the_search_backend_is_always_reachable_under_an_allowlist():
 
 
 def test_a_disabled_class_refuses_to_build_a_client():
-    from bench.net.client import build_client
-    from bench.net.policy import EgressDenied
+    from tret.net.client import build_client
+    from tret.net.policy import EgressDenied
 
     with pytest.raises(EgressDenied) as excinfo:
         build_client(CLASS_RESEARCH, policy=policy_for(CLASS_RESEARCH, _settings()))
-    assert "BENCH_EGRESS_RESEARCH" in str(excinfo.value)
+    assert "TRET_EGRESS_RESEARCH" in str(excinfo.value)
 
 
 # ── availability follows egress ──────────────────────────────────────────────
@@ -168,10 +168,10 @@ def test_a_cloud_provider_with_a_key_is_unavailable_when_its_class_is_off(monkey
     """A key is not reachability. Offering a model the deployment cannot call
     means the router picks it and the run fails; filtering it means the router
     picks something that works."""
-    from bench.config import get_settings
-    from bench.providers.catalog import ProviderRegistry
+    from tret.config import get_settings
+    from tret.providers.catalog import ProviderRegistry
 
-    monkeypatch.setenv("BENCH_EGRESS_PROVIDER", "off")
+    monkeypatch.setenv("TRET_EGRESS_PROVIDER", "off")
     get_settings.cache_clear()
     try:
         assert ProviderRegistry({"anthropic": "k"}).available_providers() == []
@@ -180,11 +180,11 @@ def test_a_cloud_provider_with_a_key_is_unavailable_when_its_class_is_off(monkey
 
 
 def test_an_air_gapped_deployment_still_routes_to_a_local_server(monkeypatch):
-    from bench.config import get_settings
-    from bench.providers.catalog import ProviderRegistry
+    from tret.config import get_settings
+    from tret.providers.catalog import ProviderRegistry
 
-    monkeypatch.setenv("BENCH_EGRESS", "off")
-    monkeypatch.setenv("BENCH_LOCAL_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("TRET_EGRESS", "off")
+    monkeypatch.setenv("TRET_LOCAL_BASE_URL", "http://localhost:11434/v1")
     get_settings.cache_clear()
     try:
         assert ProviderRegistry({"anthropic": "k"}).available_providers() == ["local"]

@@ -117,7 +117,7 @@ export function RoutingHistoryPanel({ history }: { history: RoutingHistoryData }
     return (
       <div className="empty">
         No scored runs yet. Outcomes are recorded as runs finish; run{' '}
-        <code>bench outcomes backfill</code> to score the runs already in the database.
+        <code>tret outcomes backfill</code> to score the runs already in the database.
       </div>
     )
   }

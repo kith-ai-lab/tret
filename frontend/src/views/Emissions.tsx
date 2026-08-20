@@ -1,4 +1,4 @@
-/** Emissions — the estimated carbon footprint of everything bench has run.
+/** Emissions — the estimated carbon footprint of everything tret has run.
  *
  *  This view is a climate claim about a climate product, so it is built under a
  *  hard rule: no number appears here that the backend did not send. Shares and
@@ -143,7 +143,7 @@ export function Emissions() {
       <div>
         <h1 className="view-title">Emissions</h1>
         <div className="view-sub">
-          The estimated carbon footprint of bench's own compute: energy, the GHG Protocol scope
+          The estimated carbon footprint of tret's own compute: energy, the GHG Protocol scope
           split, and a same-token comparison against a frontier baseline model. Every figure on this
           page is an estimate derived from token counts — none of it is metered.
         </div>
@@ -285,9 +285,9 @@ function WindowFactors({ data }: { data: EmissionsAnalytics }) {
         />
         <div className="fine-print" style={{ marginTop: 6 }}>
           The <em>source</em> column is which configuration rule chose each factor. Precedence:
-          per-provider factor (<code>BENCH_GRID_FACTORS</code>) → the self-hosted factor
-          (<code>BENCH_LOCAL_GRID_CO2E_G_PER_KWH</code>, legacy) → the global default
-          (<code>BENCH_GRID_CO2E_G_PER_KWH</code>). {GRID_NO_INFERENCE_NOTE}
+          per-provider factor (<code>TRET_GRID_FACTORS</code>) → the self-hosted factor
+          (<code>TRET_LOCAL_GRID_CO2E_G_PER_KWH</code>, legacy) → the global default
+          (<code>TRET_GRID_CO2E_G_PER_KWH</code>). {GRID_NO_INFERENCE_NOTE}
         </div>
       </div>
       <ConfiguredFactors factors={f.grid_factors} />
@@ -518,12 +518,12 @@ function BasisSubtotals({
           {NOT_SUMMABLE_WHY} {SUMMABLE_ACROSS_BASES_NOTE}
           <div style={{ marginTop: 6 }}>
             Which rows exist is a consequence of how the factors were configured, not of anything
-            bench inferred. {GRID_NO_INFERENCE_NOTE}
+            tret inferred. {GRID_NO_INFERENCE_NOTE}
           </div>
           {totals.runs_without_grid_basis > 0 && (
             <div style={{ marginTop: 6 }}>
               The <strong>{gridBasisLabel(null)}</strong> row is{' '}
-              {formatTokens(totals.runs_without_grid_basis)} run(s) recorded before bench stored a
+              {formatTokens(totals.runs_without_grid_basis)} run(s) recorded before tret stored a
               basis. They keep their carbon figure and are not folded into any other row.
             </div>
           )}
@@ -558,8 +558,8 @@ function ScopeSplit({
       title="GHG Protocol scopes"
       hint={
         summable
-          ? "Where the estimated carbon lands from the bench operator's point of view. Scope 1 is always zero and is shown as an explicit zero — an omitted line would read as an oversight."
-          : "Where the estimated carbon lands from the bench operator's point of view, one split per GHG Protocol basis. A scope total is carbon, so it may not be summed across bases either — there is deliberately no combined split below."
+          ? "Where the estimated carbon lands from the tret operator's point of view. Scope 1 is always zero and is shown as an explicit zero — an omitted line would read as an oversight."
+          : "Where the estimated carbon lands from the tret operator's point of view, one split per GHG Protocol basis. A scope total is carbon, so it may not be summed across bases either — there is deliberately no combined split below."
       }
     >
       <div className="stack" style={{ gap: 12 }}>
@@ -1143,7 +1143,7 @@ function ConfiguredFactors({
       {entries.length === 0 ? (
         <div className="fine-print">
           None configured. Every provider falls back to the self-hosted factor (local runs only) or
-          the global default. Set <code>BENCH_GRID_FACTORS</code> to give a provider its own factor —
+          the global default. Set <code>TRET_GRID_FACTORS</code> to give a provider its own factor —
           it is the single biggest improvement available to these numbers.
         </div>
       ) : (
@@ -1205,7 +1205,7 @@ function Factors({ data }: { data: EmissionsAnalytics }) {
                 : 'highest precedence'
             }
             subTitle="A per-provider factor outranks both the self-hosted setting and the global default for that provider's runs."
-            title={`Providers with their own configured grid factor (BENCH_GRID_FACTORS). ${GRID_NO_INFERENCE_NOTE}`}
+            title={`Providers with their own configured grid factor (TRET_GRID_FACTORS). ${GRID_NO_INFERENCE_NOTE}`}
           />
           <Stat
             label="Local grid intensity (legacy)"
@@ -1214,7 +1214,7 @@ function Factors({ data }: { data: EmissionsAnalytics }) {
                 ? 'not set'
                 : `${formatFactor(f.local_grid_co2e_g_per_kwh, 2)} gCO₂e/kWh`
             }
-            title="Optional site- or market-based factor for self-hosted inference (BENCH_LOCAL_GRID_CO2E_G_PER_KWH). Still honoured, and superseded by a per-provider factor for 'local'. Unset falls back to the grid intensity."
+            title="Optional site- or market-based factor for self-hosted inference (TRET_LOCAL_GRID_CO2E_G_PER_KWH). Still honoured, and superseded by a per-provider factor for 'local'. Unset falls back to the grid intensity."
           />
           <Stat label="Data-centre PUE" value={formatFactor(f.datacenter_pue)} />
           <Stat label="Local PUE" value={formatFactor(f.local_pue)} />

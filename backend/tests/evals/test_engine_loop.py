@@ -20,9 +20,9 @@ from replay_provider import ProviderCall, ReplayProvider, ScriptedCall, Scripted
 from sqlalchemy import select
 from test_golden_runs import PERIL, SITE, divergence_happy_script
 
-from bench.db.models import Run
-from bench.engine.tools import MAX_DELEGATION_DEPTH
-from bench.providers.base import TextDelta, ToolCall, ToolCallComplete, TurnComplete, Usage
+from tret.db.models import Run
+from tret.engine.tools import MAX_DELEGATION_DEPTH
+from tret.providers.base import TextDelta, ToolCall, ToolCallComplete, TurnComplete, Usage
 
 
 def _lookup(dataset: str, **filters) -> ScriptedCall:

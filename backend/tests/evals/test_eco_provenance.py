@@ -11,8 +11,8 @@ import pytest
 from golden_world import GOLDEN_MODEL
 from test_golden_runs import run_happy_path
 
-from bench.db.models import Finding
-from bench.services.export import _energy_cell, assemble_deliverable
+from tret.db.models import Finding
+from tret.services.export import _energy_cell, assemble_deliverable
 
 DELIVERABLE = "tcfd-report"
 SECTION_BODY = "Governance oversight of climate risk is exercised by the board.\n"

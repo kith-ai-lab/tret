@@ -10,17 +10,17 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException
 
-from bench.adaptive import (
+from tret.adaptive import (
     DEFAULT_ADAPTIVE,
     STATIC_ADAPTIVE,
     adaptive_of,
     validation_error,
 )
-from bench.api.harnesses import _validate_policy
-from bench.providers.base import ProviderError
-from bench.providers.catalog import ModelCatalog, ProviderRegistry
-from bench.router_llm.fallback import fallback_model
-from bench.router_llm.objectives import (
+from tret.api.harnesses import _validate_policy
+from tret.providers.base import ProviderError
+from tret.providers.catalog import ModelCatalog, ProviderRegistry
+from tret.router_llm.fallback import fallback_model
+from tret.router_llm.objectives import (
     EVIDENCE_GOOD_FLOOR,
     EVIDENCE_POOR_MEAN,
     TIER_POOR,
@@ -29,9 +29,9 @@ from bench.router_llm.objectives import (
     candidate_sort_key,
     evidence_tier,
 )
-from bench.router_llm.priors import ModelPrior, NoPriors
-from bench.router_llm.prompts import render_router_prompt
-from bench.router_llm.router import ModelRouter, RoutingUnavailable
+from tret.router_llm.priors import ModelPrior, NoPriors
+from tret.router_llm.prompts import render_router_prompt
+from tret.router_llm.router import ModelRouter, RoutingUnavailable
 
 
 class _Registry(ProviderRegistry):

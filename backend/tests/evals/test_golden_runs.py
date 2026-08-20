@@ -1,4 +1,4 @@
-"""Golden runs — "a bench for bench".
+"""Golden runs — "a tret for tret".
 
 Each scenario drives the real engine end to end (real pack, real doctrine, real
 tools against seeded sample data, real validation) with a scripted model, and
@@ -23,7 +23,7 @@ import pytest
 from golden_world import GOLDEN_MODEL
 from replay_provider import ReplayProvider, ScriptedCall, ScriptedTurn, cite, find_row, rows_of
 
-from bench.engine.validation import validate_cited_values, validate_payload
+from tret.engine.validation import validate_cited_values, validate_payload
 
 SITE = "S-003"  # Alder Point, River Valley — the demo site
 PERIL = "flood"

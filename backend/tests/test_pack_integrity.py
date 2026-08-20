@@ -1,8 +1,8 @@
 """Pack integrity pinning: the content hash and its verification."""
 import pytest
 
-from bench.packs import integrity
-from bench.packs.integrity import (
+from tret.packs import integrity
+from tret.packs.integrity import (
     PackIntegrityError,
     cached_content_hash,
     iter_pack_entries,
@@ -211,7 +211,7 @@ def test_a_pack_without_symlinks_hashes_as_it_always_did(tmp_path):
     """Pinning symlinks must not re-pin every pack already installed.
 
     The encoding for regular files is unchanged, so this is the digest older
-    bench releases stored for the same three files.
+    tret releases stored for the same three files.
     """
     import hashlib
 

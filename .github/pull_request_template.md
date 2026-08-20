@@ -1,4 +1,4 @@
-<!-- Thanks for contributing to bench. Keep this short; the diff says the rest. -->
+<!-- Thanks for contributing to tret. Keep this short; the diff says the rest. -->
 
 ## What and why
 
@@ -7,7 +7,7 @@
 ## Checks
 
 ```bash
-cd backend && .venv/bin/ruff check bench tests && .venv/bin/pytest -q
+cd backend && .venv/bin/ruff check tret tests && .venv/bin/pytest -q
 cd frontend && npm run build
 ```
 

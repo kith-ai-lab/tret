@@ -29,7 +29,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Lossy by nature: a multi-model run has more rows than the old key can
     # hold, so the extra segments go. They are derived and rebuildable with
-    # `bench outcomes backfill`.
+    # `tret outcomes backfill`.
     op.execute('DELETE FROM run_outcomes WHERE segment_index > 0')
     op.drop_constraint('run_outcomes_pkey', 'run_outcomes', type_='primary')
     op.create_primary_key('run_outcomes_pkey', 'run_outcomes', ['run_id'])

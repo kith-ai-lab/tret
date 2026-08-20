@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from sqlalchemy.dialects import postgresql
 
-from bench.api.analytics import (
+from tret.api.analytics import (
     _energy_stats,
     _method_stats,
     _rate,
@@ -14,9 +14,9 @@ from bench.api.analytics import (
     _validation_stats,
     guardrails,
 )
-from bench.config import get_settings
-from bench.db.models import utcnow
-from bench.providers.catalog import co2e_grams
+from tret.config import get_settings
+from tret.db.models import utcnow
+from tret.providers.catalog import co2e_grams
 
 VALIDATION_ERROR = {
     "role": "tool",
@@ -250,7 +250,7 @@ class _RowsResult:
 
 def _outcome(model_id: str, quality: str, *, shape="verdict", objective="balanced", band="m",
              outcome_class="delivered"):
-    from bench.db.models import RunOutcome
+    from tret.db.models import RunOutcome
 
     return RunOutcome(
         task_type="assess",
@@ -278,7 +278,7 @@ def _outcome(model_id: str, quality: str, *, shape="verdict", objective="balance
 
 
 async def test_routing_query_compiles_for_postgres():
-    from bench.api.analytics import routing
+    from tret.api.analytics import routing
 
     db = _RowsSession([])
     out = await routing(project_id=uuid.uuid4(), days=90, size_band=None, user=None, db=db)
@@ -289,7 +289,7 @@ async def test_routing_query_compiles_for_postgres():
 
 
 async def test_routing_groups_by_shape_and_objective_and_ranks_within_a_group():
-    from bench.api.analytics import routing
+    from tret.api.analytics import routing
 
     rows = (
         [_outcome("m/good", "0.9") for _ in range(12)]
@@ -306,7 +306,7 @@ async def test_routing_groups_by_shape_and_objective_and_ranks_within_a_group():
 
 
 async def test_models_under_the_evidence_floor_are_named_not_hidden():
-    from bench.api.analytics import routing
+    from tret.api.analytics import routing
 
     # "not enough evidence yet" and "not in the running" are different claims,
     # and an operator reading the panel has to be able to tell them apart.
@@ -318,7 +318,7 @@ async def test_models_under_the_evidence_floor_are_named_not_hidden():
 
 
 async def test_routing_response_states_that_it_is_observational():
-    from bench.api.analytics import routing
+    from tret.api.analytics import routing
 
     out = await routing(project_id=None, days=90, size_band=None, user=None, db=_RowsSession([]))
     assert out["basis"]["observational"] is True
@@ -331,7 +331,7 @@ def _hist_outcome(model_id, quality, *, days_ago=0, segment=0, run_id=None,
                   shape="verdict", outcome_class="delivered"):
     from datetime import timedelta
 
-    from bench.db.models import RunOutcome
+    from tret.db.models import RunOutcome
 
     return RunOutcome(
         run_id=run_id or uuid.uuid4(),
@@ -360,7 +360,7 @@ def _hist_outcome(model_id, quality, *, days_ago=0, segment=0, run_id=None,
 
 
 def _history(rows, bucket_days=7):
-    from bench.api.analytics import routing_history
+    from tret.api.analytics import routing_history
 
     return routing_history(rows, bucket_days=bucket_days, now=utcnow())
 
@@ -448,7 +448,7 @@ def test_history_separates_shapes_and_lists_every_model_seen():
 
 
 async def test_history_query_compiles_for_postgres():
-    from bench.api.analytics import routing_history_endpoint
+    from tret.api.analytics import routing_history_endpoint
 
     db = _RowsSession([])
     out = await routing_history_endpoint(

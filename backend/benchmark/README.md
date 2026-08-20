@@ -3,7 +3,7 @@
 **Question under test:** same model, same data — what changes when the only
 difference is the harness?
 
-This directory holds the outcome benchmark for bench: cases, both runners,
+This directory holds the outcome benchmark for tret: cases, both runners,
 scoring, and (eventually) results. It ships in the repo on purpose. If a claim
 in our marketing rests on a number produced here, anyone must be able to rerun
 it. Status: **scaffold — no results yet. No outcome claims may cite this
@@ -52,7 +52,7 @@ The 6 probes are the honesty test: the correct answer is *ask, don't guess*.
 4. **Verdict agreement** — against blind expert labels (`labels.yaml`,
    completed before any model output is looked at; template in
    `labels.template.yaml`).
-5. **Cost and energy per run** — recorded by bench for Arm A; token counts ×
+5. **Cost and energy per run** — recorded by tret for Arm A; token counts ×
    list price for Arm B.
 
 ## Blind labeling protocol
@@ -65,11 +65,11 @@ committed, so the git history proves the labels predate the runs.
 ## Running
 
 ```
-# Arm A needs the bench stack up (docker compose up) and admin credentials.
-BENCH_URL=http://localhost:8000 python arm_a.py --model <model-id> --out results/arm_a.<model>.jsonl
+# Arm A needs the tret stack up (docker compose up) and admin credentials.
+TRET_URL=http://localhost:8000 python arm_a.py --model <model-id> --out results/arm_a.<model>.jsonl
 
 # Arm B needs an OpenRouter key.
-BENCH_OPENROUTER_API_KEY=... python arm_b.py --model <model-id> --out results/arm_b.<model>.jsonl
+TRET_OPENROUTER_API_KEY=... python arm_b.py --model <model-id> --out results/arm_b.<model>.jsonl
 
 python scoring.py results/*.jsonl --labels labels.yaml --report results/report.md
 ```

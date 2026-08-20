@@ -12,8 +12,8 @@ from decimal import Decimal
 
 import pytest
 
-from bench.db.models import RunOutcome
-from bench.router_llm.priors import (
+from tret.db.models import RunOutcome
+from tret.router_llm.priors import (
     HALF_LIFE_DAYS,
     MIN_EFFECTIVE_SAMPLES,
     OFF_BAND_WEIGHT,
@@ -213,7 +213,7 @@ def test_a_prior_serializes_to_plain_json_types():
 @pytest.mark.asyncio
 async def test_an_unreadable_outcomes_table_degrades_to_no_evidence():
     # Evidence improves routing; it must never be something routing needs. A
-    # part-migrated install or a timed-out query routes exactly as bench did
+    # part-migrated install or a timed-out query routes exactly as tret did
     # before priors existed.
     class _Exploding(OutcomePriors):
         async def _rows(self, task_shape, objective):
@@ -244,7 +244,7 @@ async def test_an_aggregate_is_reused_within_its_ttl_and_recomputed_after_invali
 
 # ── handoffs ─────────────────────────────────────────────────────────────────
 def test_a_stall_handoff_drags_a_models_record_down():
-    # Which is the point: it is the most direct evidence bench has that a model
+    # Which is the point: it is the most direct evidence tret has that a model
     # was not up to a piece of work.
     clean = summarize(_many("m/x", 0.7, 20), now=NOW)["m/x"]
     with_handoffs = summarize(

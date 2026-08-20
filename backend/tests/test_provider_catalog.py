@@ -6,7 +6,7 @@ get wrong quietly:
 * the dynamic OpenRouter fetch is *best-effort* — a bad response degrades to "no
   dynamic models", it never takes GET /api/models (and the curated catalog with
   it) down;
-* a price bench cannot bill against is not a price: an entry carrying
+* a price tret cannot bill against is not a price: an entry carrying
   OpenRouter's "-1" variable-pricing sentinel would land in a cost tier by
   accident and then feed a negative number into cost accounting;
 * one registry row per provider drives key lookup, availability and
@@ -23,11 +23,11 @@ from decimal import Decimal
 import httpx
 import pytest
 
-from bench.providers.base import JsonCompletion
-from bench.config import Settings
-from bench.providers import catalog as catalog_module
-from bench.providers.anthropic import AnthropicProvider
-from bench.providers.catalog import (
+from tret.providers.base import JsonCompletion
+from tret.config import Settings
+from tret.providers import catalog as catalog_module
+from tret.providers.anthropic import AnthropicProvider
+from tret.providers.catalog import (
     KEY_PROVIDERS,
     PROVIDER_NAMES,
     PROVIDER_SPECS,
@@ -35,8 +35,8 @@ from bench.providers.catalog import (
     ModelInfo,
     ProviderRegistry,
 )
-from bench.providers.local import LocalProvider
-from bench.providers.openai_compat import KimiProvider, OpenRouterProvider
+from tret.providers.local import LocalProvider
+from tret.providers.openai_compat import KimiProvider, OpenRouterProvider
 
 
 def _settings(**over) -> Settings:
@@ -148,7 +148,7 @@ async def test_a_good_dynamic_response_is_still_parsed(monkeypatch):
     assert info.curated is False
 
 
-# ── prices bench can actually bill against ────────────────────────────────────
+# ── prices tret can actually bill against ─────────────────────────────────────
 @pytest.mark.parametrize(
     "pricing",
     [
@@ -269,7 +269,7 @@ def test_specs_build_the_expected_provider_classes(monkeypatch):
             local_base_url="http://localhost:11434/v1",
             local_display_name="Workstation",
             openrouter_referer="https://example.test",
-            openrouter_title="bench-test",
+            openrouter_title="tret-test",
         ),
     )
     registry = ProviderRegistry()
@@ -279,7 +279,7 @@ def test_specs_build_the_expected_provider_classes(monkeypatch):
     assert isinstance(openrouter, OpenRouterProvider)
     # The referer/title headers still come from settings, as before consolidation.
     assert openrouter._headers["HTTP-Referer"] == "https://example.test"
-    assert openrouter._headers["X-Title"] == "bench-test"
+    assert openrouter._headers["X-Title"] == "tret-test"
     local = registry.get("local")
     assert isinstance(local, LocalProvider)
     assert local.display_name == "Workstation"
@@ -382,8 +382,8 @@ async def test_startup_warms_the_catalog_without_blocking_the_boot(monkeypatch):
     shutdown rather than holding the process open."""
     import asyncio
 
-    from bench import main as main_module
-    from bench.services import bootstrap as bootstrap_module
+    from tret import main as main_module
+    from tret.services import bootstrap as bootstrap_module
 
     started = asyncio.Event()
     never = asyncio.Event()  # deliberately never set: a hanging model server

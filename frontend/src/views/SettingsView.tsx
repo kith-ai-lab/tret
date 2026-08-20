@@ -330,7 +330,7 @@ function ProviderKeys() {
               color: 'var(--text-muted)',
             }}
           >
-            local is enabled with the <code>BENCH_LOCAL_BASE_URL</code> env var (an OpenAI-compatible
+            local is enabled with the <code>TRET_LOCAL_BASE_URL</code> env var (an OpenAI-compatible
             server, e.g. <code>http://localhost:11434/v1</code>) — it takes no API key. Its models
             then appear as <code>local/*</code> in the pickers, free in dollars but never in watts.
           </div>
@@ -351,7 +351,7 @@ function ProviderKeys() {
 
 // ── Local models: setup guide + connection test ───────────────────────────
 // The full write-up lives in docs/local-models.md; this is the in-app version of
-// it, kept deliberately short. Commands are shown, never run — bench cannot
+// it, kept deliberately short. Commands are shown, never run — tret cannot
 // install anything on the machine hosting the model server.
 
 const OLLAMA_MODEL = 'qwen2.5:14b-instruct'
@@ -441,15 +441,15 @@ function SetupGuide() {
           </Step>
 
           <Step n={2} title="Download a model that can call tools">
-            bench drives everything through tool calls, so the model must support them. This one is
+            tret drives everything through tool calls, so the model must support them. This one is
             about 9 GB and wants ~16 GB of RAM:
             <CommandSnippet command={`ollama pull ${OLLAMA_MODEL}`} />
             On a smaller machine use <code>{OLLAMA_MODEL_SMALL}</code> instead (~4.7 GB, ~8 GB RAM).
           </Step>
 
-          <Step n={3} title="Point bench at it and restart">
-            Add this to your <code>.env</code>, then restart bench:
-            <CommandSnippet command={`BENCH_LOCAL_BASE_URL=${OLLAMA_BASE_URL}`} />
+          <Step n={3} title="Point tret at it and restart">
+            Add this to your <code>.env</code>, then restart tret:
+            <CommandSnippet command={`TRET_LOCAL_BASE_URL=${OLLAMA_BASE_URL}`} />
             Running the docker compose stack? The container's <code>localhost</code> is not your
             machine — use <code>{DOCKER_BASE_URL}</code>. Or skip the install entirely and run{' '}
             <code>docker compose --profile local up</code> for a bundled Ollama (slower: CPU-only in
@@ -490,7 +490,7 @@ function TestResult({ result }: { result: LocalProviderTest }) {
   if (!result.configured) {
     return (
       <div className="mono-body" style={{ marginTop: 10, color: 'var(--text-muted)' }}>
-        No <code>BENCH_LOCAL_BASE_URL</code> is set, so there is nothing to test.
+        No <code>TRET_LOCAL_BASE_URL</code> is set, so there is nothing to test.
       </div>
     )
   }
@@ -522,7 +522,7 @@ function TestResult({ result }: { result: LocalProviderTest }) {
           {dockerHint && (
             <>
               {' '}
-              If bench runs in docker, <code>localhost</code> is the container, not your machine —
+              If tret runs in docker, <code>localhost</code> is the container, not your machine —
               set <code>{DOCKER_BASE_URL}</code> instead.
             </>
           )}
@@ -556,7 +556,7 @@ function TestResult({ result }: { result: LocalProviderTest }) {
     <div style={{ marginTop: 10 }}>
       <div className="mono-body" style={{ color: 'var(--green)' }}>
         reachable at {result.base_url} — {result.counts.models} model
-        {result.counts.models === 1 ? '' : 's'}, {result.counts.tool_capable} usable by bench
+        {result.counts.models === 1 ? '' : 's'}, {result.counts.tool_capable} usable by tret
       </div>
       <table className="mono-table" style={{ marginTop: 8 }}>
         <thead>
@@ -589,7 +589,7 @@ function TestResult({ result }: { result: LocalProviderTest }) {
             color: 'var(--text-muted)',
           }}
         >
-          A ✗ means the model failed bench's forced-tool-call probe and is excluded from routing —
+          A ✗ means the model failed tret's forced-tool-call probe and is excluded from routing —
           pick a tool-calling build (e.g. <code>{OLLAMA_MODEL}</code>) rather than working around
           it. See <code>docs/local-models.md</code>.
         </div>

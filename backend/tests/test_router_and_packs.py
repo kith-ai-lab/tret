@@ -1,9 +1,9 @@
 """Deterministic router fallback + pack validation."""
 from pathlib import Path
 
-from bench.packs.loader import validate_pack
-from bench.providers.catalog import ModelCatalog, ProviderRegistry
-from bench.router_llm.fallback import fallback_model
+from tret.packs.loader import validate_pack
+from tret.providers.catalog import ModelCatalog, ProviderRegistry
+from tret.router_llm.fallback import fallback_model
 
 PACKS_DIR = Path(__file__).parent.parent.parent / "packs"
 
@@ -48,7 +48,7 @@ def test_climate_pack_validates():
     }
     assert set(schemas) == {"divergence_verdict", "evidence_finding", "qa_assessment"}
     # Every task shape must be a router fallback key.
-    from bench.router_llm.fallback import FALLBACK_TABLE
+    from tret.router_llm.fallback import FALLBACK_TABLE
 
     for t in manifest.task_types:
         assert t.shape in FALLBACK_TABLE

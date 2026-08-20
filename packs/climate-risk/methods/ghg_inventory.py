@@ -1,6 +1,6 @@
 """GHG inventory (Scope 1 & 2, location-based) from carbon workbook activity data.
 
-bench method contract: JSON {"params", "inputs"} on stdin -> {"rows": [...]}
+tret method contract: JSON {"params", "inputs"} on stdin -> {"rows": [...]}
 on stdout. Pure function, stdlib only.
 
 FACTORS is the pinned demo emission-factor set (factor-set id below). It is

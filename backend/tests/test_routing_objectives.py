@@ -12,11 +12,11 @@ from decimal import Decimal
 import pytest
 from fastapi import HTTPException
 
-from bench.api.harnesses import _validate_policy
-from bench.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
-from bench.engine.harness import effective_model_policy
-from bench.router_llm.fallback import fallback_model
-from bench.router_llm.objectives import (
+from tret.api.harnesses import _validate_policy
+from tret.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
+from tret.engine.harness import effective_model_policy
+from tret.router_llm.fallback import fallback_model
+from tret.router_llm.objectives import (
     DEFAULT_OBJECTIVE,
     OBJECTIVES,
     THRIFT_OBJECTIVES,
@@ -24,12 +24,12 @@ from bench.router_llm.objectives import (
     objective_of,
     released_rank,
 )
-from bench.router_llm.prompts import (
+from tret.router_llm.prompts import (
     OBJECTIVE_RULES,
     ROUTING_PROMPT_VERSION,
     render_router_prompt,
 )
-from bench.router_llm.router import ModelRouter, RoutingDecision
+from tret.router_llm.router import ModelRouter, RoutingDecision
 
 ECO_MODEL = "openrouter/google/gemini-3.5-flash-lite"  # cheapest energy in the catalog
 THRIFT_MODEL = "openrouter/deepseek/deepseek-v4-pro"  # cheapest output tokens

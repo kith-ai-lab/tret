@@ -3,7 +3,7 @@ of trust rule #1."""
 import json
 from pathlib import Path
 
-from bench.engine.validation import validate_cited_values, validate_payload
+from tret.engine.validation import validate_cited_values, validate_payload
 
 SCHEMA = json.loads(
     (Path(__file__).parent.parent.parent / "packs/climate-risk/schemas/divergence_verdict.schema.json").read_text()

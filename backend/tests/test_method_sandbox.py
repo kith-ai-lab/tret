@@ -10,10 +10,10 @@ import uuid
 
 import pytest
 
-from bench.packs import integrity
-from bench.packs.integrity import pack_content_hash
-from bench.services import methods
-from bench.services.methods import MethodError, execute_method, network_isolation_prefix
+from tret.packs import integrity
+from tret.packs.integrity import pack_content_hash
+from tret.services import methods
+from tret.services.methods import MethodError, execute_method, network_isolation_prefix
 
 ECHO_METHOD = """
 import json
@@ -219,7 +219,7 @@ async def test_off_linux_isolation_falls_back_but_says_so(monkeypatch, caplog):
     asked for one is told they did not get it.
     """
     monkeypatch.setattr(methods.get_settings(), "methods_network_isolation", True)
-    with caplog.at_level(logging.WARNING, logger="bench.methods"):
+    with caplog.at_level(logging.WARNING, logger="tret.methods"):
         assert await network_isolation_prefix() == []
     assert "WITHOUT network isolation" in caplog.text
     assert sys.platform in caplog.text

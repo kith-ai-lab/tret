@@ -24,9 +24,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from bench.api import docs
-from bench.api.auth import current_user
-from bench.db.engine import get_db
+from tret.api import docs
+from tret.api.auth import current_user
+from tret.db.engine import get_db
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 METHODOLOGY = REPO_ROOT / "docs" / "emissions-methodology.md"
@@ -114,7 +114,7 @@ def test_an_unreadable_file_is_reported_the_same_way(client: TestClient, monkeyp
     [
         "architecture",  # a real doc, deliberately not registered
         "../.env",
-        "..%2f..%2fbackend%2fbench%2fconfig.py",
+        "..%2f..%2fbackend%2ftret%2fconfig.py",
         "emissions-methodology.md",  # the filename is not the slug
         "",
     ],
@@ -137,7 +137,7 @@ def test_backend_image_copies_docs():
         "tests and return available:false in the built image"
     )
     # The COPY above is only reachable from a root build context.
-    assert "COPY backend/bench ./bench" in dockerfile
+    assert "COPY backend/tret ./tret" in dockerfile
 
 
 def test_fly_image_copies_docs():
@@ -156,5 +156,5 @@ def test_dockerignore_does_not_exclude_what_the_images_copy():
     """A .dockerignore shrinks the root context; it must not shrink away docs/."""
     ignore = (REPO_ROOT / ".dockerignore").read_text().splitlines()
     patterns = {line.strip() for line in ignore if line.strip() and not line.startswith("#")}
-    for needed in ("docs", "packs", "backend", "frontend", "docs/", "backend/bench"):
+    for needed in ("docs", "packs", "backend", "frontend", "docs/", "backend/tret"):
         assert needed not in patterns, f".dockerignore excludes {needed}, which an image COPYs"

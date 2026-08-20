@@ -10,7 +10,7 @@ from decimal import Decimal
 
 import pytest
 
-from bench.engine.supervisor import (
+from tret.engine.supervisor import (
     KIND_NONE,
     KIND_SWITCH,
     REASON_CONTEXT,
@@ -24,9 +24,9 @@ from bench.engine.supervisor import (
     choose_target,
     normalize_for_provider,
 )
-from bench.providers.base import Msg, ToolCall
-from bench.providers.catalog import ModelInfo
-from bench.router_llm.priors import ModelPrior
+from tret.providers.base import Msg, ToolCall
+from tret.providers.catalog import ModelInfo
+from tret.router_llm.priors import ModelPrior
 
 
 def _model(name: str, *, window: int = 200_000, out: str = "5", inp: str = "1") -> ModelInfo:
@@ -152,7 +152,7 @@ def test_a_switch_that_would_blow_the_cost_cap_is_refused():
 
 
 def test_a_refusal_still_names_what_was_wrong():
-    # "The run was stuck and bench chose not to act" is what an operator reading
+    # "The run was stuck and tret chose not to act" is what an operator reading
     # a failed run needs, and it is invisible unless it is written down.
     state = _state(consecutive_terminal_failures=STALL_TERMINAL_FAILURES, switches_used=5)
     result = _assess(state)

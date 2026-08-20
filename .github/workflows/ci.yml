@@ -16,7 +16,7 @@ jobs:
       - name: Install
         working-directory: backend
         # -c constraints.txt pins every dependency pip resolves here — direct and
-        # transitive — to the exact versions bench is tested against, so this
+        # transitive — to the exact versions tret is tested against, so this
         # step installs the same thing today and a year from now instead of
         # "whatever currently satisfies pyproject.toml's >= ranges." See
         # constraints.txt's own header for why this is a plain pip constraints
@@ -25,7 +25,7 @@ jobs:
       - name: Lint
         working-directory: backend
         # Tests are linted too: the eval suite is production-grade code.
-        run: ruff check bench tests
+        run: ruff check tret tests
       - name: Test
         working-directory: backend
         # Includes tests/evals — the golden runs are a build gate, not a
@@ -45,8 +45,8 @@ jobs:
         working-directory: backend
         # Also runs the method safety scan and prints the integrity hash.
         run: |
-          python -m bench.cli packs validate ../packs/climate-risk
-          python -m bench.cli packs hash ../packs/climate-risk
+          python -m tret.cli packs validate ../packs/climate-risk
+          python -m tret.cli packs hash ../packs/climate-risk
 
   # The schema lifecycle, against a real Postgres. The `backend` job above runs
   # everything on sqlite/in-process fakes, which is exactly why it stayed green
@@ -59,21 +59,21 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: bench
-          POSTGRES_PASSWORD: bench
+          POSTGRES_USER: tret
+          POSTGRES_PASSWORD: tret
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U bench"
+          --health-cmd "pg_isready -U tret"
           --health-interval 3s
           --health-timeout 3s
           --health-retries 20
     env:
-      PGPASSWORD: bench
+      PGPASSWORD: tret
       # tests/test_migrations_postgres.py creates and drops a throwaway database
       # per test; this URL is only the maintenance connection.
-      BENCH_TEST_POSTGRES_URL: postgresql+asyncpg://bench:bench@localhost:5432/postgres
+      TRET_TEST_POSTGRES_URL: postgresql+asyncpg://tret:tret@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -100,9 +100,9 @@ jobs:
         # branch serves. Kept separate from the tests above, which drive Alembic
         # through its Python API on a connection the app already owns.
         env:
-          BENCH_DATABASE_URL: postgresql+asyncpg://bench:bench@localhost:5432/bench_cli
+          TRET_DATABASE_URL: postgresql+asyncpg://tret:tret@localhost:5432/tret_cli
         run: |
-          psql -h localhost -U bench -d postgres -c 'CREATE DATABASE bench_cli'
+          psql -h localhost -U tret -d postgres -c 'CREATE DATABASE tret_cli'
           alembic upgrade head
           alembic current | tee /tmp/current.txt
           grep -q "$(alembic heads | awk '{print $1}') (head)" /tmp/current.txt
@@ -110,7 +110,7 @@ jobs:
         working-directory: backend
         # Proves every downgrade() is real, not just the last one.
         env:
-          BENCH_DATABASE_URL: postgresql+asyncpg://bench:bench@localhost:5432/bench_cli
+          TRET_DATABASE_URL: postgresql+asyncpg://tret:tret@localhost:5432/tret_cli
         run: |
           alembic downgrade base
           alembic upgrade head
@@ -162,7 +162,7 @@ jobs:
           set -e
           login_status=$(curl -sS -o /tmp/login.json -w '%{http_code}' \
             -c /tmp/cookies.txt -H 'Content-Type: application/json' \
-            -d '{"email":"admin@example.com","password":"bench-admin"}' \
+            -d '{"email":"admin@example.com","password":"tret-admin"}' \
             http://localhost:8000/api/auth/login)
           if [ "$login_status" != "200" ]; then
             echo "::error::admin login failed (HTTP $login_status) — the seeded admin user is missing or bootstrap did not run"

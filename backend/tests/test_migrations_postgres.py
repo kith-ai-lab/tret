@@ -1,10 +1,10 @@
 """The migration chain, exercised against a real Postgres. **This is the suite
 that would have caught the create_all/Alembic split-brain bug.**
 
-Skipped unless `BENCH_TEST_POSTGRES_URL` points at a Postgres server the tests may
+Skipped unless `TRET_TEST_POSTGRES_URL` points at a Postgres server the tests may
 create and drop databases on — CI sets it to the service container, and locally:
 
-    BENCH_TEST_POSTGRES_URL=postgresql+asyncpg://bench:bench@localhost:5432/postgres \\
+    TRET_TEST_POSTGRES_URL=postgresql+asyncpg://tret:tret@localhost:5432/postgres \\
         .venv/bin/python -m pytest tests/test_migrations_postgres.py -q
 
 Every test runs against its own freshly created database and drops it afterwards,
@@ -39,20 +39,20 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from bench.db.migrate import (
+from tret.db.migrate import (
     alembic_config,
     current_revisions,
     ensure_schema,
     plan_schema_upgrade,
     read_database_state,
 )
-from bench.db.models import Base
+from tret.db.models import Base
 
-ADMIN_URL = os.environ.get("BENCH_TEST_POSTGRES_URL", "")
+ADMIN_URL = os.environ.get("TRET_TEST_POSTGRES_URL", "")
 
 pytestmark = pytest.mark.skipif(
     not ADMIN_URL,
-    reason="set BENCH_TEST_POSTGRES_URL to a Postgres server where tests may create databases",
+    reason="set TRET_TEST_POSTGRES_URL to a Postgres server where tests may create databases",
 )
 
 # The pre-sprint head — the shape of a v0.1 install, i.e. the release early
@@ -73,7 +73,7 @@ def _url_for(database: str) -> str:
 @pytest.fixture
 async def database():
     """A throwaway database, dropped afterwards. Yields its URL."""
-    name = f"bench_test_{uuid.uuid4().hex[:12]}"
+    name = f"tret_test_{uuid.uuid4().hex[:12]}"
     admin = create_async_engine(ADMIN_URL, isolation_level="AUTOCOMMIT")
     try:
         async with admin.connect() as conn:
@@ -126,7 +126,7 @@ async def _diff(engine) -> list:
 
 
 async def _make_legacy_create_all_database(engine, revision: str = LEGACY_V01) -> None:
-    """Reproduce what an older bench release left behind.
+    """Reproduce what an older tret release left behind.
 
     Migrating to `revision` and then removing `alembic_version` gives a database
     with exactly that release's schema and no stamp — which is what
@@ -154,7 +154,7 @@ async def test_empty_database_migrates_to_head(engine):
 async def test_migrated_schema_has_no_drift_from_the_models(engine):
     """Models vs migrations. An empty autogenerate diff is the whole point.
 
-    If this fails, someone changed `bench/db/models.py` without writing the
+    If this fails, someone changed `tret/db/models.py` without writing the
     matching migration: fresh installs (which used to run create_all) would have
     the column and every upgraded install would not.
     """
@@ -279,21 +279,21 @@ def app_against(monkeypatch, tmp_path):
     """Point the app's cached engine/settings at `url`, and return create_app()."""
 
     def build(url: str):
-        from bench import config
-        from bench.db import engine as engine_module
+        from tret import config
+        from tret.db import engine as engine_module
 
         config.get_settings.cache_clear()
-        monkeypatch.setenv("BENCH_DATABASE_URL", url)
-        monkeypatch.setenv("BENCH_STORAGE_DIR", str(tmp_path / "storage"))
+        monkeypatch.setenv("TRET_DATABASE_URL", url)
+        monkeypatch.setenv("TRET_STORAGE_DIR", str(tmp_path / "storage"))
         monkeypatch.setattr(engine_module, "_engine", None)
         monkeypatch.setattr(engine_module, "_session_factory", None)
 
-        from bench.main import create_app
+        from tret.main import create_app
 
         return create_app()
 
     yield build
-    from bench import config
+    from tret import config
 
     config.get_settings.cache_clear()
 

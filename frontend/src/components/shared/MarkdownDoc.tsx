@@ -1,6 +1,6 @@
 /** A small, deliberately incomplete markdown renderer.
  *
- *  It is the app's only markdown renderer, used for three kinds of source: bench's
+ *  It is the app's only markdown renderer, used for three kinds of source: tret's
  *  own reference docs (the methodology dialog), pack-authored doctrine (the Packs
  *  viewer), and **model-authored** deliverable sections (the Deliverables
  *  preview). Written for the first; the other two replaced a second, weaker
@@ -13,7 +13,7 @@
  *  **Safety — the property that must not regress.** Every piece of the document
  *  becomes a React text node or element. `dangerouslySetInnerHTML` appears nowhere
  *  in this file, so React escapes the content for us: the methodology doc's own
- *  `BENCH_GRID_CO2E_G_PER_KWH=<your region>` shows up as that text rather than as
+ *  `TRET_GRID_CO2E_G_PER_KWH=<your region>` shows up as that text rather than as
  *  an unknown element, and a `<script>` in a doc — or in a model-drafted section
  *  built from an uploaded PDF — renders as visible characters. Link targets are
  *  additionally filtered to http/https/mailto, so a `javascript:` URL cannot
@@ -244,7 +244,7 @@ function render(source: string): ReactNode[] {
 
     // ── block quote ──
     // Model-authored deliverable sections quote source documents, and this
-    // renderer now shows their content (not just bench's own reference docs), so
+    // renderer now shows their content (not just tret's own reference docs), so
     // a `>` line renders as a quote instead of as a visible angle bracket.
     // Consecutive quote lines join into one; nesting is not supported.
     const quote = /^\s{0,3}>\s?(.*)$/.exec(line)

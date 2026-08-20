@@ -1,7 +1,7 @@
 """Production boot checks: refuse to start on the shipped development defaults."""
 import pytest
 
-from bench.config import (
+from tret.config import (
     DEFAULT_ADMIN_PASSWORD,
     DEFAULT_SECRET_KEY,
     InsecureConfigError,
@@ -54,8 +54,8 @@ def test_hardened_production_config_passes():
 def test_default_secret_key_is_fatal_in_production():
     fatal, _warnings = production_config_problems(_settings(secret_key=DEFAULT_SECRET_KEY))
     assert len(fatal) == 1
-    assert "BENCH_SECRET_KEY" in fatal[0]
-    with pytest.raises(InsecureConfigError, match="BENCH_SECRET_KEY"):
+    assert "TRET_SECRET_KEY" in fatal[0]
+    with pytest.raises(InsecureConfigError, match="TRET_SECRET_KEY"):
         enforce_production_safety(_settings(secret_key=DEFAULT_SECRET_KEY))
 
 
@@ -67,8 +67,8 @@ def test_empty_secret_key_is_fatal_in_production():
 def test_default_admin_password_is_fatal_in_production():
     fatal, _ = production_config_problems(_settings(admin_password=DEFAULT_ADMIN_PASSWORD))
     assert len(fatal) == 1
-    assert "BENCH_ADMIN_PASSWORD" in fatal[0]
-    with pytest.raises(InsecureConfigError, match="BENCH_ADMIN_PASSWORD"):
+    assert "TRET_ADMIN_PASSWORD" in fatal[0]
+    with pytest.raises(InsecureConfigError, match="TRET_ADMIN_PASSWORD"):
         enforce_production_safety(_settings(admin_password=DEFAULT_ADMIN_PASSWORD))
 
 
@@ -83,7 +83,7 @@ def test_insecure_cookie_warns_but_does_not_block():
     fatal, warnings = production_config_problems(_settings(cookie_secure=False))
     assert fatal == []
     assert len(warnings) == 1
-    assert "BENCH_COOKIE_SECURE" in warnings[0]
+    assert "TRET_COOKIE_SECURE" in warnings[0]
 
     class Recorder:
         def __init__(self):
@@ -94,4 +94,4 @@ def test_insecure_cookie_warns_but_does_not_block():
 
     recorder = Recorder()
     enforce_production_safety(_settings(cookie_secure=False), log=recorder)  # no raise
-    assert any("BENCH_COOKIE_SECURE" in m for m in recorder.messages)
+    assert any("TRET_COOKIE_SECURE" in m for m in recorder.messages)

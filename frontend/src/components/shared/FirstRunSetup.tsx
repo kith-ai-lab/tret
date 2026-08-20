@@ -7,7 +7,7 @@ import { Modal } from './Modal'
 import { ProviderKeyForm } from './ProviderKeyForm'
 
 /** First-run gate: until at least one provider is configured (a cloud key, or
- *  the local server via BENCH_LOCAL_BASE_URL), every run bench could start
+ *  the local server via TRET_LOCAL_BASE_URL), every run tret could start
  *  would fail — so say so, prominently, instead of letting a fresh install look
  *  quietly broken.
  *
@@ -36,7 +36,7 @@ export function FirstRunSetup() {
   return (
     <>
       <div className="first-run-banner" role="status">
-        <span>No AI provider is configured — bench cannot run anything yet.</span>
+        <span>No AI provider is configured — tret cannot run anything yet.</span>
         <span style={{ flex: 1 }} />
         {isAdmin ? (
           <button className="btn btn-sm btn-primary" onClick={() => setWelcomeOpen(true)}>
@@ -53,13 +53,13 @@ export function FirstRunSetup() {
       <Modal
         open={welcomeOpen}
         onClose={closeWelcome}
-        title="Welcome to bench"
+        title="Welcome to tret"
         subtitle="One step before anything can run"
         width={620}
       >
         <div className="stack" style={{ gap: 16 }}>
           <div style={{ fontSize: 13.5, lineHeight: 1.6 }}>
-            bench sends every task to an AI model, and no provider is set up yet. The fastest
+            tret sends every task to an AI model, and no provider is set up yet. The fastest
             path is to paste one API key — an OpenRouter key alone is enough (it reaches many
             models), and Anthropic or Moonshot (kimi) keys work too.
           </div>
@@ -78,7 +78,7 @@ export function FirstRunSetup() {
           )}
 
           <div className="fine-print">
-            Prefer no cloud at all? bench can use a local model server (e.g. Ollama) instead —
+            Prefer no cloud at all? tret can use a local model server (e.g. Ollama) instead —
             no key, nothing leaves your machine. The step-by-step guide is under{' '}
             <Link to="/settings" onClick={closeWelcome}>
               Settings → Set up local models

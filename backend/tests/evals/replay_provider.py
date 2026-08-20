@@ -22,7 +22,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
-from bench.providers.base import (
+from tret.providers.base import (
     JsonCompletion,
     Msg,
     Provider,

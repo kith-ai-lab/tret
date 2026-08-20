@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from alembic.script import ScriptDirectory
 
-from bench.db.migrate import (
+from tret.db.migrate import (
     KNOWN_TABLES,
     REVISION_MARKERS,
     DatabaseState,
@@ -102,7 +102,7 @@ def test_empty_schema_with_an_empty_alembic_version_table_is_empty_not_legacy():
     assert plan_schema_upgrade(state).kind == "empty"
 
 
-def test_unrelated_tables_do_not_make_bench_claim_the_database():
+def test_unrelated_tables_do_not_make_tret_claim_the_database():
     state = DatabaseState(tables=frozenset({"some_other_app_table"}))
     assert plan_schema_upgrade(state).kind == "empty"
 
@@ -173,18 +173,18 @@ def test_every_revision_has_at_least_one_marker_no_earlier_revision_has():
 
 
 def test_known_tables_covers_every_model_table():
-    """Otherwise a database full of bench tables could be misread as empty."""
-    from bench.db.models import Base
+    """Otherwise a database full of tret tables could be misread as empty."""
+    from tret.db.models import Base
 
     assert set(Base.metadata.tables) == set(KNOWN_TABLES)
 
 
 # ── the escape hatches ────────────────────────────────────────────────────────
 async def test_skip_env_var_short_circuits_the_whole_step(monkeypatch):
-    from bench import config
+    from tret import config
 
-    monkeypatch.setenv("BENCH_SKIP_MIGRATIONS", "1")
-    # BENCH_SKIP_MIGRATIONS is a Settings field, and get_settings() is lru_cached,
+    monkeypatch.setenv("TRET_SKIP_MIGRATIONS", "1")
+    # TRET_SKIP_MIGRATIONS is a Settings field, and get_settings() is lru_cached,
     # so the env var only lands in a freshly built Settings.
     config.get_settings.cache_clear()
 
@@ -215,13 +215,13 @@ async def test_non_postgres_url_creates_tables_from_the_models_and_skips_alembic
     from sqlalchemy import Column, Integer, MetaData, Table, inspect
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    from bench.db import models
+    from tret.db import models
 
     metadata = MetaData()
     Table("stand_in", metadata, Column("id", Integer, primary_key=True))
     monkeypatch.setattr(models, "Base", type("Base", (), {"metadata": metadata}))
 
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'bench.db'}")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tret.db'}")
     try:
         assert await ensure_schema(engine) is None
         async with engine.connect() as conn:

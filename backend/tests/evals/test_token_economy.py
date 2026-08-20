@@ -1,6 +1,6 @@
-"""Golden runs for the token economy — bench's climate mission, mechanized.
+"""Golden runs for the token economy — tret's climate mission, mechanized.
 
-Every token bench sends is energy spent, so the engine treats context size as a
+Every token tret sends is energy spent, so the engine treats context size as a
 property to be measured and bounded, not a side effect:
 
 * `test_run_records_*`      — what the prompt was made of is recorded per
@@ -21,10 +21,10 @@ from golden_world import CLIMATE_PACK
 from replay_provider import ReplayProvider, ScriptedCall, ScriptedTurn, cite, tool_results
 from test_golden_runs import DIVERGENCE_NOTE, PERIL, SITE, run_happy_path
 
-from bench.api.runs import get_run
-from bench.engine import harness as harness_module
-from bench.engine import tools as tools_module
-from bench.engine.validation import validate_cited_values
+from tret.api.runs import get_run
+from tret.engine import harness as harness_module
+from tret.engine import tools as tools_module
+from tret.engine.validation import validate_cited_values
 
 HAZARD_ROWS = list(csv.DictReader((CLIMATE_PACK / "sample-data/hazard_scores.csv").open()))
 TOTAL_HAZARD_ROWS = len(HAZARD_ROWS)

@@ -15,10 +15,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from bench.api import settings as settings_api
-from bench.api.auth import current_user
-from bench.db.engine import get_db
-from bench.providers.catalog import ModelInfo
+from tret.api import settings as settings_api
+from tret.api.auth import current_user
+from tret.db.engine import get_db
+from tret.providers.catalog import ModelInfo
 
 
 def _model(model_id: str, provider: str) -> ModelInfo:
@@ -114,10 +114,10 @@ def test_a_hung_openrouter_fetch_does_not_hang_the_endpoint(client, monkeypatch)
 def test_the_timeout_is_logged_so_a_degraded_catalog_is_explicable(client, monkeypatch, caplog):
     _install(monkeypatch, FakeCatalog(local_delay=30.0))
     monkeypatch.setattr(settings_api, "MODELS_DISCOVERY_TIMEOUT_SECONDS", 0.05)
-    with caplog.at_level("WARNING", logger="bench.settings"):
+    with caplog.at_level("WARNING", logger="tret.settings"):
         client.get("/api/models")
     assert "model discovery did not finish" in caplog.text
-    assert "BENCH_LOCAL_BASE_URL" in caplog.text
+    assert "TRET_LOCAL_BASE_URL" in caplog.text
 
 
 def test_the_two_refreshes_run_concurrently(client, monkeypatch):

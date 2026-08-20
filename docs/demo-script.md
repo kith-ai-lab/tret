@@ -1,12 +1,12 @@
 # Demo Script (~10 minutes)
 
-Login: `admin@example.com` / `bench-admin` (or your `.env` values).
+Login: `admin@example.com` / `tret-admin` (or your `.env` values).
 Everything below works on a fresh `docker compose up` with one OpenRouter key.
 
 ## The one-liner
 
 > "Coding agents get a harness — tools, guardrails, audit. Analysts get a
-> chatbox and a prayer. bench is the harness for non-technical knowledge
+> chatbox and a prayer. tret is the harness for non-technical knowledge
 > work: the AI can't invent numbers, its outputs are drafts until a named
 > human approves, and every run — including *why this model was chosen* — is
 > auditable. Climate risk assessment is the first domain pack; the core is
@@ -66,7 +66,7 @@ Fictional but hand-designed so every demo path hits something interesting:
    requests. "A gap becomes a work item, not a hallucination."
 6. **Packs.** Open the climate-risk pack: the doctrine files (the analyst's
    rules, versioned and hashed), the verdict schemas, the task types. Close:
-   "Swap this directory and bench is a workbench for a different profession —
+   "Swap this directory and tret is a workbench for a different profession —
    contract review, grant compliance, safety audits. That's the open-source
    pitch."
 

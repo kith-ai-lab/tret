@@ -16,7 +16,7 @@ depends_on = None
 
 def upgrade() -> None:
     # Every column here is derived from runs/findings/approvals, so this table is
-    # safe to drop and rebuild (`bench outcomes backfill`) — which is also why
+    # safe to drop and rebuild (`tret outcomes backfill`) — which is also why
     # the FK cascades: an outcome without its run is not evidence of anything.
     op.create_table(
         'run_outcomes',

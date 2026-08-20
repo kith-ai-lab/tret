@@ -2,13 +2,13 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: bench
-      POSTGRES_PASSWORD: bench
-      POSTGRES_DB: bench
+      POSTGRES_USER: tret
+      POSTGRES_PASSWORD: tret
+      POSTGRES_DB: tret
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bench"]
+      test: ["CMD-SHELL", "pg_isready -U tret"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -16,23 +16,23 @@ services:
   backend:
     # Root context, not ./backend: the image also carries the repository's docs/
     # so GET /api/docs can serve the emissions methodology to the in-product
-    # dialog (backend/bench/api/docs.py). The root .dockerignore keeps the wider
+    # dialog (backend/tret/api/docs.py). The root .dockerignore keeps the wider
     # context from dragging .venv / node_modules into the build.
     build:
       context: .
       dockerfile: backend/Dockerfile
     environment:
-      BENCH_DATABASE_URL: postgresql+asyncpg://bench:bench@postgres:5432/bench
-      BENCH_SECRET_KEY: ${BENCH_SECRET_KEY:-dev-secret-change-me}
-      BENCH_ADMIN_EMAIL: ${BENCH_ADMIN_EMAIL:-admin@example.com}
-      BENCH_ADMIN_PASSWORD: ${BENCH_ADMIN_PASSWORD:-bench-admin}
-      BENCH_STORAGE_DIR: /data/storage
-      BENCH_PACKS_DIR: /packs
-      BENCH_ANTHROPIC_API_KEY: ${BENCH_ANTHROPIC_API_KEY:-}
-      BENCH_MOONSHOT_API_KEY: ${BENCH_MOONSHOT_API_KEY:-}
-      BENCH_OPENROUTER_API_KEY: ${BENCH_OPENROUTER_API_KEY:-}
-      BENCH_ROUTER_MODEL: ${BENCH_ROUTER_MODEL:-anthropic/claude-haiku-4-5}
-      BENCH_ROUTER_TIMEOUT_SECONDS: ${BENCH_ROUTER_TIMEOUT_SECONDS:-10.0}
+      TRET_DATABASE_URL: postgresql+asyncpg://tret:tret@postgres:5432/tret
+      TRET_SECRET_KEY: ${TRET_SECRET_KEY:-dev-secret-change-me}
+      TRET_ADMIN_EMAIL: ${TRET_ADMIN_EMAIL:-admin@example.com}
+      TRET_ADMIN_PASSWORD: ${TRET_ADMIN_PASSWORD:-tret-admin}
+      TRET_STORAGE_DIR: /data/storage
+      TRET_PACKS_DIR: /packs
+      TRET_ANTHROPIC_API_KEY: ${TRET_ANTHROPIC_API_KEY:-}
+      TRET_MOONSHOT_API_KEY: ${TRET_MOONSHOT_API_KEY:-}
+      TRET_OPENROUTER_API_KEY: ${TRET_OPENROUTER_API_KEY:-}
+      TRET_ROUTER_MODEL: ${TRET_ROUTER_MODEL:-anthropic/claude-haiku-4-5}
+      TRET_ROUTER_TIMEOUT_SECONDS: ${TRET_ROUTER_TIMEOUT_SECONDS:-10.0}
       # Every knob .env.example documents has to be listed here or it does not
       # reach the container: compose reads .env only to interpolate ${...}, and
       # nothing copies .env into the image. tests/test_compose_env.py asserts
@@ -42,107 +42,107 @@ services:
       # The `:-<default>` values are deliberate rather than empty: an unset knob
       # would otherwise arrive as an empty string, and "" is not a valid int,
       # float or bool, so the backend would refuse to boot.
-      BENCH_OPENROUTER_CATALOG: ${BENCH_OPENROUTER_CATALOG:-true}
+      TRET_OPENROUTER_CATALOG: ${TRET_OPENROUTER_CATALOG:-true}
       # Attribution headers OpenRouter shows on its dashboard. Overridable here
       # so a fork or a private deployment is not announcing this repo's URL.
-      BENCH_OPENROUTER_REFERER: ${BENCH_OPENROUTER_REFERER:-https://github.com/bench-platform/bench}
-      BENCH_OPENROUTER_TITLE: ${BENCH_OPENROUTER_TITLE:-bench}
-      BENCH_LOGIN_MAX_ATTEMPTS: ${BENCH_LOGIN_MAX_ATTEMPTS:-10}
-      BENCH_LOGIN_WINDOW_SECONDS: ${BENCH_LOGIN_WINDOW_SECONDS:-300.0}
-      BENCH_METHODS_NETWORK_ISOLATION: ${BENCH_METHODS_NETWORK_ISOLATION:-true}
-      # ── outbound network (docs/hardening.md §9, bench/net/) ─────────────
-      # Three switchable classes plus `local`. BENCH_EGRESS=off is the
+      TRET_OPENROUTER_REFERER: ${TRET_OPENROUTER_REFERER:-https://github.com/tret-platform/tret}
+      TRET_OPENROUTER_TITLE: ${TRET_OPENROUTER_TITLE:-tret}
+      TRET_LOGIN_MAX_ATTEMPTS: ${TRET_LOGIN_MAX_ATTEMPTS:-10}
+      TRET_LOGIN_WINDOW_SECONDS: ${TRET_LOGIN_WINDOW_SECONDS:-300.0}
+      TRET_METHODS_NETWORK_ISOLATION: ${TRET_METHODS_NETWORK_ISOLATION:-true}
+      # ── outbound network (docs/hardening.md §9, tret/net/) ──────────────
+      # Three switchable classes plus `local`. TRET_EGRESS=off is the
       # air-gapped deployment: no cloud provider, no catalog, no web — a local
       # model server still works, provided it really is on a private address.
-      BENCH_EGRESS: ${BENCH_EGRESS:-on}
-      BENCH_EGRESS_PROVIDER: ${BENCH_EGRESS_PROVIDER:-on}
-      BENCH_EGRESS_CATALOG: ${BENCH_EGRESS_CATALOG:-on}
-      BENCH_EGRESS_LOCAL: ${BENCH_EGRESS_LOCAL:-on}
+      TRET_EGRESS: ${TRET_EGRESS:-on}
+      TRET_EGRESS_PROVIDER: ${TRET_EGRESS_PROVIDER:-on}
+      TRET_EGRESS_CATALOG: ${TRET_EGRESS_CATALOG:-on}
+      TRET_EGRESS_LOCAL: ${TRET_EGRESS_LOCAL:-on}
       # Web search and page fetch. OFF by default — it is the one class whose
       # destination a model chooses. `replay` reads only pages already
       # snapshotted, which is how a benchmark or an audit re-runs offline.
-      BENCH_EGRESS_RESEARCH: ${BENCH_EGRESS_RESEARCH:-off}
+      TRET_EGRESS_RESEARCH: ${TRET_EGRESS_RESEARCH:-off}
       # Empty means the public web. Set it to make research a real allowlist.
-      BENCH_EGRESS_RESEARCH_ALLOW_HOSTS: ${BENCH_EGRESS_RESEARCH_ALLOW_HOSTS:-}
-      BENCH_EGRESS_RESEARCH_MAX_BYTES: ${BENCH_EGRESS_RESEARCH_MAX_BYTES:-2000000}
-      BENCH_EGRESS_RESEARCH_TIMEOUT_SECONDS: ${BENCH_EGRESS_RESEARCH_TIMEOUT_SECONDS:-20.0}
-      BENCH_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN: ${BENCH_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN:-10}
+      TRET_EGRESS_RESEARCH_ALLOW_HOSTS: ${TRET_EGRESS_RESEARCH_ALLOW_HOSTS:-}
+      TRET_EGRESS_RESEARCH_MAX_BYTES: ${TRET_EGRESS_RESEARCH_MAX_BYTES:-2000000}
+      TRET_EGRESS_RESEARCH_TIMEOUT_SECONDS: ${TRET_EGRESS_RESEARCH_TIMEOUT_SECONDS:-20.0}
+      TRET_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN: ${TRET_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN:-10}
       # An app-level allowlist is a deterrent; a proxy the workload cannot
       # bypass is a boundary. Point this at yours for anything internet-facing.
-      BENCH_EGRESS_PROXY: ${BENCH_EGRESS_PROXY:-}
+      TRET_EGRESS_PROXY: ${TRET_EGRESS_PROXY:-}
       # Web search backend: "" (none) | brave | searxng. searxng keeps the query
       # itself inside your network.
-      BENCH_SEARCH_PROVIDER: ${BENCH_SEARCH_PROVIDER:-}
-      BENCH_SEARCH_API_KEY: ${BENCH_SEARCH_API_KEY:-}
-      BENCH_SEARXNG_BASE_URL: ${BENCH_SEARXNG_BASE_URL:-}
-      BENCH_LOCAL_DISPLAY_NAME: ${BENCH_LOCAL_DISPLAY_NAME:-Local}
-      BENCH_LOCAL_PROBE_TOOLS: ${BENCH_LOCAL_PROBE_TOOLS:-true}
+      TRET_SEARCH_PROVIDER: ${TRET_SEARCH_PROVIDER:-}
+      TRET_SEARCH_API_KEY: ${TRET_SEARCH_API_KEY:-}
+      TRET_SEARXNG_BASE_URL: ${TRET_SEARXNG_BASE_URL:-}
+      TRET_LOCAL_DISPLAY_NAME: ${TRET_LOCAL_DISPLAY_NAME:-Local}
+      TRET_LOCAL_PROBE_TOOLS: ${TRET_LOCAL_PROBE_TOOLS:-true}
       # Eco accounting — docs/eco-accounting.md, docs/emissions-methodology.md.
       # 470 gCO2e/kWh is the IEA 2024 global power-sector average.
-      BENCH_GRID_CO2E_G_PER_KWH: ${BENCH_GRID_CO2E_G_PER_KWH:-470.0}
+      TRET_GRID_CO2E_G_PER_KWH: ${TRET_GRID_CO2E_G_PER_KWH:-470.0}
       # GHG Protocol Scope 2 basis of that factor: location_based | market_based
       # | unspecified. The default factor is a physical-grid average.
-      BENCH_GRID_CO2E_BASIS: ${BENCH_GRID_CO2E_BASIS:-location_based}
+      TRET_GRID_CO2E_BASIS: ${TRET_GRID_CO2E_BASIS:-location_based}
       # Per-provider grid factors, as JSON keyed by provider name. Blank means
       # none configured. Quote it in .env, single quotes and no spaces around the
       # JSON, e.g.
-      #   BENCH_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based"}}
-      # Operator configuration only — bench never infers a region from an IP and
+      #   TRET_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based"}}
+      # Operator configuration only — tret never infers a region from an IP and
       # makes no network call to resolve a factor.
-      BENCH_GRID_FACTORS: ${BENCH_GRID_FACTORS:-}
-      # Blank on purpose: unset means "use BENCH_GRID_CO2E_G_PER_KWH for local
+      TRET_GRID_FACTORS: ${TRET_GRID_FACTORS:-}
+      # Blank on purpose: unset means "use TRET_GRID_CO2E_G_PER_KWH for local
       # inference too". A number here would silently defeat that fallback. Legacy
-      # but still honoured — BENCH_GRID_FACTORS["local"] supersedes it.
-      BENCH_LOCAL_GRID_CO2E_G_PER_KWH: ${BENCH_LOCAL_GRID_CO2E_G_PER_KWH:-}
-      BENCH_LOCAL_GRID_CO2E_BASIS: ${BENCH_LOCAL_GRID_CO2E_BASIS:-unspecified}
-      BENCH_DATACENTER_PUE: ${BENCH_DATACENTER_PUE:-1.2}
-      BENCH_LOCAL_PUE: ${BENCH_LOCAL_PUE:-1.05}
+      # but still honoured — TRET_GRID_FACTORS["local"] supersedes it.
+      TRET_LOCAL_GRID_CO2E_G_PER_KWH: ${TRET_LOCAL_GRID_CO2E_G_PER_KWH:-}
+      TRET_LOCAL_GRID_CO2E_BASIS: ${TRET_LOCAL_GRID_CO2E_BASIS:-unspecified}
+      TRET_DATACENTER_PUE: ${TRET_DATACENTER_PUE:-1.2}
+      TRET_LOCAL_PUE: ${TRET_LOCAL_PUE:-1.05}
       # Uptime Institute 2024 industry average, for self-hosting in a real
       # machine room rather than on a desk.
-      BENCH_ONPREM_PUE: ${BENCH_ONPREM_PUE:-1.56}
-      BENCH_LOCAL_DEPLOYMENT_PROFILE: ${BENCH_LOCAL_DEPLOYMENT_PROFILE:-workstation}
-      BENCH_EMBODIED_G_PER_RUN: ${BENCH_EMBODIED_G_PER_RUN:-0.0}
+      TRET_ONPREM_PUE: ${TRET_ONPREM_PUE:-1.56}
+      TRET_LOCAL_DEPLOYMENT_PROFILE: ${TRET_LOCAL_DEPLOYMENT_PROFILE:-workstation}
+      TRET_EMBODIED_G_PER_RUN: ${TRET_EMBODIED_G_PER_RUN:-0.0}
       # Multiplicative judgment band (central/2.5 .. central x 2.5), NOT a
       # confidence interval.
-      BENCH_UNCERTAINTY_BAND_LOW: ${BENCH_UNCERTAINTY_BAND_LOW:-2.5}
-      BENCH_UNCERTAINTY_BAND_HIGH: ${BENCH_UNCERTAINTY_BAND_HIGH:-2.5}
-      BENCH_EMISSIONS_BASELINE_MODEL: ${BENCH_EMISSIONS_BASELINE_MODEL:-}
+      TRET_UNCERTAINTY_BAND_LOW: ${TRET_UNCERTAINTY_BAND_LOW:-2.5}
+      TRET_UNCERTAINTY_BAND_HIGH: ${TRET_UNCERTAINTY_BAND_HIGH:-2.5}
+      TRET_EMISSIONS_BASELINE_MODEL: ${TRET_EMISSIONS_BASELINE_MODEL:-}
       # Local inference server (Ollama, LM Studio, vLLM, llama.cpp), for running
       # with no cloud provider at all — docs/local-models.md. From inside this
       # container your host's server is NOT localhost: use
-      # BENCH_LOCAL_BASE_URL=http://host.docker.internal:11434/v1 (the
+      # TRET_LOCAL_BASE_URL=http://host.docker.internal:11434/v1 (the
       # extra_hosts entry below makes that name resolve on Linux too).
       #
       # Using the bundled `local` profile below instead? Put
-      # BENCH_LOCAL_BASE_URL=http://ollama:11434/v1 in .env. It stays .env-driven
-      # on purpose: hard-wiring the ollama URL here would make bench report
+      # TRET_LOCAL_BASE_URL=http://ollama:11434/v1 in .env. It stays .env-driven
+      # on purpose: hard-wiring the ollama URL here would make tret report
       # local as configured even when the profile is off, i.e. permanently
       # configured-but-down.
-      BENCH_LOCAL_BASE_URL: ${BENCH_LOCAL_BASE_URL:-}
-      BENCH_LOCAL_API_KEY: ${BENCH_LOCAL_API_KEY:-}
+      TRET_LOCAL_BASE_URL: ${TRET_LOCAL_BASE_URL:-}
+      TRET_LOCAL_API_KEY: ${TRET_LOCAL_API_KEY:-}
       # This file is the local quickstart, so it defaults to development mode:
       # plain HTTP on localhost and the shipped default secret/password, so
       # `docker compose up` just works. Do not expose it to a network as-is.
       #
-      # For a real deployment, put these in .env — with production set, bench
+      # For a real deployment, put these in .env — with production set, tret
       # refuses to boot while the shipped default secret key or admin password
       # is still in place, rather than running insecurely (docs/hardening.md).
       # Terminate TLS in front of it; cookie_secure keeps the session cookie off
       # plain HTTP. Neither line needs editing here:
-      #   BENCH_ENVIRONMENT=production
-      #   BENCH_COOKIE_SECURE=true
-      #   BENCH_SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
-      #   BENCH_ADMIN_PASSWORD=<strong password>
-      BENCH_ENVIRONMENT: ${BENCH_ENVIRONMENT:-development}
-      BENCH_COOKIE_SECURE: ${BENCH_COOKIE_SECURE:-false}
+      #   TRET_ENVIRONMENT=production
+      #   TRET_COOKIE_SECURE=true
+      #   TRET_SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+      #   TRET_ADMIN_PASSWORD=<strong password>
+      TRET_ENVIRONMENT: ${TRET_ENVIRONMENT:-development}
+      TRET_COOKIE_SECURE: ${TRET_COOKIE_SECURE:-false}
       # Skip the boot-time `alembic upgrade head`. Leave false unless you run
-      # migrations as a separate deploy step — bench then assumes the database
+      # migrations as a separate deploy step — tret then assumes the database
       # is already at head (docs/upgrading.md).
-      BENCH_SKIP_MIGRATIONS: ${BENCH_SKIP_MIGRATIONS:-false}
+      TRET_SKIP_MIGRATIONS: ${TRET_SKIP_MIGRATIONS:-false}
     volumes:
       - ./packs:/packs:ro
       - storage:/data/storage
-    # So BENCH_LOCAL_BASE_URL can reach a model server running on the host.
+    # So TRET_LOCAL_BASE_URL can reach a model server running on the host.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -160,8 +160,8 @@ services:
 
   # ── bundled local model server (opt-in) ────────────────────────────────────
   # `docker compose --profile local up` adds an Ollama server and pulls one
-  # tool-capable model into it, so bench can run with no cloud key and no manual
-  # install. Set BENCH_LOCAL_BASE_URL=http://ollama:11434/v1 in .env to use it.
+  # tool-capable model into it, so tret can run with no cloud key and no manual
+  # install. Set TRET_LOCAL_BASE_URL=http://ollama:11434/v1 in .env to use it.
   #
   # Set expectations before you start it:
   #   - the first start downloads multi-GB model weights (a few GB, once —
@@ -177,14 +177,14 @@ services:
       # Named volume: pulled weights survive `docker compose down`.
       - ollama:/root/.ollama
     # Reachable as http://ollama:11434 on the compose network only — no host
-    # port is published, since bench is the only thing that needs to talk to it.
+    # port is published, since tret is the only thing that needs to talk to it.
     expose:
       - "11434"
     restart: unless-stopped
 
   # One-shot: waits for the server, pulls the default model, exits. Idempotent —
   # a model already in the volume re-downloads nothing, so re-running the profile
-  # is cheap. Pick a different model with BENCH_LOCAL_PULL_MODEL in .env.
+  # is cheap. Pick a different model with TRET_LOCAL_PULL_MODEL in .env.
   ollama-init:
     image: ollama/ollama
     profiles: ["local"]
@@ -192,7 +192,7 @@ services:
       - ollama
     environment:
       OLLAMA_HOST: http://ollama:11434
-      PULL_MODEL: ${BENCH_LOCAL_PULL_MODEL:-qwen2.5:7b-instruct}
+      PULL_MODEL: ${TRET_LOCAL_PULL_MODEL:-qwen2.5:7b-instruct}
     entrypoint: ["/bin/sh", "-c"]
     # $$ escapes compose interpolation: the shell expands these, not compose.
     command:

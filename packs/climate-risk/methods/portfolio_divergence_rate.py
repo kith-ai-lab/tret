@@ -1,6 +1,6 @@
 """Portfolio divergence rate — deterministic rollup of divergence verdicts.
 
-bench method contract: JSON {"params", "inputs"} on stdin -> {"rows": [...]}
+tret method contract: JSON {"params", "inputs"} on stdin -> {"rows": [...]}
 on stdout. Pure function, stdlib only.
 """
 import json

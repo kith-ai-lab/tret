@@ -12,10 +12,10 @@ from decimal import Decimal
 import pytest
 from fastapi import HTTPException
 
-from bench.api.chat import SendMessageBody, _assistant_message, _run_task_input, _validate_objective
-from bench.db.models import Run
-from bench.providers.catalog import ModelInfo, energy_accounting
-from bench.router_llm.objectives import OBJECTIVES
+from tret.api.chat import SendMessageBody, _assistant_message, _run_task_input, _validate_objective
+from tret.db.models import Run
+from tret.providers.catalog import ModelInfo, energy_accounting
+from tret.router_llm.objectives import OBJECTIVES
 
 
 def _model(energy_class: str = "L") -> ModelInfo:

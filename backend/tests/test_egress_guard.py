@@ -2,7 +2,7 @@
 
 `fetch_url` takes a URL a *model* chose, and a model's context includes uploaded
 third-party documents. So this suite is written from the attacker's side: each
-test is a way to make bench connect to something on its own network, and the
+test is a way to make tret connect to something on its own network, and the
 assertion is that it does not.
 
 DNS is stubbed throughout. These tests are about the decision, not about the
@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import pytest
 
-from bench.config import Settings
-from bench.net import guard
-from bench.net.guard import check_url
-from bench.net.policy import (
+from tret.config import Settings
+from tret.net import guard
+from tret.net.guard import check_url
+from tret.net.policy import (
     CLASS_LOCAL,
     CLASS_PROVIDER,
     CLASS_RESEARCH,

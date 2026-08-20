@@ -15,8 +15,8 @@ from unittest.mock import patch
 from replay_provider import ReplayProvider, ScriptedCall, ScriptedTurn
 from test_golden_runs import PERIL, SITE, divergence_happy_script
 
-from bench.engine.supervisor import KIND_SWITCH, Intervention
-from bench.providers.catalog import ModelCatalog
+from tret.engine.supervisor import KIND_SWITCH, Intervention
+from tret.providers.catalog import ModelCatalog
 
 BULK = "Narrative detail. " * 400
 
@@ -84,7 +84,7 @@ async def _run_with_switch(world, *, switch_at: int = 2):
             )
         return Intervention()
 
-    with patch("bench.engine.harness.assess", side_effect=fake_assess):
+    with patch("tret.engine.harness.assess", side_effect=fake_assess):
         result = await world.run(
             provider=provider,
             harness_id=harness_id,
@@ -191,7 +191,7 @@ async def test_a_run_that_never_switches_records_no_timeline(world):
 async def _outcomes(world, run_id):
     from sqlalchemy import select
 
-    from bench.db.models import RunOutcome
+    from tret.db.models import RunOutcome
 
     async with world.session_factory() as db:
         rows = (
@@ -215,7 +215,7 @@ async def _outcomes(world, run_id):
 
 
 async def test_a_switch_records_evidence_about_both_models(world):
-    """The pair is the strongest label bench can produce.
+    """The pair is the strongest label tret can produce.
 
     Not "this model averages 0.6 across a hundred different tasks", but "on this
     specific problem, at this iteration, this model stalled and that one
@@ -242,8 +242,8 @@ async def test_each_segments_evidence_carries_that_segments_own_spend(world):
 async def test_the_model_that_finished_owns_the_human_verdict(world):
     # The approved finding is the one it produced. Crediting the model that was
     # abandoned before recording anything would reward it for someone else's work.
-    from bench.db.models import Finding
-    from bench.services.outcomes import record_outcome_for_finding
+    from tret.db.models import Finding
+    from tret.services.outcomes import record_outcome_for_finding
 
     result, first, target = await _run_with_switch(world)
     async with world.session_factory() as db:
@@ -276,7 +276,7 @@ async def test_a_pinned_harness_is_never_switched_away_from(world):
         seen.append(state)
         return Intervention()
 
-    with patch("bench.engine.harness.assess", side_effect=fake_assess):
+    with patch("tret.engine.harness.assess", side_effect=fake_assess):
         result = await world.run(
             provider=provider,
             harness_id=harness_id,

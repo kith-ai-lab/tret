@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from bench.router_llm.outcomes import (
+from tret.router_llm.outcomes import (
     BASE_SCORE,
     DELIVERED,
     FAILED,
@@ -20,7 +20,7 @@ from bench.router_llm.outcomes import (
     score,
     size_band,
 )
-from bench.services.transcript import (
+from tret.services.transcript import (
     ENGINE_NUDGE_KEY,
     NUDGE_OUTPUT_BUDGET,
     NUDGE_TERMINAL,
@@ -237,7 +237,7 @@ def test_size_bands_are_ordered_and_total():
 def test_a_stall_handoff_is_the_strongest_negative_signal_available():
     # A within-task comparison: this model stalled on this specific problem and
     # another one picked it up. No average across different tasks says that.
-    from bench.router_llm.outcomes import HANDED_OFF, handoff_score
+    from tret.router_llm.outcomes import HANDED_OFF, handoff_score
 
     result = handoff_score("capability_stall")
     assert result.outcome_class == HANDED_OFF
@@ -247,7 +247,7 @@ def test_a_stall_handoff_is_the_strongest_negative_signal_available():
 def test_running_out_of_context_window_is_not_a_mark_against_a_model():
     # A window is a size, not a failing. Scoring this as poor quality would
     # teach the router that a reliable small-context model is a bad model.
-    from bench.router_llm.outcomes import (
+    from tret.router_llm.outcomes import (
         HANDED_OFF_CAPACITY,
         NON_QUALITY_CLASSES,
         handoff_score,
@@ -259,7 +259,7 @@ def test_running_out_of_context_window_is_not_a_mark_against_a_model():
 
 
 def test_both_kinds_of_handoff_explain_themselves():
-    from bench.router_llm.outcomes import handoff_score
+    from tret.router_llm.outcomes import handoff_score
 
     for reason in ("capability_stall", "context_exhausted"):
         assert handoff_score(reason).components["reason"] == reason

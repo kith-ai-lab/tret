@@ -6,7 +6,7 @@ enforces, and nothing checks the answer. Deliberately a *strong* baseline —
 full data, full doctrine, explicit permission to answer `insufficient_data`.
 
 Usage:
-    BENCH_OPENROUTER_API_KEY=... python arm_b.py --model openrouter/openai/gpt-5.6-luna \
+    TRET_OPENROUTER_API_KEY=... python arm_b.py --model openrouter/openai/gpt-5.6-luna \
         --cases cases.yaml --out results/arm_b.<model>.jsonl
 
 Output: one JSON line per case:
@@ -96,7 +96,7 @@ def parse_json_block(text: str):
 
 
 def run_case(client: httpx.Client, model: str, case: dict, api_key: str) -> dict:
-    # OpenRouter model ids don't carry bench's "openrouter/" prefix.
+    # OpenRouter model ids don't carry tret's "openrouter/" prefix.
     or_model = model.removeprefix("openrouter/")
     resp = client.post(
         OPENROUTER_URL,
@@ -136,9 +136,9 @@ def main() -> int:
     ap.add_argument("--only", help="comma-separated case ids (pilot runs)")
     args = ap.parse_args()
 
-    api_key = os.environ.get("BENCH_OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+    api_key = os.environ.get("TRET_OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
-        print("Set BENCH_OPENROUTER_API_KEY", file=sys.stderr)
+        print("Set TRET_OPENROUTER_API_KEY", file=sys.stderr)
         return 2
 
     cases = yaml.safe_load(Path(args.cases).read_text())["cases"]

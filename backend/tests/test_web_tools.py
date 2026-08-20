@@ -25,9 +25,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from bench.db.models import Base, Document, EgressCall, Project, Workspace
-from bench.engine import tools as tools_module
-from bench.engine.tools import (
+from tret.db.models import Base, Document, EgressCall, Project, Workspace
+from tret.engine import tools as tools_module
+from tret.engine.tools import (
     WEB_TOOL_NAMES,
     RunContext,
     ToolError,
@@ -38,15 +38,15 @@ from bench.engine.tools import (
     web_search,
     withheld_web_tools,
 )
-from bench.engine.validation import validate_cited_values
-from bench.net import policy
-from bench.net.fetch import SOURCE_KIND_WEB, FetchedPage
-from bench.net.policy import CLASS_RESEARCH, MODE_OFF, MODE_ON, MODE_REPLAY
+from tret.engine.validation import validate_cited_values
+from tret.net import policy
+from tret.net.fetch import SOURCE_KIND_WEB, FetchedPage
+from tret.net.policy import CLASS_RESEARCH, MODE_OFF, MODE_ON, MODE_REPLAY
 
 PAGE_HTML = b"<html><head><title>Filing</title></head><body><p>Revenue was 41.2 million.</p></body></html>"
 
 
-# ── a disposable sqlite bench ────────────────────────────────────────────────
+# ── a disposable sqlite tret ─────────────────────────────────────────────────
 @compiles(JSONB, "sqlite")
 def _jsonb_on_sqlite(type_, compiler, **kw):  # pragma: no cover - DDL only
     return "JSON"
@@ -68,7 +68,7 @@ async def db(tmp_path):
     # factory — deliberately, so a denial survives the engine's rollback — so the
     # test database has to be the one that factory hands out too. Same seam
     # tests/evals/golden_world.py uses.
-    import bench.db.engine as db_engine
+    import tret.db.engine as db_engine
 
     saved = (db_engine._engine, db_engine._session_factory)
     db_engine._engine, db_engine._session_factory = engine, factory
@@ -87,8 +87,8 @@ async def db(tmp_path):
 
 @pytest.fixture()
 async def ctx(db, tmp_path, monkeypatch):
-    monkeypatch.setenv("BENCH_STORAGE_DIR", str(tmp_path / "storage"))
-    from bench.config import get_settings
+    monkeypatch.setenv("TRET_STORAGE_DIR", str(tmp_path / "storage"))
+    from tret.config import get_settings
 
     get_settings.cache_clear()
     project = (await db.execute(select(Project))).scalars().one()
@@ -175,14 +175,14 @@ async def test_calling_a_web_tool_while_off_names_the_setting(ctx, research):
     research(MODE_OFF)
     with pytest.raises(ToolError) as excinfo:
         await web_search(ctx, query="anything")
-    assert "BENCH_EGRESS_RESEARCH" in str(excinfo.value)
+    assert "TRET_EGRESS_RESEARCH" in str(excinfo.value)
 
 
 async def test_web_search_without_a_backend_says_which_variable_to_set(ctx, research):
     research(MODE_ON)
     with pytest.raises(ToolError) as excinfo:
         await web_search(ctx, query="anything")
-    assert "BENCH_SEARCH_PROVIDER" in str(excinfo.value)
+    assert "TRET_SEARCH_PROVIDER" in str(excinfo.value)
 
 
 # ── a fetched page is a document ─────────────────────────────────────────────
@@ -265,8 +265,8 @@ async def test_a_number_from_a_web_page_still_cannot_be_cited(ctx, research, fet
 async def test_the_per_run_fetch_budget_is_enforced(ctx, research, fetches, monkeypatch):
     research(MODE_ON)
     fetches()
-    monkeypatch.setenv("BENCH_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN", "1")
-    from bench.config import get_settings
+    monkeypatch.setenv("TRET_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN", "1")
+    from tret.config import get_settings
 
     get_settings.cache_clear()
     await fetch_url(ctx, url="https://example.com/filing")
@@ -323,7 +323,7 @@ async def test_a_fetch_writes_an_audit_row_without_the_query_string(ctx, researc
 async def test_a_refused_fetch_is_recorded_too(ctx, research, monkeypatch):
     """A denial is the most interesting row in this table."""
     research(MODE_ON)
-    from bench.net.policy import EgressDenied
+    from tret.net.policy import EgressDenied
 
     async def refuse(url):
         raise EgressDenied("private_address", url, CLASS_RESEARCH, "resolves to 127.0.0.1")
@@ -345,7 +345,7 @@ async def test_a_refused_fetch_is_recorded_too(ctx, research, monkeypatch):
 async def test_a_denied_fetch_is_a_tool_error_not_a_dead_run(ctx, research, monkeypatch):
     """The model gets told and can adapt, the same as any other tool error."""
     research(MODE_ON)
-    from bench.net.policy import EgressDenied
+    from tret.net.policy import EgressDenied
 
     async def refuse(url):
         raise EgressDenied("host_not_allowed", url, CLASS_RESEARCH, "not in the allowlist")

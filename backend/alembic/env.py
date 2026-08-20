@@ -3,7 +3,7 @@
 * the **CLI** (`alembic upgrade head`), which owns nothing and must open its own
   connection — the app's URL is asyncpg, so that means an async engine driven by
   `asyncio.run`;
-* the **app** (`bench.db.migrate.ensure_schema`), which already holds a
+* the **app** (`tret.db.migrate.ensure_schema`), which already holds a
   connection inside a running event loop and an advisory lock, and hands it over
   via `config.attributes["connection"]`. Opening our own engine there would
   nest event loops and drop the lock, so a supplied connection always wins.
@@ -13,8 +13,8 @@ import asyncio
 from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from bench.config import get_settings
-from bench.db.models import Base
+from tret.config import get_settings
+from tret.db.models import Base
 
 config = context.config
 target_metadata = Base.metadata
@@ -22,7 +22,7 @@ target_metadata = Base.metadata
 
 def _url() -> str:
     """The configured URL, with the asyncpg dialect and libpq-only params handled."""
-    from bench.db.engine import normalize_database_url
+    from tret.db.engine import normalize_database_url
 
     return normalize_database_url(get_settings().database_url)
 

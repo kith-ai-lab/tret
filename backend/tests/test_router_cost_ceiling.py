@@ -21,11 +21,11 @@ from decimal import Decimal
 
 import pytest
 
-from bench.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
-from bench.router_llm import router as router_module
-from bench.router_llm.fallback import fallback_model
-from bench.router_llm.objectives import TIER_ORDER, within_cost_tier
-from bench.router_llm.router import ModelRouter, RoutingUnavailable
+from tret.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
+from tret.router_llm import router as router_module
+from tret.router_llm.fallback import fallback_model
+from tret.router_llm.objectives import TIER_ORDER, within_cost_tier
+from tret.router_llm.router import ModelRouter, RoutingUnavailable
 
 
 class _Registry(ProviderRegistry):

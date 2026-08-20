@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type DragEvent, useRef, useState } from 'react'
 
-import { api, type BenchDocument, type Dataset } from '../api/client'
+import { api, type TretDocument, type Dataset } from '../api/client'
 import { formatDateTime } from '../components/shared/format'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { StatusBadge } from '../components/shared/StatusBadge'
@@ -32,7 +32,7 @@ export function Documents() {
 
   const documents = documentsQuery.data ?? []
 
-  const columns: Column<BenchDocument>[] = [
+  const columns: Column<TretDocument>[] = [
     {
       key: 'name',
       header: 'Filename',

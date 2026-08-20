@@ -18,7 +18,7 @@ without the other:
    PID 1 in every way that matters — see the boot-time verification in the
    task notes: `docker exec <container> cat /proc/1/status` reporting
    `Uid: 10001 ...`).
-2. **The app can still write where it needs to.** `BENCH_STORAGE_DIR` lives on
+2. **The app can still write where it needs to.** `TRET_STORAGE_DIR` lives on
    a Fly volume mounted at `/data` after the image is built (fly.toml
    `[mounts]`), so a Dockerfile `RUN chown` cannot reach it — only the
    entrypoint, running at container start, can. Get this wrong and the image
@@ -50,10 +50,10 @@ def test_a_non_root_user_is_created_with_a_fixed_uid():
         "back to running uvicorn as root, contradicting docs/hardening.md"
     )
     # A fixed id, not useradd's next-free default, so ownership set at build time
-    # (chown bench:bench ...) and ownership set at boot (the entrypoint, on a
+    # (chown tret:tret ...) and ownership set at boot (the entrypoint, on a
     # different "build") name the same numeric owner.
-    assert "--gid 10001 bench" in text  # groupadd
-    assert "--uid 10001 --gid bench" in text  # useradd
+    assert "--gid 10001 tret" in text  # groupadd
+    assert "--uid 10001 --gid tret" in text  # useradd
 
 
 def test_the_entrypoint_drops_privileges_before_exec():
@@ -63,7 +63,7 @@ def test_the_entrypoint_drops_privileges_before_exec():
         "of exec'ing in place, which leaves a root process sitting above the app "
         "and can break signal delivery to it"
     )
-    assert "--reuid=bench" in text and "--regid=bench" in text
+    assert "--reuid=tret" in text and "--regid=tret" in text
     # `exec setpriv ...`, not `setpriv ...` on its own: without `exec`, the shell
     # stays as PID 1 and setpriv's dropped-privilege child is not.
     assert "exec setpriv" in text
@@ -79,8 +79,8 @@ def test_the_image_entrypoint_is_the_privilege_drop_script():
     assert "chmod +x /entrypoint.sh" in text
 
 
-def test_no_explicit_user_directive_undermines_the_root_to_bench_drop():
-    """A Dockerfile `USER bench` would run entrypoint.sh itself as bench, and it
+def test_no_explicit_user_directive_undermines_the_root_to_tret_drop():
+    """A Dockerfile `USER tret` would run entrypoint.sh itself as tret, and it
     needs root to chown the volume — so privilege-drop must happen in the
     entrypoint (via setpriv), not via a Dockerfile USER line.
     """
@@ -94,54 +94,54 @@ def test_no_explicit_user_directive_undermines_the_root_to_bench_drop():
 # ── build-time ownership: everything baked into the image ──────────────────────
 def test_build_time_paths_are_owned_by_the_app_user():
     text = _dockerfile_text()
-    assert "chown -R bench:bench /app /packs" in text, (
+    assert "chown -R tret:tret /app /packs" in text, (
         "docs/, the pack tree, and the built frontend are COPYed as root by "
         "default; without a chown the non-root app user cannot read them"
     )
     # The chown must come after every COPY into /app or /packs specifically —
     # not necessarily every COPY in the file: fly-entrypoint.sh is deliberately
-    # copied afterwards, since root (not bench) is what runs it.
+    # copied afterwards, since root (not tret) is what runs it.
     lines = text.splitlines()
     covered_copy_lines = [
         i for i, line in enumerate(lines) if line.startswith("COPY") and ("/app" in line or "/packs" in line)
     ]
     assert covered_copy_lines, "no COPY targets /app or /packs — nothing for the chown to cover"
-    chown_line = next(i for i, line in enumerate(lines) if "chown -R bench:bench /app /packs" in line)
+    chown_line = next(i for i, line in enumerate(lines) if "chown -R tret:tret /app /packs" in line)
     assert all(i < chown_line for i in covered_copy_lines), (
-        "chown -R bench:bench /app /packs runs before some COPY into /app or /packs"
+        "chown -R tret:tret /app /packs runs before some COPY into /app or /packs"
     )
 
 
 # ── boot-time ownership: the one path the Dockerfile cannot reach ──────────────
 def test_entrypoint_fixes_ownership_of_the_fly_volume_before_dropping_root():
-    """BENCH_STORAGE_DIR sits on a Fly volume (fly.toml [mounts]) attached after
+    """TRET_STORAGE_DIR sits on a Fly volume (fly.toml [mounts]) attached after
     the image is built. A freshly attached volume — or one written to by an
     older, fully-root image — is root-owned; only a boot-time step run before
     the privilege drop can fix that for the new non-root process.
     """
     text = _entrypoint_text()
-    assert "chown -R bench:bench" in text
+    assert "chown -R tret:tret" in text
     assert "exec setpriv" in text
     # Ownership must be fixed before the privilege drop, not after — setpriv execs
     # in place, so nothing in the script runs once it has been reached. Matched
     # on the actual command strings, not bare keywords, since the file's own
     # comments mention both words ahead of where the commands appear.
-    chown_pos = text.index("chown -R bench:bench")
+    chown_pos = text.index("chown -R tret:tret")
     setpriv_pos = text.index("exec setpriv")
     assert chown_pos < setpriv_pos, "entrypoint drops privileges before fixing ownership"
 
 
 def test_entrypoint_targets_the_configured_storage_dir_not_a_hardcoded_path():
     text = _entrypoint_text()
-    assert "BENCH_STORAGE_DIR" in text, (
+    assert "TRET_STORAGE_DIR" in text, (
         "entrypoint hardcodes a storage path instead of honoring "
-        "BENCH_STORAGE_DIR, so a deployment that overrides the setting would "
+        "TRET_STORAGE_DIR, so a deployment that overrides the setting would "
         "have its real storage directory left root-owned"
     )
 
 
 def test_fly_toml_mount_matches_the_directory_the_entrypoint_fixes():
-    """The entrypoint chowns dirname(BENCH_STORAGE_DIR); that must be the Fly
+    """The entrypoint chowns dirname(TRET_STORAGE_DIR); that must be the Fly
     mount's destination, or the chown lands on a path Fly never actually mounts
     anything at.
     """
@@ -154,11 +154,11 @@ def test_fly_toml_mount_matches_the_directory_the_entrypoint_fixes():
     dockerfile_storage_dir = next(
         line.split("=", 1)[1].strip()
         for line in _dockerfile_text().splitlines()
-        if "BENCH_STORAGE_DIR=" in line
+        if "TRET_STORAGE_DIR=" in line
     )
     assert dockerfile_storage_dir.startswith(destination + "/"), (
         f"fly.toml mounts the volume at {destination!r} but Dockerfile.fly sets "
-        f"BENCH_STORAGE_DIR={dockerfile_storage_dir!r}, which is not under it — "
+        f"TRET_STORAGE_DIR={dockerfile_storage_dir!r}, which is not under it — "
         "the entrypoint's chown would miss the actual volume"
     )
 

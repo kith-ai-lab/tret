@@ -17,7 +17,7 @@ depends_on = None
 def upgrade() -> None:
     # Nullable and never backfilled. Runs that predate this genuinely have no
     # figure — `complete_json` discarded the provider's usage block, so the
-    # tokens are not recoverable from anything bench stored. A zero would claim
+    # tokens are not recoverable from anything tret stored. A zero would claim
     # those runs did no routing, which is false for almost all of them.
     op.add_column(
         'runs',

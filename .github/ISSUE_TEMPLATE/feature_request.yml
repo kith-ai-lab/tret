@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         For a new **domain pack**, use the *New pack proposal* template instead —
-        packs need no core changes and are the easiest way to extend bench.
+        packs need no core changes and are the easiest way to extend tret.
   - type: textarea
     id: problem
     attributes:

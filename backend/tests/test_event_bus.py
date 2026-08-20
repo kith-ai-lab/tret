@@ -18,7 +18,7 @@ import uuid
 
 import pytest
 
-from bench.engine.events import RunEvent, RunEventBus
+from tret.engine.events import RunEvent, RunEventBus
 
 
 async def _drain(bus: RunEventBus, run_id: uuid.UUID, collected: list[RunEvent]) -> None:

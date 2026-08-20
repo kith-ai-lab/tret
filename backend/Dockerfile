@@ -1,7 +1,7 @@
 # Build context is the REPOSITORY ROOT, not `backend/`.
 #
 # It has to be: the API serves `docs/emissions-methodology.md` to the product's
-# methodology dialog (bench/api/docs.py), and `docs/` is a sibling of `backend/`,
+# methodology dialog (tret/api/docs.py), and `docs/` is a sibling of `backend/`,
 # so a `backend/`-scoped context could not reach it. Copying the doc into the
 # Python package instead would create a second copy to keep in step, which is the
 # one thing the methodology document must never have.
@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY backend/pyproject.toml ./
-COPY backend/bench ./bench
+COPY backend/tret ./tret
 COPY backend/alembic ./alembic
 COPY backend/alembic.ini ./
 
@@ -34,4 +34,4 @@ COPY docs ./docs
 
 EXPOSE 8000
 # Single worker by design: the run event bus is in-process (see docs/architecture.md).
-CMD ["uvicorn", "bench.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "tret.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

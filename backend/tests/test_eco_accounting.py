@@ -25,12 +25,12 @@ import httpx
 import pytest
 import yaml
 
-from bench.providers.base import JsonCompletion
-from bench.api.runs import _run_summary, get_run
-from bench.config import Settings
-from bench.db.models import Run
-from bench.providers import catalog as catalog_module
-from bench.providers.catalog import (
+from tret.providers.base import JsonCompletion
+from tret.api.runs import _run_summary, get_run
+from tret.config import Settings
+from tret.db.models import Run
+from tret.providers import catalog as catalog_module
+from tret.providers.catalog import (
     DEFAULT_ENERGY_CLASS,
     ENERGY_CACHE_READ_MULTIPLIER,
     ENERGY_CACHE_WRITE_MULTIPLIER,
@@ -46,7 +46,7 @@ from bench.providers.catalog import (
     energy_class_for_tier,
     wh_per_mtok_for_class,
 )
-from bench.services.export import _deliverable_footprint, _energy_cell
+from tret.services.export import _deliverable_footprint, _energy_cell
 
 MODELS_YAML = catalog_module._MODELS_YAML
 
@@ -266,7 +266,7 @@ def test_accounting_grid_override_is_recorded_with_the_figure():
     # to the PUE-inclusive energy: 60 Wh x 1.2 = 72 Wh at 30 gCO2e/kWh = 2.16 g.
     assert report["energy_wh_total"] == 72.0
     assert report["co2e_g"] == 2.16
-    # bench was handed a number, not a provenance, so it refuses to label it.
+    # tret was handed a number, not a provenance, so it refuses to label it.
     assert report["grid_co2e_basis"] == "unspecified"
 
 

@@ -1,11 +1,11 @@
 # Emissions methodology
 
-How bench turns token counts into an energy, carbon and money figure; where every
+How tret turns token counts into an energy, carbon and money figure; where every
 constant came from; and — more important — what the resulting numbers are *not*
 good for.
 
-Implementation: `backend/bench/services/emissions.py`. Settings:
-`backend/bench/config.py`. Per-model classes: `backend/bench/providers/models.yaml`.
+Implementation: `backend/tret/services/emissions.py`. Settings:
+`backend/tret/config.py`. Per-model classes: `backend/tret/providers/models.yaml`.
 The routing side of the energy model is in [eco-accounting.md](eco-accounting.md);
 this page is authoritative wherever the two overlap.
 
@@ -14,12 +14,12 @@ They are not measurements, not an inventory, and not reportable.**
 
 ## Read this first
 
-Bench's flagship domain is climate risk, which is exactly why this page leads
+Tret's flagship domain is climate risk, which is exactly why this page leads
 with limits rather than headline numbers. A platform that produces TCFD sections
 would not accept an unfalsifiable carbon claim from a portfolio company, so it
 must not make one about itself.
 
-Two things changed from bench's first version of this model, and both matter:
+Two things changed from tret's first version of this model, and both matter:
 
 - The constants used to be **hand-picked**. They are now **fitted** to the only
   granular public per-model dataset that exists. That is a real improvement in
@@ -54,7 +54,7 @@ single number.
 
 ## Why input and output tokens are weighted apart
 
-Bench used to weight an input token and an output token equally. That is wrong,
+Tret used to weight an input token and an output token equally. That is wrong,
 and measurably so. Prefill processes the whole prompt in parallel; generation is
 autoregressive and pays a full forward pass per token. The fit below puts output
 at roughly **20x** input per token.
@@ -158,7 +158,7 @@ cannot express that. Recomputing on an output-equivalent basis:
 Most of the artifact resolves. **The residual is real and is not modelled**:
 1.04-1.54x for the four well-behaved models, and 4.64x for DeepSeek-R1, whose
 short-prompt figure is anomalously high — the same anomaly that makes its fit
-degenerate. Bench records this as the `prompt_shape_residual` caveat on every
+degenerate. Tret records this as the `prompt_shape_residual` caveat on every
 run rather than claiming the split solved it.
 
 ## The energy classes
@@ -190,14 +190,14 @@ above, except XL.
 ### Why the reasoning tier exists
 
 o3 implies ~10,700 Wh/Mtok on a flat per-token basis at the medium shape — already
-3.5x bench's old XL ceiling of 3,000, and 20,850 once input and output are
+3.5x tret's old XL ceiling of 3,000, and 20,850 once input and output are
 weighted apart. A reasoning model is not "a large model, a bit more"; it is a
 different order of magnitude.
 
 Reasoning is assigned from what a model *does*, never from what it costs. In the
 reference dataset DeepSeek-R1 is among the two heaviest models measured **and**
 among the cheapest models on the market. Price is not a proxy for this in either
-direction, which is why bench's cheapest curated model (DeepSeek V4 Pro) carries
+direction, which is why tret's cheapest curated model (DeepSeek V4 Pro) carries
 its heaviest energy class.
 
 ### The documented upgrade path
@@ -206,7 +206,7 @@ EcoLogits models per-token energy from **active parameter count** instead of a
 class ladder, with published fitted constants α=1.17e-6, β=-1.12e-2, γ=4.05e-5 —
 linear in active params, exponential decay in batch size, default batch 64.
 
-Bench does not implement it, because it would be fed a guessed parameter count
+Tret does not implement it, because it would be fed a guessed parameter count
 for every closed model in the catalog, and a precise-looking function over a
 guessed input is worse than an openly coarse bucket. The seam is ready:
 `emissions.wh_per_mtok_for_model` is the single place every caller resolves a
@@ -225,9 +225,9 @@ profile**, because "self-hosted" spans a desk and a machine room.
 
 | profile | PUE | setting |
 |---|---|---|
-| hyperscaler cloud | 1.2 | `BENCH_DATACENTER_PUE` |
-| workstation | 1.05 | `BENCH_LOCAL_PUE` |
-| on-prem facility | 1.56 | `BENCH_ONPREM_PUE` |
+| hyperscaler cloud | 1.2 | `TRET_DATACENTER_PUE` |
+| workstation | 1.05 | `TRET_LOCAL_PUE` |
+| on-prem facility | 1.56 | `TRET_ONPREM_PUE` |
 
 Published figures behind those numbers:
 
@@ -238,13 +238,13 @@ Published figures behind those numbers:
 | AWS | 1.15 | 2024 |
 | Google 2025 Environmental Report | 1.09 | 2024 data |
 
-**bench's 1.2 cloud default is mildly conservative** — above all three
+**tret's 1.2 cloud default is mildly conservative** — above all three
 hyperscaler self-reports, well below the industry average. That is the safe
-direction for a facility bench cannot see. Self-reported figures are fleet
+direction for a facility tret cannot see. Self-reported figures are fleet
 averages, not the building that served your request.
 
 **A generic or on-prem deployment should use 1.56, not 1.2.** Set
-`BENCH_LOCAL_DEPLOYMENT_PROFILE=onprem_datacenter` if you self-host in a real
+`TRET_LOCAL_DEPLOYMENT_PROFILE=onprem_datacenter` if you self-host in a real
 machine room; the workstation default (1.05) is only honest for a desktop.
 
 A PUE below 1 is physically impossible, so a misconfigured value below 1 is
@@ -254,11 +254,11 @@ clamped to 1 rather than allowed to shrink the number.
 
 Default **470 gCO2e/kWh** — the IEA's 2024 global power-sector average
 ([Electricity 2025](https://www.iea.org/reports/electricity-2025), reported as
-~460-480; 470 is the midpoint). Bench's previous 400 was stale-low and uncited.
+~460-480; 470 is the midpoint). Tret's previous 400 was stale-low and uncited.
 
 | reference | g/kWh | note |
 |---|---|---|
-| IEA global, 2024 | 470 | bench default |
+| IEA global, 2024 | 470 | tret default |
 | EPA eGRID2023 US average | 350 | subregions span >10x |
 | low-carbon grid | ~30 | e.g. Sweden |
 | coal-heavy grid | ~750 | |
@@ -275,30 +275,30 @@ never be summed. Google's published 0.03 gCO2e/prompt is *market-based* and
 roughly 3x below its own location-based figure — the same electricity, a
 different accounting question.
 
-So bench records a basis label on every run (`grid_co2e_basis`:
+So tret records a basis label on every run (`grid_co2e_basis`:
 `location_based` | `market_based` | `unspecified`), and
 `GET /api/analytics/emissions` **stops reporting a single carbon total** for a
 window that mixes them (see [Basis separation](#basis-separation-what-may-be-added-to-what)).
 The shipped default factor is a physical-grid average, hence `location_based`. An
 operator's own factor defaults to `unspecified` until they say which it is —
-bench will not guess a basis on your behalf, and a factor passed explicitly into
+tret will not guess a basis on your behalf, and a factor passed explicitly into
 the accounting call is always `unspecified`.
 
-### Per-provider factors: `BENCH_GRID_FACTORS`
+### Per-provider factors: `TRET_GRID_FACTORS`
 
 One global factor is the wrong shape for a real deployment. An operator may
 self-host in a known place *and* call two cloud providers, one of which publishes
 a factor they accept. So the grid factor is configurable **per provider**, as
-JSON keyed by bench provider name (`local`, `anthropic`, `kimi`, `openrouter`):
+JSON keyed by tret provider name (`local`, `anthropic`, `kimi`, `openrouter`):
 
 ```
-BENCH_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based","label":"Ontario grid, IESO 2024"},"anthropic":{"g_per_kwh":120,"basis":"market_based","label":"provider PPA disclosure"}}
+TRET_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based","label":"Ontario grid, IESO 2024"},"anthropic":{"g_per_kwh":120,"basis":"market_based","label":"provider PPA disclosure"}}
 ```
 
 | key | required | meaning |
 |---|---|---|
 | `g_per_kwh` | yes | gCO2e/kWh. Must be positive and finite — a zero would claim carbon-free electricity, which no grid delivers. |
-| `basis` | no | `location_based` \| `market_based` \| `unspecified`. Defaults to `unspecified`: bench does not know what your number represents and will not guess. |
+| `basis` | no | `location_based` \| `market_based` \| `unspecified`. Defaults to `unspecified`: tret does not know what your number represents and will not guess. |
 | `label` | no | A short note (≤ 80 chars) shown beside the factor in the run's provenance table — where you got it, in your words. |
 
 Validation is strict inside an entry and forgiving about provider names, and the
@@ -306,12 +306,12 @@ asymmetry is deliberate:
 
 - An **unknown key inside an entry** is a hard startup error. A mistyped
   `gCO2e_per_kwh` that was quietly ignored would leave you believing you had
-  configured a factor while bench applied the global default.
+  configured a factor while tret applied the global default.
 - An **unrecognised provider name** logs a warning at startup and is kept. The
   catalog gains providers over time, and refusing to boot on a config that was
   correct when it was written is the worse failure. Such an entry is inert until a
   provider of that name exists.
-- A **blank** value means "not set", exactly like `BENCH_LOCAL_GRID_CO2E_G_PER_KWH`
+- A **blank** value means "not set", exactly like `TRET_LOCAL_GRID_CO2E_G_PER_KWH`
   — a `${VAR:-}` interpolation for a knob you never set must not stop the backend
   booting.
 
@@ -320,9 +320,9 @@ asymmetry is deliberate:
 | rank | rule | source key | setting |
 |---|---|---|---|
 | 1 | a factor passed straight into the accounting call | `run_override` | — (no basis claimed) |
-| 2 | `BENCH_GRID_FACTORS` entry for the run's provider | `provider:<name>` | `BENCH_GRID_FACTORS[<name>]` |
-| 3 | the self-hosted factor, on a local run (**legacy**) | `local_setting` | `BENCH_LOCAL_GRID_CO2E_G_PER_KWH` |
-| 4 | the global default | `global_default` | `BENCH_GRID_CO2E_G_PER_KWH` |
+| 2 | `TRET_GRID_FACTORS` entry for the run's provider | `provider:<name>` | `TRET_GRID_FACTORS[<name>]` |
+| 3 | the self-hosted factor, on a local run (**legacy**) | `local_setting` | `TRET_LOCAL_GRID_CO2E_G_PER_KWH` |
+| 4 | the global default | `global_default` | `TRET_GRID_CO2E_G_PER_KWH` |
 
 Every run records **which rule applied**, not just the number it produced:
 `grid_co2e_source` carries the stable key above and `grid_co2e_label` carries your
@@ -331,16 +331,16 @@ record as `source_key` / `source_rule` / `source_label`. A provenance table can
 therefore explain *why* a factor was used, which is the more interesting half once
 several factors are configured and one run looks wrong.
 
-`BENCH_LOCAL_GRID_CO2E_G_PER_KWH` and `BENCH_LOCAL_GRID_CO2E_BASIS` are
+`TRET_LOCAL_GRID_CO2E_G_PER_KWH` and `TRET_LOCAL_GRID_CO2E_BASIS` are
 **legacy**: still read, still documented, and behaving exactly as they always
-have for any provider without an entry of its own. `BENCH_GRID_FACTORS` with a
+have for any provider without an entry of its own. `TRET_GRID_FACTORS` with a
 `"local"` key supersedes them and is strictly more expressive (it carries a
 label), so prefer it in new configuration. Nothing is being removed.
 
 ### Why this is configuration and not geolocation
 
 The obvious-looking feature here is to detect the caller's region and apply that
-region's grid factor. Bench does not do this, and will not, and it is worth being
+region's grid factor. Tret does not do this, and will not, and it is worth being
 explicit because a reader will ask:
 
 - **The caller's location is not the load's location.** For a cloud API call, the
@@ -348,11 +348,11 @@ explicit because a reader will ask:
   caller sits. Attributing a Toronto grid factor to inference served from Virginia
   is not an approximation; it is a different number about a different place.
 - **Providers do not disclose the serving region** per request. There is nothing
-  to read even if bench wanted to.
+  to read even if tret wanted to.
 - **A router makes it worse.** OpenRouter sends a call to whichever upstream has
   capacity, so even the *provider* — let alone the region — can vary between two
   identical requests.
-- **An IP lookup is also a network call and a privacy leak**, and bench's promise
+- **An IP lookup is also a network call and a privacy leak**, and tret's promise
   is that it makes no network calls except to the LLM providers you configure
   (plus an optional model-catalog fetch), with no telemetry ever. A geolocation
   dependency would break that for a number that would still be wrong.
@@ -360,7 +360,7 @@ explicit because a reader will ask:
 Where location *is* knowable, the operator is the one who knows it: they
 self-host somewhere specific, or they have pinned a provider to a region, or they
 have a supplier disclosure in hand. So the factor comes from them. This adds
-**zero network calls** — `BENCH_GRID_FACTORS` is parsed from the environment at
+**zero network calls** — `TRET_GRID_FACTORS` is parsed from the environment at
 startup and nothing else happens.
 
 ### Basis separation: what may be added to what
@@ -387,7 +387,7 @@ number on a page gets quoted, and the warning does not travel with it.
 
 Two details worth stating:
 
-- A run recorded **before bench stored a basis** counts as its own group (`null`).
+- A run recorded **before tret stored a basis** counts as its own group (`null`).
   It cannot be shown to share a basis with a location-based run, and assuming it
   does would be the same error in the other direction. A window of only such runs
   has one group, so it keeps its total.
@@ -397,13 +397,13 @@ Two details worth stating:
 
 ### Regional sourcing
 
-**Bench ships no external API integration for grid intensity, deliberately.** A
+**Tret ships no external API integration for grid intensity, deliberately.** A
 live dependency in the accounting path would make a stored run's carbon figure
 depend on a third party's uptime, and each of these sources carries licence or
 coverage limits an operator has to accept for themselves. The seam is
-configuration: `BENCH_GRID_FACTORS` per provider, `BENCH_GRID_CO2E_G_PER_KWH`
+configuration: `TRET_GRID_FACTORS` per provider, `TRET_GRID_CO2E_G_PER_KWH`
 globally (and the legacy local variant). You paste in a figure you sourced and can
-defend; bench never fetches one.
+defend; tret never fetches one.
 
 | source | granularity | catch |
 |---|---|---|
@@ -413,9 +413,9 @@ defend; bench never fetches one.
 
 ## Embodied hardware
 
-`BENCH_EMBODIED_G_PER_RUN` defaults to **0**, which means local inference is
+`TRET_EMBODIED_G_PER_RUN` defaults to **0**, which means local inference is
 reported with **no manufacturing carbon at all**. That is a real understatement,
-and it flatters exactly the option bench's own routing prefers.
+and it flatters exactly the option tret's own routing prefers.
 
 Cited constants to set it from (EcoLogits' convention, so your figure is
 comparable with published ones):
@@ -435,7 +435,7 @@ a chassis over 100,000 runs at batch 64 is 0.933 g per run.
 states it *could not find real GPU manufacturing LCA data and assumed parity with
 CPU/RAM manufacturing*, and gives 30-50% margin of error on manufacturing
 footprints generally. This is a placeholder resting on a placeholder. It is
-offered because 0 is worse, not because it is good. Bench marks its confidence
+offered because 0 is worse, not because it is good. Tret marks its confidence
 `placeholder` in the provenance block for exactly this reason.
 
 ## Money saved
@@ -470,7 +470,7 @@ correct.
 
 `avoided_usd_pct` is **null, never `0%`**, in exactly three cases: no baseline
 could be resolved, the baseline's own cost for these tokens is zero (a
-misconfigured `BENCH_EMISSIONS_BASELINE_MODEL` pointed at a free model has no
+misconfigured `TRET_EMISSIONS_BASELINE_MODEL` pointed at a free model has no
 denominator to divide by), or the run predates the money comparison entirely.
 It is exactly **`0.0`** only when the run genuinely used the baseline model
 itself — comparing a run to itself is a real zero, not a missing one. A window
@@ -496,35 +496,35 @@ assumption, and it is the *same* assumption the carbon comparison makes (see
 run actually produced, re-priced through the baseline model. A different model
 would not have produced identical token counts — it might need more turns, or
 produce a worse answer someone redoes. Money and carbon can also disagree: a
-cheap reasoning model saves dollars while costing more carbon, and bench
+cheap reasoning model saves dollars while costing more carbon, and tret
 reports both rather than picking the flattering one.
 
 ### Zero-cost (local) models: a real 100%, and a deliberate asymmetry
 
-A self-hosted model bills **$0** through bench's token API, so it can
+A self-hosted model bills **$0** through tret's token API, so it can
 legitimately read `avoided_usd_pct: 100.0` — "100% cheaper than frontier." That
 figure is correct as far as it goes, and it does not go very far: it is **list-
 price API spend only**. It excludes the electricity the machine actually drew
-and any amortized hardware cost — bench does not model self-hosting's
+and any amortized hardware cost — tret does not model self-hosting's
 electricity bill or capital cost, so those are not zero, they are simply not
 counted in this figure. Every run with a zero-cost model carries a named caveat
 saying exactly this, `money_excludes_self_hosting_costs`, with
 `direction: "overstates"` — the real economic saving is smaller than 100% once
-those costs are counted, even though bench cannot say by how much.
+those costs are counted, even though tret cannot say by how much.
 
 This is a **deliberate asymmetry** with the carbon accounting above, worth
 stating plainly: the emissions model *does* attribute Scope 2 electricity (and,
-if `BENCH_EMBODIED_G_PER_RUN` is set, embodied hardware) to a self-hosted run.
+if `TRET_EMBODIED_G_PER_RUN` is set, embodied hardware) to a self-hosted run.
 So the same run that reads "100% cheaper than frontier" in dollars can — and
-typically does — carry a real, nonzero `co2e_g`. Money tracks what bench's
+typically does — carry a real, nonzero `co2e_g`. Money tracks what tret's
 token API bills; carbon tracks what running the model actually draws. Neither
-figure is wrong; they are answering different questions, and bench reports both
+figure is wrong; they are answering different questions, and tret reports both
 rather than letting the flattering one stand alone.
 
 ## Uncertainty: a band, not an interval
 
 Every figure carries `co2e_g_low` / `co2e_g_high` at **central / 2.5** and
-**central x 2.5**, configurable via `BENCH_UNCERTAINTY_BAND_LOW` / `_HIGH`.
+**central x 2.5**, configurable via `TRET_UNCERTAINTY_BAND_LOW` / `_HIGH`.
 
 **This is a judgment band matching field practice. It is NOT a confidence
 interval and NOT a standard deviation.** No credible methodology in this field
@@ -543,7 +543,7 @@ What the band is calibrated against:
 
 The Fischer result is the sharpest of these: CodeCarbon *actually measures
 hardware* and still underestimates ground truth by 20-30%, mainly from cooling
-and PSU losses invisible to software. Bench does not measure hardware at all.
+and PSU losses invisible to software. Tret does not measure hardware at all.
 
 ### Per-factor sensitivity
 
@@ -570,8 +570,8 @@ refinement (almost always: a regional grid factor) is worth making.
 
 ## GHG Protocol scope mapping
 
-Scopes are relative to a *reporting entity*. Here that entity is the **bench
-operator**, not the model provider and not bench-the-project.
+Scopes are relative to a *reporting entity*. Here that entity is the **tret
+operator**, not the model provider and not tret-the-project.
 
 | scope | contents |
 |---|---|
@@ -581,13 +581,13 @@ operator**, not the model provider and not bench-the-project.
 
 - **Scope 1 = 0** because running inference burns no fuel on the operator's
   premises. A nonzero Scope 1 could only come from on-site generation, which
-  bench cannot observe and must not invent. It is reported as an explained zero
+  tret cannot observe and must not invent. It is reported as an explained zero
   rather than omitted: a missing scope reads as an oversight, an explained zero is
   a claim you can check.
 - **Scope 2** is purchased energy. Self-hosting means the operator buys the kWh,
   so those emissions are theirs at the second scope. This is where
-  `BENCH_GRID_FACTORS={"local":{…}}` belongs — or the legacy
-  `BENCH_LOCAL_GRID_CO2E_G_PER_KWH`, which still works.
+  `TRET_GRID_FACTORS={"local":{…}}` belongs — or the legacy
+  `TRET_LOCAL_GRID_CO2E_G_PER_KWH`, which still works.
 - **Scope 3** covers cloud inference as a *purchased service*: the provider's own
   Scope 1/2 becomes the operator's Scope 3 Category 1 (purchased goods and
   services). They never bought the electricity — they bought tokens. Local
@@ -600,7 +600,7 @@ configuration in `backend/tests/test_emissions.py`.
 
 ## The counterfactual
 
-For each run, bench re-prices **the identical token counts** through a baseline
+For each run, tret re-prices **the identical token counts** through a baseline
 model (by default the highest-energy-class curated non-local catalog entry, ties
 broken by model id so the choice is deterministic across processes), in both
 carbon and dollars.
@@ -608,7 +608,7 @@ carbon and dollars.
 - **Same-token, not same-task.** A different model would not produce identical
   token counts. A smaller model often needs more turns, or retries, or produces a
   worse answer someone redoes. Tokens are held fixed because that is the only
-  comparison bench can make without guessing.
+  comparison tret can make without guessing.
 - **It is an efficiency indicator.** "This run was lighter than the heaviest
   option, by roughly this much, at equal token counts." That is useful for model
   selection, and it is all it is.
@@ -621,7 +621,7 @@ carbon and dollars.
 - **A run on the baseline model itself reports exactly 0**, because comparing a
   run to itself contains no counterfactual.
 - **An unresolvable baseline reports `null`, not 0.** If the configured baseline
-  names a model the catalog does not have, bench reports no comparison rather than
+  names a model the catalog does not have, tret reports no comparison rather than
   silently substituting one.
 - **The comparison can cross a basis, and says when it does.** The counterfactual
   is priced at the factor the *baseline model's* provider carries, which is honest
@@ -641,19 +641,19 @@ number of queries a model serves over its life, which providers do not disclose.
 A number whose value is set by an unobservable free parameter is not an estimate.
 
 To include it you would need the provider's total training energy, its grid mix
-at training time, and a defensible lifetime query count. Bench has none of the
+at training time, and a defensible lifetime query count. Tret has none of the
 three, so it reports training as an explicit exclusion with a value of `0.0` and
 confidence `excluded`, rather than picking a point in a 10,000x range.
 
 ### Cloud embodied hardware is not counted
 
-It sits inside the purchased service (Category 1) and bench has no basis for
+It sits inside the purchased service (Category 1) and tret has no basis for
 splitting it out, so a cloud run's Scope 3 is electricity-derived only. This
 understates it.
 
 ### Reasoning tokens may not be in the counted output
 
-Bench's token counts come from **provider usage reporting**. For several providers
+Tret's token counts come from **provider usage reporting**. For several providers
 hidden reasoning tokens are **not included in the billed output count**. Two
 consequences, both named rather than absorbed:
 
@@ -661,7 +661,7 @@ consequences, both named rather than absorbed:
    those models. The bias is one-sided.
 2. Energy per *visible* output token is **inflated** for these models, which is
    part of why the fitted `b` for o3 and DeepSeek-R1 is so much larger than for
-   non-reasoning models. Some of that figure is work bench cannot see attributed
+   non-reasoning models. Some of that figure is work tret cannot see attributed
    to tokens it can.
 
 This is recorded as the `reasoning_token_accounting` caveat on every run, and
@@ -673,16 +673,16 @@ The class constants come from batched serving stacks (the reference data infers
 batch sizes in the dozens; EcoLogits defaults to 64). A single-user local model
 carries the whole accelerator for one request, so its real per-token energy can be
 several times class S. Combined with embodied hardware defaulting to 0, **local
-runs are the roughest estimate bench produces**, and both biases understate them.
+runs are the roughest estimate tret produces**, and both biases understate them.
 
 ### Everything else around inference
 
 Excluded: water, network transfer, storage, retrieval and embedding calls, and the
-router's own model call — the same scope as the dollar cost bench already reports.
+router's own model call — the same scope as the dollar cost tret already reports.
 
 ## External anchors
 
-Where bench's output sits against published per-prompt figures. These cover one
+Where tret's output sits against published per-prompt figures. These cover one
 model each on one operator's stack, so they bound the order of magnitude rather
 than validate the ladder.
 
@@ -697,13 +697,13 @@ Reading these honestly:
 - Against Google, a Flash-class model at class M puts a 1k-in/300-out prompt at
   ~0.42 Wh compute (~0.5 Wh with PUE) — roughly **2x** Google's figure for their
   own stack. Same order, on the conservative side. Note Google's number is
-  market-based carbon, so its 0.03 gCO2e is not comparable with bench's
+  market-based carbon, so its 0.03 gCO2e is not comparable with tret's
   location-based figure at all.
-- Against Mistral, bench's figure for a comparable response is *lower*, and the
+- Against Mistral, tret's figure for a comparable response is *lower*, and the
   reason is scope: Mistral's 1.14 gCO2e includes training amortization and
-  embodied hardware, both of which bench excludes.
+  embodied hardware, both of which tret excludes.
 - **Anthropic publishes nothing.** This matters more than the other two rows,
-  because bench's default models are Anthropic's — the models bench is most likely
+  because tret's default models are Anthropic's — the models tret is most likely
   to be running are the ones with the least public data behind their energy class.
 
 ## Replacing a default with your own factor
@@ -716,35 +716,35 @@ order of payoff:
 Per provider, which is the shape a real deployment has:
 
 ```
-BENCH_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based","label":"Ontario grid, IESO 2024"},"anthropic":{"g_per_kwh":120,"basis":"market_based","label":"provider PPA disclosure"}}
+TRET_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based","label":"Ontario grid, IESO 2024"},"anthropic":{"g_per_kwh":120,"basis":"market_based","label":"provider PPA disclosure"}}
 ```
 
 Or globally, which is still the fallback for every provider without an entry:
 
 ```
-BENCH_GRID_CO2E_G_PER_KWH=<your region or supplier>
-BENCH_GRID_CO2E_BASIS=location_based|market_based
+TRET_GRID_CO2E_G_PER_KWH=<your region or supplier>
+TRET_GRID_CO2E_BASIS=location_based|market_based
 ```
 
 The legacy self-hosted pair still works and is not going away:
 
 ```
-BENCH_LOCAL_GRID_CO2E_G_PER_KWH=<your site factor>
-BENCH_LOCAL_GRID_CO2E_BASIS=market_based
+TRET_LOCAL_GRID_CO2E_G_PER_KWH=<your site factor>
+TRET_LOCAL_GRID_CO2E_BASIS=market_based
 ```
 
 Get the numbers from eGRID (US subregional), your national inventory, your
 supplier's disclosure, a provider's own published factor, or Electricity Maps /
 WattTime if you accept their terms. **Say which basis each one is** — a
 market-based figure mixed into a location-based total is not a smaller number, it
-is a meaningless one, and bench will withhold the combined total rather than print
+is a meaningless one, and tret will withhold the combined total rather than print
 it (see [Basis separation](#basis-separation-what-may-be-added-to-what)).
 
 A worked example. You self-host on an Ontario grid you have a published factor
 for, and you also call Anthropic, whose PPA disclosure you accept:
 
 ```
-BENCH_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based","label":"Ontario grid, IESO 2024"},"anthropic":{"g_per_kwh":120,"basis":"market_based","label":"provider PPA disclosure"}}
+TRET_GRID_FACTORS={"local":{"g_per_kwh":42,"basis":"location_based","label":"Ontario grid, IESO 2024"},"anthropic":{"g_per_kwh":120,"basis":"market_based","label":"provider PPA disclosure"}}
 ```
 
 A local run then records `grid_co2e_g_per_kwh: 42`, `grid_co2e_basis:
@@ -752,7 +752,7 @@ location_based`, `grid_co2e_source: provider:local`, `grid_co2e_label: "Ontario
 grid, IESO 2024"`; an Anthropic run records 120 / `market_based` /
 `provider:anthropic`. A window containing both has an energy total and a dollar
 total but **no carbon total** — it has two, one per basis, in `by_basis`. That is
-not bench being awkward; it is the GHG Protocol, and it is the reason the label
+not tret being awkward; it is the GHG Protocol, and it is the reason the label
 travels with every number.
 
 ### 2. Energy class per model
@@ -761,7 +761,7 @@ Meter your own deployment and put the result in `models.yaml` as
 `energy_wh_per_mtok` (Wh per million output-equivalent tokens) for the models you
 actually run. An explicit value always beats the class ladder. For open models,
 Hugging Face's AI Energy Score is measured on controlled hardware and is better
-evidence than bench's bucket.
+evidence than tret's bucket.
 
 If you cannot meter, at minimum review the class assignments: every one carries a
 rationale comment in `models.yaml`, and the borderline calls (is this model
@@ -770,9 +770,9 @@ reasoning-tier or not?) move the figure by ~8x.
 ### 3. PUE
 
 ```
-BENCH_DATACENTER_PUE=<your provider's disclosed figure>
-BENCH_LOCAL_DEPLOYMENT_PROFILE=onprem_datacenter
-BENCH_ONPREM_PUE=<your facility's measured PUE>
+TRET_DATACENTER_PUE=<your provider's disclosed figure>
+TRET_LOCAL_DEPLOYMENT_PROFILE=onprem_datacenter
+TRET_ONPREM_PUE=<your facility's measured PUE>
 ```
 If you self-host anywhere other than a desk, switch the profile. If you have a
 metered facility PUE, use it — it is one of the few inputs here you can actually
@@ -781,7 +781,7 @@ observe.
 ### 4. Embodied hardware
 
 ```
-BENCH_EMBODIED_G_PER_RUN=<total embodied kg * 1000 / (lifetime runs * batch)>
+TRET_EMBODIED_G_PER_RUN=<total embodied kg * 1000 / (lifetime runs * batch)>
 ```
 Use your hardware's own published embodied footprint if the vendor discloses one.
 Falling back to the H100/chassis constants above is defensible only with the
@@ -790,8 +790,8 @@ Boavizta caveat attached.
 ### 5. Uncertainty band
 
 ```
-BENCH_UNCERTAINTY_BAND_LOW=2.5
-BENCH_UNCERTAINTY_BAND_HIGH=2.5
+TRET_UNCERTAINTY_BAND_LOW=2.5
+TRET_UNCERTAINTY_BAND_HIGH=2.5
 ```
 Narrow it only if you have replaced the factors that justify its width — chiefly
 metered energy and a regional grid factor. Widen it if you are running models
@@ -800,7 +800,7 @@ whose class you had to guess. Never relabel it as a confidence interval.
 ### 6. The baseline model
 
 ```
-BENCH_EMISSIONS_BASELINE_MODEL=anthropic/claude-fable-5
+TRET_EMISSIONS_BASELINE_MODEL=anthropic/claude-fable-5
 ```
 Pick the model you would otherwise have used, if the auto-selected heaviest
 catalog entry is not that.
@@ -920,7 +920,7 @@ lower.
 - **Not audit-grade.** Nothing here is metered, verified, or assured. It is a
   model of a model, calibrated against five models' inferred hardware.
 - **Not an offset and not a reduction claim.** `avoided_co2e_g` and `avoided_usd`
-  are same-token counterfactuals. Nothing bench reports removes carbon from the
+  are same-token counterfactuals. Nothing tret reports removes carbon from the
   atmosphere or may be netted against anything.
 - **Not for statutory or regulatory reporting** — not CSRD, not SEC climate rules,
   not GHG Protocol inventory submission — unless you first replace every default
@@ -941,5 +941,5 @@ lower.
 If you need defensible numbers: meter your own deployment, put the result in
 `energy_wh_per_mtok` for the models you run, set a supplier-specific grid factor
 with its basis, set `embodied_g_per_run` from your own hardware, switch the PUE
-profile to match where you actually run, and treat everything bench produces as a
+profile to match where you actually run, and treat everything tret produces as a
 starting sanity check rather than a result.

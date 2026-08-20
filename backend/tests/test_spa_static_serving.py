@@ -16,10 +16,10 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from bench.config import get_settings
-from bench.main import _safe_static_file, create_app
+from tret.config import get_settings
+from tret.main import _safe_static_file, create_app
 
-INDEX_BODY = "<!doctype html><title>bench spa</title>"
+INDEX_BODY = "<!doctype html><title>tret spa</title>"
 SECRET_BODY = "CONFIDENTIAL-ESG-DISCLOSURE"
 
 
@@ -39,9 +39,9 @@ def deployment(tmp_path, monkeypatch):
     storage = tmp_path / "data" / "storage"
     storage.mkdir(parents=True)
     (storage / "sha256-confidential-esg.md").write_text(SECRET_BODY)
-    (tmp_path / "app" / "secrets.env").write_text("BENCH_SECRET_KEY=hunter2")
+    (tmp_path / "app" / "secrets.env").write_text("TRET_SECRET_KEY=hunter2")
 
-    monkeypatch.setenv("BENCH_SERVE_FRONTEND_DIR", str(dist))
+    monkeypatch.setenv("TRET_SERVE_FRONTEND_DIR", str(dist))
     # get_settings() is lru_cached, so the env var only lands in a fresh Settings.
     get_settings.cache_clear()
     yield {"root": tmp_path, "dist": dist, "storage": storage}
@@ -89,7 +89,7 @@ def test_encoded_traversal_reaches_the_route_as_a_real_dotdot_segment(client, mo
     """Guards the premise of the tests above: nothing upstream normalizes the
     path, so `%2e%2e` really does arrive as ".." and containment is what stops
     it. If this fails, the traversal tests are passing for the wrong reason."""
-    from bench import main as main_module
+    from tret import main as main_module
 
     seen: list[str] = []
     real = main_module._safe_static_file
@@ -113,7 +113,7 @@ def test_symlink_out_of_dist_is_refused(deployment, client):
 
 
 def test_backend_source_is_not_reachable(client):
-    for path in ["/%2e%2e/bench/config.py", "/%2e%2e%2f%2e%2e%2fbench/main.py"]:
+    for path in ["/%2e%2e/tret/config.py", "/%2e%2e%2f%2e%2e%2ftret/main.py"]:
         assert _is_index(client.get(path))
 
 

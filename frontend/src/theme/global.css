@@ -1,4 +1,4 @@
-/* bench — global theme. Dark default; every color routes through a variable
+/* tret — global theme. Dark default; every color routes through a variable
    so a light theme is a variable swap away. */
 
 :root {

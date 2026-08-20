@@ -1,20 +1,20 @@
-app = "kith-bench"
+app = "kith-tret"
 primary_region = "iad"
 
 [build]
   dockerfile = "Dockerfile.fly"
 
 [env]
-  BENCH_PACKS_DIR = "/packs"
-  BENCH_STORAGE_DIR = "/data/storage"
-  BENCH_SERVE_FRONTEND_DIR = "/app/frontend-dist"
+  TRET_PACKS_DIR = "/packs"
+  TRET_STORAGE_DIR = "/data/storage"
+  TRET_SERVE_FRONTEND_DIR = "/app/frontend-dist"
   # A real deployment, declared as one: the boot checks refuse to start with the
   # shipped dev secret or admin password (docs/hardening.md). Set both as Fly
   # secrets before the first deploy — see docs/deploy-fly.md.
-  BENCH_ENVIRONMENT = "production"
+  TRET_ENVIRONMENT = "production"
   # force_https is on above, so the session cookie can be TLS-only.
-  BENCH_COOKIE_SECURE = "true"
-  BENCH_ROUTER_MODEL = "openrouter/openai/gpt-5.6-luna"
+  TRET_COOKIE_SECURE = "true"
+  TRET_ROUTER_MODEL = "openrouter/openai/gpt-5.6-luna"
 
 [http_service]
   internal_port = 8000
@@ -33,7 +33,7 @@ primary_region = "iad"
     path = "/api/healthz"
 
 [mounts]
-  source = "bench_storage"
+  source = "tret_storage"
   destination = "/data"
 
 [[vm]]

@@ -1,13 +1,13 @@
-# bench for non-technical humans: the easy start
+# tret for non-technical humans: the easy start
 
-You don't need to know anything about programming to run bench on your own
-computer. There are three steps: install Docker Desktop (once), get the bench
+You don't need to know anything about programming to run tret on your own
+computer. There are three steps: install Docker Desktop (once), get the tret
 files, and double-click a file. This page walks through all of it.
 
 ## Step 1 — Install Docker Desktop (once)
 
-Docker Desktop is a free app that runs bench in a tidy box on your computer,
-with everything bench needs already inside the box.
+Docker Desktop is a free app that runs tret in a tidy box on your computer,
+with everything tret needs already inside the box.
 
 1. Go to <https://www.docker.com/products/docker-desktop/> and download it
    for your computer (Mac or Windows — it picks the right one for you).
@@ -18,13 +18,13 @@ with everything bench needs already inside the box.
 4. You'll know it's ready when the little whale icon (in the menu bar on a
    Mac, or the taskbar corner on Windows) stops animating.
 
-That's the only "installing software" you'll ever do for bench.
+That's the only "installing software" you'll ever do for tret.
 
-## Step 2 — Get the bench files
+## Step 2 — Get the tret files
 
 Two ways; pick whichever sounds friendlier.
 
-**The no-tools way:** on the bench page on GitHub, click the green **Code**
+**The no-tools way:** on the tret page on GitHub, click the green **Code**
 button, then **Download ZIP**. When it downloads, double-click the ZIP to
 unpack it, and put the resulting folder somewhere you'll find it again
 (Documents is a fine home).
@@ -34,16 +34,16 @@ usual.
 
 ## Step 3 — Double-click the start file
 
-Open the bench folder and double-click the one for your computer:
+Open the tret folder and double-click the one for your computer:
 
-| Your computer | Double-click this   |
-| ------------- | ------------------- |
-| Mac           | `start-bench.command` |
-| Windows       | `start-bench.bat`   |
-| Linux         | `start-bench.sh`    |
+| Your computer | Double-click this    |
+| ------------- | -------------------- |
+| Mac           | `start-tret.command` |
+| Windows       | `start-tret.bat`     |
+| Linux         | `start-tret.sh`      |
 
 A text window opens and narrates what's happening. It checks that Docker is
-awake (and wakes it if not), sets things up, and opens bench in your browser
+awake (and wakes it if not), sets things up, and opens tret in your browser
 when it's ready.
 
 ### "My computer is warning me about this file!"
@@ -62,7 +62,7 @@ is normal and only happens once:
 
 ### The first start is slow — that's expected
 
-The very first time, your computer downloads and assembles everything bench
+The very first time, your computer downloads and assembles everything tret
 needs. Depending on your internet connection this takes **several minutes**
 — you'll see a lot of text scroll by and then dots while it waits. Every
 start after this one takes only a few seconds. If the window says it timed
@@ -74,32 +74,32 @@ out but nothing looks wrong, just wait another minute or two and open
 Your browser opens at <http://localhost:5180>. Sign in with:
 
 - **Email:** `admin@example.com`
-- **Password:** `bench-admin`
+- **Password:** `tret-admin`
 
 This is fine for playing on your own computer. If other people can reach
 this machine, change the email and password in the `.env` file that the
-start script created in the bench folder (open it with any text editor, edit
-the `BENCH_ADMIN_EMAIL` and `BENCH_ADMIN_PASSWORD` lines, then stop and
-start bench again).
+start script created in the tret folder (open it with any text editor, edit
+the `TRET_ADMIN_EMAIL` and `TRET_ADMIN_PASSWORD` lines, then stop and
+start tret again).
 
 ## Step 5 — Add an AI provider key
 
-bench talks to AI models on your behalf, so it needs at least one API key —
+tret talks to AI models on your behalf, so it needs at least one API key —
 a long code you get from an AI provider (a single OpenRouter key is enough
 to try everything).
 
-bench asks for this itself: right after your first login, a **Welcome to
-bench** window appears with a place to pick your provider, paste your key,
+tret asks for this itself: right after your first login, a **Welcome to
+tret** window appears with a place to pick your provider, paste your key,
 and save. If you closed it, the yellow bar at the top brings it back — or go
 to **Settings** and find the **Provider keys** section, which is the same
 form and where keys live from then on.
 
 You never need to put keys in any file — the app is the place.
 
-## Stopping bench
+## Stopping tret
 
-Double-click the matching stop file: `stop-bench.command` (Mac),
-`stop-bench.bat` (Windows), or `stop-bench.sh` (Linux). Everything shuts
+Double-click the matching stop file: `stop-tret.command` (Mac),
+`stop-tret.bat` (Windows), or `stop-tret.sh` (Linux). Everything shuts
 down and **all your data is kept** — runs, settings, keys. Double-click the
 start file whenever you want it back. Quitting Docker Desktop afterwards is
 optional, but frees up memory.
@@ -111,4 +111,4 @@ optional, but frees up memory.
   wait for the whale to settle, and double-click the start file again.
 - Still stuck? Send whoever helps you with computers the last lines from the
   start window — they'll know what to do. (For them: `docker compose logs
-  backend` from the bench folder shows the details.)
+  backend` from the tret folder shows the details.)

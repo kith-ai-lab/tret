@@ -1,4 +1,4 @@
-/** Typed fetch wrapper + interfaces for every bench API resource.
+/** Typed fetch wrapper + interfaces for every tret API resource.
  *  All requests carry the session cookie (credentials: 'include'). */
 
 // ── Resource types ───────────────────────────────────────────────────────
@@ -191,7 +191,7 @@ export interface ContextComposition {
   blocks: ContextBlock[]
 }
 
-/** GHG Protocol split for one run, from the bench operator's perspective.
+/** GHG Protocol split for one run, from the tret operator's perspective.
  *  scope1_g is always 0 and always present — reported as an explicit zero rather
  *  than omitted. `basis` states the reasoning and is rendered verbatim. */
 export interface EmissionScopes {
@@ -458,7 +458,7 @@ export interface CompactionRecord {
 
 /** One model call a run made *about itself* — choosing its model, or
  *  summarizing what compaction elided. Metered against the model that ran it,
- *  which is not the run's model: the router runs on BENCH_ROUTER_MODEL and the
+ *  which is not the run's model: the router runs on TRET_ROUTER_MODEL and the
  *  summarizer resolves its own cheap model, so energy class and grid factor are
  *  each call's own. */
 export interface OverheadCall {
@@ -570,7 +570,7 @@ export interface HarnessBody {
   loop_config: LoopConfig
 }
 
-export interface BenchDocument {
+export interface TretDocument {
   id: string
   project_id: string
   filename: string
@@ -585,7 +585,7 @@ export interface BenchDocument {
   created_at: string | null
 }
 
-export interface BenchDocumentDetail extends BenchDocument {
+export interface TretDocumentDetail extends TretDocument {
   extracted_text: string
 }
 
@@ -727,7 +727,7 @@ export interface ProviderStatus {
  *  `GET /api/settings/providers`, which the backend derives from
  *  `providers/catalog.py::PROVIDER_SPECS`, so adding a provider stays a
  *  one-place change. What the frontend still has to know is that "local" is
- *  credentialed by `BENCH_LOCAL_BASE_URL` rather than a key: it has no key to
+ *  credentialed by `TRET_LOCAL_BASE_URL` rather than a key: it has no key to
  *  submit, an unset one is a normal state rather than a misconfiguration, and it
  *  must not appear in the write-only key form. That is a fact about the kind of
  *  credential, not a second copy of the roster. */
@@ -747,7 +747,7 @@ export interface LocalTestModel {
 }
 
 /** POST /api/settings/providers/local/test — a read-only diagnostic. The URL
- *  tested is always the server's own BENCH_LOCAL_BASE_URL; the client cannot
+ *  tested is always the server's own TRET_LOCAL_BASE_URL; the client cannot
  *  supply one (that would make this an SSRF hole). */
 export interface LocalProviderTest {
   configured: boolean
@@ -1344,10 +1344,10 @@ export const api = {
   uploadDocument: (file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return request<BenchDocument>('/documents', { method: 'POST', form })
+    return request<TretDocument>('/documents', { method: 'POST', form })
   },
-  listDocuments: () => request<BenchDocument[]>('/documents'),
-  getDocument: (id: string) => request<BenchDocumentDetail>(`/documents/${id}`),
+  listDocuments: () => request<TretDocument[]>('/documents'),
+  getDocument: (id: string) => request<TretDocumentDetail>(`/documents/${id}`),
   listDatasets: () => request<Dataset[]>('/datasets'),
   getDatasetRows: (id: string, limit = 10) =>
     request<DatasetRow[]>(`/datasets/${id}/rows?limit=${limit}`),

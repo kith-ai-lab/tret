@@ -1,6 +1,6 @@
 # Authoring a Domain Pack
 
-A pack turns bench into a workbench for *your* domain — contract review,
+A pack turns tret into a workbench for *your* domain — contract review,
 grant compliance, safety audits, anything where structured judgment over
 documents and data needs to be trustworthy. No backend code required.
 
@@ -20,7 +20,7 @@ my-pack/
 Validate any time:
 
 ```bash
-bench packs validate ./my-pack
+tret packs validate ./my-pack
 ```
 
 ## pack.yaml
@@ -61,7 +61,7 @@ datasets:
 - **output_schema** is enforced mechanically, with in-loop repair. Prefer
   enums over free text wherever a value is decision-relevant. If your schema
   includes a `cited_values` array (objects with `dataset`, `row_ref`,
-  `value`), bench cross-checks every entry against what the run actually
+  `value`), tret cross-checks every entry against what the run actually
   retrieved via `lookup_dataset` — use it for any output that carries numbers.
 - **terminal_tool** (`record_verdict`, `record_finding`, or `draft_section`)
   makes the structured output the *terminal action* of the run. If the model
@@ -93,7 +93,7 @@ task_types:
   as `#Step 5` is enough). The file's front matter — its title and the framing
   paragraphs before the first `##` — always rides along, because that is
   usually where the rule that makes the section interpretable lives.
-- `bench packs validate` fails on a selector naming an unknown file or a
+- `tret packs validate` fails on a selector naming an unknown file or a
   heading that does not exist, so scoping cannot rot silently. At runtime an
   unresolvable selector fails *open* (whole file loaded) and is noted in the
   run's context composition: a scoping mistake can never starve a task of
@@ -157,7 +157,7 @@ Rules that keep the trust story intact:
 
 ## The safety scan your methods must pass
 
-`bench packs validate` AST-scans every method entrypoint and **fails the pack**
+`tret packs validate` AST-scans every method entrypoint and **fails the pack**
 — so it is never installed — if the code reaches for anything that would stop it
 being a pure, reproducible function. Violations are reported with `file:line`.
 
@@ -173,11 +173,11 @@ being a pure, reproducible function. Violations are reported with `file:line`.
 | Environment mutation | `os.putenv`, `os.unsetenv` |
 
 Matching is on the dotted name *and* its root package, so `http.client` trips
-`http`. The authoritative list is `backend/bench/packs/safety.py`.
+`http`. The authoritative list is `backend/tret/packs/safety.py`.
 
 If a rule blocks something you need, the need is usually the problem: a method
 that fetches a URL is not reproducible, and a method that shells out is not
-reviewable. Fetch the data outside bench and ship it as a dataset instead.
+reviewable. Fetch the data outside tret and ship it as a dataset instead.
 
 **This scan is a deterrent, not a sandbox.** Any determined author can defeat an
 AST check. What actually contains a method is the subprocess isolation in
@@ -187,7 +187,7 @@ installing it. See [hardening.md](hardening.md) for what is and is not isolated
 
 ## Integrity pinning and how to re-pin
 
-At install, bench hashes **every entry** in the pack directory — methods,
+At install, tret hashes **every entry** in the pack directory — methods,
 schemas, datasets, templates, `pack.yaml`, doctrine — and stores it as
 `packs.content_hash` (visible on `GET /api/packs`). Before any method executes,
 the hash is recomputed and compared. A mismatch fails the run, names both
@@ -211,7 +211,7 @@ link swapped the code a method executes without changing a single byte the hash
 covered.
 
 The limit is worth stating plainly, because a directory hash cannot fix it:
-**content outside the pack directory cannot be pinned.** bench refuses to follow
+**content outside the pack directory cannot be pinned.** tret refuses to follow
 a link out of the pack (a pack could otherwise aim the hasher at `/dev/urandom`,
 or at a file it has no business reading), so a pack whose data lives behind an
 external symlink is pinned *by reference only* — the link still points where it
@@ -232,18 +232,18 @@ Two consequences for authoring:
 The re-pin flow after an intentional edit:
 
 ```bash
-bench packs hash ./my-pack      # the hash an install would store; changes nothing
+tret packs hash ./my-pack      # the hash an install would store; changes nothing
 ```
 
 then reinstall the pack, which re-pins it:
 
-- restart bench — boot runs the idempotent pack install, or
+- restart tret — boot runs the idempotent pack install, or
 - `POST /api/packs/install {"path": "/path/to/my-pack"}` (admin only).
 
 While iterating locally, expect to reinstall after each edit that touches a
 method or its inputs. Bump `version` in `pack.yaml` for anything you publish, so
 consumers can tell a re-pin from a genuinely new pack. Packs installed before
-integrity pinning existed carry a null hash: bench warns, runs them, and the
+integrity pinning existed carry a null hash: tret warns, runs them, and the
 next install pins them.
 
 Pinning catches tampering and drift by whoever can write to the pack directory.

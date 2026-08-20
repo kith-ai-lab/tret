@@ -1,7 +1,7 @@
 /** Where every constant behind a carbon figure came from.
  *
  *  This is the answer to "where do your numbers come from" rendered as a table
- *  rather than as prose: per factor, the value bench applied, its unit, the source
+ *  rather than as prose: per factor, the value tret applied, its unit, the source
  *  it was taken from with a real link, the date of that source, a confidence
  *  marker, and the setting that changes it. Nothing here is hardcoded in the
  *  frontend — every row, including its source string and its URL, is read from the
@@ -92,7 +92,7 @@ export function FactorTable({ factors }: { factors: EmissionsFactor[] }) {
   if (factors.length === 0) {
     return (
       <div className="empty" style={{ padding: '4px 0' }}>
-        This run carries no factor provenance — it was recorded before bench stored it.
+        This run carries no factor provenance — it was recorded before tret stored it.
       </div>
     )
   }

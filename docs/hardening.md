@@ -1,6 +1,6 @@
 # Production Hardening
 
-bench ships with development defaults so `docker compose up` works in one step.
+tret ships with development defaults so `docker compose up` works in one step.
 Those defaults are unsafe on a network. This is the checklist for a real
 deployment, and an honest account of what each control does and does not
 guarantee.
@@ -8,39 +8,39 @@ guarantee.
 ## 1. Turn on the boot checks
 
 ```
-BENCH_ENVIRONMENT=production
+TRET_ENVIRONMENT=production
 ```
 
-With `production` set, bench **refuses to start** if:
+With `production` set, tret **refuses to start** if:
 
-- `BENCH_SECRET_KEY` is still `dev-secret-change-me` (or blank). That key signs
+- `TRET_SECRET_KEY` is still `dev-secret-change-me` (or blank). That key signs
   session cookies and encrypts provider API keys stored through the settings
   UI — a known key means forgeable sessions and readable credentials.
-- `BENCH_ADMIN_PASSWORD` is still `bench-admin`.
+- `TRET_ADMIN_PASSWORD` is still `tret-admin`.
 
-It **warns loudly** (but starts) if `BENCH_COOKIE_SECURE` is false.
+It **warns loudly** (but starts) if `TRET_COOKIE_SECURE` is false.
 
-The check runs in `create_app()` (`bench/config.py::enforce_production_safety`),
+The check runs in `create_app()` (`tret/config.py::enforce_production_safety`),
 before the socket is bound, so a misconfigured deploy fails fast instead of
 serving.
 
 ```bash
-BENCH_SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+TRET_SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
 ```
 
-Rotating `BENCH_SECRET_KEY` invalidates every session **and** makes
+Rotating `TRET_SECRET_KEY` invalidates every session **and** makes
 DB-stored provider keys undecryptable — re-enter them in the settings UI after
 a rotation.
 
 ## 2. TLS and cookies
 
-- Terminate TLS in front of bench (reverse proxy, or the platform's edge).
-- Set `BENCH_COOKIE_SECURE=true`. The session cookie is already `httponly` and
+- Terminate TLS in front of tret (reverse proxy, or the platform's edge).
+- Set `TRET_COOKIE_SECURE=true`. The session cookie is already `httponly` and
   `samesite=lax`; `secure` is the part that depends on your deployment.
 - The admin user is created on first boot only. Change its password afterwards
   with `POST /api/auth/password` (your own account; the current password is
   required, and the check is rate limited so it cannot be used as an oracle).
-  `BENCH_ADMIN_PASSWORD` is not a live credential store — it is read only when
+  `TRET_ADMIN_PASSWORD` is not a live credential store — it is read only when
   no users exist.
 
 ### Credential lifecycle and session revocation
@@ -48,7 +48,7 @@ a rotation.
 Sessions are stateless signed cookies, so there is no session table to delete
 rows from. Revocation is bound to the credential instead: every cookie carries a
 short fingerprint of the password hash it was minted against, and a request whose
-fingerprint no longer matches is refused (`bench/api/auth.py::credential_version`).
+fingerprint no longer matches is refused (`tret/api/auth.py::credential_version`).
 argon2 salts every hash, so **setting a password always invalidates every session
 for that account**, immediately:
 
@@ -65,18 +65,18 @@ Two consequences worth planning for:
   honoured — accepting the old shape would be a way around revocation. The cost
   is one re-login per user, once.
 - Password change and deactivation are the revocation primitives. Rotating
-  `BENCH_SECRET_KEY` also invalidates every session, but it is the blunt
+  `TRET_SECRET_KEY` also invalidates every session, but it is the blunt
   instrument: it makes DB-stored provider keys undecryptable too (§1).
 
 ## 3. Login rate limiting
 
 The login endpoint applies an in-memory sliding window over
-`BENCH_LOGIN_WINDOW_SECONDS` (default 300), and counts each failed attempt in
+`TRET_LOGIN_WINDOW_SECONDS` (default 300), and counts each failed attempt in
 **two** buckets:
 
 | Key | Limit | What it stops |
 | --- | --- | --- |
-| `src\|<peer>\|<email>` | `BENCH_LOGIN_MAX_ATTEMPTS` (default 10) | one host guessing at one account |
+| `src\|<peer>\|<email>` | `TRET_LOGIN_MAX_ATTEMPTS` (default 10) | one host guessing at one account |
 | `acct\|<email>` | 5x that (`ACCOUNT_BURST_MULTIPLE`) | the same account attacked from many source addresses |
 
 Exceeding either yields `429` with `Retry-After`. A successful login clears both
@@ -92,18 +92,18 @@ loses when an attacker has many addresses.
 `X-Forwarded-For` is deliberately **not** consulted. It is client-settable, so
 trusting it would let an attacker mint a fresh bucket per attempt by varying a
 header — a limiter that can be stepped around is worse than one that is merely
-uninformative, and bench has no trusted-proxy configuration with which to tell a
+uninformative, and tret has no trusted-proxy configuration with which to tell a
 forged hop from a real one.
 
 Limits: the counter is **per process** and in memory — it resets on restart and
-does not coordinate across workers (bench pins `workers=1`). Neither key contains
+does not coordinate across workers (tret pins `workers=1`). Neither key contains
 anything the client controls except the email already being attacked, so a
 lockout can only ever affect one account. For anything internet-facing, put a
 proxy/WAF limit in front as well.
 
 ## 4. Deterministic methods: the actual sandbox
 
-Pack methods (`bench/services/methods.py`) run as short-lived subprocesses:
+Pack methods (`tret/services/methods.py`) run as short-lived subprocesses:
 
 | Control | Mechanism | Guarantee |
 | --- | --- | --- |
@@ -121,31 +121,31 @@ Pack methods (`bench/services/methods.py`) run as short-lived subprocesses:
 
 ### Network isolation
 
-`BENCH_METHODS_NETWORK_ISOLATION` (default true) wraps each method in
+`TRET_METHODS_NETWORK_ISOLATION` (default true) wraps each method in
 `unshare --net` when all of these hold: the host is Linux, the `unshare` binary
 exists, and the process may create a network namespace (root, `CAP_SYS_ADMIN`,
-or unprivileged user namespaces). bench probes this once and logs the result. On
+or unprivileged user namespaces). tret probes this once and logs the result. On
 a macOS development machine, or in a container without the capability, you get a
 warning and **no network isolation** — methods could open sockets.
 
 If you cannot grant the capability, isolate at the container/pod level instead
-(no egress for the bench workload, or a network policy that only allows your LLM
+(no egress for the tret workload, or a network policy that only allows your LLM
 provider).
 
 ### What is NOT isolated
 
-**The filesystem.** A method runs as the bench user and can read anything that
+**The filesystem.** A method runs as the tret user and can read anything that
 user can read — `./storage` uploads, the pack tree, application code — and write
 anywhere that user can write. There is no chroot, no mount namespace, no seccomp
 filter.
 
-The only real boundary is the one you put around bench: run it in a container or
+The only real boundary is the one you put around tret: run it in a container or
 VM with a minimal filesystem, a non-root user, a read-only root filesystem where
 possible, and controlled egress.
 
 ## 5. The pack safety scan: a deterrent, not a boundary
 
-Pack validation (`bench/packs/safety.py`, surfaced by `bench packs validate`,
+Pack validation (`tret/packs/safety.py`, surfaced by `tret packs validate`,
 `POST /api/packs/validate`, and the boot-time install) AST-scans every method
 entrypoint and **fails the pack** on:
 
@@ -169,7 +169,7 @@ casual abuse. Treat installing a pack as deploying code you reviewed.
 
 ## 6. Pack integrity pinning
 
-At install time bench hashes every entry in the pack directory (sorted by
+At install time tret hashes every entry in the pack directory (sorted by
 relative path; regular files contribute their bytes, symlinks contribute their
 target string, build artefacts excluded) and stores it on `packs.content_hash`.
 Before a method executes, the hash is recomputed and compared; a mismatch fails
@@ -187,12 +187,12 @@ re-pin. Signed packs remain future work.
 
 Intentional edits — refresh the pin by reinstalling the pack:
 
-- restart bench (boot runs the idempotent pack install), or
+- restart tret (boot runs the idempotent pack install), or
 - `POST /api/packs/install {"path": "/path/to/pack"}` (admin), or
-- inspect first: `bench packs hash /path/to/pack` prints the hash an install
+- inspect first: `tret packs hash /path/to/pack` prints the hash an install
   would store.
 
-Packs installed before this feature have a null hash: bench logs a warning and
+Packs installed before this feature have a null hash: tret logs a warning and
 runs them, and the next install pins them.
 
 ## 7. Guardrail observability
@@ -212,34 +212,34 @@ derived gCO2e, plus a per-harness breakdown with Wh per run. Unlike validation
 pressure, energy is a grouped `SUM` over every run in the window rather than the
 bounded transcript scan, and it counts only runs that carry an estimate (runs
 predating ecological accounting store null, and null is not zero). Carbon is
-derived by applying the *currently configured* `BENCH_GRID_CO2E_G_PER_KWH` to
+derived by applying the *currently configured* `TRET_GRID_CO2E_G_PER_KWH` to
 the summed energy; each run additionally records the factor in force when it ran,
 and `energy_basis` in the response says which is which. All of it is estimated —
 see [eco-accounting.md](eco-accounting.md).
 
 ## 8. Database and storage
 
-- Give bench its own Postgres role. Alembic owns the schema and bench brings the
+- Give tret its own Postgres role. Alembic owns the schema and tret brings the
   database to head on boot, including adopting a pre-migrations (v0.1) database —
   see [upgrading.md](upgrading.md). That role therefore needs DDL rights on its
   own schema. To keep DDL out of the app's role instead, run
   `alembic upgrade head` from a deploy step under a privileged role and set
-  `BENCH_SKIP_MIGRATIONS=true` on the app (documented in `.env.example` and
+  `TRET_SKIP_MIGRATIONS=true` on the app (documented in `.env.example` and
   passed through by `docker-compose.yml`).
 - Back the database up **before** an upgrade that migrates it. A failed migration
   rolls back (Postgres DDL is transactional), but a downgrade discards the columns
   it removes.
-- `BENCH_STORAGE_DIR` holds uploaded documents in the clear. Put it on an
+- `TRET_STORAGE_DIR` holds uploaded documents in the clear. Put it on an
   encrypted volume with restrictive permissions, and back it up with the DB —
   findings reference documents by id.
-- bench makes no outbound calls except to the LLM providers you configure (plus
-  the optional OpenRouter catalog fetch, `BENCH_OPENROUTER_CATALOG=false` to
+- tret makes no outbound calls except to the LLM providers you configure (plus
+  the optional OpenRouter catalog fetch, `TRET_OPENROUTER_CATALOG=false` to
   disable). No telemetry.
 
-## 9. Outbound network: what bench may talk to
+## 9. Outbound network: what tret may talk to
 
-Every request that leaves bench goes through `bench/net/`, tagged with a **class**.
-`tests/test_egress_chokepoint.py` fails the build if anything else in `bench/`
+Every request that leaves tret goes through `tret/net/`, tagged with a **class**.
+`tests/test_egress_chokepoint.py` fails the build if anything else in `tret/`
 imports a connection-opening module or constructs an HTTP client, so the answer
 to "can this deployment reach the internet, and what for?" is one directory, not
 a grep.
@@ -248,11 +248,11 @@ a grep.
 | --- | --- | --- |
 | `provider` | cloud model calls (Anthropic, Kimi, OpenRouter) | on |
 | `catalog` | the OpenRouter model list, provider key validation | on |
-| `local` | a self-hosted model server at `BENCH_LOCAL_BASE_URL` | on |
+| `local` | a self-hosted model server at `TRET_LOCAL_BASE_URL` | on |
 | `research` | `web_search` and `fetch_url` | **off** |
 
-Every switch narrows and none widens. `BENCH_EGRESS` is the master; each
-`BENCH_EGRESS_<CLASS>` narrows it further; `POST /api/settings/egress` (admin)
+Every switch narrows and none widens. `TRET_EGRESS` is the master; each
+`TRET_EGRESS_<CLASS>` narrows it further; `POST /api/settings/egress` (admin)
 narrows again at runtime, in memory, and a restart returns to what the
 environment says. Asking that endpoint for a *wider* mode is accepted and does
 nothing — the response reports the mode actually in force. That asymmetry is
@@ -262,7 +262,7 @@ and a compromised admin session must never be able to restore it.
 ### Severing web access
 
 ```
-BENCH_EGRESS_RESEARCH=off
+TRET_EGRESS_RESEARCH=off
 ```
 
 The agent's internet is gone; everything else works. Harnesses that list
@@ -277,12 +277,12 @@ re-runs without touching the network.
 ### The air-gapped deployment
 
 ```
-BENCH_EGRESS=off
-BENCH_LOCAL_BASE_URL=http://ollama.internal:11434/v1
+TRET_EGRESS=off
+TRET_LOCAL_BASE_URL=http://ollama.internal:11434/v1
 ```
 
 `provider`, `catalog` and `research` all go dark; `local` survives, because a
-call to a model server on your own network never leaves the deployment. bench
+call to a model server on your own network never leaves the deployment. tret
 does not take that on faith — with the master switch off, the `local` class
 *requires* that host to resolve to a private address, so a "local" URL that is
 secretly on the internet is refused rather than trusted for its name. Every
@@ -295,13 +295,13 @@ local models instead of picking a model it cannot reach and failing the run.
 uploaded third-party documents — the prompt-injection surface. So:
 
 - https only, no credentials in the URL, no non-standard ports;
-- the host must pass the allowlist (`BENCH_EGRESS_RESEARCH_ALLOW_HOSTS`);
+- the host must pass the allowlist (`TRET_EGRESS_RESEARCH_ALLOW_HOSTS`);
 - the host is **resolved**, and every address it resolves to must be public —
   loopback, RFC1918, link-local and the cloud metadata address are all refused.
   Checking the name rather than the addresses would miss the entire attack;
 - redirects are followed by hand, three hops maximum, each re-checked from
   scratch, because a redirect is a second destination chosen by the first;
-- the body is capped *while* it streams (`BENCH_EGRESS_RESEARCH_MAX_BYTES`), and
+- the body is capped *while* it streams (`TRET_EGRESS_RESEARCH_MAX_BYTES`), and
   each run has a fetch budget (`..._MAX_FETCHES_PER_RUN`).
 
 **An empty allowlist means the public web.** A general web search cannot run
@@ -316,17 +316,17 @@ allowlist enforced by code running inside the process it constrains, and the
 resolve-then-connect gap means a DNS record that changes between the two lookups
 (rebinding) is not closed here. Both are honest limits, not oversights: closing
 them means pinning resolved addresses into the connection with a custom
-transport, which bench does not do and does not claim to.
+transport, which tret does not do and does not claim to.
 
 The boundary is the network around the workload:
 
 ```
-BENCH_EGRESS_PROXY=http://egress-proxy.internal:3128
+TRET_EGRESS_PROXY=http://egress-proxy.internal:3128
 ```
 
 Route the container through a proxy it cannot bypass, or give the pod a network
 policy that can reach your LLM provider and nothing else. The controls in
-`bench/net/` make the intent legible, catch mistakes, and give you the audit
+`tret/net/` make the intent legible, catch mistakes, and give you the audit
 trail; the network policy is what an attacker actually has to beat.
 
 ### The audit trail
@@ -345,11 +345,11 @@ network, and is worth reading the run transcript over.
 
 ## Minimum production checklist
 
-- [ ] `BENCH_ENVIRONMENT=production`
-- [ ] unique `BENCH_SECRET_KEY`, strong `BENCH_ADMIN_PASSWORD`
-- [ ] TLS in front, `BENCH_COOKIE_SECURE=true`
+- [ ] `TRET_ENVIRONMENT=production`
+- [ ] unique `TRET_SECRET_KEY`, strong `TRET_ADMIN_PASSWORD`
+- [ ] TLS in front, `TRET_COOKIE_SECURE=true`
 - [ ] container/VM with a non-root user and controlled egress —
-      [Dockerfile.fly](../Dockerfile.fly) does this already (a fixed-uid `bench`
+      [Dockerfile.fly](../Dockerfile.fly) does this already (a fixed-uid `tret`
       user; `fly-entrypoint.sh` fixes ownership of the mounted volume at boot,
       then drops root before exec'ing uvicorn), so this is a check on your
       deployment only if you built your own image from `backend/Dockerfile`
@@ -357,8 +357,8 @@ network, and is worth reading the run transcript over.
 - [ ] `unshare` available, or network policy denying method egress
 - [ ] packs reviewed as code, installed from a path only operators can write
 - [ ] DB and `storage/` backed up, and backed up again before an upgrade
-      (bench migrates the schema itself on boot — [upgrading.md](upgrading.md))
+      (tret migrates the schema itself on boot — [upgrading.md](upgrading.md))
 - [ ] proxy/WAF rate limit in front of `/api/auth/login`
-- [ ] egress decided on purpose (§9): `BENCH_EGRESS_RESEARCH` off unless the
-      agents are meant to browse, an allowlist or a `BENCH_EGRESS_PROXY` if they
+- [ ] egress decided on purpose (§9): `TRET_EGRESS_RESEARCH` off unless the
+      agents are meant to browse, an allowlist or a `TRET_EGRESS_PROXY` if they
       are, and a network policy behind both

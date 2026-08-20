@@ -59,7 +59,7 @@ async def _long_run(world, *, limit: int):
             *divergence_happy_script(),
         ]
     )
-    with patch("bench.engine.harness.context_budget", return_value=limit):
+    with patch("tret.engine.harness.context_budget", return_value=limit):
         result = await world.run(
             provider=provider,
             harness_id=harness_id,
@@ -92,7 +92,7 @@ async def test_the_persisted_transcript_is_untouched_by_compaction(world):
     assert result.run.compactions  # it definitely compacted
     tool_results = [m for m in result.run.messages if m["role"] == "tool"]
     assert any(BULK[:200] in (m.get("content") or "") for m in tool_results)
-    assert not any("elided by bench" in (m.get("content") or "") for m in tool_results)
+    assert not any("elided by tret" in (m.get("content") or "") for m in tool_results)
 
 
 async def test_the_run_records_what_it_stopped_showing_the_model(world):

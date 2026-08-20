@@ -5,7 +5,7 @@
 
 services:
   - type: web
-    name: bench
+    name: tret
     runtime: docker
     # The single-image production build. Root context on purpose: the image
     # carries the repository's docs/ and packs/ (see Dockerfile.fly), and the
@@ -23,72 +23,72 @@ services:
     # Change both together or neither.
     region: oregon
     # Single instance by design: the run event bus is in-process and SSE
-    # streams are long-lived, so bench must NOT scale horizontally
+    # streams are long-lived, so tret must NOT scale horizontally
     # (docs/architecture.md). The disk below makes this a hard rule — Render
     # refuses to scale a service with an attached disk — but stating it here
     # keeps the constraint visible where deploys are read.
     numInstances: 1
     healthCheckPath: /api/healthz
-    # Uploaded documents (BENCH_STORAGE_DIR=/data/storage, baked into
+    # Uploaded documents (TRET_STORAGE_DIR=/data/storage, baked into
     # Dockerfile.fly). Mounted at /data to mirror the Fly volume, so
     # fly-entrypoint.sh's boot-time chown covers it unchanged. A disk can be
     # grown later but never shrunk, so it starts small.
     #
     # Trade-off to know about: an attached disk means deploys stop the old
     # instance before starting the new one — expect a brief interruption on
-    # every deploy (that is Render's rule for disks, not a bench choice).
+    # every deploy (that is Render's rule for disks, not a tret choice).
     disk:
-      name: bench-storage
+      name: tret-storage
       mountPath: /data
       sizeGB: 1
     envVars:
-      # bench ignores PORT (uvicorn binds 8000 in the Dockerfile CMD); this
+      # tret ignores PORT (uvicorn binds 8000 in the Dockerfile CMD); this
       # tells Render's router which port to forward to, skipping its port scan.
       - key: PORT
         value: "8000"
-      # Internal postgres:// URL from the database below. bench reads
-      # BENCH_DATABASE_URL, and normalizes plain postgres:// to the asyncpg
-      # dialect itself (backend/bench/db/engine.py::normalize_database_url).
-      - key: BENCH_DATABASE_URL
+      # Internal postgres:// URL from the database below. tret reads
+      # TRET_DATABASE_URL, and normalizes plain postgres:// to the asyncpg
+      # dialect itself (backend/tret/db/engine.py::normalize_database_url).
+      - key: TRET_DATABASE_URL
         fromDatabase:
-          name: bench-db
+          name: tret-db
           property: connectionString
-      # BENCH_ENVIRONMENT=production is baked into Dockerfile.fly, so bench
+      # TRET_ENVIRONMENT=production is baked into Dockerfile.fly, so tret
       # refuses to boot with dev defaults for either of these (docs/hardening.md).
       # generateValue makes Render mint a random value at deploy time — both are
       # readable afterwards in the dashboard under the service's Environment tab.
       #
-      # BENCH_SECRET_KEY signs sessions and encrypts provider keys stored via
+      # TRET_SECRET_KEY signs sessions and encrypts provider keys stored via
       # the Settings UI; changing it later logs everyone out AND makes those
       # stored keys undecryptable, so leave it alone once set.
-      - key: BENCH_SECRET_KEY
+      - key: TRET_SECRET_KEY
         generateValue: true
       # First-boot admin password (read only while no users exist). Reveal it
       # in the dashboard's Environment tab to log in the first time.
-      - key: BENCH_ADMIN_PASSWORD
+      - key: TRET_ADMIN_PASSWORD
         generateValue: true
       # Prompted for in Render's deploy form: the email you will log in with.
-      - key: BENCH_ADMIN_EMAIL
+      - key: TRET_ADMIN_EMAIL
         sync: false
       # Same default router model the Fly deployment pins (fly.toml); it is
       # used once an OpenRouter key is entered, and adjustable later in
       # Settings → Router.
-      - key: BENCH_ROUTER_MODEL
+      - key: TRET_ROUTER_MODEL
         value: openrouter/openai/gpt-5.6-luna
       # Provider API keys (OpenRouter / Anthropic / Moonshot) are NOT needed
       # here: enter them after first login in Settings → Provider keys, where
-      # they are stored encrypted with BENCH_SECRET_KEY. Env vars would win
+      # they are stored encrypted with TRET_SECRET_KEY. Env vars would win
       # over the UI if you set them (docs/hardening.md), so this blueprint
       # deliberately sets none.
 
 databases:
   # Managed Postgres. Cheapest non-expiring plan: Render's free Postgres is
   # deleted after 30 days, which is not a place to keep findings and approvals.
-  - name: bench-db
+  - name: tret-db
     plan: basic-256mb
     region: oregon # keep in step with the service region above
-    databaseName: bench
-    user: bench
+    databaseName: tret
+    user: tret
     # Matches the postgres:16 image docker-compose runs locally, so local and
     # deployed behaviour stay comparable.
     postgresMajorVersion: "16"

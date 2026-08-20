@@ -1,12 +1,12 @@
 # Deploying to Render (one-click)
 
-The easiest way to get a private bench instance on the internet, no terminal
+The easiest way to get a private tret instance on the internet, no terminal
 required. Render reads [`render.yaml`](../render.yaml) from this repository and
-creates everything bench needs: the app itself, a managed Postgres database,
+creates everything tret needs: the app itself, a managed Postgres database,
 and a persistent disk for uploaded documents. LLM provider keys are entered
 later, in the app — you do not need one to deploy.
 
-One rule to know up front: bench runs as a **single instance**. The blueprint
+One rule to know up front: tret runs as a **single instance**. The blueprint
 enforces this, and the attached disk makes Render enforce it too. Do not raise
 the instance count later — parts of the app (live run streams) work through
 in-process state that cannot be shared across copies (see
@@ -17,7 +17,7 @@ docs/architecture.md).
 <!-- README-SNIPPET: copy the block below into README.md verbatim -->
 
 ```markdown
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/voiz-academy/bench)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/voiz-academy/tret)
 ```
 
 <!-- /README-SNIPPET -->
@@ -33,13 +33,13 @@ what trigger redeploys.
    there). You will need to add a payment method: the plans this blueprint
    uses are paid, because Render's free tier has no persistent disk and its
    free database is deleted after 30 days. Costs are below.
-2. **Render shows the blueprint** — the `bench` web service, the `bench-db`
+2. **Render shows the blueprint** — the `tret` web service, the `tret-db`
    database, and one question it needs answered:
-   - **`BENCH_ADMIN_EMAIL`** — the email address you will log in with. It
+   - **`TRET_ADMIN_EMAIL`** — the email address you will log in with. It
      becomes the first (admin) account.
 3. **Click Apply.** Render builds the app from source; the first build takes
-   around 5–10 minutes. When the `bench` service shows **Live**, your
-   instance is up at `https://bench-XXXX.onrender.com` (the exact URL is on
+   around 5–10 minutes. When the `tret` service shows **Live**, your
+   instance is up at `https://tret-XXXX.onrender.com` (the exact URL is on
    the service page).
 
 Everything else is decided for you: a random secret key and a random admin
@@ -49,8 +49,8 @@ instance fails loudly instead of running insecurely.
 
 ## First login
 
-1. Find your admin password: Render dashboard → the **bench** service →
-   **Environment** tab → reveal **`BENCH_ADMIN_PASSWORD`**. That value (and
+1. Find your admin password: Render dashboard → the **tret** service →
+   **Environment** tab → reveal **`TRET_ADMIN_PASSWORD`**. That value (and
    the email you entered at deploy time) is your login.
 2. Open your instance URL and sign in.
 3. **Settings → Team**: create accounts for teammates (analyst / approver /
@@ -59,7 +59,7 @@ instance fails loudly instead of running insecurely.
 
 ## Add a provider key
 
-bench talks to LLM providers with keys you control. After logging in:
+tret talks to LLM providers with keys you control. After logging in:
 
 1. Go to **Settings → Provider keys**.
 2. Paste a key for at least one provider (OpenRouter is the simplest single
@@ -70,7 +70,7 @@ That's it — runs will work from here.
 
 ## Custom domain (optional)
 
-Render dashboard → the **bench** service → **Settings → Custom Domains** →
+Render dashboard → the **tret** service → **Settings → Custom Domains** →
 add your domain and create the DNS record Render shows you (a CNAME).
 HTTPS certificates are automatic. The default `.onrender.com` URL keeps
 working either way.
@@ -102,13 +102,13 @@ changes:
 - **Brief downtime on updates.** Because the service has a disk attached,
   Render stops the old instance before starting the new one — expect your
   instance to be unavailable for a minute or two during each deploy.
-- **Upgrades take care of the database.** On boot bench migrates its own
+- **Upgrades take care of the database.** On boot tret migrates its own
   schema and re-runs its idempotent seed, so redeploying a newer version
   keeps all data (docs/upgrading.md has the details and recovery commands).
 - **Back up before big upgrades.** Render's paid Postgres plans include
   daily backups; taking a manual one from the database's page before
-  upgrading bench is cheap insurance (see docs/hardening.md §8).
-- **Don't rotate `BENCH_SECRET_KEY`.** It encrypts the provider keys you
+  upgrading tret is cheap insurance (see docs/hardening.md §8).
+- **Don't rotate `TRET_SECRET_KEY`.** It encrypts the provider keys you
   enter in Settings; changing it logs everyone out and makes those stored
   keys unreadable (you would re-enter them).
 - The health check hits `/api/healthz`; logs are on the service's **Logs**

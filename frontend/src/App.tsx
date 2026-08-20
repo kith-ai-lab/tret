@@ -77,7 +77,7 @@ function Sidebar({ user, onLogout }: { user: User; onLogout: () => void }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        bench<span>_</span>
+        tret<span>_</span>
       </div>
       <nav>
         {NAV.map((n) => (

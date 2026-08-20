@@ -1,6 +1,6 @@
 """The blessing gate: `POST /api/findings/{id}/approval`.
 
-This is bench's headline trust guarantee, so it is tested through the real
+This is tret's headline trust guarantee, so it is tested through the real
 dependency chain rather than around it: a real signed session cookie, the real
 `current_user`/`require_approver` dependencies, and the real Pydantic body. Only
 the database is a fake (`FakeSession`), because the endpoint's promises are about
@@ -32,10 +32,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from itsdangerous import URLSafeTimedSerializer
 
-from bench.api import auth, findings
-from bench.api.auth import SESSION_COOKIE, login_limiter
-from bench.db.engine import get_db
-from bench.db.models import Approval, Finding, Project, User
+from tret.api import auth, findings
+from tret.api.auth import SESSION_COOKIE, login_limiter
+from tret.db.engine import get_db
+from tret.db.models import Approval, Finding, Project, User
 
 PASSWORD = "correct-horse-battery"
 _HASH = PasswordHasher().hash(PASSWORD)  # once: argon2 is deliberately slow
@@ -200,7 +200,7 @@ def test_a_tampered_cookie_cannot_approve(client, db, draft, people):
 
 def test_a_cookie_signed_with_another_secret_cannot_approve(client, db, draft, people):
     """The forgery an attacker who knows the user id but not the key would try."""
-    forged = URLSafeTimedSerializer("not-the-app-secret", salt="bench-session").dumps(
+    forged = URLSafeTimedSerializer("not-the-app-secret", salt="tret-session").dumps(
         str(people["approver"].id)
     )
     client.cookies.set(SESSION_COOKIE, forged)
@@ -212,7 +212,7 @@ def test_a_cookie_signed_with_another_secret_cannot_approve(client, db, draft, p
 
 def test_a_validly_signed_session_for_an_unknown_user_cannot_approve(client, db, draft):
     """Deleting the user must retire the cookie: the id is resolved every request."""
-    ghost = URLSafeTimedSerializer(auth.get_settings().secret_key, salt="bench-session").dumps(
+    ghost = URLSafeTimedSerializer(auth.get_settings().secret_key, salt="tret-session").dumps(
         str(uuid.uuid4())
     )
     client.cookies.set(SESSION_COOKIE, ghost)

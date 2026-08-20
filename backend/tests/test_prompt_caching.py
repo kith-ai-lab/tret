@@ -8,22 +8,22 @@ from decimal import Decimal
 
 import pytest
 
-from bench.providers import anthropic as anthropic_module
-from bench.providers import base as base_module
-from bench.providers import openai_compat
-from bench.providers.anthropic import (
+from tret.providers import anthropic as anthropic_module
+from tret.providers import base as base_module
+from tret.providers import openai_compat
+from tret.providers.anthropic import (
     MAX_CACHE_BREAKPOINTS,
     MESSAGE_CACHE_BREAKPOINTS,
     _apply_conversation_cache,
     _to_anthropic_messages,
 )
-from bench.providers.base import Msg, ToolCall, ToolCallComplete, TextDelta, Usage
-from bench.providers.catalog import (
+from tret.providers.base import Msg, ToolCall, ToolCallComplete, TextDelta, Usage
+from tret.providers.catalog import (
     CACHE_READ_MULTIPLIER,
     CACHE_WRITE_MULTIPLIER,
     ModelInfo,
 )
-from bench.providers.openai_compat import (
+from tret.providers.openai_compat import (
     KimiProvider,
     OpenRouterProvider,
     _cached_prompt_tokens,

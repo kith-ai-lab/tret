@@ -87,7 +87,7 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    spend and its own energy accounting; `runs.energy_accounting` becomes a
    roll-up whose per-model factors are null wherever the segments disagreed, and
    `model_used` means *the model that produced the final answer*.
-   A switch is also the strongest evidence bench can collect — a within-task
+   A switch is also the strongest evidence tret can collect — a within-task
    comparison rather than an average across different tasks — so each segment
    becomes its own `run_outcomes` row. A handoff for stalling counts against the
    model; a handoff for running out of context window does not, because a window
@@ -133,16 +133,16 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
 
 ## Outbound network
 
-Everything that leaves the process goes through `bench/net/`, tagged with a
+Everything that leaves the process goes through `tret/net/`, tagged with a
 destination **class** — `provider` (cloud model calls), `catalog` (the OpenRouter
 model list), `local` (a self-hosted model server), `research` (`web_search` and
 `fetch_url`). Each class is independently switchable, every switch narrows and
 none widens, and `research` ships off. `tests/test_egress_chokepoint.py` fails
-the build if anything outside `bench/net/` imports a connection-opening module or
+the build if anything outside `tret/net/` imports a connection-opening module or
 constructs an HTTP client, so the boundary cannot erode one convenient import at
 a time.
 
-Two consequences worth knowing at this level. First, `BENCH_EGRESS=off` is a
+Two consequences worth knowing at this level. First, `TRET_EGRESS=off` is a
 working deployment, not a broken one: `local` is exempt (a call to a model server
 on your own network never leaves it) and pays for the exemption with a check that
 the host really does resolve to a private address, so routing degrades to local
@@ -201,9 +201,9 @@ SSE tool-delta aggregation).
 The **ModelCatalog** merges three sources: a curated static `models.yaml`
 (authoritative — prices, tiers, strengths, energy classes), an optional dynamic
 OpenRouter fetch (uncurated, 24h cache), and local discovery from
-`{BENCH_LOCAL_BASE_URL}/models` (uncurated, 5-minute cache, since local
+`{TRET_LOCAL_BASE_URL}/models` (uncurated, 5-minute cache, since local
 availability changes mid-session). Local models are additionally **probed once
-for real tool-calling support** and excluded from candidacy if they fail: bench's
+for real tool-calling support** and excluded from candidacy if they fail: tret's
 trust model runs through forced tool calls, so a model that ignores `tools` is
 not usable here regardless of its prose. Cost accounting derives from catalog
 prices (cache reads/writes at their own rates); estimated energy accounting
@@ -215,7 +215,7 @@ derives from catalog energy classes (docs/eco-accounting.md).
 JSON Schemas, tool references, and doctrine section selectors, computes
 `doctrine_sha`, inlines schemas into the stored manifest (no runtime file reads
 for validation), and seeds sample datasets. Packs found under
-`BENCH_PACKS_DIR` auto-install at boot.
+`TRET_PACKS_DIR` auto-install at boot.
 
 Two integrity layers sit alongside it:
 

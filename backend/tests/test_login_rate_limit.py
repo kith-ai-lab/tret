@@ -3,9 +3,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from bench.api import auth
-from bench.api.auth import SlidingWindowLimiter, login_limiter
-from bench.db.engine import get_db
+from tret.api import auth
+from tret.api.auth import SlidingWindowLimiter, login_limiter
+from tret.db.engine import get_db
 
 
 # ── the limiter itself ───────────────────────────────────────────────────────
@@ -115,7 +115,7 @@ def test_email_case_and_whitespace_share_one_bucket(client, monkeypatch):
 
 
 # ── the keys, and what survives a reverse proxy ──────────────────────────────
-# docs/hardening.md requires a reverse proxy in front of bench, which makes
+# docs/hardening.md requires a reverse proxy in front of tret, which makes
 # `request.client.host` the proxy for every request. A limiter keyed only on that
 # would silently become one bucket for the whole internet, and keying on
 # X-Forwarded-For instead would hand the attacker a knob for minting fresh

@@ -33,13 +33,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from bench.api import analytics
-from bench.api.analytics import _recorded_emissions, emissions
-from bench.api.runs import _run_summary
-from bench.config import Settings
-from bench.db.models import Run, utcnow
-from bench.providers.catalog import ModelCatalog, ModelInfo
-from bench.services.emissions import (
+from tret.api import analytics
+from tret.api.analytics import _recorded_emissions, emissions
+from tret.api.runs import _run_summary
+from tret.config import Settings
+from tret.db.models import Run, utcnow
+from tret.providers.catalog import ModelCatalog, ModelInfo
+from tret.services.emissions import (
     DEPLOYMENT_CLOUD,
     DEPLOYMENT_LOCAL,
     GRID_BASES,
@@ -196,7 +196,7 @@ def test_a_local_operator_may_set_their_own_grid_factor():
     assert grid_factor_for(DEPLOYMENT_LOCAL, _settings(grid_co2e_g_per_kwh=400.0)) == 400.0
     settings = _settings(grid_co2e_g_per_kwh=400.0, local_grid_co2e_g_per_kwh=30.0)
     assert grid_factor_for(DEPLOYMENT_LOCAL, settings) == 30.0
-    # Cloud keeps the general factor: bench does not know which region served it.
+    # Cloud keeps the general factor: tret does not know which region served it.
     assert grid_factor_for(DEPLOYMENT_CLOUD, settings) == 400.0
 
     report = _account(_local_model(), settings)
@@ -235,7 +235,7 @@ def test_an_operators_own_local_factor_is_unspecified_until_they_say_otherwise()
 
 
 def test_an_explicitly_passed_factor_carries_no_basis_claim():
-    # bench was handed a number with no provenance; claiming a basis for it would
+    # tret was handed a number with no provenance; claiming a basis for it would
     # be inventing one.
     report = _account(_model("L"), _settings(), grid_g_per_kwh=123.0)
     assert report["grid_co2e_g_per_kwh"] == 123.0
@@ -252,11 +252,11 @@ def test_an_explicit_grid_override_still_wins_over_both_settings():
 
 
 # ── per-provider grid factors: parsing and validation ─────────────────────────
-# BENCH_GRID_FACTORS is operator configuration and nothing else. There is no
+# TRET_GRID_FACTORS is operator configuration and nothing else. There is no
 # geolocation and no network call behind it, by design: for a cloud API call the
 # caller's location says nothing about which data centre served the request. What
 # these tests defend is that a malformed or dishonest factor is refused, while a
-# config naming a provider bench has not heard of yet still boots.
+# config naming a provider tret has not heard of yet still boots.
 def test_a_valid_grid_factor_map_parses_from_json():
     settings = _settings(
         grid_factors=json.dumps(
@@ -276,7 +276,7 @@ def test_a_valid_grid_factor_map_parses_from_json():
 
 
 def test_a_blank_grid_factor_value_means_not_set():
-    """The same trap as BENCH_LOCAL_GRID_CO2E_G_PER_KWH: `${VAR:-}` arrives as "".
+    """The same trap as TRET_LOCAL_GRID_CO2E_G_PER_KWH: `${VAR:-}` arrives as "".
 
     A parse error there would stop the backend booting under the documented
     docker compose quickstart, for a knob the operator never set.
@@ -312,10 +312,10 @@ def test_a_dishonest_or_malformed_grid_factor_is_refused(raw, why):
 
 
 def test_an_unrecognised_provider_name_warns_and_still_boots(caplog):
-    """The catalog gains providers over time. A hard failure on a name bench does
+    """The catalog gains providers over time. A hard failure on a name tret does
     not know yet would make an install unbootable on a config that was correct
     when it was written — so the entry is kept, warned about, and inert."""
-    with caplog.at_level(logging.WARNING, logger="bench"):
+    with caplog.at_level(logging.WARNING, logger="tret"):
         settings = _settings(
             grid_factors='{"aws-bedrock": {"g_per_kwh": 42}, "local": {"g_per_kwh": 30}}'
         )
@@ -366,7 +366,7 @@ def test_a_provider_entry_outranks_the_legacy_local_setting_on_a_local_run():
 
 def test_the_legacy_local_setting_still_applies_where_there_is_no_entry():
     """Explicitly: nothing about the legacy path changed for an operator who never
-    sets BENCH_GRID_FACTORS, or who sets it for a different provider."""
+    sets TRET_GRID_FACTORS, or who sets it for a different provider."""
     settings = _settings(
         grid_co2e_g_per_kwh=400.0,
         local_grid_co2e_g_per_kwh=30.0,
@@ -389,15 +389,15 @@ def test_the_three_precedence_rules_resolve_in_order():
     )
     provider = resolve_grid_factor("local", DEPLOYMENT_LOCAL, settings)
     assert (provider["value"], provider["rule"]) == (42.0, "provider")
-    assert provider["setting"] == "BENCH_GRID_FACTORS[local]"
+    assert provider["setting"] == "TRET_GRID_FACTORS[local]"
 
     legacy = resolve_grid_factor("local", DEPLOYMENT_LOCAL, _settings(local_grid_co2e_g_per_kwh=30.0))
     assert (legacy["value"], legacy["rule"]) == (30.0, "local_setting")
-    assert legacy["setting"] == "BENCH_LOCAL_GRID_CO2E_G_PER_KWH"
+    assert legacy["setting"] == "TRET_LOCAL_GRID_CO2E_G_PER_KWH"
 
     default = resolve_grid_factor("anthropic", DEPLOYMENT_CLOUD, settings)
     assert (default["value"], default["rule"]) == (400.0, "global_default")
-    assert default["setting"] == "BENCH_GRID_CO2E_G_PER_KWH"
+    assert default["setting"] == "TRET_GRID_CO2E_G_PER_KWH"
 
     # An explicitly passed factor outranks all three and claims no provenance.
     handed = resolve_grid_factor("local", DEPLOYMENT_LOCAL, settings, override=700.0)
@@ -427,8 +427,8 @@ def test_the_provenance_record_explains_which_rule_applied_and_why():
     assert factor["source_label"] == "PPA 2025"
     assert factor["basis"] == "market_based"
     # The setting a reader has to change is the one that actually applied.
-    assert factor["setting"] == "BENCH_GRID_FACTORS[anthropic]"
-    # bench does not claim the IEA as the source for the operator's own number,
+    assert factor["setting"] == "TRET_GRID_FACTORS[anthropic]"
+    # tret does not claim the IEA as the source for the operator's own number,
     # and where the operator labelled it, the label is the citation.
     assert "PPA 2025" in factor["source"]
     assert "IEA" not in factor["source"]
@@ -447,7 +447,7 @@ def test_the_default_factor_still_cites_the_iea_and_names_its_precedence():
     assert "IEA" in factor["source"]
     # The setting named is the one that actually applied, not a list of the three
     # that might have. Where the precedence order matters, the note carries it.
-    assert factor["setting"] == "BENCH_GRID_CO2E_G_PER_KWH"
+    assert factor["setting"] == "TRET_GRID_CO2E_G_PER_KWH"
     assert "Precedence:" in factor["note"]
     # A factor handed straight to the accounting call has no setting to change.
     handed = next(
@@ -541,7 +541,7 @@ def test_the_resolved_profile_and_its_source_travel_with_the_run():
     assert factor["value"] == 1.56
     assert factor["profile"] == PUE_PROFILE_ONPREM
     assert "Uptime Institute" in factor["source"]
-    assert factor["setting"] == "BENCH_ONPREM_PUE"
+    assert factor["setting"] == "TRET_ONPREM_PUE"
 
     cloud = next(f for f in _account(_model("L"))["factors"] if f["key"] == "pue")
     assert cloud["value"] == 1.2
@@ -1440,7 +1440,7 @@ async def test_a_basis_mixed_window_reports_no_carbon_total_only_subtotals():
         assert row["runs"] == 1
         assert row["carbon_is_summable"] is True
         assert row["not_summable_note"] is None
-    # Sums of the subtotals are the operator's business, not bench's: the two rows
+    # Sums of the subtotals are the operator's business, not tret's: the two rows
     # are deliberately not added anywhere in the response.
     assert "co2e_g" not in {k for k in totals if totals[k] is not None}
 
@@ -1470,7 +1470,7 @@ async def test_a_single_basis_window_still_reports_one_carbon_total():
 
 
 async def test_a_window_with_legacy_basis_less_runs_is_its_own_group():
-    """A run recorded before bench stored a basis cannot be shown to share one, so
+    """A run recorded before tret stored a basis cannot be shown to share one, so
     it groups separately rather than being folded into the location-based figure.
     Its own carbon survives; what disappears is the combined total."""
     modern = _account(_model("L"), _settings())
@@ -1755,7 +1755,7 @@ def _documents(text: str, value) -> bool:
 
 
 def test_the_doc_carries_every_class_constant_and_its_anchor():
-    from bench.services.emissions import ENERGY_CLASS_CALIBRATION, ENERGY_CLASS_WH_PER_MTOK
+    from tret.services.emissions import ENERGY_CLASS_CALIBRATION, ENERGY_CLASS_WH_PER_MTOK
 
     text = _methodology_text()
     for cls, value in ENERGY_CLASS_WH_PER_MTOK.items():
@@ -1771,7 +1771,7 @@ def test_the_doc_carries_every_class_constant_and_its_anchor():
 
 
 def test_the_doc_reproduces_the_regression_inputs():
-    from bench.services.emissions import JEGHAM_2025
+    from tret.services.emissions import JEGHAM_2025
 
     text = _methodology_text()
     assert JEGHAM_2025["url"] in text
@@ -1788,7 +1788,7 @@ def test_the_doc_reproduces_the_regression_inputs():
 
 
 def test_the_doc_carries_every_other_default_the_code_uses():
-    from bench.services.emissions import (
+    from tret.services.emissions import (
         EMBODIED_REFERENCE,
         ENERGY_TOKEN_WEIGHTS,
         PUE_REFERENCE,
@@ -1815,11 +1815,11 @@ def test_the_doc_documents_the_per_provider_factor_its_precedence_and_the_basis_
     """The doc is rendered in-product, and these are the parts an operator has to
     read before configuring a factor — plus the argument a sustainability reviewer
     always asks for, which must be in the document and not only in a commit."""
-    from bench.config import GRID_FACTOR_LABEL_MAX, GRID_FACTOR_PROVIDERS
-    from bench.services.emissions import GRID_SOURCE_RULES
+    from tret.config import GRID_FACTOR_LABEL_MAX, GRID_FACTOR_PROVIDERS
+    from tret.services.emissions import GRID_SOURCE_RULES
 
     text = _methodology_text()
-    assert "BENCH_GRID_FACTORS" in text
+    assert "TRET_GRID_FACTORS" in text
     assert str(GRID_FACTOR_LABEL_MAX) in text
     for provider in GRID_FACTOR_PROVIDERS:
         assert provider in text, f"provider {provider} missing from the doc"
@@ -1828,7 +1828,7 @@ def test_the_doc_documents_the_per_provider_factor_its_precedence_and_the_basis_
         assert rule in text, f"source key {rule} missing from the doc"
     assert "provider:<name>" in text
     # The legacy settings are documented as legacy, not quietly dropped.
-    assert "BENCH_LOCAL_GRID_CO2E_G_PER_KWH" in text
+    assert "TRET_LOCAL_GRID_CO2E_G_PER_KWH" in text
     assert "legacy" in text.lower()
     # The IP-inference argument, stated rather than implied.
     for phrase in (
@@ -1869,8 +1869,8 @@ def test_emissions_requires_authentication():
 
 
 def test_emissions_is_readable_by_any_authenticated_user():
-    from bench.api.auth import current_user
-    from bench.db.engine import get_db
+    from tret.api.auth import current_user
+    from tret.db.engine import get_db
 
     app = FastAPI()
     app.include_router(analytics.router)

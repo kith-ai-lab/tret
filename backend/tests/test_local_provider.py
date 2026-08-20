@@ -15,16 +15,16 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-from bench.providers.base import JsonCompletion
-from bench.api import settings as settings_api
-from bench.api.auth import require_admin
-from bench.api.harnesses import _validate_policy
-from bench.config import Settings
-from bench.providers import catalog as catalog_module
-from bench.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
-from bench.providers.local import LocalProvider
-from bench.router_llm.fallback import fallback_model
-from bench.router_llm.router import TIER_ORDER, ModelRouter
+from tret.providers.base import JsonCompletion
+from tret.api import settings as settings_api
+from tret.api.auth import require_admin
+from tret.api.harnesses import _validate_policy
+from tret.config import Settings
+from tret.providers import catalog as catalog_module
+from tret.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
+from tret.providers.local import LocalProvider
+from tret.router_llm.fallback import fallback_model
+from tret.router_llm.router import TIER_ORDER, ModelRouter
 
 
 def _settings(**over) -> Settings:
@@ -122,7 +122,7 @@ async def _always_ok(*args, **kwargs) -> JsonCompletion:
 
 
 async def _always_fails(*args, **kwargs):
-    from bench.providers.base import ProviderError
+    from tret.providers.base import ProviderError
 
     raise ProviderError("local", "model ignored tool_choice")
 
@@ -245,7 +245,7 @@ def _probe_returns(value):
 async def test_probe_requires_the_schema_field_to_be_filled_in(monkeypatch, answer):
     """An empty-arguments answer is exactly what a model that ignores `tools`
     produces, so accepting any dict at all marked those models tool-capable — and
-    bench's whole trust model (grading, extraction, terminal actions) runs through
+    tret's whole trust model (grading, extraction, terminal actions) runs through
     tool calls."""
     _patch_settings(monkeypatch, _settings())
     monkeypatch.setattr(

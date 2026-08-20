@@ -17,9 +17,9 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from bench.api.harnesses import _validate_tool_names
-from bench.db.models import Harness, Pack
-from bench.engine.context import (
+from tret.api.harnesses import _validate_tool_names
+from tret.db.models import Harness, Pack
+from tret.engine.context import (
     assemble_context,
     composition_report,
     estimate_tokens,
@@ -28,8 +28,8 @@ from bench.engine.context import (
     task_doctrine_selection,
     tool_spec_block,
 )
-from bench.engine.tools import get_builtin_tools
-from bench.packs.loader import validate_pack
+from tret.engine.tools import get_builtin_tools
+from tret.packs.loader import validate_pack
 
 PACK_DIR = Path(__file__).parent.parent.parent / "packs/climate-risk"
 
@@ -295,7 +295,7 @@ def test_the_seeded_harnesses_name_only_real_tools():
     touched anything. Parsed out of the source rather than by booting the
     bootstrap, which needs a database.
     """
-    source = (Path(__file__).parent.parent / "bench/services/bootstrap.py").read_text()
+    source = (Path(__file__).parent.parent / "tret/services/bootstrap.py").read_text()
     builtins = set(get_builtin_tools())
     seeded: set[str] = set()
     for literal in re.findall(r"tool_names=\[(.*?)\]", source, re.DOTALL):

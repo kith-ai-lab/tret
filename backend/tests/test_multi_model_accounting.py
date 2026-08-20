@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-from bench.providers.catalog import ModelCatalog
-from bench.services.emissions import combine_accountings, energy_accounting
+from tret.providers.catalog import ModelCatalog
+from tret.services.emissions import combine_accountings, energy_accounting
 
 
 def _blocks():

@@ -11,17 +11,17 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from bench.api import settings as settings_api
-from bench.api.auth import current_user, require_admin
-from bench.config import get_settings
-from bench.db.engine import get_db
-from bench.net import policy
+from tret.api import settings as settings_api
+from tret.api.auth import current_user, require_admin
+from tret.config import get_settings
+from tret.db.engine import get_db
+from tret.net import policy
 
 
 @pytest.fixture()
 def client(monkeypatch):
-    monkeypatch.setenv("BENCH_EGRESS", "on")
-    monkeypatch.setenv("BENCH_EGRESS_RESEARCH", "on")
+    monkeypatch.setenv("TRET_EGRESS", "on")
+    monkeypatch.setenv("TRET_EGRESS_RESEARCH", "on")
     get_settings.cache_clear()
     policy.clear_all_runtime_overrides()
 
@@ -56,7 +56,7 @@ def test_an_admin_can_cut_a_class(client):
 def test_widening_past_the_environment_is_reported_honestly(client, monkeypatch):
     """Accepted, ineffective, and *said so* — the response carries the mode in
     force, never the mode requested, so a UI cannot show egress that is not on."""
-    monkeypatch.setenv("BENCH_EGRESS_RESEARCH", "off")
+    monkeypatch.setenv("TRET_EGRESS_RESEARCH", "off")
     get_settings.cache_clear()
     body = client.post(
         "/api/settings/egress", json={"egress_class": "research", "mode": "on"}
@@ -84,6 +84,6 @@ def test_the_tool_list_marks_web_tools_unavailable_when_research_is_off(client):
     tools = {t["name"]: t for t in client.get("/api/tools").json()}
     # Still listed — a harness that names it is valid config, just not runnable here.
     assert tools["web_search"]["available"] is False
-    assert "BENCH_EGRESS_RESEARCH" in tools["web_search"]["unavailable_reason"]
+    assert "TRET_EGRESS_RESEARCH" in tools["web_search"]["unavailable_reason"]
     assert tools["read_document"]["available"] is True
     assert tools["read_document"]["unavailable_reason"] is None

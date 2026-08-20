@@ -1,6 +1,6 @@
-"""A disposable bench instance for golden runs.
+"""A disposable tret instance for golden runs.
 
-Everything here is test-side scaffolding; nothing in `bench/` is modified.
+Everything here is test-side scaffolding; nothing in `tret/` is modified.
 
 Two seams are bridged:
 
@@ -29,7 +29,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from bench.db.models import (
+from tret.db.models import (
     Base,
     DataRequest,
     Document,
@@ -41,12 +41,12 @@ from bench.db.models import (
     User,
     Workspace,
 )
-from bench.engine.events import RunEvent, get_event_bus
-from bench.engine.harness import HarnessEngine
-from bench.packs.loader import install_pack
-from bench.providers.base import Provider
-from bench.providers.catalog import ModelCatalog
-from bench.router_llm.priors import NoPriors
+from tret.engine.events import RunEvent, get_event_bus
+from tret.engine.harness import HarnessEngine
+from tret.packs.loader import install_pack
+from tret.providers.base import Provider
+from tret.providers.catalog import ModelCatalog
+from tret.router_llm.priors import NoPriors
 
 PACKS_DIR = Path(__file__).resolve().parents[3] / "packs"
 CLIMATE_PACK = PACKS_DIR / "climate-risk"
@@ -291,7 +291,7 @@ class GoldenWorld:
         if provider is None:
             await engine.execute(run_id)
         else:
-            with patch("bench.engine.harness.ProviderRegistry", _replay_registry(provider)):
+            with patch("tret.engine.harness.ProviderRegistry", _replay_registry(provider)):
                 await engine.execute(run_id)
 
         violations = getattr(provider, "violations", [])
@@ -363,7 +363,7 @@ class GoldenWorld:
             )
 
     async def aclose(self) -> None:
-        import bench.db.engine as db_engine
+        import tret.db.engine as db_engine
 
         db_engine._engine, db_engine._session_factory = self._saved_db_globals
         await self.engine.dispose()
@@ -389,7 +389,7 @@ def _replay_registry(provider: Provider):
 
 
 async def build_world(db_path: Path, pack_dir: Path = CLIMATE_PACK) -> GoldenWorld:
-    """Create a fresh sqlite bench, install the pack from disk, seed sample data."""
+    """Create a fresh sqlite tret, install the pack from disk, seed sample data."""
     install_sqlite_type_shims()
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
@@ -398,7 +398,7 @@ async def build_world(db_path: Path, pack_dir: Path = CLIMATE_PACK) -> GoldenWor
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     # The engine opens its own sessions through this module-level factory.
-    import bench.db.engine as db_engine
+    import tret.db.engine as db_engine
 
     saved = (db_engine._engine, db_engine._session_factory)
     db_engine._engine = engine

@@ -76,8 +76,8 @@ const BUCKETS: TokenBucket[] = ['input', 'output', 'cache_read', 'cache_write']
 /** Where each factor comes from, spelled out once under the table. */
 const FACTOR_SOURCES =
   'Factor sources — every value below is read from this run’s own stored accounting, with its source, date and confidence marker in the provenance table further down. ' +
-  '“catalog” values ship with bench (energy classes calibrated against published per-model measurements, overridable per model in models.yaml); ' +
-  '“instance setting” values are operator-configured and fall back to bench’s documented defaults when unset. This run shows the values that were in ' +
+  '“catalog” values ship with tret (energy classes calibrated against published per-model measurements, overridable per model in models.yaml); ' +
+  '“instance setting” values are operator-configured and fall back to tret’s documented defaults when unset. This run shows the values that were in ' +
   'force when it ran — later changes to a setting do not rewrite it.'
 
 /** A token weight as the run recorded it: preferring the provenance record, then
@@ -200,7 +200,7 @@ function buildSteps(energy: EnergyAccounting): Step[] {
         energy.pue_profile ? ` · ${energy.pue_profile.replace(/_/g, ' ')}` : ''
       }`,
       sourceHint:
-        'Power Usage Effectiveness: total facility energy divided by IT-load energy, resolved per deployment profile. bench cannot see the facility that served the request, so the cloud default sits above every hyperscaler self-report on purpose.',
+        'Power Usage Effectiveness: total facility energy divided by IT-load energy, resolved per deployment profile. tret cannot see the facility that served the request, so the cloud default sits above every hyperscaler self-report on purpose.',
     })
   }
 

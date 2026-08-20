@@ -1,19 +1,19 @@
-# Contributing to bench
+# Contributing to tret
 
-Thanks for your interest! bench is early — the most valuable contributions
+Thanks for your interest! tret is early — the most valuable contributions
 right now are **domain packs**, provider integrations, and hardening.
 
 ## Development setup
 
 ```bash
 # Postgres
-docker run -d --name bench-pg -e POSTGRES_USER=bench -e POSTGRES_PASSWORD=bench \
-  -e POSTGRES_DB=bench -p 5432:5432 postgres:16-alpine
+docker run -d --name tret-pg -e POSTGRES_USER=tret -e POSTGRES_PASSWORD=tret \
+  -e POSTGRES_DB=tret -p 5432:5432 postgres:16-alpine
 
 # Backend
 cd backend
 python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-BENCH_PACKS_DIR=../packs .venv/bin/uvicorn bench.main:app --reload
+TRET_PACKS_DIR=../packs .venv/bin/uvicorn tret.main:app --reload
 # CI installs the same way but adds `-c constraints.txt`, pinning every
 # dependency (direct and transitive) to the versions CI is known to pass
 # against. If lint/tests are green for you but red in CI (or vice versa), a
@@ -27,26 +27,26 @@ cd frontend && npm install && npm run dev
 ## Before you open a PR
 
 ```bash
-cd backend && .venv/bin/ruff check bench tests && .venv/bin/pytest -q
+cd backend && .venv/bin/ruff check tret tests && .venv/bin/pytest -q
 cd frontend && npm run build
 ```
 
-CI runs exactly this, plus `bench packs validate` on the shipped pack, a
+CI runs exactly this, plus `tret packs validate` on the shipped pack, a
 `docker compose` boot smoke test, and the schema-lifecycle job below.
 
 ## Changing the database schema
 
 The ordinary suite runs on sqlite and in-process fakes, so it cannot see whether
 a schema change reaches a real database. **Every change to
-`backend/bench/db/models.py` needs a migration in the same PR:**
+`backend/tret/db/models.py` needs a migration in the same PR:**
 
 ```bash
 cd backend
 alembic revision --autogenerate -m "what changed"   # then read the generated file
 ```
 
-Then add the new revision to `REVISION_MARKERS` in `backend/bench/db/migrate.py`,
-naming a table or column only that revision creates — that table is how bench
+Then add the new revision to `REVISION_MARKERS` in `backend/tret/db/migrate.py`,
+naming a table or column only that revision creates — that table is how tret
 recognises a pre-migrations database and decides which revision to stamp it at
 (docs/upgrading.md). `tests/test_schema_migrations.py` fails if you skip it.
 
@@ -57,11 +57,11 @@ cannot: that Alembic autogenerate produces an **empty** diff against
 
 ```bash
 cd backend
-BENCH_TEST_POSTGRES_URL=postgresql+asyncpg://bench:bench@localhost:5432/postgres \
+TRET_TEST_POSTGRES_URL=postgresql+asyncpg://tret:tret@localhost:5432/postgres \
   .venv/bin/python -m pytest tests/test_migrations_postgres.py -q
 ```
 
-CI runs it in the `migrations` job. Without `BENCH_TEST_POSTGRES_URL` the module
+CI runs it in the `migrations` job. Without `TRET_TEST_POSTGRES_URL` the module
 skips, which is why `pytest -q` alone is not enough for a schema change.
 
 ## The golden-run policy
@@ -90,7 +90,7 @@ green.** When one fails, exactly one of two things is true:
 
 Never make a golden run pass by loosening it — dropping the exact failure text,
 removing an assertion, widening a set. Loosening an eval is a change to what
-bench promises, and it needs to be argued as one.
+tret promises, and it needs to be argued as one.
 
 Adding a guarantee? Add the scenario in the same PR. Details, including the
 `ReplayProvider` script format and the known gaps:
@@ -101,13 +101,13 @@ Adding a guarantee? Add the scenario in the same PR. Details, including the
 - **The trust doctrine is not negotiable** (docs/trust-doctrine.md). PRs that
   let the model bypass dataset-only numbers, self-approve findings, or skip
   provenance will be declined regardless of how convenient they are.
-- New providers implement `bench/providers/base.py`, add **one row** to
-  `PROVIDER_SPECS` in `bench/providers/catalog.py`, and add curated entries to
+- New providers implement `tret/providers/base.py`, add **one row** to
+  `PROVIDER_SPECS` in `tret/providers/catalog.py`, and add curated entries to
   `models.yaml` with honest prices and strengths. That row is the single source:
   the registry builds from it, `GET /api/settings/providers` derives its list and
   env-key map from it, and the settings UI renders that response — so there is no
   fourth place to remember.
-- New packs must pass `bench packs validate` and ship enough fictional
+- New packs must pass `tret packs validate` and ship enough fictional
   sample data to demo every task type. No real client data, ever.
 - Keep the single-worker event-bus constraint in mind (docs/architecture.md)
   until the LISTEN/NOTIFY bus lands.

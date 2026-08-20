@@ -129,7 +129,7 @@ const OVERHEAD_KINDS: Record<string, string> = {
 /** What a run spent on deciding *how* to run.
  *
  *  Shown apart from the run's own cost and energy on purpose. These calls happen
- *  on a different model — the router on BENCH_ROUTER_MODEL, the summarizer on
+ *  on a different model — the router on TRET_ROUTER_MODEL, the summarizer on
  *  whatever cheap model the harness ceiling allows — and often at a different
  *  provider, so their energy class and grid factor are their own. Adding them
  *  into the run's totals would produce a number about nothing in particular. */

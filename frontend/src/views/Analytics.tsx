@@ -155,7 +155,7 @@ export function Analytics() {
             ) : !routing || routing.groups.length === 0 ? (
               <div className="empty">
                 No scored runs yet. Outcomes are recorded as runs finish; run{' '}
-                <code>bench outcomes backfill</code> to score the runs already in the database.
+                <code>tret outcomes backfill</code> to score the runs already in the database.
               </div>
             ) : (
               <div className="stack" style={{ gap: 16 }}>

@@ -1,5 +1,5 @@
 """`POST /api/documents`: the upload path, which is where third-party bytes and
-a third-party filename enter bench.
+a third-party filename enter tret.
 
 The interesting assertions are the refusals. An upload endpoint has three ways to
 be dangerous — it can be talked into using memory it does not have, into writing
@@ -25,12 +25,12 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from bench.api import documents
-from bench.api.auth import current_user
-from bench.api.documents import safe_content_type, safe_filename
-from bench.config import get_settings
-from bench.db.engine import get_db
-from bench.db.models import Document, Project, User
+from tret.api import documents
+from tret.api.auth import current_user
+from tret.api.documents import safe_content_type, safe_filename
+from tret.config import get_settings
+from tret.db.engine import get_db
+from tret.db.models import Document, Project, User
 
 PROJECT = Project(id=uuid.uuid4(), workspace_id=uuid.uuid4(), name="P")
 UPLOADER = User(id=uuid.uuid4(), email="a@example.com", display_name="A", role="analyst")

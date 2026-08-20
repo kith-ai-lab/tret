@@ -1,13 +1,13 @@
-"""Arm A — the harnessed runs, through bench's real API.
+"""Arm A — the harnessed runs, through tret's real API.
 
-Drives the running bench stack exactly as the UI does: create a
+Drives the running tret stack exactly as the UI does: create a
 divergence_assessment run on the Climate Analyst harness, wait for it to
 finish, then collect the run record (verdict finding, validation events, cost,
 energy). Nothing is mocked; this is the production path.
 
 Usage (stack must be up: docker compose up):
-    BENCH_URL=http://localhost:8000 BENCH_ADMIN_EMAIL=admin@example.com \
-    BENCH_ADMIN_PASSWORD=... python arm_a.py --model openrouter/openai/gpt-5.6-luna \
+    TRET_URL=http://localhost:8000 TRET_ADMIN_EMAIL=admin@example.com \
+    TRET_ADMIN_PASSWORD=... python arm_a.py --model openrouter/openai/gpt-5.6-luna \
         --cases cases.yaml --out results/arm_a.<model>.jsonl
 
 Output: one JSON line per case:
@@ -39,8 +39,8 @@ TERMINAL = {"completed", "completed_without_output", "failed", "cancelled"}
 
 
 def login(client: httpx.Client, base: str) -> None:
-    email = os.environ.get("BENCH_ADMIN_EMAIL", "admin@example.com")
-    password = os.environ.get("BENCH_ADMIN_PASSWORD", "bench-admin")
+    email = os.environ.get("TRET_ADMIN_EMAIL", "admin@example.com")
+    password = os.environ.get("TRET_ADMIN_PASSWORD", "tret-admin")
     r = client.post(f"{base}/api/auth/login", json={"email": email, "password": password})
     r.raise_for_status()
 
@@ -128,7 +128,7 @@ def main() -> int:
     ap.add_argument("--only", help="comma-separated case ids (pilot runs)")
     args = ap.parse_args()
 
-    base = os.environ.get("BENCH_URL", "http://localhost:8000").rstrip("/")
+    base = os.environ.get("TRET_URL", "http://localhost:8000").rstrip("/")
     cases = yaml.safe_load(Path(args.cases).read_text())["cases"]
     if args.only:
         wanted = set(args.only.split(","))

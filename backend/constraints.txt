@@ -4,7 +4,7 @@
 # the >= ranges in pyproject.toml right now."
 #
 # This is deliberately NOT a lockfile tool (uv, pip-tools, Poetry): pyproject.toml
-# stays the single source of *what* bench depends on and stays installable the
+# stays the single source of *what* tret depends on and stays installable the
 # ordinary way for a contributor who just wants `pip install -e ".[dev]"` to work
 # without learning a new tool. This file only narrows the *versions* pip is
 # allowed to pick, via pip's own `-c`/`--constraint` flag — no new tooling, no new
@@ -26,7 +26,7 @@
 #     && .venv/bin/pip freeze | grep -v '^-e ' > constraints.txt
 #
 # The `grep -v '^-e '` drops the editable self-install line pip freeze emits for
-# `bench` itself (a `file://` or `git+ssh://` reference to this checkout) — that
+# `tret` itself (a `file://` or `git+ssh://` reference to this checkout) — that
 # line describes the environment freeze was run in, not a dependency, and is
 # actively wrong to pin (it would freeze CI to installing over ssh from whoever
 # generated it).

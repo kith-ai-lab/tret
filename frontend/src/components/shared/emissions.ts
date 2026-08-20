@@ -1,4 +1,4 @@
-/** Shared emissions vocabulary: scope labels, colours, and the wording bench is
+/** Shared emissions vocabulary: scope labels, colours, and the wording tret is
  *  allowed to use about the frontier-baseline comparison.
  *
  *  Two rules govern everything in here, and both are product commitments rather
@@ -49,7 +49,7 @@ export interface ScopeMeta {
   key: ScopeKey
   label: string
   color: string
-  /** What bench assigns to this scope. The authoritative reasoning is the
+  /** What tret assigns to this scope. The authoritative reasoning is the
    *  backend's own `scopes.basis`, which is always rendered verbatim alongside. */
   what: string
 }
@@ -132,7 +132,7 @@ export function share(part: number, whole: number): number {
 // confidence interval, a standard deviation, a margin of error, or a ±. It is a
 // multiplicative judgment band, and the words used for it say that.
 
-/** The band's name, in the only wording bench uses for it. */
+/** The band's name, in the only wording tret uses for it. */
 export const BAND_LABEL = 'judgment band'
 
 /** The one-line disclaimer that travels with any rendered range. The long-form
@@ -428,7 +428,7 @@ export const GRID_BASIS_META: Record<string, { label: string; what: string }> = 
   },
   unspecified: {
     label: 'unspecified',
-    what: 'bench was handed a factor without a provenance, so it will not guess a basis on the operator’s behalf.',
+    what: 'tret was handed a factor without a provenance, so it will not guess a basis on the operator’s behalf.',
   },
 }
 
@@ -453,19 +453,19 @@ export function gridBasisWhat(basis: string | null | undefined): string {
 export const GRID_SOURCE_META: Record<string, { label: string; what: string }> = {
   provider: {
     label: 'per-provider factor',
-    what: 'Configured by the operator for this run’s provider (BENCH_GRID_FACTORS). The most specific rule, so it outranks both the self-hosted setting and the global default.',
+    what: 'Configured by the operator for this run’s provider (TRET_GRID_FACTORS). The most specific rule, so it outranks both the self-hosted setting and the global default.',
   },
   local_setting: {
     label: 'self-hosted factor',
-    what: 'The operator’s factor for self-hosted inference (BENCH_LOCAL_GRID_CO2E_G_PER_KWH — the legacy setting, still honoured), applied because this run ran locally and its provider has no per-provider entry.',
+    what: 'The operator’s factor for self-hosted inference (TRET_LOCAL_GRID_CO2E_G_PER_KWH — the legacy setting, still honoured), applied because this run ran locally and its provider has no per-provider entry.',
   },
   global_default: {
     label: 'global default',
-    what: 'BENCH_GRID_CO2E_G_PER_KWH — the single factor applied wherever nothing more specific is configured. Ships as the IEA global power-sector average.',
+    what: 'TRET_GRID_CO2E_G_PER_KWH — the single factor applied wherever nothing more specific is configured. Ships as the IEA global power-sector average.',
   },
   run_override: {
     label: 'supplied for this run',
-    what: 'A factor handed straight to the accounting call. bench cannot state its provenance and will not claim a GHG Protocol basis for it.',
+    what: 'A factor handed straight to the accounting call. tret cannot state its provenance and will not claim a GHG Protocol basis for it.',
   },
 }
 
@@ -485,10 +485,10 @@ export function gridSourceWhat(source: string | null | undefined): string {
   return GRID_SOURCE_META[source.split(':')[0]]?.what ?? `Recorded source key: ${source}.`
 }
 
-/** Why bench asks the operator instead of looking the region up. The question a
+/** Why tret asks the operator instead of looking the region up. The question a
  *  reviewer always asks, answered where the numbers are. */
 export const GRID_NO_INFERENCE_NOTE =
-  'Operator configuration, never inference. bench does not derive a grid region from an IP address and makes no network call to look one up: for a cloud API call the caller’s location says nothing about which data centre served the request, providers do not disclose the serving region, and a router such as OpenRouter sends the call to whichever upstream has capacity. Location is knowable when the operator knows it — they self-host somewhere, or they pin a provider to a region — so it comes from them.'
+  'Operator configuration, never inference. tret does not derive a grid region from an IP address and makes no network call to look one up: for a cloud API call the caller’s location says nothing about which data centre served the request, providers do not disclose the serving region, and a router such as OpenRouter sends the call to whichever upstream has capacity. Location is knowable when the operator knows it — they self-host somewhere, or they pin a provider to a region — so it comes from them.'
 
 // ── basis separation ─────────────────────────────────────────────────────
 // The GHG Protocol rule with teeth: energy and dollars sum across bases, carbon
@@ -504,7 +504,7 @@ export const SUMMABLE_ACROSS_BASES_NOTE =
   'Energy in Wh and dollars are still totalled across the whole window: a kWh is a kWh however its carbon is accounted, and a price has no Scope 2 accounting method. Only carbon — including the scope split, the baseline comparison and the judgment band — is held back.'
 
 export const BASIS_SUBTOTAL_HINT =
-  'One row per GHG Protocol basis. Each row is internally consistent and may be read as a total; the rows may not be added to each other. Which rows exist is a consequence of how the operator configured their factors, not of anything bench inferred.'
+  'One row per GHG Protocol basis. Each row is internally consistent and may be read as a total; the rows may not be added to each other. Which rows exist is a consequence of how the operator configured their factors, not of anything tret inferred.'
 
 /** The em-dash placeholder wording for a carbon figure withheld because it would
  *  cross a basis boundary. Distinct from "no estimate recorded". */

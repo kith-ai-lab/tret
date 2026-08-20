@@ -71,7 +71,7 @@ export function MethodologyDialog({
       title="Emissions methodology"
       subtitle={
         <>
-          How bench turns token counts into an energy, carbon and money figure, and what those
+          How tret turns token counts into an energy, carbon and money figure, and what those
           figures may not be used for. {ESTIMATE_NOTE}
         </>
       }
@@ -163,7 +163,7 @@ function LiveFactors({
         </div>
         <div className="fine-print" style={{ marginBottom: 8 }}>
           Read from the run's stored accounting, exactly as recorded when it ran — not from the
-          document, and not recomputed at today's settings. If a constant changes in bench, this
+          document, and not recomputed at today's settings. If a constant changes in tret, this
           table changes with it.
         </div>
         <FactorTable factors={energy.factors ?? []} />

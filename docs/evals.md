@@ -1,4 +1,4 @@
-# Evals — a bench for bench
+# Evals — a tret for tret
 
 The trust guarantees in the README are only worth something if they cannot
 quietly stop being true. Prompts get reworded, doctrine gets edited, a router
@@ -48,7 +48,7 @@ grounded, schema-valid, fully audited result?*
   discipline the real model is held to. Hardcode a value only when the point of
   the scenario is that it was never retrieved.
 
-- **`golden_world.py`** — `GoldenWorld` builds a disposable bench: sqlite
+- **`golden_world.py`** — `GoldenWorld` builds a disposable tret: sqlite
   schema, a workspace/project/user, and the real pack installed from disk with
   its sample data seeded. `world.run(...)` creates a run and executes it
   through `HarnessEngine`, then reads back everything a scenario asserts on:
@@ -168,7 +168,7 @@ When a golden run fails, exactly one of two things is true:
 
 Never make a golden run pass by loosening it (dropping the exact failure text,
 removing an assertion, widening a set). Loosening an eval is a change to what
-bench promises.
+tret promises.
 
 ## Live evals
 
@@ -185,14 +185,14 @@ Live evals are marked `live` and **skipped by default** (registered in
 `backend/pyproject.toml`, gated in `backend/tests/conftest.py`):
 
 ```bash
-BENCH_LIVE_EVALS=1 \
-BENCH_EVAL_MODEL=anthropic/claude-sonnet-5 \
-BENCH_ANTHROPIC_API_KEY=sk-... \
+TRET_LIVE_EVALS=1 \
+TRET_EVAL_MODEL=anthropic/claude-sonnet-5 \
+TRET_ANTHROPIC_API_KEY=sk-... \
   .venv/bin/python -m pytest tests/evals -m live -q
 ```
 
-`BENCH_EVAL_MODEL` is a catalog model id (see
-`backend/bench/providers/models.yaml`); it defaults to the golden pin. Keep live
+`TRET_EVAL_MODEL` is a catalog model id (see
+`backend/tret/providers/models.yaml`); it defaults to the golden pin. Keep live
 evals out of CI: they cost money and a model's mood is not a build gate. They
 belong in a periodic, manually reviewed sweep — the natural next step is to run
 the matrix across catalog models and record verdict agreement, repair-attempt

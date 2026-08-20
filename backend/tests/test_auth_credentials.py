@@ -4,7 +4,7 @@ session revocation all three depend on.
 docs/hardening.md tells an operator to change the bootstrap admin's password and
 to rotate credentials after an incident. Both instructions are only true if a
 password change actually invalidates the sessions minted against the old one, so
-that is what most of this file is about: bench has no session table, so
+that is what most of this file is about: tret has no session table, so
 revocation rides on a credential fingerprint inside the signed cookie
 (`auth.credential_version`), and the tests below check the fingerprint cannot be
 bypassed, replayed, or outlived.
@@ -21,10 +21,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from itsdangerous import URLSafeTimedSerializer
 
-from bench.api import auth
-from bench.api.auth import SESSION_COOKIE, credential_version, login_limiter
-from bench.db.engine import get_db
-from bench.db.models import User
+from tret.api import auth
+from tret.api.auth import SESSION_COOKIE, credential_version, login_limiter
+from tret.db.engine import get_db
+from tret.db.models import User
 
 HASHER = PasswordHasher()
 ADMIN_PASSWORD = "admin-password-1"
@@ -168,14 +168,14 @@ def test_a_legacy_cookie_carrying_only_a_user_id_is_refused(client, people):
     Accepting it would be a bypass — a cookie with no credential fingerprint can
     never be invalidated by a password change.
     """
-    legacy = URLSafeTimedSerializer(auth.get_settings().secret_key, salt="bench-session").dumps(
+    legacy = URLSafeTimedSerializer(auth.get_settings().secret_key, salt="tret-session").dumps(
         str(people["analyst"].id)
     )
     assert me_with(client, legacy).status_code == 401
 
 
 def test_a_cookie_with_a_guessed_fingerprint_is_refused(client, people):
-    forged = URLSafeTimedSerializer(auth.get_settings().secret_key, salt="bench-session").dumps(
+    forged = URLSafeTimedSerializer(auth.get_settings().secret_key, salt="tret-session").dumps(
         {"uid": str(people["analyst"].id), "cv": "0" * 16}
     )
     assert me_with(client, forged).status_code == 401

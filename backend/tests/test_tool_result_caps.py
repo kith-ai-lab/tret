@@ -7,15 +7,15 @@ from __future__ import annotations
 
 import json
 
-from bench.engine import tools as tools_module
-from bench.engine.tools import (
+from tret.engine import tools as tools_module
+from tret.engine.tools import (
     MAX_RESULT_BYTES,
     RESULT_MARKER_SLACK_BYTES,
     _cap_result_text,
     _cap_rows,
     execute_tool,
 )
-from bench.providers.base import ToolSpec
+from tret.providers.base import ToolSpec
 
 
 def _rows(n: int, width: int = 10) -> list[dict]:

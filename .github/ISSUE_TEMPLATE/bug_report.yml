@@ -8,7 +8,7 @@ body:
         If the bug is that a **run produced something it should not have** — a
         number the model was never given, a finding that skipped approval, a
         citation that does not match what was retrieved — say so plainly and
-        include the run id. Those are the highest-priority bugs in bench.
+        include the run id. Those are the highest-priority bugs in tret.
 
         Please do not paste real client data, provider API keys, or session
         cookies. Redact transcripts before attaching them.
@@ -40,13 +40,13 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: How you are running bench, and against which models.
+      description: How you are running tret, and against which models.
       value: |
         - Install: docker compose / local dev / Fly / other
-        - bench version or commit:
+        - tret version or commit:
         - Providers configured: Anthropic / Moonshot / OpenRouter / local
         - Model used for the run (from the run detail view):
-        - `BENCH_ENVIRONMENT`: development / production
+        - `TRET_ENVIRONMENT`: development / production
         - OS:
     validations:
       required: true

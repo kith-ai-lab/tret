@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from bench.config import Settings
+from tret.config import Settings
 
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE = REPO / "docker-compose.yml"
@@ -29,15 +29,15 @@ ENV_EXAMPLE = REPO / ".env.example"
 # Names that legitimately do not belong in the backend service environment.
 NOT_BACKEND_SETTINGS = {
     # Consumed by the ollama-init service, not by the backend.
-    "BENCH_LOCAL_PULL_MODEL",
+    "TRET_LOCAL_PULL_MODEL",
 }
 
 # Values compose deliberately fixes to container paths / service names, so they
 # must NOT match the code default (which is tuned for a bare local checkout).
 CONTAINER_OVERRIDES = {
-    "BENCH_DATABASE_URL",
-    "BENCH_STORAGE_DIR",
-    "BENCH_PACKS_DIR",
+    "TRET_DATABASE_URL",
+    "TRET_STORAGE_DIR",
+    "TRET_PACKS_DIR",
 }
 
 
@@ -50,13 +50,13 @@ def _backend_environment() -> dict[str, str]:
 
 
 def _documented_names() -> set[str]:
-    """Every BENCH_* name .env.example mentions, commented examples included —
+    """Every TRET_* name .env.example mentions, commented examples included —
     a commented knob is still documented as working."""
-    return set(re.findall(r"\bBENCH_[A-Z0-9_]+", ENV_EXAMPLE.read_text()))
+    return set(re.findall(r"\bTRET_[A-Z0-9_]+", ENV_EXAMPLE.read_text()))
 
 
 def _settings_env_names() -> set[str]:
-    return {f"BENCH_{name.upper()}" for name in Settings.model_fields}
+    return {f"TRET_{name.upper()}" for name in Settings.model_fields}
 
 
 def test_every_documented_env_var_reaches_the_backend_container():
@@ -80,7 +80,7 @@ def test_every_backend_env_var_is_a_real_setting():
 def test_every_setting_is_either_wired_or_deliberately_absent():
     """A new Settings field should be reachable from the quickstart, or
     explicitly not (frontend-serving is a single-app/Fly concern)."""
-    deliberately_absent = {"BENCH_SERVE_FRONTEND_DIR"}
+    deliberately_absent = {"TRET_SERVE_FRONTEND_DIR"}
     absent = _settings_env_names() - set(_backend_environment()) - deliberately_absent
     assert not absent, f"Settings fields unreachable under docker compose: {sorted(absent)}"
 
@@ -95,7 +95,7 @@ def test_compose_defaults_match_the_code_defaults(name):
     assert match, f"{name} should be written as ${{{name}:-<default>}}, found {value!r}"
 
     compose_default = match.group(1) or ""
-    code_default = Settings.model_fields[name[len("BENCH_") :].lower()].default
+    code_default = Settings.model_fields[name[len("TRET_") :].lower()].default
     expected = "" if code_default is None else str(code_default)
     # Booleans read as true/false in YAML-land, not Python's True/False.
     if isinstance(code_default, bool):
@@ -106,9 +106,9 @@ def test_compose_defaults_match_the_code_defaults(name):
 
 
 def test_blank_optional_float_is_read_as_unset():
-    """What makes `${BENCH_LOCAL_GRID_CO2E_G_PER_KWH:-}` safe: an empty value is
+    """What makes `${TRET_LOCAL_GRID_CO2E_G_PER_KWH:-}` safe: an empty value is
     "not set", not a parse error — and not a hardcoded number that would defeat
-    the documented fallback to BENCH_GRID_CO2E_G_PER_KWH."""
+    the documented fallback to TRET_GRID_CO2E_G_PER_KWH."""
     assert Settings(local_grid_co2e_g_per_kwh="").local_grid_co2e_g_per_kwh is None
     assert Settings(local_grid_co2e_g_per_kwh="  ").local_grid_co2e_g_per_kwh is None
     assert Settings(local_grid_co2e_g_per_kwh="30").local_grid_co2e_g_per_kwh == 30.0
@@ -121,5 +121,5 @@ def test_every_numeric_or_bool_default_in_compose_parses():
     overrides = {}
     for name, value in env.items():
         match = re.fullmatch(r"\$\{%s(?::-(.*))?\}" % name, value)
-        overrides[name[len("BENCH_") :].lower()] = match.group(1) or "" if match else value
+        overrides[name[len("TRET_") :].lower()] = match.group(1) or "" if match else value
     Settings(**overrides)  # must not raise

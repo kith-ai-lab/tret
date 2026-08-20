@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from bench.engine.compaction import (
+from tret.engine.compaction import (
     ELIDABLE_TOOLS,
     KEEP_RECENT_ITERATIONS,
     MIN_ELIDABLE_CHARS,
@@ -29,9 +29,9 @@ from bench.engine.compaction import (
     trim_history,
     wire_view,
 )
-from bench.engine.tools import get_builtin_tools
-from bench.providers.base import JsonCompletion, Msg, ProviderError, ToolCall, ToolSpec, Usage
-from bench.providers.catalog import ModelCatalog
+from tret.engine.tools import get_builtin_tools
+from tret.providers.base import JsonCompletion, Msg, ProviderError, ToolCall, ToolSpec, Usage
+from tret.providers.catalog import ModelCatalog
 
 BULK = "x" * (MIN_ELIDABLE_CHARS * 4)
 
@@ -182,7 +182,7 @@ def test_an_elided_result_says_what_was_there_and_when():
     messages = _transcript("read_document")
     wire = wire_view(messages, _compacted(messages, iteration=9))
     elided = next(m for m in wire if m.role == "tool")
-    assert "elided by bench at iteration 9" in elided.content
+    assert "elided by tret at iteration 9" in elided.content
     assert "read_document" in elided.content
     assert str(len(BULK)) in elided.content
 

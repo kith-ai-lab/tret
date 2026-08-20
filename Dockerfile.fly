@@ -28,16 +28,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # touch environment, so whatever $HOME the entrypoint inherited (/root, from
 # the image default) would otherwise leak straight through to this user.
 # asyncpg's connector stats $HOME/.postgresql/postgresql.key on every
-# connection looking for an optional client cert; as `bench`, stat()ing
+# connection looking for an optional client cert; as `tret`, stat()ing
 # anything under /root is a PermissionError, not a miss, and the app fails to
 # boot. HOME must name a directory this user can actually read.
-RUN groupadd --gid 10001 bench \
-    && useradd --uid 10001 --gid bench --home /app --no-create-home --shell /usr/sbin/nologin bench
+RUN groupadd --gid 10001 tret \
+    && useradd --uid 10001 --gid tret --home /app --no-create-home --shell /usr/sbin/nologin tret
 ENV HOME=/app
 
 WORKDIR /app
 COPY backend/pyproject.toml ./
-COPY backend/bench ./bench
+COPY backend/tret ./tret
 COPY backend/alembic ./alembic
 COPY backend/alembic.ini ./
 RUN pip install --no-cache-dir .
@@ -54,30 +54,30 @@ COPY --from=frontend /fe/dist /app/frontend-dist
 # to the non-root user right here. The Fly volume at /data is a different
 # story — nothing is mounted there yet, so its ownership is fixed at boot
 # instead (see fly-entrypoint.sh).
-RUN chown -R bench:bench /app /packs
+RUN chown -R tret:tret /app /packs
 
 COPY fly-entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# This image is a real deployment, so it declares itself one: BENCH_ENVIRONMENT
+# This image is a real deployment, so it declares itself one: TRET_ENVIRONMENT
 # =production turns the shipped dev defaults into hard boot failures rather than
-# a quiet insecure install (bench/config.py::enforce_production_safety,
+# a quiet insecure install (tret/config.py::enforce_production_safety,
 # docs/hardening.md). A container built from this file therefore refuses to start
-# until BENCH_SECRET_KEY and BENCH_ADMIN_PASSWORD are supplied — which is the
+# until TRET_SECRET_KEY and TRET_ADMIN_PASSWORD are supplied — which is the
 # point. fly.toml restates both values so they are visible where deploys are read.
-ENV BENCH_PACKS_DIR=/packs \
-    BENCH_STORAGE_DIR=/data/storage \
-    BENCH_SERVE_FRONTEND_DIR=/app/frontend-dist \
-    BENCH_ENVIRONMENT=production \
-    BENCH_COOKIE_SECURE=true
+ENV TRET_PACKS_DIR=/packs \
+    TRET_STORAGE_DIR=/data/storage \
+    TRET_SERVE_FRONTEND_DIR=/app/frontend-dist \
+    TRET_ENVIRONMENT=production \
+    TRET_COOKIE_SECURE=true
 
 EXPOSE 8000
 # entrypoint.sh starts as root — it needs to chown the freshly mounted Fly
 # volume — but application code never runs as root: setpriv's last act is an
-# execve into uvicorn as `bench`, replacing the entrypoint process rather than
+# execve into uvicorn as `tret`, replacing the entrypoint process rather than
 # forking it, so PID 1 for the container's whole useful lifetime is uvicorn
 # running as uid 10001 (verified: `docker exec <container> cat /proc/1/status`
 # shows `Uid: 10001 ...`, not 0).
 ENTRYPOINT ["/entrypoint.sh"]
 # Single worker by design: in-process run event bus (docs/architecture.md).
-CMD ["uvicorn", "bench.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "tret.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

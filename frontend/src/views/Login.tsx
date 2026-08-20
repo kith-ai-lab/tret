@@ -21,7 +21,7 @@ export function Login({ onLogin }: { onLogin: () => void }) {
     <div className="login-wrap">
       <form className="login-card" onSubmit={submit}>
         <div className="sidebar-brand" style={{ padding: '0 0 6px' }}>
-          bench<span style={{ color: 'var(--accent)' }}>_</span>
+          tret<span style={{ color: 'var(--accent)' }}>_</span>
         </div>
         <div className="view-sub" style={{ marginBottom: 18 }}>
           analyst workbench — sign in

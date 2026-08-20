@@ -11,7 +11,7 @@ the export.
 
 WeasyPrint cannot load its native libraries in a bare venv, so the PDF tests
 inject a fake `weasyprint` module that captures the document and the
-`url_fetcher` bench passes in, then drives that fetcher over every resource
+`url_fetcher` tret passes in, then drives that fetcher over every resource
 reference in the document. That checks the property that matters (no reference
 in a rendered deliverable can produce a fetch) without needing pango installed.
 """
@@ -25,14 +25,14 @@ from html.parser import HTMLParser
 
 import pytest
 
-from bench.services import export as export_module
-from bench.services.export import (
+from tret.services import export as export_module
+from tret.services.export import (
     ExternalResourceBlocked,
     assemble_deliverable,
     blocked_url_fetcher,
     render_pdf,
 )
-from bench.services.html_sanitize import is_safe_url, render_markdown
+from tret.services.html_sanitize import is_safe_url, render_markdown
 
 # The canonical injection payload set: what a prompt injection in an uploaded
 # ESG questionnaire would try to get into a drafted section.
@@ -207,7 +207,7 @@ class _FakeDb:
 
 
 def _section_finding(markdown: str, section: str = "governance") -> object:
-    from bench.db.models import Finding
+    from tret.db.models import Finding
 
     return Finding(
         id=uuid.uuid4(),
@@ -322,7 +322,7 @@ def test_provenance_cells_are_escaped(fake_weasyprint):
     render_pdf("<p>body</p>", "tcfd-assessment", [hostile], "<script>alert(1)</script>")
 
     document = _FakeHTML.captured["string"]
-    # `style`/`meta` are bench's own print stylesheet and charset declaration;
+    # `style`/`meta` are tret's own print stylesheet and charset declaration;
     # nothing from the section data may appear as markup.
     assert_inert(document, allow_tags=frozenset({"style", "meta"}))
     assert "&lt;script&gt;" in document  # escaped, so still visible in the audit
@@ -334,10 +334,10 @@ def _export_client(findings):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from bench.api import findings as findings_api
-    from bench.api.auth import current_user
-    from bench.db.engine import get_db
-    from bench.db.models import Project
+    from tret.api import findings as findings_api
+    from tret.api.auth import current_user
+    from tret.db.engine import get_db
+    from tret.db.models import Project
 
     project = Project(id=uuid.uuid4(), workspace_id=uuid.uuid4(), name="p")
     db = _FakeDb(findings, runs=())

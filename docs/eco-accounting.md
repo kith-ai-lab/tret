@@ -1,10 +1,10 @@
 # Routing objectives and ecological accounting
 
-Bench reports two costs for every run: dollars, and estimated energy/carbon.
+Tret reports two costs for every run: dollars, and estimated energy/carbon.
 
-## Why bench reports energy at all
+## Why tret reports energy at all
 
-Bench's flagship domain is climate risk. A platform whose deliverables are TCFD
+Tret's flagship domain is climate risk. A platform whose deliverables are TCFD
 sections and divergence verdicts cannot treat its own compute footprint as
 somebody else's problem — a climate document that hides what it burned is making
 an argument it would not accept from a portfolio company. So the footprint is
@@ -12,11 +12,11 @@ reported in the run audit view, in the deliverable's provenance appendix, and in
 the deliverable body itself.
 
 The second reason is that the estimate is *actionable*. Model choice moves the
-number by more than an order of magnitude, and bench already picks the model.
+number by more than an order of magnitude, and tret already picks the model.
 Turning "use a smaller model when a smaller model will do" into a knob is worth
 more than perfect measurement of a choice nobody can change.
 
-Everything below is an estimate. Bench says "estimated" everywhere it prints
+Everything below is an estimate. Tret says "estimated" everywhere it prints
 these numbers, and you should too.
 
 **This page covers routing objectives and the energy model.** The carbon layer on
@@ -30,7 +30,7 @@ they overlap, the methodology page is authoritative.
 ## Routing objectives
 
 `model_policy["objective"]` on a harness tells the router what it is optimizing
-for. It defaults to `balanced`, which is exactly bench's historical behavior —
+for. It defaults to `balanced`, which is exactly tret's historical behavior —
 existing harnesses route unchanged.
 
 | objective | what it optimizes | candidate ordering |
@@ -60,12 +60,12 @@ appeared in one of them would be advisory rather than real:
    candidates under a different objective are a different decision.
 
 Two notes on the interaction with the curated catalog. `balanced` and `quality`
-keep bench's curated-first preference: a hand-checked entry outranks a
+keep tret's curated-first preference: a hand-checked entry outranks a
 dynamically discovered one. The thrift objectives **drop** curated-first and keep
 curation only as a tiebreak — if an uncurated OpenRouter entry really is cheaper
 or lower-energy, an objective that asked for cheap or low-energy has to be
 allowed to pick it, otherwise the catalog quietly overrules the operator.
-Separately, price stands in for capability throughout: bench holds no benchmark
+Separately, price stands in for capability throughout: tret holds no benchmark
 score for a model, and what a lab charges is the most honest proxy on hand.
 
 An unrecognized objective is a 422 from the harness API, never a silent fall back
@@ -102,7 +102,7 @@ class figure.
 
 **The reasoning tier is assigned from what a model does, never from its price.**
 In the reference dataset DeepSeek-R1 is among the two heaviest models measured
-*and* among the cheapest sold, so bench's cheapest curated model carries its
+*and* among the cheapest sold, so tret's cheapest curated model carries its
 heaviest class. Individual assignments come from public model-scale signals and
 product positioning; each one carries its rationale as a comment in
 `models.yaml`.
@@ -129,7 +129,7 @@ co2e_g          = energy_wh_total × grid_co2e_g_per_kwh / 1000 + embodied_g
 An output token is the unit and weighs 1.0; an input token weighs 0.05 because
 prefill is parallel while generation is autoregressive (the fitted ratio is ~20x).
 A cache *write* is a full prefill pass, so it weighs exactly what input does. A
-cache read is discounted a further 10x, mirroring how bench prices it: the read
+cache read is discounted a further 10x, mirroring how tret prices it: the read
 re-uses stored KV state instead of running a fresh forward pass. It is not free.
 Both the per-run figure and its full derivation are persisted (`runs.energy_wh`,
 `runs.energy_accounting`) and exposed by the runs API.
@@ -144,16 +144,16 @@ are all in [emissions-methodology.md](emissions-methodology.md).
 
 ### Grid intensity
 
-`BENCH_GRID_CO2E_G_PER_KWH` (setting `grid_co2e_g_per_kwh`, default `470.0`)
+`TRET_GRID_CO2E_G_PER_KWH` (setting `grid_co2e_g_per_kwh`, default `470.0`)
 converts energy to carbon. 470 gCO2e/kWh is the IEA's 2024 global power-sector
 average; a regional or supplier-specific figure is much better (~30 for Sweden,
 ~350 for the US average, ~750 for a coal-heavy grid, and EPA eGRID subregions
-span more than 10x). `BENCH_LOCAL_GRID_CO2E_G_PER_KWH` optionally overrides it for
+span more than 10x). `TRET_LOCAL_GRID_CO2E_G_PER_KWH` optionally overrides it for
 self-hosted runs, where the operator buys the power and may hold a site- or
 market-based factor; unset, local runs use the same figure as cloud runs.
 
 Each factor also carries a **GHG Protocol basis** label
-(`BENCH_GRID_CO2E_BASIS`: `location_based` | `market_based` | `unspecified`),
+(`TRET_GRID_CO2E_BASIS`: `location_based` | `market_based` | `unspecified`),
 because a market-based figure and a location-based one answer different questions
 and must never be summed. The intensity and its basis in force at run time are
 stored inside `runs.energy_accounting`, so changing the setting later does not
@@ -164,9 +164,9 @@ stored figures rather than recomputing at today's settings.
 
 - **These are estimates, not measurements.** The class constants are fitted to
   measured latency on *inferred* hardware for five models and generalised well
-  beyond them. Nothing in bench is metered, and every figure carries an explicit
+  beyond them. Nothing in tret is metered, and every figure carries an explicit
   ±2.5x judgment band that is not a confidence interval.
-- **Inference energy depends on things bench cannot see**: hardware generation,
+- **Inference energy depends on things tret cannot see**: hardware generation,
   batch size, sequence length, quantization, accelerator utilisation, whether
   your request landed on a warm replica. Data-centre overhead is *modelled* by a
   default PUE rather than ignored, but that PUE is a self-reported fleet average,
@@ -177,13 +177,13 @@ stored figures rather than recomputing at today's settings.
 - **Reasoning tokens can dominate, and may not be counted.** A model that thinks
   at length can burn 8x the energy of one that does not — hence the separate R
   class. Worse, several providers exclude hidden thinking tokens from the billed
-  output count bench reads, so for those models the real work is *higher* than
+  output count tret reads, so for those models the real work is *higher* than
   counted. That bias is one-sided and is named on every run rather than absorbed.
 - **Training is excluded.** This is inference only, amortized training energy is
   not allocated.
 - **The router's own call is not counted.** A run's figure covers the execution
   model's turns, not the small routing call that chose it — the same scope as the
-  dollar cost bench already reports.
+  dollar cost tret already reports.
 - **Local models are the roughest estimate here.** S assumes small quantized
   weights on typical end-user hardware; a 70B model on a workstation GPU is well
   outside that. The class constants also come from *batched* serving stacks, and
@@ -195,8 +195,8 @@ stored figures rather than recomputing at today's settings.
   [emissions-methodology.md](emissions-methodology.md).
 - **Not an emissions figure of record.** These numbers are good enough to compare
   two candidate models, or to see one harness burning ten times another. They are
-  not good enough for a disclosure, and bench does not present them as such.
-  Nothing bench reports — including `avoided_co2e_g` — is an offset, a credit, or
+  not good enough for a disclosure, and tret does not present them as such.
+  Nothing tret reports — including `avoided_co2e_g` — is an offset, a credit, or
   an emissions reduction.
 
 If you need defensible numbers, measure your own deployment and put the result in

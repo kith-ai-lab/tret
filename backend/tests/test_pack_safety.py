@@ -1,8 +1,8 @@
 """The static method safety scan — a deterrent, enforced at pack validation."""
 from pathlib import Path
 
-from bench.packs.loader import validate_pack
-from bench.packs.safety import scan_method_file, scan_method_source
+from tret.packs.loader import validate_pack
+from tret.packs.safety import scan_method_file, scan_method_source
 
 PACKS_DIR = Path(__file__).parent.parent.parent / "packs"
 

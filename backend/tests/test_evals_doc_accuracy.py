@@ -48,7 +48,7 @@ def test_divergence_assessment_declares_no_doctrine_scope_of_its_own():
     """The doc's "loads every doctrine file, three today" claim rests on this:
     no `doctrine:` override on the task means the loader's documented default
     ("omit doctrine: and the task gets every doctrine file in the pack",
-    bench/engine/context.py::task_doctrine_selection) applies in full.
+    tret/engine/context.py::task_doctrine_selection) applies in full.
     """
     task = _divergence_assessment_task(_pack_manifest())
     assert "doctrine" not in task, (
