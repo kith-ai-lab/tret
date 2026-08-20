@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bench.db.models import Finding, Harness, Pack, Run, RunOutcome
 from bench.engine.context import task_config
 from bench.router_llm.objectives import DEFAULT_MAX_COST_TIER, DEFAULT_OBJECTIVE
-from bench.router_llm.outcomes import UNSCORED, score, size_band
+from bench.router_llm.outcomes import UNSCORED, handoff_score, score, size_band
 
 log = logging.getLogger("bench.outcomes")
 
@@ -97,8 +97,14 @@ def _est_input_tokens(run: Run) -> int:
     return int(composition.get("total_est_tokens") or run.input_tokens or 0)
 
 
-async def build_outcome(db: AsyncSession, run: Run) -> RunOutcome | None:
-    """The outcome row for `run`, or None if this run carries no lesson.
+async def build_outcomes(db: AsyncSession, run: Run) -> list[RunOutcome]:
+    """Every outcome row this run produced — one per model it used.
+
+    Almost always exactly one. A run that changed model part-way produced
+    evidence about each of them, and the pair is the most useful thing bench can
+    record: a within-task comparison, where one model stalled on a specific
+    problem and another finished it. Averages across different tasks cannot say
+    that.
 
     Not persisted here — `record_outcome` owns the write, and the backfill reuses
     this to build rows in bulk.
@@ -106,14 +112,14 @@ async def build_outcome(db: AsyncSession, run: Run) -> RunOutcome | None:
     if run.model_used is None:
         # Never routed: failed before the first token (unknown task type, no
         # candidates). Real failures, but not this model's — there wasn't one.
-        return None
+        return []
 
     routing = run.routing or {}
     counts = await _finding_counts(db, run.id)
     approved = counts.get("approved", 0)
     rejected = counts.get("rejected", 0)
 
-    scored = score(
+    final = score(
         status=run.status,
         error=run.error,
         messages=run.messages or [],
@@ -122,38 +128,90 @@ async def build_outcome(db: AsyncSession, run: Run) -> RunOutcome | None:
         findings_approved=approved,
         findings_rejected=rejected,
     )
-    if scored.outcome_class == UNSCORED:
-        return None
+    if final.outcome_class == UNSCORED:
+        return []
 
-    return RunOutcome(
-        run_id=run.id,
-        project_id=run.project_id,
-        harness_id=run.harness_id,
-        task_type=run.task_type,
-        task_shape=await _task_shape(db, run, routing),
-        objective=routing.get("objective") or DEFAULT_OBJECTIVE,
-        max_cost_tier=routing.get("max_cost_tier") or DEFAULT_MAX_COST_TIER,
-        size_band=size_band(_est_input_tokens(run)),
-        model_id=run.model_used,
-        provider=run.provider_used,
-        fallback_used=bool(routing.get("fallback_used")),
-        override=routing.get("override"),
-        outcome_class=scored.outcome_class,
-        quality_score=scored.quality_score,
-        score_version=scored.score_version,
-        error_kind=scored.error_kind,
-        components=scored.components,
-        iterations=run.iterations or 0,
-        cost_usd=run.cost_usd or 0,
-        input_tokens=run.input_tokens or 0,
-        output_tokens=run.output_tokens or 0,
-        energy_wh=run.energy_wh,
-        duration_ms=_duration_ms(run),
-        findings_created=sum(counts.values()),
-        findings_approved=approved,
-        findings_rejected=rejected,
-        observed_at=run.created_at,
-    )
+    shared = {
+        "project_id": run.project_id,
+        "harness_id": run.harness_id,
+        "task_type": run.task_type,
+        "task_shape": await _task_shape(db, run, routing),
+        "objective": routing.get("objective") or DEFAULT_OBJECTIVE,
+        "max_cost_tier": routing.get("max_cost_tier") or DEFAULT_MAX_COST_TIER,
+        "size_band": size_band(_est_input_tokens(run)),
+        "fallback_used": bool(routing.get("fallback_used")),
+        "override": routing.get("override"),
+        "observed_at": run.created_at,
+    }
+
+    timeline = run.model_timeline or []
+    if len(timeline) < 2:
+        # The ordinary run: one model, the run's own outcome, everything it spent.
+        return [
+            RunOutcome(
+                run_id=run.id,
+                segment_index=0,
+                model_id=run.model_used,
+                provider=run.provider_used,
+                outcome_class=final.outcome_class,
+                quality_score=final.quality_score,
+                score_version=final.score_version,
+                error_kind=final.error_kind,
+                components=final.components,
+                iterations=run.iterations or 0,
+                cost_usd=run.cost_usd or 0,
+                input_tokens=run.input_tokens or 0,
+                output_tokens=run.output_tokens or 0,
+                energy_wh=run.energy_wh,
+                duration_ms=_duration_ms(run),
+                findings_created=sum(counts.values()),
+                findings_approved=approved,
+                findings_rejected=rejected,
+                **shared,
+            )
+        ]
+
+    rows = []
+    for index, segment in enumerate(timeline):
+        last = index == len(timeline) - 1
+        if last:
+            # The model that finished the work owns the run's outcome, including
+            # its human verdict: the approved finding is the one it produced.
+            scored = final
+            findings = (sum(counts.values()), approved, rejected)
+        else:
+            # A model the run moved on from. Why it moved on is what decides
+            # whether this is evidence at all — `handoff_score`.
+            scored = handoff_score(timeline[index + 1].get("reason", "capability_stall"))
+            findings = (0, 0, 0)
+        rows.append(
+            RunOutcome(
+                run_id=run.id,
+                segment_index=index,
+                model_id=segment.get("model"),
+                provider=segment.get("provider"),
+                outcome_class=scored.outcome_class,
+                quality_score=scored.quality_score,
+                score_version=scored.score_version,
+                error_kind=scored.error_kind,
+                components=scored.components,
+                # Each segment's own spend, never the run's totals — that is the
+                # whole reason model_timeline exists (engine/harness.py).
+                iterations=max(
+                    0, (segment.get("to_iteration") or 0) - (segment.get("from_iteration") or 0) + 1
+                ),
+                cost_usd=segment.get("cost_usd") or 0,
+                input_tokens=segment.get("input_tokens") or 0,
+                output_tokens=segment.get("output_tokens") or 0,
+                energy_wh=segment.get("energy_wh"),
+                duration_ms=_duration_ms(run) if last else 0,
+                findings_created=findings[0],
+                findings_approved=findings[1],
+                findings_rejected=findings[2],
+                **shared,
+            )
+        )
+    return rows
 
 
 # Columns rewritten when a run is re-scored. The routing key is not among them:
@@ -176,31 +234,47 @@ _MUTABLE = (
 )
 
 
-async def record_outcome(db: AsyncSession, run: Run, *, commit: bool = False) -> RunOutcome | None:
-    """Write (or rewrite) this run's outcome. Never raises.
+async def record_outcome(db: AsyncSession, run: Run, *, commit: bool = False) -> list[RunOutcome]:
+    """Write (or rewrite) this run's outcomes. Never raises.
 
     `commit=False` by default so the engine can fold this into the write it is
     already about to make. The approval path passes True, because by then the
     request's own transaction has been committed and there is nothing to join.
     """
     try:
-        fresh = await build_outcome(db, run)
-        if fresh is None:
-            return None
-        existing = await db.get(RunOutcome, run.id)
-        if existing is None:
-            db.add(fresh)
-            recorded = fresh
-        else:
-            for column in _MUTABLE:
-                setattr(existing, column, getattr(fresh, column))
-            recorded = existing
+        fresh = await build_outcomes(db, run)
+        if not fresh:
+            return []
+        recorded = []
+        for row in fresh:
+            existing = await db.get(RunOutcome, (run.id, row.segment_index))
+            if existing is None:
+                db.add(row)
+                recorded.append(row)
+            else:
+                for column in _MUTABLE:
+                    setattr(existing, column, getattr(row, column))
+                recorded.append(existing)
+        # A re-score can produce *fewer* segments than a previous one (a run
+        # re-scored after its timeline was rebuilt, or after a backfill under new
+        # weights). Leaving the surplus behind would keep counting evidence for a
+        # segment that no longer exists.
+        stale = (
+            await db.execute(
+                select(RunOutcome).where(
+                    RunOutcome.run_id == run.id,
+                    RunOutcome.segment_index >= len(fresh),
+                )
+            )
+        ).scalars().all()
+        for row in stale:
+            await db.delete(row)
         if commit:
             await db.commit()
         return recorded
     except Exception:  # noqa: BLE001 - bookkeeping must never break a run
         log.exception("failed to record run outcome for run %s", run.id)
-        return None
+        return []
 
 
 async def record_outcome_for_finding(db: AsyncSession, finding_id: uuid.UUID) -> None:
@@ -233,9 +307,10 @@ async def backfill(db: AsyncSession, *, limit: int | None = None) -> dict:
 
     written = skipped = 0
     for run in runs:
-        if await record_outcome(db, run) is None:
-            skipped += 1
+        rows = await record_outcome(db, run)
+        if rows:
+            written += len(rows)
         else:
-            written += 1
+            skipped += 1
     await db.commit()
     return {"scanned": len(runs), "written": written, "skipped": skipped}

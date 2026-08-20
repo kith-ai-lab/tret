@@ -45,7 +45,7 @@ from bench.db.engine import get_db
 from bench.db.models import EgressCall, Harness, MethodRun, Run, RunOutcome, User, utcnow
 from bench.net import egress_status
 from bench.providers.catalog import co2e_grams
-from bench.router_llm.outcomes import OUTCOME_SCORE_VERSION
+from bench.router_llm.outcomes import NON_QUALITY_CLASSES, OUTCOME_SCORE_VERSION
 from bench.router_llm.priors import (
     HALF_LIFE_DAYS,
     MIN_EFFECTIVE_SAMPLES,
@@ -947,20 +947,28 @@ def _routing_rows(rows: list, size_band: str | None) -> list[dict]:
 
     out = []
     for (shape, objective), group in sorted(grouped.items()):
-        priors = summarize(group, size_band=size_band)
+        # Rows that are recorded but are deliberately not quality evidence — a
+        # model handed off because the conversation outgrew its window was the
+        # wrong size, not a poor performer (router_llm/outcomes.py). Counted
+        # separately rather than folded into `runs`, so the group's total matches
+        # what was actually aggregated.
+        excluded = [r for r in group if r.outcome_class in NON_QUALITY_CLASSES]
+        scored = [r for r in group if r.outcome_class not in NON_QUALITY_CLASSES]
+        priors = summarize(scored, size_band=size_band)
         models = sorted(priors.values(), key=lambda p: -p.quality_mean)
         # Models present in the window but still under the evidence floor. Named
         # rather than hidden: "we have not seen enough of this model yet" is a
         # different statement from "this model is not in the running", and an
         # operator deciding whether to trust the panel needs to tell them apart.
-        thin = sorted({r.model_id for r in group} - set(priors))
+        thin = sorted({r.model_id for r in scored} - set(priors))
         out.append(
             {
                 "task_shape": shape,
                 "objective": objective,
-                "runs": len(group),
+                "runs": len(scored),
                 "models": [p.to_json() for p in models],
                 "models_below_evidence_floor": thin,
+                "not_quality_evidence": len(excluded),
             }
         )
     out.sort(key=lambda g: -g["runs"])

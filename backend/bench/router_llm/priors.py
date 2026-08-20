@@ -1,6 +1,7 @@
 """What the track record says — turning recorded outcomes into routing evidence.
 
-`run_outcomes` holds one row per finished run. This module answers the only
+`run_outcomes` holds one row per model a finished run used — usually one, and
+two or more for a run that changed model part-way. This module answers the only
 question routing actually has: *for this shape of task, under this objective, how
 has each candidate model actually done?* Everything here exists to stop that
 question being answered badly, because a naive average over that table is
@@ -40,6 +41,7 @@ from typing import Protocol
 from sqlalchemy import select
 
 from bench.db.models import RunOutcome
+from bench.router_llm.outcomes import NON_QUALITY_CLASSES
 
 PRIORS_VERSION = "priors-v1"
 
@@ -254,6 +256,13 @@ def summarize(
     acc: dict[str, _Accumulator] = {}
 
     for row in rows:
+        if row.outcome_class in NON_QUALITY_CLASSES:
+            # Recorded, and deliberately not evidence: a model handed off
+            # because the conversation outgrew its window was the wrong size,
+            # not a poor performer, and the router already reasons about context
+            # windows directly. Filtered in the query too — this is the guard for
+            # rows reaching `summarize` by another route.
+            continue
         weight = _row_weight(row, now, size_band)
         if weight <= 0.0:
             continue
@@ -361,6 +370,7 @@ class OutcomePriors:
                     RunOutcome.task_shape == task_shape,
                     RunOutcome.objective == objective,
                     RunOutcome.observed_at >= since,
+                    RunOutcome.outcome_class.notin_(NON_QUALITY_CLASSES),
                 )
                 .order_by(RunOutcome.observed_at.desc())
                 .limit(ROW_SCAN_LIMIT)

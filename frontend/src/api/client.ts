@@ -953,6 +953,9 @@ export interface RoutingGroup {
   models: RoutingModelPrior[]
   /** Seen in the window but still under the evidence floor — named, not hidden. */
   models_below_evidence_floor: string[]
+  /** Rows recorded but excluded from quality evidence: a model handed off for
+   *  running out of context window was the wrong size, not a poor performer. */
+  not_quality_evidence: number
 }
 
 export interface RoutingBasis {

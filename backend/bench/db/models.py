@@ -311,6 +311,16 @@ class RunOutcome(Base):
     run_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
     )
+    # One row per model the run used, in order. A run that changed model
+    # part-way produced evidence about *both* — and the pair is the strongest
+    # label bench can generate, because it is a within-task comparison rather
+    # than an average across different tasks: this model stalled on this
+    # problem at this iteration, and that one finished it.
+    #
+    # Keyed on the position rather than on the model id, because a run may
+    # return to a model it already used and the two stints are separate
+    # evidence.
+    segment_index: Mapped[int] = mapped_column(Integer, primary_key=True, default=0)
     project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("projects.id"))
     harness_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("harnesses.id"))
 
@@ -329,7 +339,8 @@ class RunOutcome(Base):
     override: Mapped[str | None] = mapped_column(Text)  # user_pin | run_override | null
 
     # ── the verdict ──────────────────────────────────────────────────────────
-    outcome_class: Mapped[str] = mapped_column(Text, nullable=False)  # delivered|no_output|failed
+    # delivered | no_output | failed | handed_off | handed_off_capacity
+    outcome_class: Mapped[str] = mapped_column(Text, nullable=False)
     quality_score: Mapped[Decimal] = mapped_column(Numeric(6, 4), nullable=False)
     score_version: Mapped[str] = mapped_column(Text, nullable=False)
     error_kind: Mapped[str | None] = mapped_column(Text)

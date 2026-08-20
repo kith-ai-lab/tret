@@ -64,7 +64,9 @@ def _backfill_outcomes(limit: int | None) -> None:
             return await backfill(db, limit=limit)
 
     stats = asyncio.run(run())
-    print(f"scored {stats['written']} run(s) at {OUTCOME_SCORE_VERSION}")
+    # Rows, not runs: a run that changed model part-way produced evidence about
+    # every model it used.
+    print(f"scored {stats['written']} outcome row(s) at {OUTCOME_SCORE_VERSION}")
     print(f"  scanned: {stats['scanned']}")
     # Not an error: runs that failed before they were routed have no model to
     # attribute anything to, and cancelled runs are deliberately not evidence.

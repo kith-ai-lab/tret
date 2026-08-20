@@ -805,6 +805,14 @@ class HarnessEngine:
             # Between iterations, deterministically, on the state the loop has
             # already gathered. See engine/supervisor.py for why this is not an
             # LLM call and why every intervention is bounded.
+            #
+            # Short-circuited when switching is off, so a harness that disabled
+            # it does not pay for a candidate list and a priors lookup on every
+            # iteration to be told the same thing each time. `assess` refuses on
+            # the same conditions; this only avoids the work of asking.
+            if adaptive.escalation == "off" or adaptive.max_switches <= 0 or overridden:
+                await db.commit()
+                continue
             candidates, live_priors = await self.router.candidates_for(
                 model_policy=model_policy,
                 task_shape=task.get("shape", "freeform"),

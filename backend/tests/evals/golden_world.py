@@ -166,8 +166,14 @@ class GoldenWorld:
         max_iterations: int = 12,
         system_prompt_extra: str | None = None,
         max_run_output_tokens: int | None = None,
+        model_policy: dict | None = None,
     ) -> uuid.UUID:
-        policy: dict = {"mode": "pinned", "model": model}
+        # Pinned by default: golden runs assert on output quality, not on
+        # routing, and a pin also means the run can never be re-routed mid-flight
+        # (engine/supervisor.py refuses to switch away from a model the operator
+        # named). Pass `model_policy=` for the scenarios where routing itself, or
+        # what the engine may do to it, is the thing under test.
+        policy: dict = dict(model_policy) if model_policy else {"mode": "pinned", "model": model}
         if max_run_output_tokens is not None:
             policy["max_run_output_tokens"] = max_run_output_tokens
         async with self.session_factory() as db:

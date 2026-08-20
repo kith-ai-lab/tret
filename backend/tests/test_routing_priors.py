@@ -240,3 +240,30 @@ async def test_an_aggregate_is_reused_within_its_ttl_and_recomputed_after_invali
     priors.invalidate()
     await priors.for_key(task_shape="verdict", objective="balanced")
     assert len(calls) == 2
+
+
+# ── handoffs ─────────────────────────────────────────────────────────────────
+def test_a_stall_handoff_drags_a_models_record_down():
+    # Which is the point: it is the most direct evidence bench has that a model
+    # was not up to a piece of work.
+    clean = summarize(_many("m/x", 0.7, 20), now=NOW)["m/x"]
+    with_handoffs = summarize(
+        _many("m/x", 0.7, 20) + _many("m/x", 0.05, 10, outcome_class="handed_off"), now=NOW
+    )["m/x"]
+    assert with_handoffs.quality_mean < clean.quality_mean
+
+
+def test_a_capacity_handoff_is_not_counted_at_all():
+    # Filtered in the query and again here, because a model handed off for
+    # running out of window was the wrong size, not a poor performer.
+    clean = summarize(_many("m/x", 0.7, 20), now=NOW)["m/x"]
+    with_capacity = summarize(
+        _many("m/x", 0.7, 20) + _many("m/x", 0.0, 30, outcome_class="handed_off_capacity"),
+        now=NOW,
+    )["m/x"]
+    assert with_capacity.quality_mean == clean.quality_mean
+    assert with_capacity.runs == clean.runs
+
+
+def test_a_model_seen_only_in_capacity_handoffs_has_no_prior():
+    assert summarize(_many("m/small", 0.0, 40, outcome_class="handed_off_capacity"), now=NOW) == {}

@@ -35,15 +35,17 @@ async def _run_with_switch(world, *, switch_at: int = 2):
     something already covered.
     """
     catalog = ModelCatalog()
-    models = [m for m in catalog.all(curated_only=True) if m.supports_tools]
-    target = next(m for m in models if m.id != models[0].id)
+    models = [m for m in catalog.all(curated_only=True) if m.supports_tools][:2]
 
     documents = [
         await world.create_document(filename="report.txt", text=BULK),
     ]
     harness_id = await world.create_harness(
         name="Switching Analyst",
-        model=models[0].id,
+        # Deliberately NOT pinned. A pinned or per-run-overridden model is never
+        # switched away from — the caller named it — so a pinned harness could
+        # not exercise this path at all (see the guard test below).
+        model_policy={"mode": "auto", "allowed": [m.id for m in models]},
         tool_names=[
             "read_document",
             "search_documents",
@@ -62,15 +64,23 @@ async def _run_with_switch(world, *, switch_at: int = 2):
 
     calls = {"n": 0}
 
+    chosen: dict = {}
+
     def fake_assess(state, *, candidates, priors=None):
         calls["n"] += 1
-        if calls["n"] == switch_at:
+        # The target is derived from the candidate list the engine actually
+        # handed over, so this cannot accidentally "switch" to a model the
+        # harness policy never permitted.
+        other = next((m for m in candidates if m.id != state.model.id), None)
+        if calls["n"] == switch_at and other is not None:
+            chosen["from"] = state.model
+            chosen["to"] = other
             return Intervention(
                 kind=KIND_SWITCH,
-                target=target,
+                target=other,
                 reason="capability_stall",
                 detail="forced by the test",
-                evidence={"from": state.model.id, "to": target.id},
+                evidence={"from": state.model.id, "to": other.id},
             )
         return Intervention()
 
@@ -82,7 +92,7 @@ async def _run_with_switch(world, *, switch_at: int = 2):
             task_input={"site_id": SITE, "peril": PERIL},
             document_ids=documents,
         )
-    return result, models[0], target
+    return result, chosen.get("from"), chosen.get("to")
 
 
 async def test_a_switched_run_finishes_and_says_which_models_it_used(world):
@@ -175,3 +185,115 @@ async def test_a_run_that_never_switches_records_no_timeline(world):
     assert "switches" not in (result.run.routing or {})
     assert "models" not in (result.run.energy_accounting or {})
     assert result.run.energy_accounting["model"] == result.run.model_used
+
+
+# ── the switch becomes evidence ──────────────────────────────────────────────
+async def _outcomes(world, run_id):
+    from sqlalchemy import select
+
+    from bench.db.models import RunOutcome
+
+    async with world.session_factory() as db:
+        rows = (
+            await db.execute(
+                select(RunOutcome)
+                .where(RunOutcome.run_id == run_id)
+                .order_by(RunOutcome.segment_index)
+            )
+        ).scalars().all()
+        return [
+            {
+                "segment": r.segment_index,
+                "model": r.model_id,
+                "class": r.outcome_class,
+                "quality": float(r.quality_score),
+                "input_tokens": r.input_tokens,
+                "findings_approved": r.findings_approved,
+            }
+            for r in rows
+        ]
+
+
+async def test_a_switch_records_evidence_about_both_models(world):
+    """The pair is the strongest label bench can produce.
+
+    Not "this model averages 0.6 across a hundred different tasks", but "on this
+    specific problem, at this iteration, this model stalled and that one
+    finished it" — a within-task comparison, which is the only kind that is not
+    confounded by which tasks each model tends to be given.
+    """
+    result, first, target = await _run_with_switch(world)
+    rows = await _outcomes(world, result.run.id)
+
+    assert [r["model"] for r in rows] == [first.id, target.id]
+    assert rows[0]["class"] == "handed_off"
+    assert rows[1]["class"] == "delivered"
+    assert rows[0]["quality"] < rows[1]["quality"]
+
+
+async def test_each_segments_evidence_carries_that_segments_own_spend(world):
+    result, _first, _target = await _run_with_switch(world)
+    rows = await _outcomes(world, result.run.id)
+
+    assert all(r["input_tokens"] > 0 for r in rows)
+    assert sum(r["input_tokens"] for r in rows) == result.run.input_tokens
+
+
+async def test_the_model_that_finished_owns_the_human_verdict(world):
+    # The approved finding is the one it produced. Crediting the model that was
+    # abandoned before recording anything would reward it for someone else's work.
+    from bench.db.models import Finding
+    from bench.services.outcomes import record_outcome_for_finding
+
+    result, first, target = await _run_with_switch(world)
+    async with world.session_factory() as db:
+        finding = (await db.get(Finding, result.findings[0].id))
+        finding.status = "approved"
+        await db.commit()
+        await record_outcome_for_finding(db, finding.id)
+
+    rows = await _outcomes(world, result.run.id)
+    assert rows[0]["findings_approved"] == 0
+    assert rows[1]["findings_approved"] == 1
+    assert rows[1]["quality"] > rows[0]["quality"]
+
+
+async def test_a_pinned_harness_is_never_switched_away_from(world):
+    """The guard, end to end: the operator named a model.
+
+    Not a hypothetical — `world.create_harness` pins by default, and every other
+    test in this file had to opt out of that to exercise switching at all.
+    """
+    documents = [await world.create_document(filename="report.txt", text=BULK)]
+    harness_id = await world.create_harness(name="Pinned Analyst", max_iterations=16)
+    provider = ReplayProvider(
+        [ScriptedTurn(text="Reading.", tool_calls=[_read(documents[0])]), *divergence_happy_script()]
+    )
+
+    seen = []
+
+    def fake_assess(state, *, candidates, priors=None):
+        seen.append(state)
+        return Intervention()
+
+    with patch("bench.engine.harness.assess", side_effect=fake_assess):
+        result = await world.run(
+            provider=provider,
+            harness_id=harness_id,
+            task_type="divergence_assessment",
+            task_input={"site_id": SITE, "peril": PERIL},
+            document_ids=documents,
+        )
+
+    # The supervisor is not even consulted: there is no decision to make.
+    assert seen == []
+    assert result.run.model_timeline is None
+    assert result.run.status == "completed"
+
+
+async def test_an_ordinary_run_records_exactly_one_outcome(world):
+    result, _first, _target = await _run_with_switch(world, switch_at=999)
+    rows = await _outcomes(world, result.run.id)
+    assert len(rows) == 1
+    assert rows[0]["segment"] == 0
+    assert rows[0]["model"] == result.run.model_used

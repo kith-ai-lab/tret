@@ -231,3 +231,36 @@ def test_size_bands_are_ordered_and_total():
     assert size_band(50_000) == "m"
     assert size_band(200_000) == "l"
     assert size_band(5_000_000) == "xl"
+
+
+# ── a run that changed model produced evidence about both ────────────────────
+def test_a_stall_handoff_is_the_strongest_negative_signal_available():
+    # A within-task comparison: this model stalled on this specific problem and
+    # another one picked it up. No average across different tasks says that.
+    from bench.router_llm.outcomes import HANDED_OFF, handoff_score
+
+    result = handoff_score("capability_stall")
+    assert result.outcome_class == HANDED_OFF
+    assert 0 < result.quality_score < BASE_SCORE[NO_OUTPUT]
+
+
+def test_running_out_of_context_window_is_not_a_mark_against_a_model():
+    # A window is a size, not a failing. Scoring this as poor quality would
+    # teach the router that a reliable small-context model is a bad model.
+    from bench.router_llm.outcomes import (
+        HANDED_OFF_CAPACITY,
+        NON_QUALITY_CLASSES,
+        handoff_score,
+    )
+
+    result = handoff_score("context_exhausted")
+    assert result.outcome_class == HANDED_OFF_CAPACITY
+    assert result.outcome_class in NON_QUALITY_CLASSES
+
+
+def test_both_kinds_of_handoff_explain_themselves():
+    from bench.router_llm.outcomes import handoff_score
+
+    for reason in ("capability_stall", "context_exhausted"):
+        assert handoff_score(reason).components["reason"] == reason
+        assert handoff_score(reason).components["note"]

@@ -38,9 +38,27 @@ DELIVERED = "delivered"  # ran to completion and produced what the task required
 NO_OUTPUT = "no_output"  # `completed_without_output`: guardrails won, task did not
 FAILED = "failed"
 UNSCORED = "unscored"  # cancelled, or still running — carries no lesson
+# The run left this model before it finished. Two kinds, and the difference is
+# the whole point of separating them:
+HANDED_OFF = "handed_off"  # it stalled: the strongest negative signal there is
+HANDED_OFF_CAPACITY = "handed_off_capacity"  # it ran out of context window
+
+# Outcome classes that say nothing about how good a model is, and must never
+# reach the priors. A model handed off because the conversation outgrew its
+# context window did not perform badly — it was the wrong *size*, which is a
+# property of the task, and the router already reasons about context windows
+# directly. Scoring it as poor quality would teach the router that a reliable
+# small-context model is a bad model.
+NON_QUALITY_CLASSES = (UNSCORED, HANDED_OFF_CAPACITY)
 
 BASE_SCORE: dict[str, float] = {
     DELIVERED: 0.70,
+    # A model the run had to abandon mid-task. Not zero — it did real work, and
+    # the run may have been nearly done — but this is the most direct evidence
+    # bench can collect that a model was not up to a piece of work, because it
+    # is a within-task comparison: this model stalled on this problem, and
+    # another one picked it up.
+    HANDED_OFF: 0.05,
     # Not zero. The run ended honestly and the guardrails held; what it did not
     # do is land the verdict the task asked for. Scoring it as a flat failure
     # would rank it with a provider outage, which is a different thing entirely.
@@ -170,6 +188,37 @@ def _iteration_penalty(iterations: int, max_iterations: int) -> float:
 
 def _human_rate(approved: int, rejected: int) -> float:
     return (approved + HUMAN_PRIOR_SUCCESSES) / (approved + rejected + HUMAN_PRIOR_TRIALS)
+
+
+def handoff_score(reason: str) -> OutcomeScore:
+    """Score a model the run moved away from, by why it was moved away from.
+
+    `capability_stall` is evidence. `context_exhausted` is not — see
+    `NON_QUALITY_CLASSES`. Both are recorded, because an operator asking "why did
+    this run change model" needs the answer either way; only the first is
+    allowed to move a model's standing.
+    """
+    if reason == "context_exhausted":
+        return OutcomeScore(
+            HANDED_OFF_CAPACITY,
+            0.0,
+            components={
+                "reason": reason,
+                "note": (
+                    "handed off because the conversation outgrew this model's context "
+                    "window; recorded, but excluded from quality evidence — a window is "
+                    "a size, not a failing"
+                ),
+            },
+        )
+    return OutcomeScore(
+        HANDED_OFF,
+        BASE_SCORE[HANDED_OFF],
+        components={
+            "reason": reason,
+            "note": "the run abandoned this model mid-task and another one took over",
+        },
+    )
 
 
 def score(
