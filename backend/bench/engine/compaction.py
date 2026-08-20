@@ -43,7 +43,21 @@ from bench.providers.base import Msg, ToolSpec
 # run sits, and losing the exact wording of a document the model has already read
 # and reasoned about costs little.
 ELIDABLE_TOOLS = frozenset(
-    {"read_document", "search_documents", "list_prior_findings", "run_harness_task"}
+    {
+        "read_document",
+        "search_documents",
+        "list_prior_findings",
+        "run_harness_task",
+        # The web tools are elidable by construction rather than by judgment.
+        # `web_search` returns titles, URLs and vendor snippets that its own
+        # description forbids quoting or citing — navigation, not evidence.
+        # `fetch_url` stores the page as a Document and returns a short preview
+        # plus that document's id, so the page itself lives in Postgres and not
+        # in the context window: a model whose old fetch result was elided can
+        # still re-read the page in full via `read_document`.
+        "web_search",
+        "fetch_url",
+    }
 )
 # Never elided, for two distinct reasons:
 #

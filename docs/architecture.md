@@ -155,9 +155,12 @@ docs/hardening.md §9 and docs/trust-doctrine.md §1.
 ## Events / SSE
 
 `GET /api/runs/{id}/events` replays the in-memory backlog then streams live
-events (`routing`, `text_delta`, `tool_call`, `tool_result`,
-`finding_recorded`, `usage`, `context_pressure`, `compaction`, `model_switch`,
-`switch_refused`, `budget_warning`, `done`, `error`). The event bus is in-process,
+events: `routing`, `context_composition`, `text_delta`, `tool_call`,
+`tool_result`, `finding_recorded`, `usage`, `budget_warning`, `tools_withheld`,
+`context_pressure`, `compaction`, `model_switch`, `switch_refused`, `done`,
+`error`. (This list had drifted twice over before it was checked against the
+code — `context_composition` and `budget_warning` had been publishing
+undocumented for some time.) The event bus is in-process,
 so the backend runs **one worker by design**. The multi-worker upgrade path
 is Postgres LISTEN/NOTIFY behind the same `RunEventBus` interface.
 

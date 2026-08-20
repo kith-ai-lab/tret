@@ -333,7 +333,6 @@ class HarnessEngine:
         withheld = withheld_web_tools(enabled_names)
         if withheld:
             enabled_names = [n for n in enabled_names if n not in withheld]
-        if withheld:
             await self.bus.publish(
                 run.id,
                 RunEvent(

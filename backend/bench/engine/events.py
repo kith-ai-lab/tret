@@ -39,7 +39,13 @@ MAX_RETAINED_COMPLETED_RUNS = 32
 
 @dataclass
 class RunEvent:
-    type: str  # status|routing|text_delta|tool_call|tool_result|finding_recorded|usage|done|error
+    # Every type the engine actually publishes, verified against the
+    # RunEvent(...) constructions in engine/harness.py. `status` used to be
+    # listed here and has never existed anywhere in the codebase — a documented
+    # event a client could wait on forever.
+    type: str  # routing|context_composition|text_delta|tool_call|tool_result|
+    #            finding_recorded|usage|budget_warning|tools_withheld|
+    #            context_pressure|compaction|model_switch|switch_refused|done|error
     data: dict = field(default_factory=dict)
     ts: float = field(default_factory=time.time)
 
