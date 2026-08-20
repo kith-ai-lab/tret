@@ -195,9 +195,12 @@ export interface ContextComposition {
  *  scope1_g is always 0 and always present — reported as an explicit zero rather
  *  than omitted. `basis` states the reasoning and is rendered verbatim. */
 export interface EmissionScopes {
-  scope1_g: number
-  scope2_g: number
-  scope3_g: number
+  // Nullable for the same reason as `co2e_g`: scope figures are carbon, so a
+  // roll-up spanning two GHG Protocol bases withholds them rather than adding
+  // location-based and market-based grams together.
+  scope1_g: number | null
+  scope2_g: number | null
+  scope3_g: number | null
   basis: string
 }
 
@@ -361,6 +364,19 @@ export interface EnergyAccounting {
   model: string | null
   /** Present only on a multi-model roll-up: every model the run used, in order. */
   models?: string[]
+  /** Roll-up only: the GHG Protocol bases the segments were accounted under. */
+  grid_bases?: (string | null)[]
+  /** Roll-up only. False when the segments span more than one basis, in which
+   *  case every carbon field above is null — location-based and market-based
+   *  figures answer different questions and may not be added. Energy, tokens
+   *  and cost are unaffected. Per-basis carbon subtotals are in `by_basis`. */
+  carbon_summable?: boolean
+  by_basis?: {
+    grid_co2e_basis: string | null
+    co2e_g: number | null
+    energy_wh: number | null
+    models: (string | null)[]
+  }[]
   energy_class: string | null // S | M | L | XL | R
   energy_wh_per_mtok: number | null // per million *output-equivalent* tokens
   weighted_tokens: number
@@ -368,7 +384,9 @@ export interface EnergyAccounting {
   cache_write_weight: number | null
   energy_wh: number // compute / IT load only — excludes facility overhead
   grid_co2e_g_per_kwh: number | null
-  co2e_g: number // run total; equals scope1_g + scope2_g + scope3_g
+  /** Run total; equals scope1_g + scope2_g + scope3_g. Null on a roll-up whose
+   *  segments span more than one GHG Protocol basis — see `carbon_summable`. */
+  co2e_g: number | null
   basis: string
   pue?: number
   energy_wh_total?: number // compute x PUE

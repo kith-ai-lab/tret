@@ -2040,21 +2040,75 @@ def emission_event_fields(accounting: dict | None) -> dict[str, Any]:
 # factor, report null rather than inventing a figure. A null here means "these
 # segments were accounted differently"; it never means zero.
 
-# Quantities that add across models: energy is energy, a gram is a gram, and a
-# token spent on one model is still a token.
+# Quantities that add across models unconditionally: a kWh is a kWh, a token is
+# a token, and a dollar is a dollar whatever grid generated the electricity.
 _SUMMABLE_TOP = (
     "energy_wh",
     "energy_wh_total",
-    "co2e_g",
-    "embodied_g",
     "weighted_tokens",
 )
 _SUMMABLE_NESTED = {
     "tokens": ("input", "output", "cache_read", "cache_write"),
     "energy_wh_by_bucket": ("input", "output", "cache_read", "cache_write"),
-    "scopes": ("scope1_g", "scope2_g", "scope3_g"),
-    "baseline": ("energy_wh", "energy_wh_total", "co2e_g", "avoided_co2e_g"),
+    # Baseline *energy* only. `resolve_baseline_model` picks one global baseline
+    # model, so baseline energy is a linear function of tokens against a single
+    # model and genuinely adds. Baseline carbon is carbon and follows the rule
+    # below.
+    "baseline": ("energy_wh", "energy_wh_total"),
     "cost": ("usd", "baseline_usd", "avoided_usd"),
+}
+
+# ── carbon may only be summed within one GHG Protocol basis ──────────────────
+# Location-based and market-based figures answer different questions and may not
+# be added. `api/analytics.py` already enforces this at window scale — see
+# `_is_summable` / `_bucket_bases` / `by_basis` there, and the rule stated in
+# EMISSIONS_DISCLAIMER — and this is the same rule at run scale.
+#
+# It was previously enforced only halfway here, which was worse than not at all:
+# `grid_co2e_basis` was nulled because the segments disagreed, while `co2e_g`
+# kept its sum. A null basis beside a populated carbon figure reads as "the basis
+# wasn't recorded", not "this addition is not legitimate" — so the number
+# survived and the one field that would have exposed it was removed. Latent on a
+# default deployment, where every segment shares the global factor; live for an
+# operator who has configured BENCH_GRID_FACTORS per provider, which is exactly
+# the operator most likely to publish the figure.
+#
+# `embodied_g` is deliberately absent: it is hardware amortization, not
+# electricity, so no grid basis applies to it and it adds freely.
+_CARBON_TOP = ("co2e_g", "co2e_g_low", "co2e_g_high")
+_CARBON_NESTED = {
+    "scopes": ("scope1_g", "scope2_g", "scope3_g"),
+    "baseline": ("co2e_g", "avoided_co2e_g"),
+}
+
+
+def _bases_of(blocks: list[dict]) -> list:
+    """The distinct GHG Protocol bases these blocks were accounted under."""
+    seen = {b.get("grid_co2e_basis") for b in blocks}
+    return sorted(seen, key=lambda basis: (basis is None, str(basis)))
+
+
+CROSS_BASIS_CAVEAT = {
+    "key": "carbon_crosses_grid_basis",
+    "label": "Carbon could not be summed: this run spans more than one GHG Protocol basis",
+    "direction": "unknown",
+    "note": (
+        "Parts of this run were accounted location-based and parts market-based. "
+        "Those answer different questions and may not be added, so every carbon "
+        "figure here is null and the per-basis subtotals are in `by_basis`. "
+        "Energy, tokens and cost are unaffected and are summed as normal."
+    ),
+}
+
+LIST_PRICE_CAVEAT = {
+    "key": "cost_is_list_price_only",
+    "label": "Cost is list-price API spend",
+    "direction": "understates",
+    "note": (
+        "Summed cost counts what providers bill for tokens. It excludes "
+        "electricity and hardware amortization for locally-executed inference, so "
+        "a total mixing a cloud call with a local one understates real cost."
+    ),
 }
 
 MULTI_MODEL_CAVEAT = {
@@ -2108,36 +2162,106 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
     if len(blocks) == 1:
         return blocks[0]
 
+    bases = _bases_of(blocks)
+    # One basis (or one that simply never varied) — carbon adds. More than one,
+    # and it does not, at any scale.
+    carbon_summable = len(bases) <= 1
+
     combined = dict(blocks[0])
     for key in _SUMMABLE_TOP:
         combined[key] = _sum_or_none([b.get(key) for b in blocks])
+    for key in _CARBON_TOP:
+        combined[key] = (
+            _sum_or_none([b.get(key) for b in blocks]) if carbon_summable else None
+        )
+    combined["embodied_g"] = _sum_or_none([b.get("embodied_g") for b in blocks])
+
     for parent, fields in _SUMMABLE_NESTED.items():
         children = [b.get(parent) or {} for b in blocks]
         merged = dict(children[0])
+        carbon_fields = _CARBON_NESTED.get(parent, ())
         for field_name in fields:
             merged[field_name] = _sum_or_none([c.get(field_name) for c in children])
-        for field_name in set(merged) - set(fields):
+        for field_name in carbon_fields:
+            merged[field_name] = (
+                _sum_or_none([c.get(field_name) for c in children])
+                if carbon_summable
+                else None
+            )
+        for field_name in set(merged) - set(fields) - set(carbon_fields):
+            merged[field_name] = _agreed([c.get(field_name) for c in children])
+        combined[parent] = merged
+    for parent, carbon_fields in _CARBON_NESTED.items():
+        if parent in _SUMMABLE_NESTED:
+            continue
+        children = [b.get(parent) or {} for b in blocks]
+        merged = dict(children[0])
+        for field_name in carbon_fields:
+            merged[field_name] = (
+                _sum_or_none([c.get(field_name) for c in children])
+                if carbon_summable
+                else None
+            )
+        for field_name in set(merged) - set(carbon_fields):
             merged[field_name] = _agreed([c.get(field_name) for c in children])
         combined[parent] = merged
 
     # Every per-model factor: kept where the segments agree, nulled where they do
     # not. Nulling is the honest answer — "this run ran at PUE 1.2" is false if
     # half of it ran somewhere else.
-    for key in set(combined) - set(_SUMMABLE_TOP) - set(_SUMMABLE_NESTED):
+    handled = (
+        set(_SUMMABLE_TOP)
+        | set(_SUMMABLE_NESTED)
+        | set(_CARBON_TOP)
+        | set(_CARBON_NESTED)
+        | {"embodied_g"}
+    )
+    for key in set(combined) - handled:
         if key in ("estimated", "basis", "factors", "caveats"):
             continue
         combined[key] = _agreed([b.get(key) for b in blocks])
 
     combined["models"] = [b.get("model") for b in blocks]
+    combined["grid_bases"] = bases
+    combined["carbon_summable"] = carbon_summable
+    if not carbon_summable:
+        # Per-basis subtotals, so the carbon is still *available* — it just is not
+        # offered as one number that would be a category error. Same shape and
+        # same reasoning as `by_basis` in api/analytics.py.
+        combined["by_basis"] = [
+            {
+                "grid_co2e_basis": basis,
+                **{
+                    key: _sum_or_none(
+                        [b.get(key) for b in blocks if b.get("grid_co2e_basis") == basis]
+                    )
+                    for key in ("co2e_g", "energy_wh")
+                },
+                "models": [
+                    b.get("model") for b in blocks if b.get("grid_co2e_basis") == basis
+                ],
+            }
+            for basis in bases
+        ]
     combined["basis"] = (
         "summed across the models this run used; per-model factors are reported "
-        "only where every segment agreed. " + str(blocks[0].get("basis", ""))
+        "only where every segment agreed"
+        + (
+            "; carbon is null because the segments span more than one GHG "
+            "Protocol basis and is broken out in `by_basis`. "
+            if not carbon_summable
+            else ". "
+        )
+        + str(blocks[0].get("basis", ""))
     )
     # Provenance annotations are unioned by key rather than summed: they describe
     # how a figure was reached, and every segment's reasoning still applies to
     # its own share.
     combined["factors"] = _union_by_key(blocks, "factors")
-    combined["caveats"] = [*_union_by_key(blocks, "caveats"), MULTI_MODEL_CAVEAT]
+    caveats = [*_union_by_key(blocks, "caveats"), MULTI_MODEL_CAVEAT, LIST_PRICE_CAVEAT]
+    if not carbon_summable:
+        caveats.append(CROSS_BASIS_CAVEAT)
+    combined["caveats"] = caveats
     return combined
 
 

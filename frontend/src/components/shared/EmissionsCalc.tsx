@@ -1,3 +1,4 @@
+import { Fragment } from 'react'
 /** A run's carbon figure, derived one checkable step at a time.
  *
  *  The point of this component is that a skeptical reader can redo the
@@ -142,7 +143,10 @@ function buildSteps(energy: EnergyAccounting): Step[] {
   const band = energy.uncertainty
   // Identity over returned figures: the run total less amortized hardware is the
   // part that came from electricity.
-  const electricity = energy.co2e_g - (embodied ?? 0)
+  // Non-null by construction: `EmissionsCalc` renders `CrossBasisNotice`
+  // instead when there is no total, and this function only builds the
+  // derivation of one.
+  const electricity = (energy.co2e_g ?? 0) - (embodied ?? 0)
   const energyForGrid = total ?? compute
 
   const steps: Step[] = [
@@ -248,7 +252,52 @@ function buildSteps(energy: EnergyAccounting): Step[] {
   return steps
 }
 
+/** Why a carbon figure is missing, when it is missing on purpose.
+ *
+ *  A run whose segments were accounted under different GHG Protocol bases has no
+ *  single carbon total, because location-based and market-based grams answer
+ *  different questions and adding them is a category error rather than a
+ *  rounding one. The subtotals are real and are shown; the total is not offered.
+ *  Rendering the derivation chain here would be worse than useless — it would
+ *  walk through arithmetic the backend deliberately declined to perform. */
+export function CrossBasisNotice({ energy }: { energy: EnergyAccounting }) {
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 6 }}>
+        Carbon not summed — this run spans two accounting bases
+      </div>
+      <div
+        style={{
+          marginBottom: 8,
+          fontFamily: 'var(--mono)',
+          fontSize: 10.5,
+          color: 'var(--text-muted)',
+        }}
+      >
+        Parts of this run were accounted {(energy.grid_bases ?? []).filter(Boolean).join(' and ')}.
+        Those answer different questions and may not be added, so there is no run total. Energy,
+        tokens and cost are unaffected. Per-basis subtotals:
+      </div>
+      <div className="kv">
+        {(energy.by_basis ?? []).map((row) => (
+          <Fragment key={row.grid_co2e_basis ?? 'unspecified'}>
+            <span className="k">{row.grid_co2e_basis ?? 'unspecified'}</span>
+            <span>
+              {row.co2e_g === null ? NO_ESTIMATE : `${formatFactor(row.co2e_g, 3)} gCO₂e`} ·{' '}
+              {row.energy_wh === null ? NO_ESTIMATE : `${formatFactor(row.energy_wh, 3)} Wh`} ·{' '}
+              {row.models.filter(Boolean).join(', ')}
+            </span>
+          </Fragment>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function EmissionsCalc({ energy }: { energy: EnergyAccounting }) {
+  // No total to derive. Everything below this point walks the arithmetic that
+  // produced one.
+  if (energy.co2e_g === null) return <CrossBasisNotice energy={energy} />
   const steps = buildSteps(energy)
   const hasProvenance = Boolean(energy.factors?.length || energy.caveats?.length)
   return (
@@ -423,6 +472,15 @@ function TokenBuckets({ energy }: { energy: EnergyAccounting }) {
 function RunScopes({ energy }: { energy: EnergyAccounting }) {
   const scopes = energy.scopes
   if (!scopes) return null
+  if (
+    energy.co2e_g === null ||
+    scopes.scope1_g === null ||
+    scopes.scope2_g === null ||
+    scopes.scope3_g === null
+  ) {
+    // Scope figures are carbon and follow the same rule as the total.
+    return null
+  }
   const sum = scopes.scope1_g + scopes.scope2_g + scopes.scope3_g
   // The backend guarantees co2e_g == scope1+2+3; check it rather than trust it.
   const matches = Math.abs(sum - energy.co2e_g) < 1e-6
@@ -455,7 +513,9 @@ function RunScopes({ energy }: { energy: EnergyAccounting }) {
                   </td>
                   <td style={{ color: 'var(--text-muted)' }}>{meta.what}</td>
                   <td className="num">{orDash(formatCo2e(value))}</td>
-                  <td className="num">{share(value, sum).toFixed(1)}%</td>
+                  <td className="num">
+                    {value === null ? orDash(null) : `${share(value, sum).toFixed(1)}%`}
+                  </td>
                 </tr>
               )
             })}
@@ -568,10 +628,31 @@ export function ScopeBar({
   values,
   height = 10,
 }: {
-  values: { scope1_g: number; scope2_g: number; scope3_g: number }
+  // Nullable, because a roll-up spanning two GHG Protocol bases withholds its
+  // scope figures rather than adding grams accounted different ways. A withheld
+  // figure is not zero, and the bar must not draw it as an empty slice.
+  values: { scope1_g: number | null; scope2_g: number | null; scope3_g: number | null }
   height?: number
 }) {
-  const total = values.scope1_g + values.scope2_g + values.scope3_g
+  if (values.scope1_g === null || values.scope2_g === null || values.scope3_g === null) {
+    return (
+      <div
+        className="stacked-bar"
+        style={{ height }}
+        title="Carbon was not summed for this run: it spans more than one GHG Protocol basis."
+      >
+        <span style={{ width: '100%', background: 'var(--bg-input)' }} />
+      </div>
+    )
+  }
+  // Re-bound after the guard above so the indexed access below is a number.
+  // Narrowing a property does not narrow `values[key]`.
+  const solid = {
+    scope1_g: values.scope1_g,
+    scope2_g: values.scope2_g,
+    scope3_g: values.scope3_g,
+  }
+  const total = solid.scope1_g + solid.scope2_g + solid.scope3_g
   if (total <= 0) {
     return (
       <div className="stacked-bar" style={{ height }} title="No carbon attributed to any scope.">
@@ -582,11 +663,11 @@ export function ScopeBar({
   return (
     <div className="stacked-bar" style={{ height }} role="img" aria-label="Scope split">
       {SCOPE_META.map((meta) => {
-        const pct = share(values[meta.key], total)
+        const pct = share(solid[meta.key], total)
         return pct > 0 ? (
           <span
             key={meta.key}
-            title={`${meta.label}: ${formatCo2e(values[meta.key])} (${pct.toFixed(1)}%)`}
+            title={`${meta.label}: ${formatCo2e(solid[meta.key])} (${pct.toFixed(1)}%)`}
             style={{ width: `${pct}%`, background: meta.color, opacity: 0.8 }}
           />
         ) : null
