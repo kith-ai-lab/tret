@@ -324,3 +324,136 @@ async def test_routing_response_states_that_it_is_observational():
     assert out["basis"]["observational"] is True
     assert "routed to stronger models" in out["basis"]["note"]
     assert out["score_version"] and out["priors_version"]
+
+
+# ── routing history ──────────────────────────────────────────────────────────
+def _hist_outcome(model_id, quality, *, days_ago=0, segment=0, run_id=None,
+                  shape="verdict", outcome_class="delivered"):
+    from datetime import timedelta
+
+    from bench.db.models import RunOutcome
+
+    return RunOutcome(
+        run_id=run_id or uuid.uuid4(),
+        segment_index=segment,
+        task_type="assess",
+        task_shape=shape,
+        objective="balanced",
+        max_cost_tier="premium",
+        size_band="m",
+        model_id=model_id,
+        provider="anthropic",
+        outcome_class=outcome_class,
+        quality_score=Decimal(str(quality)),
+        score_version="outcome-v1",
+        components={},
+        iterations=4,
+        cost_usd=Decimal("0.02"),
+        input_tokens=100,
+        output_tokens=50,
+        duration_ms=900,
+        findings_created=0,
+        findings_approved=0,
+        findings_rejected=0,
+        observed_at=utcnow() - timedelta(days=days_ago),
+    )
+
+
+def _history(rows, bucket_days=7):
+    from bench.api.analytics import routing_history
+
+    return routing_history(rows, bucket_days=bucket_days, now=utcnow())
+
+
+def test_history_buckets_runs_by_age():
+    rows = [_hist_outcome("m/a", 0.8, days_ago=d) for d in (0, 1, 8, 9, 20)]
+    buckets = _history(rows)[0]["buckets"]
+    assert len(buckets) == 3
+    assert sum(b["runs"] for b in buckets) == 5
+
+
+def test_choice_share_counts_the_model_the_router_picked():
+    # A run that later switched still counts once, against the model it was
+    # given — that is what the routing decision was.
+    run = uuid.uuid4()
+    rows = [
+        _hist_outcome("m/first", 0.05, run_id=run, segment=0, outcome_class="handed_off"),
+        _hist_outcome("m/second", 0.8, run_id=run, segment=1),
+    ]
+    group = _history(rows)[0]
+    bucket = group["buckets"][0]
+    assert bucket["models"]["m/first"]["picked"] == 1
+    assert bucket["models"]["m/second"]["picked"] == 0
+    assert bucket["runs"] == 1
+
+
+def test_quality_counts_the_abandoned_half_of_a_switched_run():
+    # The strongest evidence the table holds: this model stalled on this task.
+    run = uuid.uuid4()
+    rows = [
+        _hist_outcome("m/first", 0.05, run_id=run, segment=0, outcome_class="handed_off"),
+        _hist_outcome("m/second", 0.8, run_id=run, segment=1),
+    ]
+    models = _history(rows)[0]["buckets"][0]["models"]
+    assert models["m/first"]["mean_quality"] == 0.05
+    assert models["m/second"]["mean_quality"] == 0.8
+
+
+def test_switch_rate_needs_no_column_of_its_own():
+    run_switched, run_clean = uuid.uuid4(), uuid.uuid4()
+    rows = [
+        _hist_outcome("m/a", 0.05, run_id=run_switched, segment=0, outcome_class="handed_off"),
+        _hist_outcome("m/b", 0.8, run_id=run_switched, segment=1),
+        _hist_outcome("m/a", 0.8, run_id=run_clean, segment=0),
+    ]
+    bucket = _history(rows)[0]["buckets"][0]
+    assert bucket["switched_runs"] == 1
+    assert bucket["switch_rate"] == 0.5
+
+
+def test_the_moment_the_router_changed_its_mind_is_reported():
+    # The single most interesting point on this chart, and invisible in a
+    # snapshot of current standings.
+    rows = (
+        [_hist_outcome("m/old", 0.6, days_ago=20) for _ in range(3)]
+        + [_hist_outcome("m/new", 0.9, days_ago=1) for _ in range(3)]
+    )
+    group = _history(rows)[0]
+    assert [b["top_pick"] for b in group["buckets"]] == ["m/old", "m/new"]
+    changes = group["top_pick_changes"]
+    assert len(changes) == 1
+    assert changes[0]["from_model"] == "m/old"
+    assert changes[0]["to_model"] == "m/new"
+
+
+def test_a_steady_router_reports_no_changes_of_mind():
+    rows = [_hist_outcome("m/a", 0.8, days_ago=d) for d in (0, 8, 16)]
+    assert _history(rows)[0]["top_pick_changes"] == []
+
+
+def test_capacity_handoffs_are_excluded_from_quality_here_too():
+    rows = [_hist_outcome("m/a", 0.8) for _ in range(2)] + [
+        _hist_outcome("m/a", 0.0, outcome_class="handed_off_capacity")
+    ]
+    models = _history(rows)[0]["buckets"][0]["models"]
+    assert models["m/a"]["mean_quality"] == 0.8
+    assert models["m/a"]["scored_segments"] == 2
+
+
+def test_history_separates_shapes_and_lists_every_model_seen():
+    rows = [_hist_outcome("m/a", 0.8), _hist_outcome("m/b", 0.7, shape="drafting")]
+    groups = _history(rows)
+    assert {g["task_shape"] for g in groups} == {"verdict", "drafting"}
+    assert groups[0]["model_ids"]
+
+
+async def test_history_query_compiles_for_postgres():
+    from bench.api.analytics import routing_history_endpoint
+
+    db = _RowsSession([])
+    out = await routing_history_endpoint(
+        project_id=uuid.uuid4(), days=180, bucket_days=7, user=None, db=db
+    )
+    assert out["groups"] == []
+    for statement in db.statements:
+        assert "SELECT" in str(statement.compile(dialect=postgresql.dialect()))

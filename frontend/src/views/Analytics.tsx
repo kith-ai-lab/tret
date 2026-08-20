@@ -20,6 +20,7 @@ import {
   orDash,
 } from '../components/shared/format'
 import { type Column, MonoTable } from '../components/shared/MonoTable'
+import { RoutingHistoryPanel } from '../components/shared/RoutingHistory'
 
 const WINDOWS = [7, 30, 90, 365]
 
@@ -40,6 +41,10 @@ export function Analytics() {
   const routingQuery = useQuery({
     queryKey: ['routing-analytics'],
     queryFn: () => api.routingAnalytics(),
+  })
+  const historyQuery = useQuery({
+    queryKey: ['routing-history'],
+    queryFn: () => api.routingHistory(),
   })
 
   const data = guardrailsQuery.data
@@ -124,6 +129,19 @@ export function Analytics() {
               rowKey={(e) => `${e.at ?? ''}-${e.method_slug}-${e.error.slice(0, 24)}`}
               empty="No method errors in this window."
             />
+          </Section>
+
+          <Section
+            title="Is the router learning?"
+            hint="Which model got picked for each shape of task over time, how well each one did, and the moments the router changed its mind. Amber dots mark buckets where a run had to change model mid-flight."
+          >
+            {historyQuery.isLoading ? (
+              <div className="empty pulse">Loading routing history…</div>
+            ) : historyQuery.isError ? (
+              <div className="error-text">{(historyQuery.error as Error).message}</div>
+            ) : historyQuery.data ? (
+              <RoutingHistoryPanel history={historyQuery.data} />
+            ) : null}
           </Section>
 
           <Section

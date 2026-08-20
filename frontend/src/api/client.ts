@@ -1006,6 +1006,55 @@ export interface RoutingAnalytics {
   basis: RoutingBasis
 }
 
+// ── Routing history ──────────────────────────────────────────────────────
+// GET /api/analytics/routing/history. The standings view answers "which model
+// is best now"; this answers "did the router change its mind, and when". Same
+// table, no extra recording.
+
+export interface RoutingHistoryModel {
+  /** Runs where the router PICKED this model (the run's first segment). */
+  picked: number
+  share: number
+  /** Averages every scored segment, including the abandoned half of a switch. */
+  mean_quality: number | null
+  scored_segments: number
+}
+
+export interface RoutingHistoryBucket {
+  start: string
+  runs: number
+  top_pick: string | null
+  switched_runs: number
+  switch_rate: number
+  models: Record<string, RoutingHistoryModel>
+}
+
+export interface TopPickChange {
+  at: string
+  from_model: string
+  to_model: string
+}
+
+export interface RoutingHistoryGroup {
+  task_shape: string
+  objective: string
+  runs: number
+  /** Every model in the series, so colours stay stable across buckets. */
+  model_ids: string[]
+  buckets: RoutingHistoryBucket[]
+  top_pick_changes: TopPickChange[]
+}
+
+export interface RoutingHistory {
+  window_days: number | null
+  bucket_days: number
+  rows_scanned: number
+  rows_scan_limit: number
+  score_version: string
+  groups: RoutingHistoryGroup[]
+  basis: { observational: boolean; share_counts: string; quality_counts: string }
+}
+
 // ── Emissions analytics ──────────────────────────────────────────────────
 // GET /api/analytics/emissions. Every total is a plain sum of each run's stored
 // figures, frozen at the factors in force when that run ran — nothing is
@@ -1379,6 +1428,11 @@ export const api = {
     const qs = new URLSearchParams({ days: String(days) })
     if (projectId) qs.set('project_id', projectId)
     return request<RoutingAnalytics>(`/analytics/routing?${qs.toString()}`)
+  },
+  routingHistory: (days = 180, bucketDays = 7, projectId?: string) => {
+    const qs = new URLSearchParams({ days: String(days), bucket_days: String(bucketDays) })
+    if (projectId) qs.set('project_id', projectId)
+    return request<RoutingHistory>(`/analytics/routing/history?${qs.toString()}`)
   },
   emissionsAnalytics: (days = 30, projectId?: string) => {
     const qs = new URLSearchParams({ days: String(days) })

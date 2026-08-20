@@ -27,7 +27,7 @@ Read-only; any authenticated user may look.
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta
+from datetime import timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query
@@ -1022,6 +1022,169 @@ async def routing(
                 "quality_score measures whether the work was right, never what it "
                 "cost. Cost, tokens and energy are reported beside it so the "
                 "routing objective can make that trade explicitly."
+            ),
+        },
+    }
+
+
+# ── routing history ──────────────────────────────────────────────────────────
+# The standings above answer "which model is best for this shape *now*". They
+# cannot answer the question the adaptive router actually raises — is it
+# learning, and did it ever change its mind? — because a snapshot has no memory
+# of itself. This does, from the same table, with no extra recording.
+#
+# Two different counts come out of `run_outcomes`, and conflating them would
+# make both wrong:
+#
+#   * **Choice share** counts `segment_index == 0` only: the model the router
+#     *picked* for the run. A run that later switched still counts once, against
+#     the model it was given, because that is what the routing decision was.
+#   * **Quality** counts every scored segment, including the abandoned half of a
+#     switched run. A model that stalled and had to be replaced should have that
+#     count against it — that is the strongest evidence the table holds.
+#
+# Switch rate is a third thing again: the share of runs with any segment beyond
+# the first. It needs no separate column — a second segment *is* a switch.
+
+DEFAULT_HISTORY_BUCKET_DAYS = 7
+
+
+def _bucket_start(observed, now, bucket_days: int):
+    """The start of the bucket `observed` falls in, counting back from `now`.
+
+    Anchored on `now` rather than on the calendar so the most recent bucket is
+    always a full-width one ending today. Calendar weeks would make the current
+    partial week look like a collapse in volume every Monday.
+    """
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    age_days = (now - observed).total_seconds() / 86400.0
+    index = int(age_days // bucket_days)
+    return now - timedelta(days=(index + 1) * bucket_days - bucket_days)
+
+
+def routing_history(rows: list, *, bucket_days: int, now) -> list[dict]:
+    """Per (shape, objective), a series of buckets. Pure — no I/O, no clock."""
+    grouped: dict[tuple[str, str], list] = {}
+    for row in rows:
+        grouped.setdefault((row.task_shape, row.objective), []).append(row)
+
+    out = []
+    for (shape, objective), group in sorted(grouped.items()):
+        by_bucket: dict = {}
+        for row in group:
+            start = _bucket_start(row.observed_at, now, bucket_days)
+            bucket = by_bucket.setdefault(
+                start,
+                {"runs": set(), "switched": set(), "picks": {}, "quality": {}},
+            )
+            bucket["runs"].add(row.run_id)
+            if row.segment_index > 0:
+                bucket["switched"].add(row.run_id)
+                # A second segment means the run left its first model, so the
+                # run it belongs to is a switch — recorded once per run.
+            else:
+                bucket["picks"][row.model_id] = bucket["picks"].get(row.model_id, 0) + 1
+            if row.outcome_class not in NON_QUALITY_CLASSES:
+                scores = bucket["quality"].setdefault(row.model_id, [])
+                scores.append(float(row.quality_score))
+
+        buckets = []
+        previous_top = None
+        changes = []
+        for start in sorted(by_bucket):
+            bucket = by_bucket[start]
+            total = sum(bucket["picks"].values())
+            models = {}
+            for model_id in set(bucket["picks"]) | set(bucket["quality"]):
+                picked = bucket["picks"].get(model_id, 0)
+                scores = bucket["quality"].get(model_id, [])
+                models[model_id] = {
+                    "picked": picked,
+                    "share": round(picked / total, 4) if total else 0.0,
+                    "mean_quality": (
+                        round(sum(scores) / len(scores), 4) if scores else None
+                    ),
+                    "scored_segments": len(scores),
+                }
+            top = max(bucket["picks"], key=lambda m: (bucket["picks"][m], m), default=None)
+            if top and previous_top and top != previous_top:
+                # The moment the router changed its mind. The single most
+                # interesting point on this chart, and invisible in a snapshot.
+                changes.append(
+                    {"at": start.isoformat(), "from_model": previous_top, "to_model": top}
+                )
+            if top:
+                previous_top = top
+            runs = len(bucket["runs"])
+            buckets.append(
+                {
+                    "start": start.isoformat(),
+                    "runs": runs,
+                    "top_pick": top,
+                    "switched_runs": len(bucket["switched"]),
+                    "switch_rate": round(len(bucket["switched"]) / runs, 4) if runs else 0.0,
+                    "models": models,
+                }
+            )
+        out.append(
+            {
+                "task_shape": shape,
+                "objective": objective,
+                "runs": len({r.run_id for r in group}),
+                # Every model that appears anywhere in the series, so a client can
+                # assign one stable colour per model across all buckets.
+                "model_ids": sorted({r.model_id for r in group}),
+                "buckets": buckets,
+                "top_pick_changes": changes,
+            }
+        )
+    out.sort(key=lambda g: -g["runs"])
+    return out
+
+
+@router.get("/routing/history")
+async def routing_history_endpoint(
+    project_id: uuid.UUID | None = None,
+    days: int | None = Query(default=180, ge=1, le=3650),
+    bucket_days: int = Query(default=DEFAULT_HISTORY_BUCKET_DAYS, ge=1, le=90),
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """How routing has moved over time: what got picked, how well it did, when it changed.
+
+    Same caveat as the standings view, and for the same reason: these are
+    observed outcomes, not a controlled comparison. A model's share rising is
+    evidence the router changed its mind, not proof it was right to.
+    """
+    now = utcnow()
+    since = now - timedelta(days=days) if days else None
+    q = select(RunOutcome).order_by(RunOutcome.observed_at.desc()).limit(ROUTING_SCAN_LIMIT)
+    if project_id is not None:
+        q = q.where(RunOutcome.project_id == project_id)
+    if since is not None:
+        q = q.where(RunOutcome.observed_at >= since)
+    rows = list((await db.execute(q)).scalars().all())
+
+    return {
+        "window_days": days,
+        "bucket_days": bucket_days,
+        "project_id": str(project_id) if project_id else None,
+        "rows_scanned": len(rows),
+        "rows_scan_limit": ROUTING_SCAN_LIMIT,
+        "score_version": OUTCOME_SCORE_VERSION,
+        "groups": routing_history(rows, bucket_days=bucket_days, now=now),
+        "basis": {
+            "observational": True,
+            "share_counts": (
+                "Choice share counts the model the router picked for each run "
+                "(the run's first segment). A run that later changed model still "
+                "counts once, against the model it was given."
+            ),
+            "quality_counts": (
+                "Quality averages every scored segment, including the abandoned "
+                "half of a run that switched — a model that stalled and had to be "
+                "replaced is counted against."
             ),
         },
     }
