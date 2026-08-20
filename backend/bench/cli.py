@@ -1,4 +1,4 @@
-"""`bench` CLI — pack authoring utilities."""
+"""`bench` CLI — pack authoring utilities, and outcome bookkeeping."""
 from __future__ import annotations
 
 import argparse
@@ -44,6 +44,33 @@ def _hash(path: Path) -> None:
     )
 
 
+def _backfill_outcomes(limit: int | None) -> None:
+    """Rebuild `run_outcomes` from the runs already in the database.
+
+    Two jobs, same command. On upgrade it seeds the table so routing has history
+    from day one instead of starting blind. Afterwards it is the repair path: the
+    table is derived, so re-running this after the scoring weights change
+    re-judges every past run under the new version rather than leaving a database
+    of scores that mean two different things.
+    """
+    import asyncio
+
+    from bench.db.engine import get_session_factory
+    from bench.router_llm.outcomes import OUTCOME_SCORE_VERSION
+    from bench.services.outcomes import backfill
+
+    async def run() -> dict:
+        async with get_session_factory()() as db:
+            return await backfill(db, limit=limit)
+
+    stats = asyncio.run(run())
+    print(f"scored {stats['written']} run(s) at {OUTCOME_SCORE_VERSION}")
+    print(f"  scanned: {stats['scanned']}")
+    # Not an error: runs that failed before they were routed have no model to
+    # attribute anything to, and cancelled runs are deliberately not evidence.
+    print(f"  skipped: {stats['skipped']} (never routed, or carrying no lesson)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bench")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -57,7 +84,20 @@ def main() -> None:
     )
     hash_cmd.add_argument("path", type=Path)
 
+    outcomes = sub.add_parser("outcomes", help="Routing outcome evidence")
+    outcomes_sub = outcomes.add_subparsers(dest="outcomes_command", required=True)
+    backfill_cmd = outcomes_sub.add_parser(
+        "backfill", help="Rebuild run_outcomes from existing runs"
+    )
+    backfill_cmd.add_argument(
+        "--limit", type=int, default=None, help="Only score the N most recent runs"
+    )
+
     args = parser.parse_args()
+    if args.command == "outcomes":
+        if args.outcomes_command == "backfill":
+            _backfill_outcomes(args.limit)
+        return
     if args.command == "packs":
         if args.packs_command == "validate":
             _validate(args.path)

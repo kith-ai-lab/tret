@@ -262,6 +262,83 @@ class Approval(Base):
     created_at: Mapped[datetime] = created_at_col()
 
 
+class RunOutcome(Base):
+    """How a finished run turned out — the evidence the router learns from.
+
+    Derived, never authoritative: every column here is a summary of something
+    already recorded on `runs`, `findings` and `approvals`, and this table can be
+    dropped and rebuilt from those at any time (`bench outcomes backfill`). It
+    exists because routing needs to ask "how has this model done on this shape of
+    task" cheaply, and answering that from raw transcripts means parsing every
+    run on every route.
+
+    One row per run, written when the run reaches a terminal status and rewritten
+    when an approval later lands on one of its findings — a human verdict arrives
+    minutes or days after the run ends, and it is the strongest signal there is
+    (see router_llm/outcomes.py). Cancelled and still-running runs are not
+    recorded at all: an operator pressing stop is not evidence about a model.
+
+    The routing key is denormalised onto the row (shape, objective, cost tier,
+    size band, model) rather than read back out of `runs.routing`, because that
+    is exactly the tuple the priors group by, and a JSON predicate per group is
+    the thing this table exists to avoid.
+    """
+
+    __tablename__ = "run_outcomes"
+    __table_args__ = (
+        Index("run_outcomes_routing_key", "task_shape", "objective", "model_id"),
+        Index("run_outcomes_observed", "observed_at"),
+    )
+
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("projects.id"))
+    harness_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("harnesses.id"))
+
+    # ── the routing key this outcome is evidence about ───────────────────────
+    task_type: Mapped[str] = mapped_column(Text, nullable=False)
+    task_shape: Mapped[str] = mapped_column(Text, nullable=False)
+    objective: Mapped[str] = mapped_column(Text, nullable=False)
+    max_cost_tier: Mapped[str] = mapped_column(Text, nullable=False)
+    size_band: Mapped[str] = mapped_column(Text, nullable=False)
+    model_id: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str | None] = mapped_column(Text)
+    # Whether this route came from the LLM router, the deterministic fallback, or
+    # an override. A pinned model's record says nothing about the router's
+    # judgment, so priors can exclude overrides from what they learn.
+    fallback_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    override: Mapped[str | None] = mapped_column(Text)  # user_pin | run_override | null
+
+    # ── the verdict ──────────────────────────────────────────────────────────
+    outcome_class: Mapped[str] = mapped_column(Text, nullable=False)  # delivered|no_output|failed
+    quality_score: Mapped[Decimal] = mapped_column(Numeric(6, 4), nullable=False)
+    score_version: Mapped[str] = mapped_column(Text, nullable=False)
+    error_kind: Mapped[str | None] = mapped_column(Text)
+    components: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    # ── what it cost to get there ────────────────────────────────────────────
+    # Kept separate from quality_score on purpose: what a route is worth is a
+    # trade-off between these and the score, and the routing objective is what
+    # makes that trade. Baking cost into the score would take the choice away.
+    iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    energy_wh: Mapped[Decimal | None] = mapped_column(Numeric(14, 6))
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # ── the human record ─────────────────────────────────────────────────────
+    findings_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    findings_approved: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    findings_rejected: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # The run's own creation time, copied so time-decay can weight evidence
+    # without joining back to `runs` on every routing decision.
+    observed_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class DataRequest(Base):
     __tablename__ = "data_requests"
 

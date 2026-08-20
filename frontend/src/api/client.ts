@@ -847,6 +847,63 @@ export interface GuardrailAnalytics {
   energy_basis: GuardrailEnergyBasis
 }
 
+// ── Routing track record ─────────────────────────────────────────────────
+// GET /api/analytics/routing. How each model has actually performed, grouped by
+// the tuple routing groups by. Read within a group only: the response's `basis`
+// says why, and the UI repeats it.
+
+/** One model's record on one (task shape, objective) key. */
+export interface RoutingModelPrior {
+  model_id: string
+  runs: number
+  /** Sample count after time decay and off-band discounting — not `runs`. */
+  effective_n: number
+  /** Shrunk toward the pooled mean of this key. */
+  quality_mean: number
+  quality_raw: number
+  /** Conservative lower bound. What a caller reads before overriding a rule. */
+  quality_ci_low: number
+  delivered_rate: number
+  failure_rate: number
+  mean_cost_usd: number
+  mean_output_tokens: number
+  mean_iterations: number
+  mean_energy_wh: number | null
+  approvals: number
+  rejections: number
+  error_kinds: Record<string, number>
+  last_seen: string | null
+}
+
+export interface RoutingGroup {
+  task_shape: string
+  objective: string
+  runs: number
+  models: RoutingModelPrior[]
+  /** Seen in the window but still under the evidence floor — named, not hidden. */
+  models_below_evidence_floor: string[]
+}
+
+export interface RoutingBasis {
+  observational: boolean
+  note: string
+  half_life_days: number
+  minimum_effective_samples: number
+  quality_ignores_cost: string
+}
+
+export interface RoutingAnalytics {
+  window_days: number | null
+  project_id: string | null
+  size_band: string | null
+  rows_scanned: number
+  rows_scan_limit: number
+  score_version: string
+  priors_version: string
+  groups: RoutingGroup[]
+  basis: RoutingBasis
+}
+
 // ── Emissions analytics ──────────────────────────────────────────────────
 // GET /api/analytics/emissions. Every total is a plain sum of each run's stored
 // figures, frozen at the factors in force when that run ran — nothing is
@@ -1215,6 +1272,11 @@ export const api = {
     const qs = new URLSearchParams({ days: String(days) })
     if (projectId) qs.set('project_id', projectId)
     return request<GuardrailAnalytics>(`/analytics/guardrails?${qs.toString()}`)
+  },
+  routingAnalytics: (days = 90, projectId?: string) => {
+    const qs = new URLSearchParams({ days: String(days) })
+    if (projectId) qs.set('project_id', projectId)
+    return request<RoutingAnalytics>(`/analytics/routing?${qs.toString()}`)
   },
   emissionsAnalytics: (days = 30, projectId?: string) => {
     const qs = new URLSearchParams({ days: String(days) })

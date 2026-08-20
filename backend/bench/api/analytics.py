@@ -42,9 +42,17 @@ from bench.config import (
     get_settings,
 )
 from bench.db.engine import get_db
+from bench.db.models import EgressCall, Harness, MethodRun, Run, RunOutcome, User, utcnow
 from bench.net import egress_status
-from bench.db.models import EgressCall, Harness, MethodRun, Run, User, utcnow
 from bench.providers.catalog import co2e_grams
+from bench.router_llm.outcomes import OUTCOME_SCORE_VERSION
+from bench.router_llm.priors import (
+    HALF_LIFE_DAYS,
+    MIN_EFFECTIVE_SAMPLES,
+    PRIORS_VERSION,
+    summarize,
+)
+from bench.services import transcript
 from bench.services.emissions import resolve_baseline_model
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
@@ -56,8 +64,17 @@ RUN_SCAN_LIMIT = 500
 # run's JSON block in Python (no dialect-specific JSON predicates), so the query
 # is capped at the most recent N runs in the window and the response says so.
 EMISSIONS_RUN_SCAN_LIMIT = 2000
-VALIDATION_MARKER = "Validation failed"
-EXHAUSTED_MARKER = "repair attempts are exhausted"
+# Bound on the /routing scan. Outcome rows are small, but aggregation happens
+# in Python (no dialect-specific JSON or window functions), so the window is
+# capped and the response reports the cap.
+ROUTING_SCAN_LIMIT = 5000
+# Transcript parsing lives in services/transcript.py, because outcome scoring
+# (router_llm/outcomes.py) reads the same markers out of the same transcripts and
+# the two must never drift. Re-exported here under the names this module has
+# always used.
+VALIDATION_MARKER = transcript.VALIDATION_MARKER
+EXHAUSTED_MARKER = transcript.EXHAUSTED_MARKER
+_validation_errors_in = transcript.validation_errors_in
 
 
 def _rate(part: int, whole: int) -> float:
@@ -124,22 +141,6 @@ async def _recent_method_errors(
         }
         for slug, error, created_at in (await db.execute(q)).all()
     ]
-
-
-def _validation_errors_in(messages: list) -> tuple[int, int]:
-    """(validation errors, of which exhausted repair budget) in one transcript."""
-    total = exhausted = 0
-    for msg in messages or []:
-        if not isinstance(msg, dict) or msg.get("role") != "tool":
-            continue
-        if not (msg.get("meta") or {}).get("error"):
-            continue
-        content = msg.get("content") or ""
-        if VALIDATION_MARKER in content:
-            total += 1
-            if EXHAUSTED_MARKER in content:
-                exhausted += 1
-    return total, exhausted
 
 
 async def _validation_stats(
@@ -929,4 +930,90 @@ async def emissions(
                 else ""
             )
         ),
+    }
+
+
+# ── routing track record ─────────────────────────────────────────────────────
+# What `run_outcomes` says about each model, grouped the way routing groups it.
+# The same `summarize` the router reads, so the panel an operator looks at and
+# the evidence a routing decision cites can never disagree.
+
+
+def _routing_rows(rows: list, size_band: str | None) -> list[dict]:
+    """Per (shape, objective) groups, each listing its models best-first."""
+    grouped: dict[tuple[str, str], list] = {}
+    for row in rows:
+        grouped.setdefault((row.task_shape, row.objective), []).append(row)
+
+    out = []
+    for (shape, objective), group in sorted(grouped.items()):
+        priors = summarize(group, size_band=size_band)
+        models = sorted(priors.values(), key=lambda p: -p.quality_mean)
+        # Models present in the window but still under the evidence floor. Named
+        # rather than hidden: "we have not seen enough of this model yet" is a
+        # different statement from "this model is not in the running", and an
+        # operator deciding whether to trust the panel needs to tell them apart.
+        thin = sorted({r.model_id for r in group} - set(priors))
+        out.append(
+            {
+                "task_shape": shape,
+                "objective": objective,
+                "runs": len(group),
+                "models": [p.to_json() for p in models],
+                "models_below_evidence_floor": thin,
+            }
+        )
+    out.sort(key=lambda g: -g["runs"])
+    return out
+
+
+@router.get("/routing")
+async def routing(
+    project_id: uuid.UUID | None = None,
+    days: int | None = Query(default=90, ge=1, le=3650),
+    size_band: str | None = Query(default=None),
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """How each model has actually performed, per shape of task and objective.
+
+    Read this as observational, not causal, and the response says so. Harder work
+    is already routed to stronger models, so a strong model's measured success
+    rate is dragged down by the very tasks it was chosen for. Comparisons are
+    only meaningful *within* one group, which is why the response is shaped as
+    groups rather than as one league table of models.
+    """
+    since = utcnow() - timedelta(days=days) if days else None
+    q = select(RunOutcome).order_by(RunOutcome.observed_at.desc()).limit(ROUTING_SCAN_LIMIT)
+    if project_id is not None:
+        q = q.where(RunOutcome.project_id == project_id)
+    if since is not None:
+        q = q.where(RunOutcome.observed_at >= since)
+    rows = list((await db.execute(q)).scalars().all())
+
+    return {
+        "window_days": days,
+        "project_id": str(project_id) if project_id else None,
+        "size_band": size_band,
+        "rows_scanned": len(rows),
+        "rows_scan_limit": ROUTING_SCAN_LIMIT,
+        "score_version": OUTCOME_SCORE_VERSION,
+        "priors_version": PRIORS_VERSION,
+        "groups": _routing_rows(rows, size_band),
+        "basis": {
+            "observational": True,
+            "note": (
+                "Observed outcomes, not a controlled comparison: harder tasks are "
+                "routed to stronger models, so a model's measured rate reflects the "
+                "work it was given as much as how it did. Compare within a group, "
+                "never across one."
+            ),
+            "half_life_days": HALF_LIFE_DAYS,
+            "minimum_effective_samples": MIN_EFFECTIVE_SAMPLES,
+            "quality_ignores_cost": (
+                "quality_score measures whether the work was right, never what it "
+                "cost. Cost, tokens and energy are reported beside it so the "
+                "routing objective can make that trade explicitly."
+            ),
+        },
     }

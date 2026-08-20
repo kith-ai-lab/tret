@@ -76,6 +76,15 @@ class RoutingDecision:
     # same candidates and the same prompt version can yield different picks
     # under different objectives — the audit trail has to say which was in force.
     objective: str = DEFAULT_OBJECTIVE
+    # The other two inputs that change the answer without appearing anywhere in
+    # it. `task_shape` selects the deterministic fallback's preference list and
+    # is the key outcome evidence is grouped by; `max_cost_tier` is the ceiling
+    # that shaped the candidate list. Both were previously reconstructible only
+    # by re-reading the run's pack — which stops working the moment the pack is
+    # upgraded, so a past decision became uninterpretable exactly when it
+    # mattered. Defaulted so a decision built without them still validates.
+    task_shape: str = "freeform"
+    max_cost_tier: str = DEFAULT_MAX_COST_TIER
     fallback_used: bool = False
     override: str | None = None  # "user_pin" | "run_override" | None
     latency_ms: int = 0
@@ -197,10 +206,24 @@ class ModelRouter:
         # per-request override is confined to the harness policy.
         if run_override:
             return self._validated_override(
-                run_override, "run_override", objective, model_policy=model_policy
+                run_override,
+                "run_override",
+                objective,
+                model_policy=model_policy,
+                task_shape=task_shape,
+                max_cost_tier=max_tier,
             )
         if model_policy.get("mode") == "pinned":
-            return self._validated_override(model_policy.get("model", ""), "user_pin", objective)
+            return self._validated_override(
+                model_policy.get("model", ""),
+                "user_pin",
+                objective,
+                task_shape=task_shape,
+                # A harness pin may exceed the harness's own ceiling (see the
+                # module docstring), so the tier recorded here is what the policy
+                # asked for, not a claim that the pinned model sits inside it.
+                max_cost_tier=max_tier,
+            )
 
         candidates = self._candidates(model_policy)
         if not candidates:
@@ -215,6 +238,8 @@ class ModelRouter:
                 chosen_model=candidates[0].id,
                 reasoning="Only one candidate model available.",
                 objective=objective,
+                task_shape=task_shape,
+                max_cost_tier=max_tier,
                 fallback_used=False,
             )
 
@@ -259,6 +284,8 @@ class ModelRouter:
                             reasoning=str(result.get("reasoning", ""))[:600],
                             confidence=result.get("confidence"),
                             objective=objective,
+                            task_shape=task_shape,
+                            max_cost_tier=max_tier,
                             latency_ms=int((time.monotonic() - start) * 1000),
                         )
                 except ProviderError:
@@ -301,6 +328,8 @@ class ModelRouter:
                 f"objective '{objective}' with cost ceiling '{max_tier}'."
             ),
             objective=objective,
+            task_shape=task_shape,
+            max_cost_tier=max_tier,
             fallback_used=True,
         )
 
@@ -364,6 +393,8 @@ class ModelRouter:
         kind: str,
         objective: str = DEFAULT_OBJECTIVE,
         model_policy: dict | None = None,
+        task_shape: str = "freeform",
+        max_cost_tier: str = DEFAULT_MAX_COST_TIER,
     ) -> RoutingDecision:
         info = self._catalog.get(model_id)
         if info is None:
@@ -381,5 +412,7 @@ class ModelRouter:
             chosen_model=model_id,
             reasoning="user pin" if kind == "user_pin" else "per-run override",
             objective=objective,
+            task_shape=task_shape,
+            max_cost_tier=max_cost_tier,
             override=kind,
         )

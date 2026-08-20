@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bench.api.auth import current_user, require_approver
 from bench.db.engine import get_db
 from bench.db.models import Approval, DataRequest, Finding, Project, User
+from bench.services.outcomes import record_outcome_for_finding
 
 router = APIRouter(prefix="/api", tags=["findings"])
 
@@ -134,6 +135,12 @@ async def decide_finding(
     db.add(approval)
     f.status = "approved" if body.action == "approve" else "rejected"
     await db.commit()
+    # A human just said whether this output was right, which is the strongest
+    # signal bench has about the model that produced it — re-score the run behind
+    # it so routing can learn from the verdict. After the commit, deliberately:
+    # the approval is the thing that must succeed, and outcome bookkeeping is
+    # rebuildable (`bench outcomes backfill`). It never raises.
+    await record_outcome_for_finding(db, f.id)
     return {"ok": True, "status": f.status, "approver": user.display_name}
 
 

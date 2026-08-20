@@ -219,3 +219,108 @@ async def test_method_failure_rates_are_computed_per_slug():
     }
     assert by_slug["portfolio_divergence_rate"]["failure_rate_pct"] == 0.0
     assert stats[0]["method_slug"] == "ghg_inventory"  # worst rate first
+
+
+# ── routing track record ─────────────────────────────────────────────────────
+class _RowsSession(RecordingSession):
+    """Returns a fixed set of ORM rows, for the endpoints that scan and group."""
+
+    def __init__(self, rows):
+        super().__init__()
+        self._rows = rows
+
+    async def execute(self, statement):
+        self.statements.append(statement)
+        return _RowsResult(self._rows)
+
+
+class _RowsResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+    def scalars(self):
+        return self
+
+    def unique(self):
+        return self
+
+
+def _outcome(model_id: str, quality: str, *, shape="verdict", objective="balanced", band="m",
+             outcome_class="delivered"):
+    from bench.db.models import RunOutcome
+
+    return RunOutcome(
+        task_type="assess",
+        task_shape=shape,
+        objective=objective,
+        max_cost_tier="premium",
+        size_band=band,
+        model_id=model_id,
+        provider="anthropic",
+        outcome_class=outcome_class,
+        quality_score=Decimal(quality),
+        score_version="outcome-v1",
+        components={},
+        iterations=4,
+        cost_usd=Decimal("0.02"),
+        input_tokens=100,
+        output_tokens=50,
+        energy_wh=Decimal("0.4"),
+        duration_ms=900,
+        findings_created=0,
+        findings_approved=0,
+        findings_rejected=0,
+        observed_at=utcnow(),
+    )
+
+
+async def test_routing_query_compiles_for_postgres():
+    from bench.api.analytics import routing
+
+    db = _RowsSession([])
+    out = await routing(project_id=uuid.uuid4(), days=90, size_band=None, user=None, db=db)
+    assert out["groups"] == []
+    assert out["rows_scanned"] == 0
+    for statement in db.statements:
+        assert "SELECT" in str(statement.compile(dialect=postgresql.dialect()))
+
+
+async def test_routing_groups_by_shape_and_objective_and_ranks_within_a_group():
+    from bench.api.analytics import routing
+
+    rows = (
+        [_outcome("m/good", "0.9") for _ in range(12)]
+        + [_outcome("m/poor", "0.2") for _ in range(12)]
+        + [_outcome("m/other", "0.8", shape="drafting") for _ in range(12)]
+    )
+    out = await routing(project_id=None, days=90, size_band=None, user=None, db=_RowsSession(rows))
+
+    keys = {(g["task_shape"], g["objective"]) for g in out["groups"]}
+    assert keys == {("verdict", "balanced"), ("drafting", "balanced")}
+    verdict = next(g for g in out["groups"] if g["task_shape"] == "verdict")
+    assert [m["model_id"] for m in verdict["models"]] == ["m/good", "m/poor"]
+    assert verdict["runs"] == 24
+
+
+async def test_models_under_the_evidence_floor_are_named_not_hidden():
+    from bench.api.analytics import routing
+
+    # "not enough evidence yet" and "not in the running" are different claims,
+    # and an operator reading the panel has to be able to tell them apart.
+    rows = [_outcome("m/known", "0.8") for _ in range(12)] + [_outcome("m/new", "0.9")]
+    out = await routing(project_id=None, days=90, size_band=None, user=None, db=_RowsSession(rows))
+    group = out["groups"][0]
+    assert [m["model_id"] for m in group["models"]] == ["m/known"]
+    assert group["models_below_evidence_floor"] == ["m/new"]
+
+
+async def test_routing_response_states_that_it_is_observational():
+    from bench.api.analytics import routing
+
+    out = await routing(project_id=None, days=90, size_band=None, user=None, db=_RowsSession([]))
+    assert out["basis"]["observational"] is True
+    assert "routed to stronger models" in out["basis"]["note"]
+    assert out["score_version"] and out["priors_version"]

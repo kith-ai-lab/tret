@@ -48,6 +48,13 @@ from bench.providers.catalog import (
 )
 from bench.router_llm.router import ModelRouter, RoutingUnavailable
 from bench.services.emissions import emission_event_fields, energy_wh_field
+from bench.services.outcomes import record_outcome
+from bench.services.transcript import (
+    ENGINE_NUDGE_KEY,
+    NUDGE_OUTPUT_BUDGET,
+    NUDGE_TERMINAL,
+    REPEATED_CALL_KEY,
+)
 
 DEFAULT_MAX_ITERATIONS = 24
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
@@ -451,6 +458,11 @@ class HarnessEngine:
                                 "with the required schema now, or file_data_request and record an "
                                 "insufficient_data outcome if the assessment cannot be completed."
                             ),
+                            # Structural, not prose: outcome scoring counts how
+                            # often a model had to be told to finish, and reading
+                            # that off the sentence would break the day the
+                            # sentence is reworded (services/transcript.py).
+                            meta={ENGINE_NUDGE_KEY: NUDGE_TERMINAL},
                         )
                     )
                     continue
@@ -526,15 +538,20 @@ class HarnessEngine:
 
                 call_key = f"{tc.name}:{_json.dumps(tc.arguments, sort_keys=True, default=str)}"
                 seen_calls[call_key] = seen_calls.get(call_key, 0) + 1
+                repeated = 0
                 if seen_calls[call_key] >= 3 and not is_error:
+                    repeated = seen_calls[call_key]
                     result_text += (
                         "\n\n[NOTE: you have now made this exact call "
                         f"{seen_calls[call_key]} times and the result is unchanged. You have "
                         "the data you need — proceed to your terminal action "
                         f"({ctx.terminal_tool or 'your final answer'}) now.]"
                     )
+                meta = {"error": is_error}
+                if repeated:
+                    meta[REPEATED_CALL_KEY] = repeated
                 messages.append(
-                    Msg(role="tool", content=result_text, tool_call_id=tc.id, meta={"error": is_error})
+                    Msg(role="tool", content=result_text, tool_call_id=tc.id, meta=meta)
                 )
                 await self.bus.publish(
                     run.id,
@@ -564,6 +581,7 @@ class HarnessEngine:
                             "retrieved, or file_data_request and record an insufficient_data "
                             "outcome. Do not start new lines of inquiry."
                         ),
+                        meta={ENGINE_NUDGE_KEY: NUDGE_OUTPUT_BUDGET},
                     )
                 )
                 await self.bus.publish(
@@ -608,6 +626,10 @@ class HarnessEngine:
             run.status = self._completion_status(ctx)
         run.messages = [m.to_json() for m in messages]
         run.finished_at = _utcnow()
+        # Evidence for the next routing decision, folded into the run's own final
+        # commit. `record_outcome` never raises and returns None for runs that
+        # carry no lesson (cancelled, or never routed) — see services/outcomes.py.
+        await record_outcome(db, run)
         await db.commit()
         self._cancelled.discard(run.id)
         if run.status in SUCCESS_STATUSES:

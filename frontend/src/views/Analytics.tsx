@@ -8,6 +8,8 @@ import {
   type GuardrailHarnessStat,
   type GuardrailMethodError,
   type GuardrailMethodStat,
+  type RoutingGroup,
+  type RoutingModelPrior,
 } from '../api/client'
 import {
   formatCo2eScaled,
@@ -30,8 +32,18 @@ export function Analytics() {
     queryKey: ['guardrails', days],
     queryFn: () => api.guardrailAnalytics(days),
   })
+  // The routing track record reads a longer window than the guardrail panels: an
+  // outcome is one data point about a model, and thirty days of them is rarely
+  // enough to say anything. The window selector above deliberately does not
+  // drive it, so shortening the guardrail view cannot quietly empty the
+  // evidence panel.
+  const routingQuery = useQuery({
+    queryKey: ['routing-analytics'],
+    queryFn: () => api.routingAnalytics(),
+  })
 
   const data = guardrailsQuery.data
+  const routing = routingQuery.data
 
   return (
     <div className="stack" style={{ gap: 28 }}>
@@ -112,6 +124,44 @@ export function Analytics() {
               rowKey={(e) => `${e.at ?? ''}-${e.method_slug}-${e.error.slice(0, 24)}`}
               empty="No method errors in this window."
             />
+          </Section>
+
+          <Section
+            title="Routing track record"
+            hint="How each model has actually done, per shape of task and objective — the same evidence the router reads when it chooses. Compare within a group only."
+          >
+            {routingQuery.isLoading ? (
+              <div className="empty pulse">Loading routing evidence…</div>
+            ) : routingQuery.isError ? (
+              <div className="error-text">{(routingQuery.error as Error).message}</div>
+            ) : !routing || routing.groups.length === 0 ? (
+              <div className="empty">
+                No scored runs yet. Outcomes are recorded as runs finish; run{' '}
+                <code>bench outcomes backfill</code> to score the runs already in the database.
+              </div>
+            ) : (
+              <div className="stack" style={{ gap: 16 }}>
+                {routing.groups.map((g) => (
+                  <RoutingGroupTable key={`${g.task_shape}-${g.objective}`} group={g} />
+                ))}
+                <div
+                  style={{
+                    fontFamily: 'var(--mono)',
+                    fontSize: 10.5,
+                    color: 'var(--text-muted)',
+                  }}
+                >
+                  {/* The backend's own wording, verbatim. These numbers are the
+                      easiest thing on this page to over-read, and the caveat has
+                      to travel with them rather than living in a doc. */}
+                  {routing.basis.note} Evidence halves in weight every{' '}
+                  {routing.basis.half_life_days} days; a model needs{' '}
+                  {routing.basis.minimum_effective_samples} effective samples before it appears
+                  at all. {routing.basis.quality_ignores_cost} ({routing.score_version} /{' '}
+                  {routing.priors_version})
+                </div>
+              </div>
+            )}
           </Section>
 
           {/* The energy rollup this endpoint has always returned. It is NOT the
@@ -254,6 +304,110 @@ const ERROR_COLUMNS: Column<GuardrailMethodError>[] = [
     render: (e) => (
       <span style={{ color: 'var(--text-muted)' }} title={e.error}>
         {e.error}
+      </span>
+    ),
+  },
+]
+
+function RoutingGroupTable({ group }: { group: RoutingGroup }) {
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 4 }}>
+        {group.task_shape} · {group.objective} · {formatTokens(group.runs)} runs
+      </div>
+      <MonoTable
+        columns={ROUTING_COLUMNS}
+        rows={group.models}
+        rowKey={(m) => m.model_id}
+        empty="No model in this group has enough evidence yet."
+      />
+      {group.models_below_evidence_floor.length > 0 && (
+        <div
+          style={{
+            marginTop: 6,
+            fontFamily: 'var(--mono)',
+            fontSize: 10.5,
+            color: 'var(--text-muted)',
+          }}
+        >
+          {/* Not the same statement as "did badly". A model with too little
+              history is left exactly where it was in the ordering, so it can
+              still be tried; saying so here is what stops the table reading as
+              a complete list of the models in play. */}
+          Too little evidence to rank: {group.models_below_evidence_floor.join(', ')}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const ROUTING_COLUMNS: Column<RoutingModelPrior>[] = [
+  { key: 'model', header: 'Model', render: (m) => m.model_id },
+  { key: 'runs', header: 'Runs', align: 'right', render: (m) => formatTokens(m.runs) },
+  {
+    key: 'n',
+    header: 'Eff. n',
+    align: 'right',
+    // Not the run count: time decay and off-band discounting have already been
+    // applied, and the gap between the two columns is the point.
+    render: (m) => m.effective_n.toFixed(1),
+  },
+  {
+    key: 'quality',
+    header: 'Quality',
+    align: 'right',
+    render: (m) => (
+      <span title={`raw ${m.quality_raw.toFixed(3)}, lower bound ${m.quality_ci_low.toFixed(3)}`}>
+        {m.quality_mean.toFixed(3)}
+      </span>
+    ),
+  },
+  {
+    key: 'floor',
+    header: 'Lower bound',
+    align: 'right',
+    render: (m) => (
+      <span style={{ color: 'var(--text-muted)' }}>{m.quality_ci_low.toFixed(3)}</span>
+    ),
+  },
+  {
+    key: 'delivered',
+    header: 'Delivered',
+    align: 'right',
+    render: (m) => `${(m.delivered_rate * 100).toFixed(0)}%`,
+  },
+  {
+    key: 'human',
+    header: 'Approved / rejected',
+    align: 'right',
+    render: (m) =>
+      m.approvals + m.rejections === 0 ? (
+        <span style={{ color: 'var(--text-muted)' }}>—</span>
+      ) : (
+        <span style={{ color: m.rejections > m.approvals ? 'var(--red)' : undefined }}>
+          {m.approvals} / {m.rejections}
+        </span>
+      ),
+  },
+  {
+    key: 'cost',
+    header: 'Mean cost',
+    align: 'right',
+    render: (m) => `$${m.mean_cost_usd.toFixed(4)}`,
+  },
+  {
+    key: 'iterations',
+    header: 'Mean iters',
+    align: 'right',
+    render: (m) => m.mean_iterations.toFixed(1),
+  },
+  {
+    key: 'seen',
+    header: 'Last seen',
+    align: 'right',
+    render: (m) => (
+      <span style={{ color: 'var(--text-muted)' }}>
+        {m.last_seen ? formatDateTime(m.last_seen) : orDash(null)}
       </span>
     ),
   },
