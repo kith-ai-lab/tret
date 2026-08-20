@@ -225,6 +225,13 @@ class Run(Base):
     # Makes spend legible per component (preamble, each doctrine file, task
     # instructions, output schema, tool specs). See engine/context.py.
     context_composition: Mapped[dict | None] = mapped_column(JSONB)
+    # Every time this run had to shrink what it sends the model to stay inside
+    # its context window: [{iteration, before_est_tokens, after_est_tokens,
+    # elided_messages, elided_tools, summarized, summarizer_model, ...}].
+    # `messages` above is always the COMPLETE transcript — compaction changes
+    # only what the provider was sent, never what was recorded — so this column
+    # is what states the gap between the two. Null for runs that never compacted.
+    compactions: Mapped[list | None] = mapped_column(JSONB)
     iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))

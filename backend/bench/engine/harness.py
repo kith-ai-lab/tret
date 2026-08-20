@@ -14,7 +14,21 @@ from sqlalchemy import select
 
 from bench.db.engine import get_session_factory
 from bench.db.models import Document, Harness, Pack, Run
+from bench.adaptive import adaptive_of
+from bench.engine.compaction import (
+    CompactionState,
+    apply_plan,
+    elided_source_text,
+    estimate_wire_tokens,
+    over_budget,
+    plan_compaction,
+    summarize,
+    trim_history,
+    wire_view,
+)
+from bench.engine.compaction import budget as context_budget
 from bench.engine.context import (
+    TOKEN_ESTIMATOR,
     assemble_context,
     block_for,
     build_user_message,
@@ -330,8 +344,43 @@ class HarnessEngine:
             delegation_depth=int(run.task_input.get(DELEGATION_DEPTH_KEY) or 0),
         )
 
+        # ── context budget ───────────────────────────────────────────────────
+        # The chosen model's window is known only now, which is why the history
+        # trim below lives here rather than in api/chat.py: that endpoint hands
+        # over the last N turns with no idea how large they are or which model
+        # will have to hold them.
+        adaptive = adaptive_of(model_policy)
+        context_limit = context_budget(
+            model_info.context_window, max_output_tokens, adaptive.context_headroom
+        )
+        compaction = CompactionState()
+        compaction_records: list[dict] = []
+
         # Chat turns carry prior conversation turns as history.
         history = [Msg.from_json(m) for m in run.task_input.get("_history", [])]
+        if context_limit and adaptive.compaction != "off":
+            history, dropped = trim_history(
+                history,
+                system=system,
+                user_message=user_message,
+                tools=tool_specs,
+                limit=context_limit,
+            )
+            if dropped:
+                compaction_records.append(
+                    {
+                        "kind": "history_trim",
+                        "iteration": 0,
+                        "dropped_history_turns": dropped,
+                        "context_window": model_info.context_window,
+                        "limit_est_tokens": context_limit,
+                        "estimator": TOKEN_ESTIMATOR,
+                    }
+                )
+                run.compactions = list(compaction_records)
+                await self.bus.publish(
+                    run.id, RunEvent("compaction", compaction_records[-1])
+                )
         messages: list[Msg] = [*history, Msg(role="user", content=user_message)]
         total_usage = Usage()
         nudged = False
@@ -348,11 +397,48 @@ class HarnessEngine:
             tool_calls: list[ToolCall] = []
             turn: TurnComplete | None = None
 
+            # ── stay inside the window ───────────────────────────────────────
+            # Checked before every call, not after a failure: a run that exceeds
+            # its window gets a provider error with nothing in the transcript
+            # explaining it, and by then the turn has already been paid for.
+            wire = wire_view(messages, compaction)
+            est_tokens = estimate_wire_tokens(system, wire, tool_specs)
+            if adaptive.compaction != "off" and over_budget(est_tokens, context_limit):
+                await self.bus.publish(
+                    run.id,
+                    RunEvent(
+                        "context_pressure",
+                        {
+                            "iteration": iteration,
+                            "est_input_tokens": est_tokens,
+                            "limit_est_tokens": context_limit,
+                            "context_window": model_info.context_window,
+                            "estimator": TOKEN_ESTIMATOR,
+                        },
+                    ),
+                )
+                record = await self._compact(
+                    run=run,
+                    messages=messages,
+                    state=compaction,
+                    iteration=iteration,
+                    before_tokens=est_tokens,
+                    system=system,
+                    tool_specs=tool_specs,
+                    terminal_tool=ctx.terminal_tool,
+                    max_tier=model_policy.get("max_cost_tier") or "premium",
+                )
+                if record is not None:
+                    compaction_records.append(record)
+                    run.compactions = list(compaction_records)
+                    await self.bus.publish(run.id, RunEvent("compaction", record))
+                wire = wire_view(messages, compaction)
+
             try:
                 async for event in provider.stream(
                     model=model_info.wire_id,
                     system=system,
-                    messages=messages,
+                    messages=wire,
                     tools=tool_specs,
                     max_tokens=max_output_tokens,
                     temperature=temperature,
@@ -667,6 +753,86 @@ class HarnessEngine:
             await self.bus.publish(
                 run.id, RunEvent("error", {"message": run.error or run.status, "status": run.status})
             )
+
+    async def _compact(
+        self,
+        *,
+        run: Run,
+        messages: list[Msg],
+        state: CompactionState,
+        iteration: int,
+        before_tokens: int,
+        system: str,
+        tool_specs: list,
+        terminal_tool: str | None,
+        max_tier: str,
+    ) -> dict | None:
+        """Shrink what the provider sees, and say exactly what was shrunk.
+
+        `messages` is not modified. Compaction produces a wire view; the
+        transcript stays the complete record of what happened, and the dict
+        returned here is what states the difference (see engine/compaction.py).
+
+        Returns None when there was nothing left to elide — which is a real
+        outcome, not a failure: a run can be over its window on protected
+        material alone (retrieved values and recorded results are never elided),
+        and the honest answer is to say so and let the run proceed into whatever
+        the provider makes of it rather than to start discarding citations.
+        """
+        plan = plan_compaction(
+            messages,
+            state=state,
+            current_iteration=iteration,
+            terminal_tool=terminal_tool,
+        )
+        if plan.empty:
+            return {
+                "kind": "no_op",
+                "iteration": iteration,
+                "before_est_tokens": before_tokens,
+                "after_est_tokens": before_tokens,
+                "note": (
+                    "over the context budget with nothing elidable left: what remains is "
+                    "retrieved values, recorded results and instructions, none of which "
+                    "may be dropped"
+                ),
+                "estimator": TOKEN_ESTIMATOR,
+            }
+
+        source = elided_source_text(messages, plan)
+        apply_plan(state, plan, iteration)
+
+        # The summary is an improvement on top of the elision, never a
+        # precondition for it: the space is already freed by the markers, so a
+        # summarizer that cannot be reached costs detail, not the run.
+        summary_model = None
+        if source:
+            info = self.router._resolve_router_model(max_tier)
+            if info is not None:
+                summary = await summarize(
+                    self.registry.get(info.provider), info.wire_id, source
+                )
+                if summary:
+                    state.summary = summary
+                    summary_model = info.id
+
+        after_tokens = estimate_wire_tokens(system, wire_view(messages, state), tool_specs)
+        return {
+            "kind": "elision",
+            "iteration": iteration,
+            "before_est_tokens": before_tokens,
+            "after_est_tokens": after_tokens,
+            "elided_messages": len(plan.elide),
+            "elided_tools": sorted(set(plan.elided_tools)),
+            "summarized": bool(summary_model),
+            "summarizer_model": summary_model,
+            # Deliberately absent: a cost for the summarizer call. `complete_json`
+            # does not report usage (providers/base.py), so bench cannot meter it,
+            # and adding an estimate into a metered total would corrupt the total.
+            # The same gap already exists for the router's own call.
+            "summarizer_cost": "not metered — complete_json reports no usage",
+            "estimator": TOKEN_ESTIMATOR,
+        }
 
     async def _fail_before_start(self, db, run: Run, message: str) -> None:
         """Fail a run that never reached the loop (bad task type, no route).

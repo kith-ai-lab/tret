@@ -192,6 +192,12 @@ class ReplayProvider(Provider):
                 "reasoning": "ReplayProvider: first candidate.",
                 "confidence": "high",
             }
+        # Same treatment for context compaction's summarizer
+        # (engine/compaction.py). A long golden run compacts as a matter of
+        # course, and that is engine behavior under test — not a scenario every
+        # such script should have to anticipate with a canned summary.
+        if tool_name == "summarize":
+            return {"summary": "ReplayProvider: elided material, summarized."}
         raise self._violation(
             f"complete_json called for tool '{tool_name}' with no scripted response."
         )
