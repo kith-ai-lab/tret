@@ -412,7 +412,9 @@ function HarnessEditor({
               />
               <span>{t.name}</span>
               <span className="desc" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {t.description}
+                {/* Switched off is not the same as nonexistent: the harness config
+                    is valid and portable, this deployment just will not run it. */}
+                {t.available ? t.description : `OFF HERE — ${t.unavailable_reason}`}
               </span>
             </label>
           ))

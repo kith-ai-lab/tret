@@ -14,11 +14,13 @@ cloud provider:
 """
 from __future__ import annotations
 
+from bench.net import CLASS_LOCAL
 from bench.providers.openai_compat import OpenAICompatProvider
 
 
 class LocalProvider(OpenAICompatProvider):
     name = "local"
+    egress_class = CLASS_LOCAL
 
     def __init__(self, base_url: str, api_key: str = "", display_name: str = "Local"):
         self.display_name = display_name

@@ -50,6 +50,31 @@ services:
       BENCH_LOGIN_MAX_ATTEMPTS: ${BENCH_LOGIN_MAX_ATTEMPTS:-10}
       BENCH_LOGIN_WINDOW_SECONDS: ${BENCH_LOGIN_WINDOW_SECONDS:-300.0}
       BENCH_METHODS_NETWORK_ISOLATION: ${BENCH_METHODS_NETWORK_ISOLATION:-true}
+      # ── outbound network (docs/hardening.md §9, bench/net/) ─────────────
+      # Three switchable classes plus `local`. BENCH_EGRESS=off is the
+      # air-gapped deployment: no cloud provider, no catalog, no web — a local
+      # model server still works, provided it really is on a private address.
+      BENCH_EGRESS: ${BENCH_EGRESS:-on}
+      BENCH_EGRESS_PROVIDER: ${BENCH_EGRESS_PROVIDER:-on}
+      BENCH_EGRESS_CATALOG: ${BENCH_EGRESS_CATALOG:-on}
+      BENCH_EGRESS_LOCAL: ${BENCH_EGRESS_LOCAL:-on}
+      # Web search and page fetch. OFF by default — it is the one class whose
+      # destination a model chooses. `replay` reads only pages already
+      # snapshotted, which is how a benchmark or an audit re-runs offline.
+      BENCH_EGRESS_RESEARCH: ${BENCH_EGRESS_RESEARCH:-off}
+      # Empty means the public web. Set it to make research a real allowlist.
+      BENCH_EGRESS_RESEARCH_ALLOW_HOSTS: ${BENCH_EGRESS_RESEARCH_ALLOW_HOSTS:-}
+      BENCH_EGRESS_RESEARCH_MAX_BYTES: ${BENCH_EGRESS_RESEARCH_MAX_BYTES:-2000000}
+      BENCH_EGRESS_RESEARCH_TIMEOUT_SECONDS: ${BENCH_EGRESS_RESEARCH_TIMEOUT_SECONDS:-20.0}
+      BENCH_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN: ${BENCH_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN:-10}
+      # An app-level allowlist is a deterrent; a proxy the workload cannot
+      # bypass is a boundary. Point this at yours for anything internet-facing.
+      BENCH_EGRESS_PROXY: ${BENCH_EGRESS_PROXY:-}
+      # Web search backend: "" (none) | brave | searxng. searxng keeps the query
+      # itself inside your network.
+      BENCH_SEARCH_PROVIDER: ${BENCH_SEARCH_PROVIDER:-}
+      BENCH_SEARCH_API_KEY: ${BENCH_SEARCH_API_KEY:-}
+      BENCH_SEARXNG_BASE_URL: ${BENCH_SEARXNG_BASE_URL:-}
       BENCH_LOCAL_DISPLAY_NAME: ${BENCH_LOCAL_DISPLAY_NAME:-Local}
       BENCH_LOCAL_PROBE_TOOLS: ${BENCH_LOCAL_PROBE_TOOLS:-true}
       # Eco accounting — docs/eco-accounting.md, docs/emissions-methodology.md.

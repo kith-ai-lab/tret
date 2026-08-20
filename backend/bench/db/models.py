@@ -146,6 +146,14 @@ class Document(Base):
     extraction_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    # Where these bytes came from: 'upload' (a human put them here) or 'web' (an
+    # agent fetched them). A column rather than a key in `meta` because it is a
+    # trust tier, and a tier that only exists inside a JSON blob is a tier nobody
+    # can filter on, index, or notice. Web documents are third-party text nobody
+    # vetted: readable and quotable with attribution, never a source of numbers
+    # (they are not registered in `retrieved_values`, so the cited-values check in
+    # engine/validation.py still refuses anything that came from one).
+    source_kind: Mapped[str] = mapped_column(Text, nullable=False, default="upload")
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = created_at_col()
 
@@ -302,3 +310,39 @@ class ProviderCredential(Base):
     provider: Mapped[str] = mapped_column(Text, primary_key=True)  # anthropic|kimi|openrouter
     encrypted_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class EgressCall(Base):
+    """One outbound request in the `research` class: what a run reached for.
+
+    Only research-class calls land here. Provider and catalog calls are counted
+    in-process instead (`bench/net/audit.py` explains why: a row per model call
+    would double a run's write volume to re-record what the run already persists
+    in full, and the provider stream has no session to write it with).
+
+    Denials are rows too, and the interesting ones. `reason` is the policy code
+    from `bench/net/policy.py` — `host_not_allowed`, `private_address`,
+    `class_disabled` — so a rising count of one of them is legible without
+    reading prose.
+
+    Query strings are never stored (see audit.py): they carry API keys and the
+    private half of a search term.
+    """
+
+    __tablename__ = "egress_calls"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id"))
+    project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("projects.id"))
+    egress_class: Mapped[str] = mapped_column(Text, nullable=False)
+    method: Mapped[str] = mapped_column(Text, nullable=False)
+    host: Mapped[str] = mapped_column(Text, nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status_code: Mapped[int | None] = mapped_column(Integer)
+    byte_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    decision: Mapped[str] = mapped_column(Text, nullable=False)  # allowed | denied
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+
+    __table_args__ = (Index("ix_egress_calls_created_at", "created_at"),)

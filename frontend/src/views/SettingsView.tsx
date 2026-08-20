@@ -1,7 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type FormEvent, type ReactNode, useState } from 'react'
 
-import { api, ApiError, type LocalProviderTest, takesApiKey, type User } from '../api/client'
+import {
+  api,
+  ApiError,
+  type EgressMode,
+  type LocalProviderTest,
+  takesApiKey,
+  type User,
+} from '../api/client'
 import { formatDateTime } from '../components/shared/format'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { ProviderKeyForm } from '../components/shared/ProviderKeyForm'
@@ -13,12 +20,14 @@ export function SettingsView() {
       <div>
         <h1 className="view-title">Settings</h1>
         <div className="view-sub">
-          Team, provider keys, router configuration, and open data requests.
+          Team, provider keys, router configuration, network access, and open data
+          requests.
         </div>
       </div>
       <TeamSection />
       <ProviderKeys />
       <RouterInfo />
+      <NetworkAccess />
       <DataRequests />
     </div>
   )
@@ -665,6 +674,130 @@ function RouterInfo() {
             <div className="mono-label">Timeout</div>
             <div className="mono-body">{routerQuery.data.timeout_seconds}s</div>
           </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// ── Network access ────────────────────────────────────────────────────────
+// The kill switch, and an honest picture of what this deployment can reach.
+//
+// The one rule this UI has to respect: modes narrow, never widen. The API
+// accepts a wider request and returns the mode actually in force, so every
+// control here renders the *response* rather than what it asked for — an
+// operator must never be shown egress they did not actually get back.
+
+const CLASS_LABELS: Record<string, string> = {
+  provider: 'Cloud model providers',
+  catalog: 'Model catalog',
+  local: 'Local model server',
+  research: 'Web search & page fetch',
+}
+
+const CLASS_HINTS: Record<string, string> = {
+  provider: 'Anthropic, Kimi, OpenRouter',
+  catalog: 'the OpenRouter model list and key checks',
+  local: 'your own server — not covered by the master switch',
+  research: 'the only class an agent points at a URL it chose',
+}
+
+function NetworkAccess() {
+  const queryClient = useQueryClient()
+  const egressQuery = useQuery({ queryKey: ['egress-settings'], queryFn: api.egressSettings })
+  const [pending, setPending] = useState<string | null>(null)
+
+  const narrow = useMutation({
+    mutationFn: ({ cls, mode }: { cls: string; mode: EgressMode }) => api.setEgress(cls, mode),
+    onSettled: () => {
+      setPending(null)
+      queryClient.invalidateQueries({ queryKey: ['egress-settings'] })
+      // Availability of the web tools follows the research class.
+      queryClient.invalidateQueries({ queryKey: ['tools'] })
+    },
+  })
+
+  const restore = useMutation({
+    mutationFn: (cls: string) => api.clearEgressOverride(cls),
+    onSettled: () => {
+      setPending(null)
+      queryClient.invalidateQueries({ queryKey: ['egress-settings'] })
+      queryClient.invalidateQueries({ queryKey: ['tools'] })
+    },
+  })
+
+  const data = egressQuery.data
+
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 8 }}>
+        Network access
+      </div>
+      {egressQuery.isLoading ? (
+        <div className="empty pulse">Loading network settings…</div>
+      ) : egressQuery.isError ? (
+        <QueryError error={egressQuery.error} what="this deployment's network settings" />
+      ) : data ? (
+        <div className="panel stack" style={{ gap: 14 }}>
+          <div className="mono-body" style={{ opacity: 0.75 }}>
+            {data.note}
+          </div>
+          {Object.entries(data.classes).map(([cls, status]) => (
+            <div key={cls} className="stack" style={{ gap: 4 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <StatusBadge status={status.mode} />
+                <span className="mono-body">{CLASS_LABELS[cls] ?? cls}</span>
+                <span className="mono-body" style={{ opacity: 0.6 }}>
+                  {CLASS_HINTS[cls] ?? ''}
+                </span>
+                <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                  {status.mode !== 'off' ? (
+                    <button
+                      className="btn btn-sm btn-danger"
+                      disabled={pending === cls}
+                      onClick={() => {
+                        setPending(cls)
+                        narrow.mutate({ cls, mode: 'off' })
+                      }}
+                    >
+                      Cut
+                    </button>
+                  ) : null}
+                  {status.runtime_override ? (
+                    <button
+                      className="btn btn-sm"
+                      disabled={pending === cls}
+                      onClick={() => {
+                        setPending(cls)
+                        restore.mutate(cls)
+                      }}
+                    >
+                      Restore
+                    </button>
+                  ) : null}
+                </span>
+              </div>
+              <div className="mono-body" style={{ opacity: 0.6, paddingLeft: 4 }}>
+                {status.runtime_override
+                  ? `narrowed here to ${status.runtime_override}; environment allows ${status.configured}`
+                  : `set by the environment (${status.configured})`}
+                {status.allow_hosts.length > 0
+                  ? ` · hosts: ${status.allow_hosts.join(', ')}`
+                  : cls === 'research' && status.mode !== 'off'
+                    ? ' · no allowlist: any public host'
+                    : ''}
+              </div>
+            </div>
+          ))}
+          <div className="mono-body" style={{ opacity: 0.6 }}>
+            Search backend: {data.search_backend}
+            {data.proxy ? ' · all traffic routed through the configured egress proxy' : ''}
+          </div>
+          {narrow.isError || restore.isError ? (
+            <div className="error-text">
+              {((narrow.error ?? restore.error) as Error).message}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>

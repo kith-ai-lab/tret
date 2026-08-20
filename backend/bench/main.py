@@ -23,6 +23,7 @@ from bench.api import (
 from bench.config import enforce_production_safety
 from bench.db.engine import get_engine, get_session_factory
 from bench.db.migrate import ensure_schema
+from bench.net import log_egress_at_boot
 from bench.providers.catalog import get_catalog
 
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +50,10 @@ async def lifespan(app: FastAPI):
     # first (the router also calls `warm_once()` as a backstop, for the run that
     # arrives before this task finishes).
     warm_task = asyncio.create_task(get_catalog().warm())
+    # Before "ready", so anything switched off is visible above the line an
+    # operator reads as success. A deployment with egress off looks exactly like
+    # a deployment with a bad API key; this is the difference.
+    log_egress_at_boot(logger=log)
     log.info("bench is ready")
     try:
         yield

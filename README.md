@@ -138,6 +138,37 @@ walks through Ollama from zero, and `docker compose --profile local up` bundles
 one (first start downloads multi-GB weights, and CPU-only inference in a
 container is slow — a native install is faster, especially on Apple Silicon).
 
+## One door to the internet
+
+Everything bench sends outward goes through one module, `backend/bench/net/`,
+tagged with a destination **class** — cloud providers, the model catalog, your
+local model server, and *research* (web search and page fetch). Each class has
+its own switch, every switch narrows and none widens, and a test fails the build
+if any other module in the codebase so much as constructs an HTTP client. "What
+can this deployment reach?" is one directory, not a grep.
+
+Research ships **off**. It is the only class whose destination is chosen by a
+model — from text that may have arrived in an uploaded document — so turning it
+on is a deliberate act, and
+
+```
+BENCH_EGRESS_RESEARCH=off
+```
+
+takes it away again without disturbing anything else. Harnesses that use the web
+tools keep working: the tools stay registered, the engine withholds them, and the
+run says so. An admin can cut any class from the running app (Settings → Network
+access) and cannot restore one the environment took away.
+
+When it is on, a fetched page does not become prose in a transcript. It is
+stored byte-for-byte, hashed, and recorded as a document with its URL and fetch
+time, so a reviewer can see the page **as it was when the run read it** — and it
+still cannot supply a number to a verdict, because nothing fetched enters the
+retrieved-values record the citation check reads. The web is a source you can
+quote and attribute, not a third door for values.
+[docs/hardening.md](docs/hardening.md) §9 has the rest, including the honest
+account of what an app-level allowlist does and does not buy you.
+
 ## The ecological cost line
 
 Every run carries an estimated **energy (Wh) and carbon (gCO₂e)** figure next to
@@ -284,8 +315,11 @@ See [docs/architecture.md](docs/architecture.md) and
 ## Privacy
 
 Configuration is env-only. bench makes no network calls except to the LLM
-providers you configure (plus an optional OpenRouter model-catalog fetch you
-can disable) — or none at all, if you run local models. No telemetry, ever.
+providers you configure (plus an optional OpenRouter model-catalog fetch you can
+disable, and web research if you switch it on — off by default). With
+`BENCH_EGRESS=off` and a local model server it makes none at all. Every one of
+those goes through a single module you can read in an afternoon. No telemetry,
+ever.
 
 ## Contributing
 

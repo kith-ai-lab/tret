@@ -12,6 +12,8 @@ from collections.abc import AsyncIterator
 
 import httpx
 
+from bench.net import CLASS_PROVIDER, open_client
+
 from bench.providers.base import (
     Msg,
     Provider,
@@ -138,6 +140,10 @@ def _to_openai_tools(tools: list[ToolSpec]) -> list[dict]:
 
 class OpenAICompatProvider(Provider):
     name = "openai_compat"
+    # Which egress class these calls belong to. Cloud upstreams are `provider`;
+    # LocalProvider overrides this to `local`, which is the class an air-gapped
+    # deployment keeps (bench/net/policy.py).
+    egress_class = CLASS_PROVIDER
 
     def __init__(
         self,
@@ -198,7 +204,9 @@ class OpenAICompatProvider(Provider):
         usage = Usage()
         finish_reason = "end_turn"
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=15.0)) as client:
+        async with open_client(
+            self.egress_class, timeout=httpx.Timeout(300.0, connect=15.0)
+        ) as client:
             try:
                 async with client.stream(
                     "POST", f"{self._base_url}/chat/completions", headers=self._headers, json=body
@@ -295,7 +303,7 @@ class OpenAICompatProvider(Provider):
             "max_tokens": max_tokens,
             **self._extra_body,
         }
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with open_client(self.egress_class, timeout=timeout) as client:
             try:
                 resp = await client.post(
                     f"{self._base_url}/chat/completions", headers=self._headers, json=body

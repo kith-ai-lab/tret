@@ -19,6 +19,11 @@ const STATUS_COLOR: Record<string, string> = {
   open: 'badge-amber',
   fulfilled: 'badge-green',
   dismissed: 'badge-gray',
+  // egress classes. `on` is green because reaching a provider is the normal,
+  // working state — not because open egress is inherently good.
+  on: 'badge-green',
+  replay: 'badge-amber',
+  off: 'badge-gray',
 }
 
 export function StatusBadge({ status }: { status: string }) {

@@ -14,6 +14,9 @@ from decimal import Decimal
 from pathlib import Path
 
 import httpx
+
+from bench.net import CLASS_CATALOG, CLASS_LOCAL, CLASS_PROVIDER, EgressDenied, effective_mode, open_client
+from bench.net.policy import MODE_OFF
 import yaml
 
 from bench.config import get_settings
@@ -373,7 +376,7 @@ class ModelCatalog:
         if time.monotonic() - self._dynamic_fetched_at < _OPENROUTER_CACHE_TTL and self._dynamic:
             return
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
+            async with open_client(CLASS_CATALOG, timeout=20.0) as client:
                 resp = await client.get("https://openrouter.ai/api/v1/models")
             resp.raise_for_status()
             # Parsed inside the try: a 200 that is not JSON (a captive portal or
@@ -382,7 +385,11 @@ class ModelCatalog:
             # curated catalog with it — instead of degrading to "no dynamic
             # models", which is what "best-effort" has to mean.
             payload = resp.json()
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, EgressDenied):
+            # EgressDenied belongs with the network errors, not above them: an
+            # operator who switched the catalog class off asked for exactly this,
+            # and it should degrade to "no dynamic models" like an unreachable
+            # openrouter.ai does, not fail GET /api/models.
             return  # dynamic catalog is best-effort
         if not isinstance(payload, dict):
             return
@@ -481,14 +488,14 @@ class ModelCatalog:
             )
         base_url = configured_url.rstrip("/")
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with open_client(CLASS_LOCAL, timeout=10.0) as client:
                 resp = await client.get(
                     f"{base_url}/models",
                     headers={"Authorization": f"Bearer {settings.local_api_key or 'local'}"},
                 )
             resp.raise_for_status()
             payload = resp.json()
-        except (httpx.HTTPError, ValueError) as exc:
+        except (httpx.HTTPError, ValueError, EgressDenied) as exc:
             self._local = {}
             self._local_fetched_at = time.monotonic()
             return LocalDiscovery(
@@ -697,9 +704,25 @@ class ProviderRegistry:
         self._instances: dict[str, Provider] = {}
 
     def has_key(self, provider: str) -> bool:
+        """Whether this provider can actually be used for a run.
+
+        Egress is part of the answer, not a separate check the callers would each
+        have to remember: with `BENCH_EGRESS_PROVIDER=off` an Anthropic key is a
+        string that cannot reach Anthropic, and a router that offered the model
+        anyway would pick it and then fail the run. Filtering here means every
+        caller — candidate selection, the models endpoint, the settings UI — sees
+        the same, honest availability. (`local` is a separate class and survives
+        an air-gapped deployment; see bench/net/policy.py.)
+        """
+        if effective_mode(self._egress_class(provider)) == MODE_OFF:
+            return False
         if provider in self._enabled:
             return self._enabled[provider]
         return bool(self._keys.get(provider))
+
+    @staticmethod
+    def _egress_class(provider: str) -> str:
+        return CLASS_LOCAL if provider == "local" else CLASS_PROVIDER
 
     def available_providers(self) -> list[str]:
         return [spec.name for spec in PROVIDER_SPECS if self.has_key(spec.name)]

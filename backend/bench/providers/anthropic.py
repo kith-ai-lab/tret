@@ -14,6 +14,8 @@ from collections.abc import AsyncIterator
 
 import anthropic
 
+from bench.net import CLASS_PROVIDER, build_client
+
 from bench.providers.base import (
     Msg,
     Provider,
@@ -117,7 +119,13 @@ class AnthropicProvider(Provider):
     name = "anthropic"
 
     def __init__(self, api_key: str):
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        # The SDK brings its own httpx client; it is handed bench's instead so
+        # that these calls pass the same policy check as every other outbound
+        # request (bench/net/client.py). The SDK owns and closes what it is
+        # given, which is why this is `build_client` and not the context manager.
+        self._client = anthropic.AsyncAnthropic(
+            api_key=api_key, http_client=build_client(CLASS_PROVIDER, timeout=600.0)
+        )
 
     async def stream(
         self,

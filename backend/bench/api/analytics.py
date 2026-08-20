@@ -13,6 +13,10 @@ Three aggregates, all deliberately cheap:
   * **ecological cost** — estimated energy per harness over the window, summed
     in SQL from `runs.energy_wh`. Every figure is an estimate; see
     `_energy_stats` for why carbon is derived rather than summed.
+  * **egress** — what the research tools reached, and what policy refused, from
+    `egress_calls` (a plain SQL group-by). Denials are the interesting half: a
+    rising `host_not_allowed` is a misconfigured allowlist, while a rising
+    `private_address` is something steering the agent at your own network.
 
 `GET /emissions` is the full carbon view and works differently on purpose: it
 sums each run's **stored, as-recorded** figures instead of recomputing anything
@@ -38,7 +42,8 @@ from bench.config import (
     get_settings,
 )
 from bench.db.engine import get_db
-from bench.db.models import Harness, MethodRun, Run, User, utcnow
+from bench.net import egress_status
+from bench.db.models import EgressCall, Harness, MethodRun, Run, User, utcnow
 from bench.providers.catalog import co2e_grams
 from bench.services.emissions import resolve_baseline_model
 
@@ -244,6 +249,54 @@ async def _energy_stats(
     return out, total_wh, total_runs
 
 
+async def _egress_stats(db: AsyncSession, project_id: uuid.UUID | None, since) -> dict:
+    """Research-class egress over the window, grouped in SQL.
+
+    Only the research class is in this table at all — provider and catalog calls
+    are counted in-process instead (`bench/net/audit.py` says why), so `hosts`
+    here is "what the agents read", not "everything bench talked to". The
+    response says so rather than leaving the reader to infer it.
+    """
+    q = select(
+        EgressCall.host,
+        EgressCall.decision,
+        EgressCall.reason,
+        func.count().label("calls"),
+        func.coalesce(func.sum(EgressCall.byte_count), 0).label("bytes"),
+    ).group_by(EgressCall.host, EgressCall.decision, EgressCall.reason)
+    if project_id:
+        q = q.where(EgressCall.project_id == project_id)
+    if since is not None:
+        q = q.where(EgressCall.created_at >= since)
+
+    hosts: dict[str, dict] = {}
+    denials: dict[str, int] = {}
+    allowed = denied = 0
+    total_bytes = 0
+    for host, decision, reason, calls, byte_count in (await db.execute(q)).all():
+        entry = hosts.setdefault(host, {"host": host, "allowed": 0, "denied": 0, "bytes": 0})
+        entry["bytes"] += int(byte_count or 0)
+        total_bytes += int(byte_count or 0)
+        if decision == "allowed":
+            entry["allowed"] += calls
+            allowed += calls
+        else:
+            entry["denied"] += calls
+            denied += calls
+            # The reason code, not the prose: `host_not_allowed` groups, while
+            # "example.com is not in the allowlist for research (…)" does not.
+            denials[(reason or "unknown").split(":")[0]] = (
+                denials.get((reason or "unknown").split(":")[0], 0) + calls
+            )
+    return {
+        "allowed": allowed,
+        "denied": denied,
+        "bytes": total_bytes,
+        "hosts": sorted(hosts.values(), key=lambda h: -(h["allowed"] + h["denied"]))[:50],
+        "denials_by_reason": dict(sorted(denials.items(), key=lambda kv: -kv[1])),
+    }
+
+
 @router.get("/guardrails")
 async def guardrails(
     project_id: uuid.UUID | None = None,
@@ -256,6 +309,7 @@ async def guardrails(
     methods = await _method_stats(db, project_id, since)
     harnesses, runs_scanned = await _validation_stats(db, project_id, since)
     energy, total_wh, energy_runs = await _energy_stats(db, project_id, since)
+    egress = await _egress_stats(db, project_id, since)
     method_runs = sum(m["runs"] for m in methods)
     method_failures = sum(m["failed"] for m in methods)
     grid = get_settings().grid_co2e_g_per_kwh
@@ -279,6 +333,15 @@ async def guardrails(
         },
         "methods": methods,
         "recent_method_errors": await _recent_method_errors(db, project_id, since),
+        "egress": {
+            **egress,
+            **egress_status(),
+            "scope": (
+                "research-class calls only (web_search, fetch_url). Provider and "
+                "catalog calls are counted in-process, not recorded per row — see "
+                "bench/net/audit.py. Query strings are never stored."
+            ),
+        },
         "harnesses": harnesses,
         "energy": energy,
         # Stated inline so nobody reads these numbers as metered, and so the grid

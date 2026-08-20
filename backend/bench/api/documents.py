@@ -91,6 +91,10 @@ def _doc_out(d: Document) -> dict:
         "filename": d.filename,
         "content_type": d.content_type,
         "byte_size": d.byte_size,
+        # The trust tier, surfaced wherever documents are listed: a reviewer
+        # scanning the document list should be able to see that three of these
+        # were fetched off the web by an agent, not handed over by a person.
+        "source_kind": d.source_kind,
         "extraction_status": d.extraction_status,
         "meta": d.meta,
         "text_chars": len(d.extracted_text or ""),

@@ -33,7 +33,21 @@ export function Documents() {
   const documents = documentsQuery.data ?? []
 
   const columns: Column<BenchDocument>[] = [
-    { key: 'name', header: 'Filename', render: (d) => d.filename },
+    {
+      key: 'name',
+      header: 'Filename',
+      // A web-fetched page sits next to documents a person uploaded, and looks
+      // exactly like one in a table. It should not: the source is the first
+      // thing a reviewer needs to know about it.
+      render: (d) =>
+        d.source_kind === 'web' ? (
+          <span title={String((d.meta as { url?: string }).url ?? '')}>
+            {d.filename} <span style={{ opacity: 0.6 }}>· web</span>
+          </span>
+        ) : (
+          d.filename
+        ),
+    },
     { key: 'type', header: 'Type', render: (d) => d.content_type },
     {
       key: 'size',

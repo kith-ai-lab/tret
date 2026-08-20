@@ -459,6 +459,9 @@ export interface BenchDocument {
   filename: string
   content_type: string
   byte_size: number
+  // 'upload' (a person provided it) | 'web' (an agent fetched it). The trust
+  // tier, not a detail: web documents are unverified third-party text.
+  source_kind: string
   extraction_status: string // pending | done | failed
   meta: Record<string, unknown>
   text_chars: number
@@ -588,6 +591,10 @@ export interface ToolInfo {
   name: string
   description: string
   parameters: Record<string, unknown>
+  // Registered but switchable: the web tools exist on every deployment and are
+  // withheld where egress is off, so the builder can say why rather than hide them.
+  available: boolean
+  unavailable_reason: string | null
 }
 
 export interface ProviderStatus {
@@ -742,6 +749,25 @@ export interface RouterSettings {
   router_model: string
   routing_prompt_version: string
   timeout_seconds: number
+}
+
+// ── Egress ────────────────────────────────────────────────────────────────
+export type EgressMode = 'off' | 'replay' | 'on'
+
+export interface EgressClassStatus {
+  mode: EgressMode
+  configured: EgressMode
+  runtime_override: EgressMode | null
+  allow_hosts: string[]
+}
+
+export interface EgressStatus {
+  master: EgressMode
+  proxy: boolean
+  classes: Record<string, EgressClassStatus>
+  search_backend: string
+  web_tools: string[]
+  note: string
 }
 
 // ── Guardrail analytics ──────────────────────────────────────────────────
@@ -1167,6 +1193,19 @@ export const api = {
   listModels: () => request<ModelInfo[]>('/models'),
   listTools: () => request<ToolInfo[]>('/tools'),
   routerSettings: () => request<RouterSettings>('/settings/router'),
+  egressSettings: () => request<EgressStatus>('/settings/egress'),
+  // Narrowing only — the API accepts a wider request and reports the mode
+  // actually in force, so the UI must render the response, not the request.
+  setEgress: (egressClass: string, mode: EgressMode) =>
+    request<{ egress_class: string; requested: EgressMode; mode: EgressMode }>('/settings/egress', {
+      method: 'POST',
+      body: { egress_class: egressClass, mode },
+    }),
+  clearEgressOverride: (egressClass: string) =>
+    request<{ egress_class: string; mode: EgressMode }>(
+      `/settings/egress/${encodeURIComponent(egressClass)}`,
+      { method: 'DELETE' },
+    ),
 
   // reference docs
   doc: (slug: string) => request<DocPage>(`/docs/${encodeURIComponent(slug)}`),

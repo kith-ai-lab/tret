@@ -1,6 +1,6 @@
 """Settings + catalog endpoints: provider key status (write-only keys), the
-model catalog for pickers, the available tool list, and the local-model
-connection diagnostic.
+model catalog for pickers, the available tool list, the local-model connection
+diagnostic, and the egress kill switch.
 """
 from __future__ import annotations
 
@@ -16,7 +16,10 @@ from bench.api.auth import current_user, require_admin
 from bench.config import get_settings
 from bench.db.engine import get_db
 from bench.db.models import ProviderCredential, User, Workspace
-from bench.engine.tools import get_builtin_tools
+from bench.engine.tools import WEB_TOOL_NAMES, get_builtin_tools
+from bench.net import CLASS_RESEARCH, EGRESS_CLASSES, MODE_OFF, effective_mode, egress_status
+from bench.net.policy import MODES, clear_runtime_override, set_runtime_override
+from bench.net.search import search_backend_name
 from bench.providers.catalog import (
     KEY_PROVIDERS,
     PROVIDER_SPECS,
@@ -226,10 +229,83 @@ async def list_models(user: User = Depends(current_user), db: AsyncSession = Dep
 
 @router.get("/tools")
 async def list_tools(user: User = Depends(current_user)):
+    """Every builtin, with whether this deployment will actually offer it.
+
+    `available` is separate from existence on purpose. The registry is complete —
+    that is what makes `bench/engine/tools.py` readable as the list of things an
+    agent can do — while the web tools are switchable by an operator. A builder UI
+    that hid the switched-off ones would leave nowhere to explain *why* a harness
+    that lists `web_search` is not searching.
+    """
+    research_off = effective_mode(CLASS_RESEARCH) == MODE_OFF
     return [
-        {"name": t.name, "description": t.description, "parameters": t.parameters}
+        {
+            "name": t.name,
+            "description": t.description,
+            "parameters": t.parameters,
+            "available": not (research_off and t.name in WEB_TOOL_NAMES),
+            "unavailable_reason": (
+                "Web access is off for this deployment (BENCH_EGRESS_RESEARCH). "
+                "A harness may still list this tool; runs will proceed without it."
+                if research_off and t.name in WEB_TOOL_NAMES
+                else None
+            ),
+        }
         for t in get_builtin_tools().values()
     ]
+
+
+# ── egress ───────────────────────────────────────────────────────────────────
+class EgressOverride(BaseModel):
+    egress_class: str
+    mode: str  # off | replay | on — but only ever narrowing; see below
+
+
+@router.get("/settings/egress")
+async def egress_settings(user: User = Depends(current_user)):
+    """What this deployment can reach, and what a run would be allowed to do."""
+    status = egress_status()
+    status["search_backend"] = search_backend_name() or "none"
+    status["web_tools"] = list(WEB_TOOL_NAMES)
+    status["note"] = (
+        "Modes narrow, never widen: the environment sets a ceiling, and an override "
+        "here can only lower it. An override lives in memory and is dropped on "
+        "restart — it is a kill switch, not configuration. See docs/hardening.md §9."
+    )
+    return status
+
+
+@router.post("/settings/egress")
+async def set_egress(body: EgressOverride, user: User = Depends(require_admin)):
+    """Narrow one egress class at runtime.
+
+    Requesting a *wider* mode than the environment allows is accepted and has no
+    effect — the response reports the mode actually in force, not the one asked
+    for, so a caller is never told it opened something it did not. That asymmetry
+    is the design: an operator must be able to cut egress in a hurry without a
+    redeploy, and an admin session must never be able to restore it.
+    """
+    if body.egress_class not in EGRESS_CLASSES:
+        raise HTTPException(422, f"egress_class must be one of: {', '.join(EGRESS_CLASSES)}")
+    if body.mode not in MODES:
+        raise HTTPException(422, f"mode must be one of: {', '.join(MODES)}")
+    in_force = set_runtime_override(body.egress_class, body.mode)
+    log.warning(
+        "egress override: %s requested %s for class %r; in force: %s",
+        user.email,
+        body.mode,
+        body.egress_class,
+        in_force,
+    )
+    return {"egress_class": body.egress_class, "requested": body.mode, "mode": in_force}
+
+
+@router.delete("/settings/egress/{egress_class}")
+async def clear_egress_override(egress_class: str, user: User = Depends(require_admin)):
+    """Drop a runtime override, returning the class to whatever the env allows."""
+    if egress_class not in EGRESS_CLASSES:
+        raise HTTPException(422, f"egress_class must be one of: {', '.join(EGRESS_CLASSES)}")
+    return {"egress_class": egress_class, "mode": clear_runtime_override(egress_class)}
 
 
 @router.get("/settings/router")

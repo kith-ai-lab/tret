@@ -8,6 +8,8 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
                                       ├─ router_llm/ LLM-as-router, objectives, deterministic fallback
                                       ├─ packs/     pack.yaml loader, doctrine hashing, safety scan,
                                       │             content-hash integrity pinning
+                                      ├─ net/       the ONLY outbound network path: egress classes,
+                                      │             per-URL policy, web search, page snapshots
                                       └─ services/  documents, export, methods (sandboxed compute),
                                                     bootstrap, credentials
 ```
@@ -81,6 +83,27 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    disagree, and `packs/loader.py` additionally rejects at install any task whose
    `terminal_tool` is not among its own `tools`, since a terminal tool the model
    is never offered would strand every run of that task type.
+
+## Outbound network
+
+Everything that leaves the process goes through `bench/net/`, tagged with a
+destination **class** — `provider` (cloud model calls), `catalog` (the OpenRouter
+model list), `local` (a self-hosted model server), `research` (`web_search` and
+`fetch_url`). Each class is independently switchable, every switch narrows and
+none widens, and `research` ships off. `tests/test_egress_chokepoint.py` fails
+the build if anything outside `bench/net/` imports a connection-opening module or
+constructs an HTTP client, so the boundary cannot erode one convenient import at
+a time.
+
+Two consequences worth knowing at this level. First, `BENCH_EGRESS=off` is a
+working deployment, not a broken one: `local` is exempt (a call to a model server
+on your own network never leaves it) and pays for the exemption with a check that
+the host really does resolve to a private address, so routing degrades to local
+models rather than picking a model it cannot reach. Second, the research class is
+the only one whose destination is chosen by a *model*, so it alone resolves and
+verifies addresses, follows redirects by hand, caps the body mid-stream, and
+writes every call — allowed or refused — to `egress_calls`. See
+docs/hardening.md §9 and docs/trust-doctrine.md §1.
 
 ## Events / SSE
 

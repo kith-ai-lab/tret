@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bench.api.auth import current_user
 from bench.db.engine import get_db
 from bench.db.models import Harness, Pack, User, Workspace
-from bench.engine.context import assemble_system_prompt
-from bench.engine.tools import get_builtin_tools
+from bench.engine.context import assemble_system_prompt, task_config
+from bench.engine.tools import WEB_TOOL_NAMES, get_builtin_tools, withheld_web_tools
 from bench.providers.catalog import get_catalog
 from bench.router_llm.objectives import DEFAULT_OBJECTIVE, OBJECTIVES
 from bench.router_llm.router import TIER_ORDER
@@ -125,7 +125,20 @@ async def get_harness(
     out = _out(h, pack)
     # Assembled-prompt preview for the builder UI.
     schemas = pack.manifest.get("schemas", {}) if pack else {}
-    out["assembled_system_prompt"] = assemble_system_prompt(h, pack, h.task_profile, schemas)
+    # Derived the way the engine derives it, so the preview is the prompt a run
+    # would send rather than an approximation of it. A pack task type can widen
+    # the tool list beyond the harness's, so this reads both.
+    task = task_config(pack, h.task_profile)
+    run_tools = list((task or {}).get("tools") or h.tool_names or [])
+    out["assembled_system_prompt"] = assemble_system_prompt(
+        h,
+        pack,
+        h.task_profile,
+        schemas,
+        web_tools_enabled=any(
+            name in WEB_TOOL_NAMES for name in run_tools if name not in withheld_web_tools(run_tools)
+        ),
+    )
     if pack:
         out["task_types"] = pack.manifest.get("task_types", [])
     return out

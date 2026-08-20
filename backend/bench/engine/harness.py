@@ -25,9 +25,11 @@ from bench.engine.context import (
 from bench.engine.events import RunEvent, get_event_bus
 from bench.engine.tools import (
     DELEGATION_DEPTH_KEY,
+    WEB_TOOL_NAMES,
     RunContext,
     execute_tool,
     get_builtin_tools,
+    withheld_web_tools,
 )
 from bench.providers.base import (
     Msg,
@@ -209,6 +211,35 @@ class HarnessEngine:
                 "running without them.",
             )
             return
+        # Registered, but withheld. `web_search`/`fetch_url` are always in the
+        # registry — "read one file to see everything an agent can do" stays true
+        # only if the registry is complete — while whether they are *available*
+        # is an operator switch (BENCH_EGRESS_RESEARCH). The two are separate
+        # questions, so this is a filter here rather than a hole in the registry:
+        # removing them from `get_builtin_tools()` would turn every harness that
+        # lists one into an `unknown_tool` failure above, which is the wrong
+        # answer — the harness is fine, the deployment is offline. Withheld
+        # rather than silent, because a run that quietly lost a capability its
+        # author declared is the failure mode `unknown_tool` exists to prevent.
+        withheld = withheld_web_tools(enabled_names)
+        if withheld:
+            enabled_names = [n for n in enabled_names if n not in withheld]
+        if withheld:
+            await self.bus.publish(
+                run.id,
+                RunEvent(
+                    "tools_withheld",
+                    {
+                        "tools": sorted(set(withheld)),
+                        "reason": "egress_research_disabled",
+                        "detail": (
+                            "Web access is off for this deployment "
+                            "(BENCH_EGRESS_RESEARCH). These tools were not offered to "
+                            "the model; the run continues without them."
+                        ),
+                    },
+                ),
+            )
         tool_specs = [builtins[n] for n in enabled_names]
 
         # ── context, accounted ───────────────────────────────────────────────
@@ -218,6 +249,7 @@ class HarnessEngine:
             run.task_type,
             output_schemas,
             extra_context=run.task_input.get("_capabilities"),
+            web_tools_enabled=any(n in WEB_TOOL_NAMES for n in enabled_names),
         )
         system = assembled.system
         user_message = build_user_message(run, pack, documents)

@@ -236,6 +236,113 @@ see [eco-accounting.md](eco-accounting.md).
   the optional OpenRouter catalog fetch, `BENCH_OPENROUTER_CATALOG=false` to
   disable). No telemetry.
 
+## 9. Outbound network: what bench may talk to
+
+Every request that leaves bench goes through `bench/net/`, tagged with a **class**.
+`tests/test_egress_chokepoint.py` fails the build if anything else in `bench/`
+imports a connection-opening module or constructs an HTTP client, so the answer
+to "can this deployment reach the internet, and what for?" is one directory, not
+a grep.
+
+| Class | What it is | Default |
+| --- | --- | --- |
+| `provider` | cloud model calls (Anthropic, Kimi, OpenRouter) | on |
+| `catalog` | the OpenRouter model list, provider key validation | on |
+| `local` | a self-hosted model server at `BENCH_LOCAL_BASE_URL` | on |
+| `research` | `web_search` and `fetch_url` | **off** |
+
+Every switch narrows and none widens. `BENCH_EGRESS` is the master; each
+`BENCH_EGRESS_<CLASS>` narrows it further; `POST /api/settings/egress` (admin)
+narrows again at runtime, in memory, and a restart returns to what the
+environment says. Asking that endpoint for a *wider* mode is accepted and does
+nothing — the response reports the mode actually in force. That asymmetry is
+deliberate: an operator must be able to cut egress in a hurry without a redeploy,
+and a compromised admin session must never be able to restore it.
+
+### Severing web access
+
+```
+BENCH_EGRESS_RESEARCH=off
+```
+
+The agent's internet is gone; everything else works. Harnesses that list
+`web_search` or `fetch_url` still run — the tools stay in the registry, the
+engine withholds them, and the run emits a `tools_withheld` event naming this
+variable. A harness is not broken by a deployment being offline.
+
+`replay` is the third mode: `fetch_url` serves pages an earlier run already
+snapshotted and refuses anything else, which is how a benchmark arm or an audit
+re-runs without touching the network.
+
+### The air-gapped deployment
+
+```
+BENCH_EGRESS=off
+BENCH_LOCAL_BASE_URL=http://ollama.internal:11434/v1
+```
+
+`provider`, `catalog` and `research` all go dark; `local` survives, because a
+call to a model server on your own network never leaves the deployment. bench
+does not take that on faith — with the master switch off, the `local` class
+*requires* that host to resolve to a private address, so a "local" URL that is
+secretly on the internet is refused rather than trusted for its name. Every
+cloud provider drops out of `available_providers()`, so routing degrades to
+local models instead of picking a model it cannot reach and failing the run.
+
+### What the research class checks
+
+`fetch_url` takes a URL a **model** chose, and the model's context includes
+uploaded third-party documents — the prompt-injection surface. So:
+
+- https only, no credentials in the URL, no non-standard ports;
+- the host must pass the allowlist (`BENCH_EGRESS_RESEARCH_ALLOW_HOSTS`);
+- the host is **resolved**, and every address it resolves to must be public —
+  loopback, RFC1918, link-local and the cloud metadata address are all refused.
+  Checking the name rather than the addresses would miss the entire attack;
+- redirects are followed by hand, three hops maximum, each re-checked from
+  scratch, because a redirect is a second destination chosen by the first;
+- the body is capped *while* it streams (`BENCH_EGRESS_RESEARCH_MAX_BYTES`), and
+  each run has a fetch budget (`..._MAX_FETCHES_PER_RUN`).
+
+**An empty allowlist means the public web.** A general web search cannot run
+against an allowlist, and an allowlist covering everything would be a comforting
+lie. Set the variable and research becomes a real allowlist; leave it empty and
+production boot warns you that it is open.
+
+### What is NOT isolated
+
+The same caveat as the pack safety scan (§5), for the same reason. This is an
+allowlist enforced by code running inside the process it constrains, and the
+resolve-then-connect gap means a DNS record that changes between the two lookups
+(rebinding) is not closed here. Both are honest limits, not oversights: closing
+them means pinning resolved addresses into the connection with a custom
+transport, which bench does not do and does not claim to.
+
+The boundary is the network around the workload:
+
+```
+BENCH_EGRESS_PROXY=http://egress-proxy.internal:3128
+```
+
+Route the container through a proxy it cannot bypass, or give the pod a network
+policy that can reach your LLM provider and nothing else. The controls in
+`bench/net/` make the intent legible, catch mistakes, and give you the audit
+trail; the network policy is what an attacker actually has to beat.
+
+### The audit trail
+
+Every research-class call — allowed and refused — is a row in `egress_calls`:
+run, host, path, status, bytes, and the policy reason for a denial. **Query
+strings are never stored**; they carry API keys and the private half of a search
+term. Provider and catalog calls are counted in-process rather than per row (a
+row per model call would double a run's writes to re-record what the run already
+persists in full).
+
+`GET /api/analytics/guardrails` reports it: hosts reached, bytes, and denials
+grouped by reason. Rising `host_not_allowed` is usually a misconfigured
+allowlist. Rising `private_address` is something steering an agent at your own
+network, and is worth reading the run transcript over.
+
 ## Minimum production checklist
 
 - [ ] `BENCH_ENVIRONMENT=production`
@@ -252,3 +359,6 @@ see [eco-accounting.md](eco-accounting.md).
 - [ ] DB and `storage/` backed up, and backed up again before an upgrade
       (bench migrates the schema itself on boot — [upgrading.md](upgrading.md))
 - [ ] proxy/WAF rate limit in front of `/api/auth/login`
+- [ ] egress decided on purpose (§9): `BENCH_EGRESS_RESEARCH` off unless the
+      agents are meant to browse, an allowlist or a `BENCH_EGRESS_PROXY` if they
+      are, and a network policy behind both

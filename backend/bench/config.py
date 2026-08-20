@@ -14,6 +14,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 log = logging.getLogger("bench")
 
+# ── egress modes (bench/net/policy.py) ───────────────────────────────────────
+# Kept here, not imported from bench.net, because Settings has to *validate*
+# against them and bench.net imports this module. policy.py re-exports the same
+# names and remains the place the meaning is written down.
+EGRESS_MODES = ("off", "replay", "on")
+# Spellings an operator plausibly types for a switch. Mapped rather than rejected
+# because `BENCH_EGRESS_RESEARCH=true` silently reading as "off" is the worst of
+# both worlds: the safe outcome, arrived at by ignoring what they wrote.
+_EGRESS_ALIASES = {
+    "true": "on", "1": "on", "yes": "on", "enabled": "on",
+    "false": "off", "0": "off", "no": "off", "disabled": "off", "": "off",
+}
+
 # The values shipped in .env.example / the defaults below. Refused in production.
 DEFAULT_SECRET_KEY = "dev-secret-change-me"
 DEFAULT_ADMIN_PASSWORD = "bench-admin"
@@ -134,6 +147,48 @@ class Settings(BaseSettings):
 
     # Packs auto-installed at boot (colon-separated dirs)
     packs_dir: str = "../packs"
+
+    # ── outbound network (bench/net/) ────────────────────────────────────────
+    # Egress is three classes, not one boolean, because bench must reach an LLM
+    # provider to do anything and "no internet" is a different deployment from
+    # "no *research* internet". Every switch here narrows: `egress` is the master,
+    # each class switch narrows it further, and the settings API can narrow again
+    # at runtime but never widen. See bench/net/policy.py and docs/hardening.md §9.
+    egress: str = "on"  # on | off — off is the air-gapped deployment (local models only)
+    egress_provider: str = "on"  # LLM API calls
+    egress_catalog: str = "on"  # OpenRouter model list, provider key validation
+    # A self-hosted model server at BENCH_LOCAL_BASE_URL. Deliberately NOT
+    # narrowed by `egress` above: a call to a model server on your own network
+    # never leaves the deployment, and an air-gapped bench that could not reach
+    # one would do nothing at all. With BENCH_EGRESS=off the local class instead
+    # *requires* that host to resolve to a private address, so the exemption is
+    # checked rather than taken on the word of a variable name.
+    egress_local: str = "on"
+    # Web search and page fetch. OFF by default: it is the only class whose
+    # destination is chosen by a model, from text that may have come from an
+    # uploaded document. `replay` serves fetches from snapshots already taken and
+    # refuses new ones, which is how a benchmark or an audit re-runs offline.
+    egress_research: str = "off"  # off | replay | on
+    # Comma-separated hosts the research class may reach (subdomains included).
+    # EMPTY MEANS THE PUBLIC WEB — a general web search cannot work against an
+    # allowlist, and pretending otherwise would be worse than saying so. Set it to
+    # turn research into a genuine allowlist; the configured search endpoint is
+    # always added, since the operator already chose that host.
+    egress_research_allow_hosts: str = ""
+    egress_research_max_bytes: int = 2_000_000  # per fetched page
+    egress_research_timeout_seconds: float = 20.0
+    egress_research_max_fetches_per_run: int = 10
+    # Force every outbound request through one proxy. The app-level allowlist is
+    # a deterrent; a proxy that the workload cannot bypass is a boundary.
+    egress_proxy: str = ""  # e.g. http://egress-proxy.internal:3128
+
+    # Web search backend (bench/net/search/). Empty = no search: web_search is
+    # registered but tells the model it is unconfigured, so a harness that lists
+    # the tool still runs. `searxng` is the self-hosted option, which keeps the
+    # query itself inside the deployment.
+    search_provider: str = ""  # "" | brave | searxng
+    search_api_key: str = ""  # Brave: the subscription token
+    searxng_base_url: str = ""  # e.g. http://searxng.internal:8080
 
     # Deterministic method sandbox (bench/services/methods.py)
     # Linux + `unshare` only: run each method in an empty network namespace.
@@ -256,6 +311,27 @@ class Settings(BaseSettings):
     local_display_name: str = "Local"
     local_probe_tools: bool = True  # probe each discovered model for real tool support
 
+    @field_validator(
+        "egress", "egress_provider", "egress_catalog", "egress_local", "egress_research", mode="before"
+    )
+    @classmethod
+    def _egress_mode(cls, value):
+        """Normalize an egress switch, and refuse a spelling with no meaning.
+
+        A typo in a kill switch is the one config error that must not fail quiet:
+        `BENCH_EGRESS_RESEARCH=of` reading as "off" happens to be safe, while
+        `BENCH_EGRESS=of` reading as "off" takes the whole deployment down for a
+        reason nobody can see. Both fail at boot instead.
+        """
+        candidate = str(value if value is not None else "").strip().lower()
+        candidate = _EGRESS_ALIASES.get(candidate, candidate)
+        if candidate not in EGRESS_MODES:
+            raise ValueError(
+                f"must be one of {', '.join(EGRESS_MODES)} (got {value!r}). "
+                "`replay` is meaningful only for BENCH_EGRESS_RESEARCH."
+            )
+        return candidate
+
     @field_validator("local_grid_co2e_g_per_kwh", mode="before")
     @classmethod
     def _blank_means_unset(cls, value):
@@ -362,6 +438,18 @@ def production_config_problems(settings: Settings | None = None) -> tuple[list[s
         fatal.append(
             "BENCH_ADMIN_PASSWORD is still the shipped default ('bench-admin'). Set a strong "
             "password before first boot (it seeds the admin user)."
+        )
+    if s.egress_research == "on" and not s.egress_research_allow_hosts.strip():
+        warnings.append(
+            "BENCH_EGRESS_RESEARCH=on with an empty BENCH_EGRESS_RESEARCH_ALLOW_HOSTS: the "
+            "agent may fetch any public URL, including URLs it read out of an uploaded "
+            "document. Set an allowlist, or put an egress proxy in front (BENCH_EGRESS_PROXY) "
+            "— docs/hardening.md §9."
+        )
+    if s.egress_research != "off" and not (s.search_provider or "").strip():
+        warnings.append(
+            "BENCH_EGRESS_RESEARCH is enabled but BENCH_SEARCH_PROVIDER is empty: fetch_url "
+            "works, web_search will tell the model it is unconfigured."
         )
     if not s.cookie_secure:
         warnings.append(
