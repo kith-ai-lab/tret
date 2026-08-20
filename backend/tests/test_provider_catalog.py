@@ -23,6 +23,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
+from bench.providers.base import JsonCompletion
 from bench.config import Settings
 from bench.providers import catalog as catalog_module
 from bench.providers.anthropic import AnthropicProvider
@@ -324,8 +325,8 @@ async def test_warm_discovers_local_models_without_a_ui_visit(monkeypatch):
     assert catalog.get("local/llama3.1:8b") is not None
 
 
-async def _ok_probe() -> dict:
-    return {"ok": True}
+async def _ok_probe() -> JsonCompletion:
+    return JsonCompletion(payload={"ok": True})
 
 
 async def test_warm_once_runs_a_single_pass(monkeypatch):

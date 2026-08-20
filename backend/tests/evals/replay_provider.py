@@ -23,6 +23,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
 from bench.providers.base import (
+    JsonCompletion,
     Msg,
     Provider,
     ProviderError,
@@ -34,6 +35,11 @@ from bench.providers.base import (
     TurnComplete,
     Usage,
 )
+
+# Fixed, non-zero usage for every scripted structured completion. Non-zero so a
+# golden run's overhead accounting has something to record — zero would be
+# indistinguishable from the bug this metering exists to fix.
+_REPLAY_JSON_USAGE = Usage(input_tokens=800, output_tokens=60)
 
 # A late-bound argument builder: reads the conversation the engine has built so
 # far (including tool results) and returns the tool arguments.
@@ -178,26 +184,42 @@ class ReplayProvider(Provider):
         tool_name: str = "respond",
         max_tokens: int = 1024,
         timeout: float = 30.0,
-    ) -> dict:
-        """Scripted structured completion (the router and QA graders use this)."""
+    ) -> JsonCompletion:
+        """Scripted structured completion (the router and the summarizer use this).
+
+        Usage is scripted too, and non-zero on purpose: these calls are metered
+        now (services/emissions.overhead_call), and a replay that reported zero
+        would let a run's overhead accounting silently vanish while every test
+        stayed green.
+        """
         self.json_calls.append({"model": model, "prompt": prompt, "tool_name": tool_name})
         if self._json_responses:
-            return self._json_responses.pop(0)
+            return JsonCompletion(
+                payload=self._json_responses.pop(0), usage=_REPLAY_JSON_USAGE, model=model
+            )
         # Unscripted: answer the router's schema deterministically with the first
         # candidate, so `auto` routing stays offline instead of blowing up.
         choices = ((schema.get("properties") or {}).get("model_id") or {}).get("enum") or []
         if choices:
-            return {
-                "model_id": choices[0],
-                "reasoning": "ReplayProvider: first candidate.",
-                "confidence": "high",
-            }
+            return JsonCompletion(
+                payload={
+                    "model_id": choices[0],
+                    "reasoning": "ReplayProvider: first candidate.",
+                    "confidence": "high",
+                },
+                usage=_REPLAY_JSON_USAGE,
+                model=model,
+            )
         # Same treatment for context compaction's summarizer
         # (engine/compaction.py). A long golden run compacts as a matter of
         # course, and that is engine behavior under test — not a scenario every
         # such script should have to anticipate with a canned summary.
         if tool_name == "summarize":
-            return {"summary": "ReplayProvider: elided material, summarized."}
+            return JsonCompletion(
+                payload={"summary": "ReplayProvider: elided material, summarized."},
+                usage=_REPLAY_JSON_USAGE,
+                model=model,
+            )
         raise self._violation(
             f"complete_json called for tool '{tool_name}' with no scripted response."
         )

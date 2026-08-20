@@ -438,6 +438,33 @@ export interface CompactionRecord {
   estimator?: string
 }
 
+/** One model call a run made *about itself* — choosing its model, or
+ *  summarizing what compaction elided. Metered against the model that ran it,
+ *  which is not the run's model: the router runs on BENCH_ROUTER_MODEL and the
+ *  summarizer resolves its own cheap model, so energy class and grid factor are
+ *  each call's own. */
+export interface OverheadCall {
+  kind: string // routing | compaction_summary
+  model: string
+  provider: string
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  cost_usd: number
+  energy_wh: number
+  energy_accounting: EnergyAccounting
+}
+
+/** A run's overhead, reported beside `cost_usd`/`energy_wh` and never added
+ *  into them — folding it in would leave every stored value unchanged while
+ *  changing what it means. `accounting` nulls any factor the calls disagreed on. */
+export interface RunOverhead {
+  calls: OverheadCall[]
+  total_cost_usd: number
+  accounting: EnergyAccounting | null
+}
+
 export interface RunDetail extends RunSummary {
   task_input: Record<string, unknown>
   messages: Msg[]
@@ -450,6 +477,7 @@ export interface RunDetail extends RunSummary {
    *  factors are null wherever the segments disagreed. */
   model_timeline: ModelSegment[] | null
   compactions: CompactionRecord[] | null
+  overhead: RunOverhead | null
 }
 
 export interface CreateRunBody {

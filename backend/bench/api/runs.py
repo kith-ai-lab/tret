@@ -141,7 +141,13 @@ async def get_run(
             # What the run had to stop showing the model to stay inside its
             # context window. `messages` above is always the complete
             # transcript; this is the record of the gap between the two.
-            "compactions": run.compactions}
+            "compactions": run.compactions,
+            # Model calls the run made about itself — choosing its model, and
+            # summarizing what it elided. Reported beside the run's own cost and
+            # energy, never added into them: these ran on different models and
+            # possibly different providers, so their energy class and grid basis
+            # are their own (services/emissions.overhead_call).
+            "overhead": run.overhead}
 
 
 @router.get("/method-runs/{method_run_id}")

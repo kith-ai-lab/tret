@@ -76,6 +76,7 @@ from bench.config import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from bench.providers.base import Usage
     from bench.providers.catalog import ModelCatalog, ModelInfo
 
 # ── the calibration dataset ──────────────────────────────────────────────────
@@ -2147,3 +2148,85 @@ def _union_by_key(blocks: list[dict], field_name: str) -> list:
             key = entry.get("key") if isinstance(entry, dict) else str(entry)
             seen.setdefault(key, entry)
     return list(seen.values())
+
+
+# ── overhead: model calls a run makes about itself ───────────────────────────
+# The router chooses which model runs the task; context compaction summarizes
+# what it had to elide. Both are model calls, both cost real money and real
+# electricity, and until they were metered neither appeared anywhere.
+#
+# They are accounted **separately from the run's own totals**, and not out of
+# tidiness. Three things make folding them in unsound rather than merely coarse:
+#
+# * They run on a different model. The router runs on `BENCH_ROUTER_MODEL`, the
+#   summarizer on whatever cheap model the harness ceiling permits. Energy is
+#   tokens x the *executing* model's energy class, and those classes differ by
+#   more than an order of magnitude, so attributing overhead tokens at the task
+#   model's class produces a wrong number, not an approximate one.
+# * They may run on a different provider, and `BENCH_GRID_FACTORS` is keyed by
+#   provider — each entry carrying its own GHG Protocol basis. A run executing
+#   locally whose routing happened at a cloud provider spans two bases, and
+#   `api/analytics.py` already refuses to sum carbon across bases at window
+#   scale. A single folded figure would perform exactly the addition that code
+#   exists to prevent.
+# * `runs.cost_usd` is already exposed through the runs API, exports and
+#   deliverable provenance. Folding overhead in would leave every historical
+#   value unchanged but change what it *means*, so a chart spanning the change
+#   would show a cost jump that never happened — the same silent rewriting of
+#   history that `analytics.emissions()` refuses when it reports as-recorded
+#   figures instead of recomputing at today's factors.
+
+
+def overhead_call(kind: str, model: ModelInfo, usage: Usage) -> dict:
+    """Account one overhead model call, in full, against its own model.
+
+    Returns the same shape a run segment carries: the tokens, the money, and a
+    complete `energy_accounting` block naming the model, its energy class, its
+    provider's grid factor and that factor's basis. Callers persist it; nothing
+    here writes.
+    """
+    accounting = energy_accounting(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+    )
+    return {
+        "kind": kind,  # routing | compaction_summary
+        "model": model.id,
+        "provider": model.provider,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+        "cost_usd": float(
+            model.cost_usd(
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens,
+                usage.cache_write_tokens,
+            )
+        ),
+        "energy_wh": accounting["energy_wh"],
+        "energy_accounting": accounting,
+    }
+
+
+def overhead_block(calls: list[dict]) -> dict | None:
+    """Roll a run's overhead calls into one record. None when there were none.
+
+    Money is summed unconditionally — a dollar is a dollar whatever grid it was
+    generated on. Energy and carbon go through `combine_accountings`, which sums
+    the additive quantities and nulls every per-model factor the calls disagreed
+    on, so a routing call on one provider and a summarizer call on another
+    produce a total with no invented energy class and no blended grid factor.
+    """
+    calls = [c for c in calls if c]
+    if not calls:
+        return None
+    return {
+        "calls": calls,
+        "total_cost_usd": round(sum(c["cost_usd"] for c in calls), 6),
+        "accounting": combine_accountings([c["energy_accounting"] for c in calls]),
+    }

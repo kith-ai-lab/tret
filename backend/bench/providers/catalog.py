@@ -586,7 +586,7 @@ class ModelCatalog:
                 max_tokens=64,
                 timeout=_LOCAL_PROBE_TIMEOUT,
             )
-            ok = _probe_answered(result)
+            ok = _probe_answered(result.payload)
         except Exception:
             ok = False
         self._tool_probe_cache[bench_id] = ok

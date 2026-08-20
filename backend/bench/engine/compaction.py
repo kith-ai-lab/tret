@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 
 from bench.engine.context import estimate_tokens
 from bench.providers.base import Msg, ToolSpec
+from bench.services.emissions import overhead_call
 
 # ── what may be elided ───────────────────────────────────────────────────────
 # Retrieval that returns bulk text. This is where nearly all the weight of a long
@@ -361,18 +362,25 @@ def elided_source_text(messages: list[Msg], plan: CompactionPlan, limit: int = 6
     return "\n\n---\n\n".join(p for p in parts if p)
 
 
-async def summarize(provider, wire_model: str, text: str, *, timeout: float = 60.0) -> str | None:
-    """Compress elided material, or None if the summarizer could not be reached.
+async def summarize(
+    provider, model, text: str, *, timeout: float = 60.0
+) -> tuple[str | None, dict | None]:
+    """(summary, what it cost) — either may be None, independently.
 
     Failure is not an error. The deterministic elision has already happened and
     already freed the space; a summary is an improvement on top of it, and a run
     that loses its summarizer is better off continuing with markers than failing.
+
+    The spend is returned even when the summary is unusable, because the tokens
+    were spent either way — a summarizer that answers with an empty string still
+    cost money, and that is precisely the case where silently dropping the cost
+    would flatter the numbers.
     """
     if not text.strip():
-        return None
+        return None, None
     try:
-        result = await provider.complete_json(
-            model=wire_model,
+        completion = await provider.complete_json(
+            model=model.wire_id,
             system=SUMMARIZER_SYSTEM,
             prompt=text,
             schema=summary_schema(),
@@ -381,6 +389,8 @@ async def summarize(provider, wire_model: str, text: str, *, timeout: float = 60
             timeout=timeout,
         )
     except Exception:  # noqa: BLE001 - a lost summarizer must not fail the run
-        return None
-    summary = (result or {}).get("summary")
-    return summary.strip() if isinstance(summary, str) and summary.strip() else None
+        return None, None
+    spend = overhead_call("compaction_summary", model, completion.usage)
+    summary = (completion.payload or {}).get("summary")
+    usable = summary.strip() if isinstance(summary, str) and summary.strip() else None
+    return usable, spend

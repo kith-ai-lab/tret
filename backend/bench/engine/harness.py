@@ -72,6 +72,7 @@ from bench.engine.supervisor import (
 )
 from bench.services.emissions import (
     combine_accountings,
+    overhead_block,
     emission_event_fields,
     energy_wh_field,
 )
@@ -432,6 +433,14 @@ class HarnessEngine:
         )
         compaction = CompactionState()
         compaction_records: list[dict] = []
+        # Model calls this run made *about itself* — choosing its model, and
+        # summarizing what it had to elide. Real money and real electricity,
+        # invisible until now. Kept apart from the run's own totals because they
+        # ran on different models and possibly different providers; see
+        # services/emissions.overhead_call for why folding them in would be
+        # wrong rather than just coarse.
+        overhead_calls: list[dict] = [decision.spend] if decision.spend else []
+        run.overhead = overhead_block(overhead_calls)
 
         # One segment per model this run uses. Almost always exactly one.
         segments: list[ModelSegment] = [ModelSegment(model_info, reason="initial")]
@@ -521,10 +530,12 @@ class HarnessEngine:
                     tool_specs=tool_specs,
                     terminal_tool=ctx.terminal_tool,
                     max_tier=model_policy.get("max_cost_tier") or "premium",
+                    overhead=overhead_calls,
                 )
                 if record is not None:
                     compaction_records.append(record)
                     run.compactions = list(compaction_records)
+                    run.overhead = overhead_block(overhead_calls)
                     await self.bus.publish(run.id, RunEvent("compaction", record))
                     # Over the budget with only protected material left. The
                     # supervisor's cue that a bigger window is the only remedy.
@@ -907,6 +918,7 @@ class HarnessEngine:
         if run.status == "running":
             run.status = self._completion_status(ctx)
         run.messages = [m.to_json() for m in messages]
+        run.overhead = overhead_block(overhead_calls)
         run.finished_at = _utcnow()
         # Evidence for the next routing decision, folded into the run's own final
         # commit. `record_outcome` never raises and returns None for runs that
@@ -989,6 +1001,7 @@ class HarnessEngine:
         tool_specs: list,
         terminal_tool: str | None,
         max_tier: str,
+        overhead: list[dict],
     ) -> dict | None:
         """Shrink what the provider sees, and say exactly what was shrunk.
 
@@ -1032,9 +1045,11 @@ class HarnessEngine:
         if source:
             info = self.router._resolve_router_model(max_tier)
             if info is not None:
-                summary = await summarize(
-                    self.registry.get(info.provider), info.wire_id, source
+                summary, spend = await summarize(
+                    self.registry.get(info.provider), info, source
                 )
+                if spend is not None:
+                    overhead.append(spend)
                 if summary:
                     state.summary = summary
                     summary_model = info.id
@@ -1049,11 +1064,10 @@ class HarnessEngine:
             "elided_tools": sorted(set(plan.elided_tools)),
             "summarized": bool(summary_model),
             "summarizer_model": summary_model,
-            # Deliberately absent: a cost for the summarizer call. `complete_json`
-            # does not report usage (providers/base.py), so bench cannot meter it,
-            # and adding an estimate into a metered total would corrupt the total.
-            # The same gap already exists for the router's own call.
-            "summarizer_cost": "not metered — complete_json reports no usage",
+            # Metered, not estimated. Accounted against the summarizer's own
+            # model in `runs.overhead` rather than folded into this run's totals,
+            # because it ran on a different model and possibly a different
+            # provider — see services/emissions.overhead_call.
             "estimator": TOKEN_ESTIMATOR,
         }
 

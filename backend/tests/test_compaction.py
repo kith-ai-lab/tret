@@ -30,7 +30,8 @@ from bench.engine.compaction import (
     wire_view,
 )
 from bench.engine.tools import get_builtin_tools
-from bench.providers.base import Msg, ProviderError, ToolCall, ToolSpec
+from bench.providers.base import JsonCompletion, Msg, ProviderError, ToolCall, ToolSpec, Usage
+from bench.providers.catalog import ModelCatalog
 
 BULK = "x" * (MIN_ELIDABLE_CHARS * 4)
 
@@ -286,19 +287,57 @@ class _DeadProvider:
 
 class _LiveProvider:
     async def complete_json(self, **kwargs):
-        return {"summary": "  the documents established X  "}
+        return JsonCompletion(
+            payload={"summary": "  the documents established X  "},
+            usage=Usage(input_tokens=5000, output_tokens=120),
+            model=kwargs.get("model", ""),
+        )
+
+
+def _summarizer_model():
+    return next(m for m in ModelCatalog().all(curated_only=True) if m.supports_tools)
 
 
 @pytest.mark.asyncio
 async def test_a_summarizer_that_cannot_be_reached_costs_detail_not_the_run():
     # The elision has already freed the space; the summary is an improvement on
     # top of it, never a precondition.
-    assert await summarize(_DeadProvider(), "m", "some text") is None
+    text, spend = await summarize(_DeadProvider(), _summarizer_model(), "some text")
+    assert text is None and spend is None
 
 
 @pytest.mark.asyncio
 async def test_a_summary_is_returned_stripped():
-    assert await summarize(_LiveProvider(), "m", "some text") == "the documents established X"
+    text, _ = await summarize(_LiveProvider(), _summarizer_model(), "some text")
+    assert text == "the documents established X"
+
+
+@pytest.mark.asyncio
+async def test_the_summarizer_call_is_metered_against_its_own_model():
+    # It runs on a cheap model resolved separately from the run's, so its energy
+    # class and its provider's grid factor are its own.
+    model = _summarizer_model()
+    _, spend = await summarize(_LiveProvider(), model, "some text")
+    assert spend["kind"] == "compaction_summary"
+    assert spend["model"] == model.id
+    assert spend["input_tokens"] == 5000
+    assert spend["cost_usd"] > 0
+    assert spend["energy_accounting"]["model"] == model.id
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_summary_is_still_paid_for():
+    # The tokens were spent whatever came back. Dropping the cost of a bad
+    # answer is exactly how these numbers would flatter themselves.
+    class _Empty:
+        async def complete_json(self, **kwargs):
+            return JsonCompletion(
+                payload={"summary": "   "}, usage=Usage(input_tokens=4000, output_tokens=5)
+            )
+
+    text, spend = await summarize(_Empty(), _summarizer_model(), "some text")
+    assert text is None
+    assert spend is not None and spend["input_tokens"] == 4000
 
 
 @pytest.mark.asyncio
@@ -307,7 +346,7 @@ async def test_nothing_to_summarize_makes_no_provider_call():
         async def complete_json(self, **kwargs):
             raise AssertionError("should not be called")
 
-    assert await summarize(_Exploding(), "m", "   ") is None
+    assert await summarize(_Exploding(), _summarizer_model(), "   ") == (None, None)
 
 
 def test_the_summarizer_is_shown_only_what_was_elided():

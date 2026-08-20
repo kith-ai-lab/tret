@@ -25,6 +25,7 @@ import httpx
 import pytest
 import yaml
 
+from bench.providers.base import JsonCompletion
 from bench.api.runs import _run_summary, get_run
 from bench.config import Settings
 from bench.db.models import Run
@@ -340,8 +341,8 @@ class _FakeGetClient:
         return _FakeModelsResponse(self._payload)
 
 
-async def _always_ok(*args, **kwargs) -> dict:
-    return {"ok": True}
+async def _always_ok(*args, **kwargs) -> JsonCompletion:
+    return JsonCompletion(payload={"ok": True})
 
 
 async def test_discovered_local_models_are_small_but_never_free_in_watts(monkeypatch):

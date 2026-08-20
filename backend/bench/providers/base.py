@@ -78,6 +78,35 @@ class Usage:
     cache_write_tokens: int = 0
 
 
+@dataclass
+class JsonCompletion:
+    """A structured completion, what it cost, and which model it cost it on.
+
+    `complete_json` used to return a bare dict, so every caller of it — the model
+    router on essentially every run, context compaction on long ones, the local
+    tool-capability probe on every discovery pass — spent real tokens bench never
+    counted. Invisible rather than small: a router call happens before the first
+    token of a run and appeared nowhere in that run's cost.
+
+    Returning usage *alongside* the payload rather than as a second value is
+    deliberate. A tuple invites `result, _ = await complete_json(...)`, and a
+    discarded second element is how this went untracked in the first place. It
+    also matches `TurnComplete`, which has always carried usage this way.
+
+    `model` is here rather than re-derived by the caller because these calls do
+    **not** run on the run's model. The router runs on `BENCH_ROUTER_MODEL`; the
+    compaction summarizer resolves its own cheap model within the harness ceiling.
+    Their energy class, their provider's grid factor and its GHG Protocol basis
+    are all properties of *that* model, and attributing their tokens to the run's
+    model would not be an approximation — it would be a different number about a
+    different thing.
+    """
+
+    payload: dict
+    usage: Usage = field(default_factory=Usage)
+    model: str = ""
+
+
 # ── prompt-cache breakpoints ──────────────────────────────────────────────────
 def mark_cache_breakpoint(message: dict) -> bool:
     """Attach `cache_control` to a message's final content part, in place.
@@ -165,9 +194,11 @@ class Provider(ABC):
         tool_name: str = "respond",
         max_tokens: int = 1024,
         timeout: float = 30.0,
-    ) -> dict:
+    ) -> JsonCompletion:
         """Non-streaming structured completion via a forced tool call.
 
-        Used by the model router and QA graders. Returns the tool arguments.
+        Used by the model router, context compaction's summarizer, and the local
+        tool-capability probe. Returns the tool arguments *and* the usage the
+        call incurred — see `JsonCompletion` for why both.
         """
         ...

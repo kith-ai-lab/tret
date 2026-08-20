@@ -15,6 +15,7 @@ import httpx
 from bench.net import CLASS_PROVIDER, open_client
 
 from bench.providers.base import (
+    JsonCompletion,
     Msg,
     Provider,
     ProviderError,
@@ -282,7 +283,7 @@ class OpenAICompatProvider(Provider):
         tool_name: str = "respond",
         max_tokens: int = 1024,
         timeout: float = 30.0,
-    ) -> dict:
+    ) -> JsonCompletion:
         body = {
             "model": model,
             "messages": [
@@ -313,11 +314,16 @@ class OpenAICompatProvider(Provider):
         if resp.status_code >= 400:
             raise ProviderError(self.name, resp.text[:2000], resp.status_code)
         data = resp.json()
+        usage = _usage_from_openai(data.get("usage") or {})
         try:
             calls = data["choices"][0]["message"].get("tool_calls") or []
             for call in calls:
                 if call["function"]["name"] == tool_name:
-                    return json.loads(call["function"]["arguments"])
+                    return JsonCompletion(
+                        payload=json.loads(call["function"]["arguments"]),
+                        usage=usage,
+                        model=model,
+                    )
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             raise ProviderError(self.name, f"Malformed structured completion: {e}") from e
         raise ProviderError(self.name, "No forced tool call in structured completion")

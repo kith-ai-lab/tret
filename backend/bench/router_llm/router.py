@@ -53,6 +53,7 @@ from bench.router_llm.priors import (
     NoPriors,
     PriorsProvider,
 )
+from bench.services.emissions import overhead_call
 from bench.router_llm.prompts import (
     ROUTER_SYSTEM,
     ROUTING_PROMPT_VERSION,
@@ -137,6 +138,11 @@ class RoutingDecision:
     # them next month answers a different question than the one this decision
     # was answering.
     evidence: dict | None = None
+    # What choosing cost. A routing call runs on `BENCH_ROUTER_MODEL`, not on the
+    # model it selects, so this is accounted against that model with its own
+    # energy class and its provider's own grid factor — see
+    # services/emissions.overhead_call. Null when no router was contacted.
+    spend: dict | None = None
     fallback_used: bool = False
     override: str | None = None  # "user_pin" | "run_override" | None
     latency_ms: int = 0
@@ -371,7 +377,7 @@ class ModelRouter:
             for _attempt in range(2):  # one retry
                 try:
                     provider = self._registry.get(router_info.provider)
-                    result = await provider.complete_json(
+                    completion = await provider.complete_json(
                         model=router_info.wire_id,
                         system=ROUTER_SYSTEM,
                         prompt=prompt,
@@ -380,6 +386,12 @@ class ModelRouter:
                         max_tokens=512,
                         timeout=settings.router_timeout_seconds,
                     )
+                    result = completion.payload
+                    # Recorded even when the answer is rejected below: the tokens
+                    # were spent either way, and a router that keeps returning
+                    # invalid choices is exactly the case where the unbilled cost
+                    # would otherwise be highest.
+                    spend = overhead_call("routing", router_info, completion.usage)
                     chosen = result.get("model_id")
                     if chosen in candidate_ids:
                         return RoutingDecision(
@@ -395,6 +407,7 @@ class ModelRouter:
                             evidence=_evidence_snapshot(
                                 priors, candidate_ids, est_input_tokens
                             ),
+                            spend=spend,
                             latency_ms=int((time.monotonic() - start) * 1000),
                         )
                 except ProviderError:

@@ -243,6 +243,16 @@ class Run(Base):
     # a roll-up across these segments (services/emissions.combine_accountings),
     # and its per-model factors are null wherever the segments disagreed.
     model_timeline: Mapped[list | None] = mapped_column(JSONB)
+    # Model calls this run made *about itself*: choosing its model (the router)
+    # and summarizing what compaction elided. Both cost money and electricity and
+    # were previously unmetered entirely — `complete_json` discarded the usage
+    # block. Deliberately NOT folded into `cost_usd` / `energy_wh` above: these
+    # calls run on a different model, often at a different provider, so their
+    # energy class and grid basis are their own, and `cost_usd` is already
+    # exposed through the runs API, exports and deliverable provenance — changing
+    # what it means would rewrite the meaning of every historical value.
+    # {"calls": [...], "total_cost_usd": ..., "accounting": {...}}
+    overhead: Mapped[dict | None] = mapped_column(JSONB)
     iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))

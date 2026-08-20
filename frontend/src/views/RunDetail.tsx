@@ -5,7 +5,11 @@ import { Link, useParams } from 'react-router-dom'
 import { api, type Msg, type RunDetail } from '../api/client'
 import { type StreamConnection, type StreamItem, useRunStream } from '../api/useRunStream'
 import { ContextComposition } from '../components/shared/ContextComposition'
-import { CompactionLog, ModelTimeline } from '../components/shared/ModelTimeline'
+import {
+  CompactionLog,
+  ModelTimeline,
+  OverheadPanel,
+} from '../components/shared/ModelTimeline'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
 import { BAND_SHORT } from '../components/shared/emissions'
 import { footprintText, formatCo2eBand, formatCost, formatTokens } from '../components/shared/format'
@@ -228,6 +232,9 @@ export function RunDetailView() {
       )}
       {run.compactions && run.compactions.length > 0 && (
         <CompactionLog records={run.compactions} />
+      )}
+      {run.overhead && run.overhead.calls.length > 0 && (
+        <OverheadPanel overhead={run.overhead} />
       )}
 
       {/* Provenance + footer */}

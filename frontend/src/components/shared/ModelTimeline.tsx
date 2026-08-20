@@ -1,4 +1,8 @@
-import { type CompactionRecord, type ModelSegment } from '../../api/client'
+import {
+  type CompactionRecord,
+  type ModelSegment,
+  type RunOverhead,
+} from '../../api/client'
 import { formatTokens } from './format'
 import { shortModelName } from './RoutingBadge'
 
@@ -109,6 +113,56 @@ export function CompactionLog({ records }: { records: CompactionRecord[] }) {
                 {r.note}
               </div>
             )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+
+const OVERHEAD_KINDS: Record<string, string> = {
+  routing: 'choosing which model to run',
+  compaction_summary: 'summarizing elided context',
+}
+
+/** What a run spent on deciding *how* to run.
+ *
+ *  Shown apart from the run's own cost and energy on purpose. These calls happen
+ *  on a different model — the router on BENCH_ROUTER_MODEL, the summarizer on
+ *  whatever cheap model the harness ceiling allows — and often at a different
+ *  provider, so their energy class and grid factor are their own. Adding them
+ *  into the run's totals would produce a number about nothing in particular. */
+export function OverheadPanel({ overhead }: { overhead: RunOverhead }) {
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 4 }}>
+        Overhead — ${overhead.total_cost_usd.toFixed(5)}
+      </div>
+      <div
+        style={{
+          marginBottom: 8,
+          fontFamily: 'var(--mono)',
+          fontSize: 10.5,
+          color: 'var(--text-muted)',
+        }}
+      >
+        Model calls this run made about itself. Counted here and deliberately not
+        added to the run&rsquo;s cost or energy above — they ran on different models, so
+        their energy class and grid factor are their own.
+      </div>
+      <div className="stack" style={{ gap: 6 }}>
+        {overhead.calls.map((c, i) => (
+          <div key={`${c.kind}-${i}`} className="panel" style={{ padding: 10 }}>
+            <div className="row" style={{ justifyContent: 'space-between' }}>
+              <span className="mono-body">{OVERHEAD_KINDS[c.kind] ?? c.kind}</span>
+              <span className="mono-label">{shortModelName(c.model)}</span>
+            </div>
+            <div className="mono-body" style={{ marginTop: 4, fontSize: 11.5 }}>
+              {formatTokens(c.input_tokens)} in · {formatTokens(c.output_tokens)} out · $
+              {c.cost_usd.toFixed(5)} · {c.energy_wh.toFixed(3)} Wh (est.) ·{' '}
+              {c.energy_accounting?.energy_class ?? '—'}
+            </div>
           </div>
         ))}
       </div>

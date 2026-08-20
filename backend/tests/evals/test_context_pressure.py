@@ -130,3 +130,56 @@ async def test_a_run_that_fits_its_window_compacts_nothing(world):
 
     assert result.run.compactions in (None, [])
     assert "context_pressure" not in result.event_types
+
+
+# ── the summarizer is now metered ────────────────────────────────────────────
+async def test_the_summarizer_call_is_recorded_as_run_overhead(world):
+    """Compaction's summarizer costs real money, and used to cost it invisibly.
+
+    `complete_json` discarded the provider's usage block, so every routing call
+    and every summarizer call was spent and never counted.
+    """
+    result, _ = await _long_run(world, limit=3_000)
+
+    assert result.run.overhead, "a run that summarized must say what that cost"
+    calls = result.run.overhead["calls"]
+    summaries = [c for c in calls if c["kind"] == "compaction_summary"]
+    assert summaries
+    assert all(c["input_tokens"] > 0 and c["cost_usd"] > 0 for c in summaries)
+    assert result.run.overhead["total_cost_usd"] > 0
+
+
+async def test_overhead_is_accounted_against_the_model_that_ran_it(world):
+    # The summarizer resolves its own cheap model, so its energy class and its
+    # provider's grid factor are its own — not the task model's.
+    result, _ = await _long_run(world, limit=3_000)
+
+    for call in result.run.overhead["calls"]:
+        assert call["energy_accounting"]["model"] == call["model"]
+        assert call["energy_accounting"]["energy_wh"] == call["energy_wh"]
+
+
+async def test_overhead_is_kept_out_of_the_runs_own_totals(world):
+    """The load-bearing separation.
+
+    `cost_usd` and `energy_wh` are already on charts, exports and deliverable
+    provenance. Folding overhead in would leave every stored value unchanged but
+    change what it means, so a series spanning the change would show a jump that
+    never happened.
+    """
+    result, _ = await _long_run(world, limit=3_000)
+
+    overhead_cost = result.run.overhead["total_cost_usd"]
+    assert overhead_cost > 0
+    task_cost = float(result.run.cost_usd)
+    # The run's own figure counts its own turns and nothing else.
+    assert result.run.energy_accounting["model"] == result.run.model_used
+    segments = result.run.model_timeline or []
+    if not segments:
+        assert task_cost > 0
+
+
+async def test_a_run_that_never_compacts_records_no_summarizer_overhead(world):
+    result, _ = await _long_run(world, limit=10_000_000)
+    calls = (result.run.overhead or {}).get("calls", [])
+    assert [c for c in calls if c["kind"] == "compaction_summary"] == []

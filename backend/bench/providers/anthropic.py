@@ -17,6 +17,7 @@ import anthropic
 from bench.net import CLASS_PROVIDER, build_client
 
 from bench.providers.base import (
+    JsonCompletion,
     Msg,
     Provider,
     ProviderError,
@@ -115,6 +116,25 @@ def _to_anthropic_tools(tools: list[ToolSpec]) -> list[dict]:
     ]
 
 
+def _usage_of(raw) -> Usage:
+    """Anthropic's usage object as canonical `Usage`.
+
+    Factored out because `stream()` and `complete_json()` both need it and a
+    second hand-rolled copy is how the cache buckets drift apart. Tolerates a
+    missing usage block (returns zeros) rather than raising: a completion whose
+    token counts did not arrive is still a valid completion, and refusing it
+    would fail a run over bookkeeping.
+    """
+    if raw is None:
+        return Usage()
+    return Usage(
+        input_tokens=getattr(raw, "input_tokens", 0) or 0,
+        output_tokens=getattr(raw, "output_tokens", 0) or 0,
+        cache_read_tokens=getattr(raw, "cache_read_input_tokens", 0) or 0,
+        cache_write_tokens=getattr(raw, "cache_creation_input_tokens", 0) or 0,
+    )
+
+
 class AnthropicProvider(Provider):
     name = "anthropic"
 
@@ -183,15 +203,10 @@ class AnthropicProvider(Provider):
                                 args = {"_raw": slot["json"]}
                             yield ToolCallComplete(ToolCall(slot["id"], slot["name"], args))
                 final = await stream.get_final_message()
-                usage = Usage(
-                    input_tokens=final.usage.input_tokens,
-                    output_tokens=final.usage.output_tokens,
-                    cache_read_tokens=getattr(final.usage, "cache_read_input_tokens", 0) or 0,
-                    cache_write_tokens=(
-                        getattr(final.usage, "cache_creation_input_tokens", 0) or 0
-                    ),
+                yield TurnComplete(
+                    usage=_usage_of(final.usage),
+                    stop_reason=final.stop_reason or "end_turn",
                 )
-                yield TurnComplete(usage=usage, stop_reason=final.stop_reason or "end_turn")
         except anthropic.APIError as e:
             raise ProviderError("anthropic", str(e), getattr(e, "status_code", None)) from e
 
@@ -205,7 +220,7 @@ class AnthropicProvider(Provider):
         tool_name: str = "respond",
         max_tokens: int = 1024,
         timeout: float = 30.0,
-    ) -> dict:
+    ) -> JsonCompletion:
         try:
             msg = await self._client.messages.create(
                 model=model,
@@ -221,5 +236,9 @@ class AnthropicProvider(Provider):
             raise ProviderError("anthropic", str(e), getattr(e, "status_code", None)) from e
         for block in msg.content:
             if block.type == "tool_use" and block.name == tool_name:
-                return dict(block.input)
+                return JsonCompletion(
+                    payload=dict(block.input),
+                    usage=_usage_of(getattr(msg, "usage", None)),
+                    model=model,
+                )
         raise ProviderError("anthropic", "No tool_use block in structured completion")

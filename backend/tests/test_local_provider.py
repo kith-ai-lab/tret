@@ -15,6 +15,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from bench.providers.base import JsonCompletion
 from bench.api import settings as settings_api
 from bench.api.auth import require_admin
 from bench.api.harnesses import _validate_policy
@@ -116,8 +117,8 @@ class _FakeGetClient:
         return _FakeModelsResponse(self._payload)
 
 
-async def _always_ok(*args, **kwargs) -> dict:
-    return {"ok": True}
+async def _always_ok(*args, **kwargs) -> JsonCompletion:
+    return JsonCompletion(payload={"ok": True})
 
 
 async def _always_fails(*args, **kwargs):
@@ -216,10 +217,15 @@ async def test_probe_marks_supports_tools_false_on_failure(monkeypatch):
 
 
 def _probe_returns(value):
-    """A `complete_json` stand-in that answers the probe with `value`."""
+    """A `complete_json` stand-in whose payload is `value`.
+
+    `value` is the *payload* a local runtime would put in the tool call, which is
+    the thing these tests vary — the probe's whole job is deciding which shapes
+    of answer count as "this model really does call tools".
+    """
 
     async def probe(*args, **kwargs):
-        return value
+        return JsonCompletion(payload=value)
 
     return probe
 
@@ -287,7 +293,7 @@ async def test_probe_result_is_cached_per_model_id(monkeypatch):
 
     async def counting_probe(*args, **kwargs):
         calls["n"] += 1
-        return {"ok": True}
+        return JsonCompletion(payload={"ok": True})
 
     monkeypatch.setattr(catalog_module.LocalProvider, "complete_json", counting_probe)
     fake_client = _FakeGetClient(payload={"data": [{"id": "cached-model"}]})
@@ -309,7 +315,7 @@ async def test_force_bypasses_both_the_ttl_and_the_probe_cache(monkeypatch):
 
     async def counting_probe(*args, **kwargs):
         calls["n"] += 1
-        return {"ok": True}
+        return JsonCompletion(payload={"ok": True})
 
     monkeypatch.setattr(catalog_module.LocalProvider, "complete_json", counting_probe)
     fake_client = _FakeGetClient(payload={"data": [{"id": "m"}]})
@@ -394,7 +400,7 @@ def test_local_test_reports_an_unreachable_server(monkeypatch):
 def test_local_test_happy_path_with_mixed_probe_results(monkeypatch):
     async def probe_by_model(*args, **kwargs):
         if kwargs.get("model", "").startswith("good"):
-            return {"ok": True}
+            return JsonCompletion(payload={"ok": True})
         raise RuntimeError("model ignored tool_choice")
 
     monkeypatch.setattr(catalog_module.LocalProvider, "complete_json", probe_by_model)
