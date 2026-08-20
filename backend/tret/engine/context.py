@@ -22,8 +22,13 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from tret.db.models import Document, Harness, Pack, Run
+if TYPE_CHECKING:
+    # Only for static analysis. `tret.packs.loader` imports this module's
+    # doctrine-selector helpers (which never touch the ORM) and must stay
+    # importable without SQLAlchemy in a core-only (`pip install tret`) install.
+    from tret.db.models import Document, Harness, Pack, Run
 
 # chars/4 — deliberately dependency-free. Real usage is recorded per run from
 # provider-reported tokens; this is for composition accounting and routing size

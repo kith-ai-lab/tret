@@ -25,7 +25,7 @@ from typing import AsyncIterator
 import httpx
 
 from tret.config import get_settings
-from tret.net import audit
+from tret.net import audit_base
 from tret.net.guard import check_url
 from tret.net.policy import ClassPolicy, EgressDenied, policy_for
 
@@ -39,7 +39,7 @@ USER_AGENT = "tret/0.1 (+https://github.com/tret-platform/tret)"
 def _hook(egress_class: str, policy: ClassPolicy):
     async def enforce(request: httpx.Request) -> None:
         target = await check_url(str(request.url), egress_class, policy)
-        audit.note_attempt(egress_class, target.host)
+        audit_base.note_attempt(egress_class, target.host)
 
     return enforce
 

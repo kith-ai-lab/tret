@@ -40,7 +40,7 @@ COPY backend/pyproject.toml ./
 COPY backend/tret ./tret
 COPY backend/alembic ./alembic
 COPY backend/alembic.ini ./
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[server]"
 
 COPY packs /packs
 # Reference documentation, served read-only by GET /api/docs/{slug} — the

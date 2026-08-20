@@ -14,44 +14,40 @@ Two tiers, deliberately not one:
 Query strings are dropped, never stored. They carry API keys and search terms
 that are often the private part of a question, and a host plus a path answers
 the audit question without becoming a second place secrets accumulate.
+
+The in-process counters live in `audit_base.py` — DB-free, so `tret.net.client`
+can note an attempt without importing SQLAlchemy — and are re-exported here
+unchanged for existing importers of this module.
 """
 from __future__ import annotations
 
 import uuid
-import logging
-from collections import Counter
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.db.engine import get_session_factory
 from tret.db.models import EgressCall
+from tret.net.audit_base import (
+    DECISION_ALLOWED,
+    DECISION_DENIED,
+    MAX_PATH_CHARS,
+    counters,
+    log,
+    note_attempt,
+    reset_counters,
+)
 
-log = logging.getLogger("tret.net")
-
-DECISION_ALLOWED = "allowed"
-DECISION_DENIED = "denied"
-
-# Path kept for the audit trail, but a path is attacker-influenced text that is
-# rendered back to an operator; it does not get to be arbitrarily long.
-MAX_PATH_CHARS = 512
-
-_counters: Counter[tuple[str, str]] = Counter()  # (class, host) -> attempts
-
-
-def note_attempt(egress_class: str, host: str) -> None:
-    """Count one outbound attempt. Cheap enough for the provider hot path."""
-    _counters[(egress_class, host)] += 1
-
-
-def counters() -> dict[str, dict[str, int]]:
-    out: dict[str, dict[str, int]] = {}
-    for (egress_class, host), count in _counters.items():
-        out.setdefault(egress_class, {})[host] = count
-    return out
-
-
-def reset_counters() -> None:
-    _counters.clear()
+__all__ = [
+    "DECISION_ALLOWED",
+    "DECISION_DENIED",
+    "MAX_PATH_CHARS",
+    "counters",
+    "log",
+    "note_attempt",
+    "record",
+    "record_durably",
+    "reset_counters",
+]
 
 
 async def record(

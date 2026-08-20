@@ -47,7 +47,7 @@ from tret.router_llm.objectives import (
     within_cost_tier,
 )
 from tret.router_llm.outcomes import size_band
-from tret.router_llm.priors import (
+from tret.router_llm.priors_base import (
     PRIORS_VERSION,
     ModelPrior,
     NoPriors,

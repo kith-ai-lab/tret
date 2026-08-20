@@ -24,7 +24,7 @@ COPY backend/tret ./tret
 COPY backend/alembic ./alembic
 COPY backend/alembic.ini ./
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[server]"
 
 # Reference documentation, served read-only by GET /api/docs/{slug} so the
 # methodology is readable in-product instead of only in the repo. Kept as the

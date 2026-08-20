@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from tret.providers.catalog import ModelInfo
-from tret.router_llm.priors import ModelPrior
+from tret.router_llm.priors_base import ModelPrior
 
 OBJECTIVES = ("quality", "balanced", "token_conservation", "eco")
 DEFAULT_OBJECTIVE = "balanced"

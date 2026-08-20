@@ -45,7 +45,7 @@ from decimal import Decimal
 
 from tret.providers.catalog import ModelInfo
 from tret.router_llm.objectives import TIER_POOR, evidence_tier
-from tret.router_llm.priors import ModelPrior
+from tret.router_llm.priors_base import ModelPrior
 
 # ── stall signals ────────────────────────────────────────────────────────────
 # Consecutive failures of the run's terminal tool. Three is the engine's own

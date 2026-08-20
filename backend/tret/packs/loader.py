@@ -12,13 +12,10 @@ import csv
 import json
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import jsonschema
 import yaml
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from tret.db.models import Dataset, DatasetRow, Pack
 
 # Boundary note: `doctrine:` selector syntax (`file.md#Heading`) is part of the
 # *pack format*, so parsing and validating it belongs beside the manifest schema
@@ -29,10 +26,21 @@ from tret.db.models import Dataset, DatasetRow, Pack
 # would fix both; it is an engine-side edit, so it is recorded here rather than
 # done piecemeal.
 from tret.engine.context import doctrine_sha, parse_doctrine_selector, select_doctrine_text
-from tret.engine.tools import get_builtin_tools
 from tret.packs.integrity import pack_content_hash
 from tret.packs.safety import scan_method_file
 from tret.packs.schema import PackManifest
+
+if TYPE_CHECKING:
+    # SQLAlchemy, the ORM models, and `tret.engine.tools` (which pulls in the
+    # whole tool-execution engine, itself SQLAlchemy-backed) are deferred into
+    # the functions that need them so that *importing* this module never
+    # requires the server extra. Note the limit of that guarantee: *calling*
+    # `validate_pack` or `install_pack` still needs `tret[server]`, because
+    # both reach `get_builtin_tools()` and the engine behind it. Core-only
+    # installs get `tret packs hash`; `tret packs validate` needs the extra.
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from tret.db.models import Pack
 
 
 class PackValidationError(Exception):
@@ -65,6 +73,8 @@ def _doctrine_selector_errors(
 
 def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[str]]:
     """Returns (manifest, schemas-by-slug, errors). Raises nothing."""
+    from tret.engine.tools import get_builtin_tools
+
     errors: list[str] = []
     manifest_path = pack_dir / "pack.yaml"
     if not manifest_path.exists():
@@ -141,6 +151,10 @@ async def install_pack(
     db: AsyncSession, pack_dir: Path, workspace_id: uuid.UUID, project_id: uuid.UUID
 ) -> Pack:
     """Idempotent by (workspace, slug, version). Seeds datasets into project_id."""
+    from sqlalchemy import select
+
+    from tret.db.models import Dataset, DatasetRow, Pack
+
     pack_dir = pack_dir.resolve()
     manifest, schemas, errors = validate_pack(pack_dir)
     if errors:

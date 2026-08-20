@@ -34,7 +34,7 @@ from tret.router_llm.objectives import (
     evidence_tier,
     within_cost_tier,
 )
-from tret.router_llm.priors import ModelPrior
+from tret.router_llm.priors_base import ModelPrior
 
 FALLBACK_TABLE: dict[str, list[str]] = {
     "verdict": [
