@@ -97,8 +97,15 @@ function bucketWeights(energy: EnergyAccounting): Partial<Record<TokenBucket, nu
   return {
     input: recordedWeight(f, 'token_weight_input', energy.input_weight),
     output: recordedWeight(f, 'token_weight_output', energy.output_weight),
-    cache_read: recordedWeight(f, 'token_weight_cache_read', energy.cache_read_weight),
-    cache_write: recordedWeight(f, 'token_weight_cache_write', energy.cache_write_weight),
+    // ?? undefined, not ?? 0: a multi-model roll-up nulls these where the
+    // segments disagreed, and `recordedWeight` already renders "no recorded
+    // weight" for undefined. Coercing to 0 would claim these tokens were free.
+    cache_read: recordedWeight(f, 'token_weight_cache_read', energy.cache_read_weight ?? undefined),
+    cache_write: recordedWeight(
+      f,
+      'token_weight_cache_write',
+      energy.cache_write_weight ?? undefined,
+    ),
   }
 }
 

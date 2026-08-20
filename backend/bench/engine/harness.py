@@ -7,6 +7,7 @@ persists the transcript/cost after every iteration, and publishes RunEvents.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -56,13 +57,24 @@ from bench.providers.base import (
 )
 from bench.providers.catalog import (
     ModelCatalog,
+    ModelInfo,
     ProviderRegistry,
     energy_accounting,
     get_catalog,
 )
 from bench.router_llm.priors import OutcomePriors, PriorsProvider
 from bench.router_llm.router import ModelRouter, RoutingUnavailable
-from bench.services.emissions import emission_event_fields, energy_wh_field
+from bench.engine.supervisor import (
+    Intervention,
+    TurnState,
+    assess,
+    normalize_for_provider,
+)
+from bench.services.emissions import (
+    combine_accountings,
+    emission_event_fields,
+    energy_wh_field,
+)
 from bench.services.outcomes import record_outcome
 from bench.services.transcript import (
     ENGINE_NUDGE_KEY,
@@ -118,6 +130,72 @@ GENERIC_TASK_TYPES = ("chat", "freeform")
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@dataclass
+class ModelSegment:
+    """One contiguous stretch of a run spent on one model.
+
+    Exists because energy accounting is a *per-model* calculation — energy class,
+    deployment PUE, grid intensity and the frontier baseline all come from the
+    model — while `energy_accounting` was being handed the run's running totals
+    and a single `ModelInfo`. For a run that never changes model that is correct
+    and stays correct. For one that does, it would attribute every token in the
+    run to whichever model happened to be current, which is not a rounding error:
+    an S-class model and an R-class one differ by more than an order of
+    magnitude in Wh per token.
+    """
+
+    model: ModelInfo
+    reason: str
+    from_iteration: int = 0
+    to_iteration: int = 0
+    usage: Usage = field(default_factory=Usage)
+    cost_usd: Decimal = Decimal(0)
+
+    def add(self, usage: Usage, iteration: int) -> None:
+        if not self.from_iteration:
+            self.from_iteration = iteration
+        self.to_iteration = iteration
+        self.usage.input_tokens += usage.input_tokens
+        self.usage.output_tokens += usage.output_tokens
+        self.usage.cache_read_tokens += usage.cache_read_tokens
+        self.usage.cache_write_tokens += usage.cache_write_tokens
+        self.cost_usd += self.model.cost_usd(
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+        )
+
+    def accounting(self) -> dict:
+        return energy_accounting(
+            self.model,
+            self.usage.input_tokens,
+            self.usage.output_tokens,
+            self.usage.cache_read_tokens,
+            self.usage.cache_write_tokens,
+        )
+
+    def to_json(self) -> dict:
+        accounting = self.accounting()
+        return {
+            "model": self.model.id,
+            "provider": self.model.provider,
+            "from_iteration": self.from_iteration,
+            "to_iteration": self.to_iteration,
+            "reason": self.reason,
+            "input_tokens": self.usage.input_tokens,
+            "output_tokens": self.usage.output_tokens,
+            "cache_read_tokens": self.usage.cache_read_tokens,
+            "cache_write_tokens": self.usage.cache_write_tokens,
+            "cost_usd": float(self.cost_usd),
+            "energy_wh": accounting["energy_wh"],
+            # The full per-model derivation, kept segment by segment. The
+            # run-level roll-up nulls whatever the segments disagreed on, so this
+            # is where the un-nulled detail survives.
+            "energy_accounting": accounting,
+        }
 
 
 class HarnessEngine:
@@ -356,6 +434,10 @@ class HarnessEngine:
         compaction = CompactionState()
         compaction_records: list[dict] = []
 
+        # One segment per model this run uses. Almost always exactly one.
+        segments: list[ModelSegment] = [ModelSegment(model_info, reason="initial")]
+        segment = segments[0]
+
         # Chat turns carry prior conversation turns as history.
         history = [Msg.from_json(m) for m in run.task_input.get("_history", [])]
         if context_limit and adaptive.compaction != "off":
@@ -386,6 +468,19 @@ class HarnessEngine:
         nudged = False
         budget_nudged = False
         seen_calls: dict[str, int] = {}  # repeated-identical-call breaker
+        # Stall signals for the supervisor. Counted here rather than re-derived
+        # from the transcript each iteration, because "in a row" is a property of
+        # the sequence and the transcript would have to be re-scanned to see it.
+        consecutive_terminal_failures = 0
+        repeated_call_trips = 0
+        # Cumulative, because `ctx.findings_created` is drained at the end of
+        # every iteration once its events have been published — reading it in the
+        # supervisor would see zero on every turn and report a productive run as
+        # a stalled one.
+        findings_total = 0
+        compaction_exhausted = False
+        switches_used = 0
+        overridden = bool(decision.override)
 
         # ── loop ─────────────────────────────────────────────────────────────
         for iteration in range(1, max_iterations + 1):
@@ -432,6 +527,9 @@ class HarnessEngine:
                     compaction_records.append(record)
                     run.compactions = list(compaction_records)
                     await self.bus.publish(run.id, RunEvent("compaction", record))
+                    # Over the budget with only protected material left. The
+                    # supervisor's cue that a bigger window is the only remedy.
+                    compaction_exhausted = record["kind"] == "no_op"
                 wire = wire_view(messages, compaction)
 
             try:
@@ -482,6 +580,11 @@ class HarnessEngine:
             total_usage.output_tokens += usage.output_tokens
             total_usage.cache_read_tokens += usage.cache_read_tokens
             total_usage.cache_write_tokens += usage.cache_write_tokens
+            # Booked against the model that actually ran the turn. A run may
+            # change model part-way (see the supervisor below), and every figure
+            # downstream — price, energy class, PUE, grid factor — is a property
+            # of *which* model spent the tokens, not of the run as a whole.
+            segment.add(usage, iteration)
             turn_cost = model_info.cost_usd(
                 usage.input_tokens,
                 usage.output_tokens,
@@ -504,18 +607,17 @@ class HarnessEngine:
             run.cache_read_tokens = total_usage.cache_read_tokens
             run.cache_write_tokens = total_usage.cache_write_tokens
             run.cost_usd = (run.cost_usd or Decimal(0)) + turn_cost
-            # Estimated energy/carbon, recomputed from the running totals rather
-            # than accumulated per turn: the estimate is linear in tokens, so
-            # totals cannot drift from the sum of the turns.
-            accounting = energy_accounting(
-                model_info,
-                total_usage.input_tokens,
-                total_usage.output_tokens,
-                total_usage.cache_read_tokens,
-                total_usage.cache_write_tokens,
-            )
+            # Estimated energy/carbon, recomputed per segment from that segment's
+            # running totals rather than accumulated per turn: the estimate is
+            # linear in tokens, so a segment's total cannot drift from the sum of
+            # its turns. The run-level block is the roll-up across segments,
+            # which for the ordinary single-model run is byte-identical to the
+            # single segment's own block (services/emissions.combine_accountings).
+            accounting = combine_accountings([seg.accounting() for seg in segments])
             run.energy_wh = Decimal(str(accounting["energy_wh"]))
             run.energy_accounting = accounting
+            if len(segments) > 1:
+                run.model_timeline = [seg.to_json() for seg in segments]
             run.messages = [m.to_json() for m in messages]
             await db.commit()
             await self.bus.publish(
@@ -606,6 +708,11 @@ class HarnessEngine:
                 else:
                     result_text, is_error = await execute_tool(ctx, spec, tc.arguments)
 
+                if is_error and ctx.terminal_tool and tc.name == ctx.terminal_tool:
+                    consecutive_terminal_failures += 1
+                elif not is_error and ctx.terminal_tool and tc.name == ctx.terminal_tool:
+                    consecutive_terminal_failures = 0
+
                 if is_error:
                     # Roll the failed tool's partial write out of the session so
                     # the end-of-iteration commit cannot persist something the
@@ -637,6 +744,7 @@ class HarnessEngine:
                 repeated = 0
                 if seen_calls[call_key] >= 3 and not is_error:
                     repeated = seen_calls[call_key]
+                    repeated_call_trips += 1
                     result_text += (
                         "\n\n[NOTE: you have now made this exact call "
                         f"{seen_calls[call_key]} times and the result is unchanged. You have "
@@ -660,6 +768,7 @@ class HarnessEngine:
                 await self.bus.publish(
                     run.id, RunEvent("finding_recorded", {"finding_id": str(finding_id)})
                 )
+            findings_total += len(ctx.findings_created)
             ctx.findings_created.clear()
 
             # Soft output budget: ask for the terminal action once, then let the
@@ -688,6 +797,76 @@ class HarnessEngine:
                             "kind": "output_tokens",
                             "output_tokens": total_usage.output_tokens,
                             "budget": output_budget,
+                        },
+                    ),
+                )
+
+            # ── should this run change model? ────────────────────────────────
+            # Between iterations, deterministically, on the state the loop has
+            # already gathered. See engine/supervisor.py for why this is not an
+            # LLM call and why every intervention is bounded.
+            candidates, live_priors = await self.router.candidates_for(
+                model_policy=model_policy,
+                task_shape=task.get("shape", "freeform"),
+                est_input_tokens=est_tokens,
+            )
+            intervention = assess(
+                TurnState(
+                    iteration=iteration,
+                    max_iterations=max_iterations,
+                    model=model_info,
+                    est_wire_tokens=est_tokens,
+                    context_limit=context_limit,
+                    compaction_exhausted=compaction_exhausted,
+                    consecutive_terminal_failures=consecutive_terminal_failures,
+                    repeated_call_trips=repeated_call_trips,
+                    terminal_recorded=ctx.terminal_recorded,
+                    findings_created=findings_total,
+                    cost_so_far=run.cost_usd or Decimal(0),
+                    max_cost_usd=max_cost,
+                    switches_used=switches_used,
+                    max_switches=adaptive.max_switches,
+                    escalation=adaptive.escalation,
+                    overridden=overridden,
+                ),
+                candidates=candidates,
+                priors=live_priors,
+            )
+            if intervention.switching:
+                switches_used += 1
+                model_info, provider, segment = self._switch_model(
+                    run=run,
+                    intervention=intervention,
+                    segments=segments,
+                    iteration=iteration,
+                )
+                context_limit = context_budget(
+                    model_info.context_window, max_output_tokens, adaptive.context_headroom
+                )
+                ctx.model_used = model_info.id
+                messages = normalize_for_provider(messages, model_info.provider)
+                # The cache is void from here: a different model has never seen
+                # this prefix, so the next turn re-pays full input price. The
+                # supervisor priced that in before choosing to switch.
+                compaction_exhausted = False
+                consecutive_terminal_failures = 0
+                repeated_call_trips = 0
+                await self.bus.publish(
+                    run.id, RunEvent("model_switch", run.routing["switches"][-1])
+                )
+            elif intervention.refused:
+                # A run that was stuck and that bench decided not to rescue is
+                # exactly what an operator reading a failed run needs to see, and
+                # it is invisible unless it is written down.
+                await self.bus.publish(
+                    run.id,
+                    RunEvent(
+                        "switch_refused",
+                        {
+                            "iteration": iteration,
+                            "reason": intervention.reason,
+                            "detail": intervention.detail,
+                            "refused": intervention.refused,
                         },
                     ),
                 )
@@ -753,6 +932,43 @@ class HarnessEngine:
             await self.bus.publish(
                 run.id, RunEvent("error", {"message": run.error or run.status, "status": run.status})
             )
+
+    def _switch_model(
+        self,
+        *,
+        run: Run,
+        intervention: Intervention,
+        segments: list[ModelSegment],
+        iteration: int,
+    ):
+        """Move the run onto a different model, and record that it happened.
+
+        The switch is appended to `run.routing["switches"]` in the shape of a
+        routing decision, so the audit trail keeps its existing form: every model
+        a run used is explained in the same place, in the same language, as the
+        model it started with. `model_used` becomes the new model because it has
+        always meant *the model that produced the final answer* — the full
+        sequence is in `model_timeline`.
+        """
+        target = intervention.target
+        segments.append(ModelSegment(target, reason=intervention.reason))
+        record = {
+            "at_iteration": iteration,
+            "from_model": run.model_used,
+            "chosen_model": target.id,
+            "provider": target.provider,
+            "reason": intervention.reason,
+            "detail": intervention.detail,
+            "evidence": intervention.evidence,
+            "decided_at": _utcnow().isoformat(),
+        }
+        routing = dict(run.routing or {})
+        routing["switches"] = [*(routing.get("switches") or []), record]
+        run.routing = routing
+        run.model_used = target.id
+        run.provider_used = target.provider
+        run.model_timeline = [seg.to_json() for seg in segments]
+        return target, self.registry.get(target.provider), segments[-1]
 
     async def _compact(
         self,

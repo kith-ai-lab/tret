@@ -2024,3 +2024,126 @@ def emission_event_fields(accounting: dict | None) -> dict[str, Any]:
         "co2e_g_low": band.get("co2e_g_low"),
         "co2e_g_high": band.get("co2e_g_high"),
     }
+
+
+# ── rolling several models' accounting into one run ──────────────────────────
+# A run that changes model part-way (engine/supervisor.py) produces one
+# accounting block per segment. `runs.energy_accounting` still has to answer
+# "what did this run cost the planet", and the answer cannot be one segment's
+# block: every per-model factor in it — energy class, PUE, grid intensity,
+# baseline — would then be asserted of tokens that were never spent on that
+# model.
+#
+# The rule is the one `api/analytics.py` already applies when rolling carbon
+# across runs: sum what is genuinely additive, and where segments disagree on a
+# factor, report null rather than inventing a figure. A null here means "these
+# segments were accounted differently"; it never means zero.
+
+# Quantities that add across models: energy is energy, a gram is a gram, and a
+# token spent on one model is still a token.
+_SUMMABLE_TOP = (
+    "energy_wh",
+    "energy_wh_total",
+    "co2e_g",
+    "embodied_g",
+    "weighted_tokens",
+)
+_SUMMABLE_NESTED = {
+    "tokens": ("input", "output", "cache_read", "cache_write"),
+    "energy_wh_by_bucket": ("input", "output", "cache_read", "cache_write"),
+    "scopes": ("scope1_g", "scope2_g", "scope3_g"),
+    "baseline": ("energy_wh", "energy_wh_total", "co2e_g", "avoided_co2e_g"),
+    "cost": ("usd", "baseline_usd", "avoided_usd"),
+}
+
+MULTI_MODEL_CAVEAT = {
+    "key": "multi_model_run",
+    "label": "This run used more than one model",
+    "direction": "unknown",
+    "note": (
+        "Energy, carbon, tokens and cost are summed across every model this run "
+        "used; each model's own accounting is recorded separately in "
+        "runs.model_timeline. Per-model factors (energy class, PUE, grid "
+        "intensity, baseline) are reported only where every segment agreed — "
+        "elsewhere they are null, which means 'accounted differently', not zero."
+    ),
+}
+
+
+def _sum_or_none(values: list) -> float | None:
+    """Sum, unless any segment is missing the figure entirely.
+
+    A partial sum would read as a complete one. Consistent with the rest of this
+    module: a missing estimate is null, never zero.
+    """
+    numbers = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if len(numbers) != len(values):
+        return None
+    total = sum(numbers)
+    # Token counts stay integers: a run that used 3000 input tokens did not use
+    # 3000.0 of them, and the difference shows up in every JSON payload.
+    return total if all(isinstance(v, int) for v in numbers) else round(float(total), 6)
+
+
+def _agreed(values: list):
+    """The shared value, or None where the segments disagree."""
+    first = values[0]
+    try:
+        return first if all(v == first for v in values) else None
+    except Exception:  # noqa: BLE001 - unorderable/odd values are simply "mixed"
+        return None
+
+
+def combine_accountings(blocks: list[dict]) -> dict | None:
+    """One run-level accounting block from several per-model ones.
+
+    A single block is returned **unchanged**, byte for byte — the overwhelming
+    majority of runs use one model, and none of them should acquire a different
+    accounting record because this function exists.
+    """
+    blocks = [b for b in blocks if b]
+    if not blocks:
+        return None
+    if len(blocks) == 1:
+        return blocks[0]
+
+    combined = dict(blocks[0])
+    for key in _SUMMABLE_TOP:
+        combined[key] = _sum_or_none([b.get(key) for b in blocks])
+    for parent, fields in _SUMMABLE_NESTED.items():
+        children = [b.get(parent) or {} for b in blocks]
+        merged = dict(children[0])
+        for field_name in fields:
+            merged[field_name] = _sum_or_none([c.get(field_name) for c in children])
+        for field_name in set(merged) - set(fields):
+            merged[field_name] = _agreed([c.get(field_name) for c in children])
+        combined[parent] = merged
+
+    # Every per-model factor: kept where the segments agree, nulled where they do
+    # not. Nulling is the honest answer — "this run ran at PUE 1.2" is false if
+    # half of it ran somewhere else.
+    for key in set(combined) - set(_SUMMABLE_TOP) - set(_SUMMABLE_NESTED):
+        if key in ("estimated", "basis", "factors", "caveats"):
+            continue
+        combined[key] = _agreed([b.get(key) for b in blocks])
+
+    combined["models"] = [b.get("model") for b in blocks]
+    combined["basis"] = (
+        "summed across the models this run used; per-model factors are reported "
+        "only where every segment agreed. " + str(blocks[0].get("basis", ""))
+    )
+    # Provenance annotations are unioned by key rather than summed: they describe
+    # how a figure was reached, and every segment's reasoning still applies to
+    # its own share.
+    combined["factors"] = _union_by_key(blocks, "factors")
+    combined["caveats"] = [*_union_by_key(blocks, "caveats"), MULTI_MODEL_CAVEAT]
+    return combined
+
+
+def _union_by_key(blocks: list[dict], field_name: str) -> list:
+    seen: dict = {}
+    for block in blocks:
+        for entry in block.get(field_name) or []:
+            key = entry.get("key") if isinstance(entry, dict) else str(entry)
+            seen.setdefault(key, entry)
+    return list(seen.values())

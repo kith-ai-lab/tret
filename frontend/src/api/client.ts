@@ -348,17 +348,26 @@ export type TokenCounts = Record<TokenBucket, number>
  *  `baseline` were added with the calibrated model (token weighting, money,
  *  uncertainty and provenance). All are optional because runs recorded before
  *  each addition genuinely do not carry them — and a missing field must render as
- *  an em-dash, never as 0. */
+ *  an em-dash, never as 0.
+ *
+ *  A run that used more than one model carries a *roll-up* here: the additive
+ *  quantities are summed, `models` lists what it used, and each per-model factor
+ *  is null wherever the segments disagreed. Null means "these segments were
+ *  accounted differently", never zero — the un-nulled per-model detail is in
+ *  `RunDetail.model_timeline`. Fields that a roll-up can null are typed nullable
+ *  for that reason. */
 export interface EnergyAccounting {
   estimated: boolean
-  model: string
-  energy_class: string // S | M | L | XL | R
-  energy_wh_per_mtok: number // per million *output-equivalent* tokens
+  model: string | null
+  /** Present only on a multi-model roll-up: every model the run used, in order. */
+  models?: string[]
+  energy_class: string | null // S | M | L | XL | R
+  energy_wh_per_mtok: number | null // per million *output-equivalent* tokens
   weighted_tokens: number
-  cache_read_weight: number
-  cache_write_weight: number
+  cache_read_weight: number | null
+  cache_write_weight: number | null
   energy_wh: number // compute / IT load only — excludes facility overhead
-  grid_co2e_g_per_kwh: number
+  grid_co2e_g_per_kwh: number | null
   co2e_g: number // run total; equals scope1_g + scope2_g + scope3_g
   basis: string
   pue?: number
@@ -392,6 +401,43 @@ export interface EnergyAccounting {
   caveats?: EmissionsCaveat[]
 }
 
+/** One contiguous stretch of a run spent on one model, with its own accounting.
+ *  Energy is a per-model calculation — class, PUE, grid factor and baseline all
+ *  come from the model — so a run that changed model keeps them separated here
+ *  rather than restating one segment's factors over the other's tokens. */
+export interface ModelSegment {
+  model: string
+  provider: string
+  from_iteration: number
+  to_iteration: number
+  /** "initial" | "context_exhausted" | "capability_stall" */
+  reason: string
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  cost_usd: number
+  energy_wh: number
+  energy_accounting: EnergyAccounting
+}
+
+/** One time a run had to shrink what it sends the model to stay inside its
+ *  window. `messages` is always the complete transcript; this is the record of
+ *  what the model stopped being shown. */
+export interface CompactionRecord {
+  kind: string // "elision" | "history_trim" | "no_op"
+  iteration: number
+  before_est_tokens?: number
+  after_est_tokens?: number
+  elided_messages?: number
+  elided_tools?: string[]
+  summarized?: boolean
+  summarizer_model?: string | null
+  dropped_history_turns?: number
+  note?: string
+  estimator?: string
+}
+
 export interface RunDetail extends RunSummary {
   task_input: Record<string, unknown>
   messages: Msg[]
@@ -399,6 +445,11 @@ export interface RunDetail extends RunSummary {
   doctrine_sha: string | null
   context_composition: ContextComposition | null
   energy: EnergyAccounting | null
+  /** Null for the ordinary single-model run, where `energy` is already that
+   *  model's own block. When present, `energy` is a roll-up whose per-model
+   *  factors are null wherever the segments disagreed. */
+  model_timeline: ModelSegment[] | null
+  compactions: CompactionRecord[] | null
 }
 
 export interface CreateRunBody {

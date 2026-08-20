@@ -193,6 +193,32 @@ class ModelRouter:
         out.sort(key=candidate_sort_key(objective, priors))
         return out[:CANDIDATE_LIMIT]
 
+    async def candidates_for(
+        self,
+        *,
+        model_policy: dict,
+        task_shape: str,
+        est_input_tokens: int,
+    ) -> tuple[list[ModelInfo], dict[str, ModelPrior]]:
+        """The models this policy permits, in order, plus their track records.
+
+        Public because the mid-run supervisor (`engine/supervisor.py`) needs
+        exactly the list `route()` chose from — the same `allowed` filter, the
+        same provider-key check, the same cost ceiling. Re-deriving that list in
+        the engine is how the two would drift, and a drift here means a switch
+        landing outside the harness policy.
+        """
+        await self._catalog.warm_once()
+        objective = objective_of(model_policy)
+        priors: dict[str, ModelPrior] = {}
+        if adaptive_of(model_policy).learn_from_outcomes:
+            priors = await self._priors.for_key(
+                task_shape=task_shape,
+                objective=objective,
+                size_band=size_band(est_input_tokens),
+            )
+        return self._candidates(model_policy, priors), priors
+
     def _resolve_router_model(self, max_tier: str) -> ModelInfo | None:
         """Which model performs the routing decision, or None to skip the LLM step.
 

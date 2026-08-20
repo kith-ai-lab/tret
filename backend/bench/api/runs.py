@@ -131,7 +131,17 @@ async def get_run(
             # uncertainty band with its per-factor sensitivity, every constant's
             # provenance under `factors`, and the named biases under `caveats`.
             # All estimates, exactly as recorded when the run happened.
-            "energy": run.energy_accounting}
+            "energy": run.energy_accounting,
+            # Every model this run used, with each one's own full accounting.
+            # Null for the ordinary single-model run, where `energy` above is
+            # already that model's block. When it is present, `energy` is a
+            # roll-up whose per-model factors are null wherever the segments
+            # disagreed — this is where the un-nulled detail lives.
+            "model_timeline": run.model_timeline,
+            # What the run had to stop showing the model to stay inside its
+            # context window. `messages` above is always the complete
+            # transcript; this is the record of the gap between the two.
+            "compactions": run.compactions}
 
 
 @router.get("/method-runs/{method_run_id}")

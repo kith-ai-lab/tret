@@ -232,6 +232,17 @@ class Run(Base):
     # only what the provider was sent, never what was recorded — so this column
     # is what states the gap between the two. Null for runs that never compacted.
     compactions: Mapped[list | None] = mapped_column(JSONB)
+    # Every model this run used, in order: [{model, provider, from_iteration,
+    # to_iteration, tokens, cost_usd, energy_wh, energy_accounting, reason}].
+    # Null for the ordinary single-model run.
+    #
+    # `model_used` above therefore means *the model that produced the final
+    # answer*, not the only model involved. It has always been read that way by
+    # the runs list and the chat chip; this column is what makes the fuller
+    # story available, and what keeps `energy_accounting` honest — that block is
+    # a roll-up across these segments (services/emissions.combine_accountings),
+    # and its per-model factors are null wherever the segments disagreed.
+    model_timeline: Mapped[list | None] = mapped_column(JSONB)
     iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))

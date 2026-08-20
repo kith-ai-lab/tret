@@ -93,7 +93,10 @@ export function EnergyDetail({ energy }: { energy: EnergyAccounting }) {
         />
         <Stat
           label="Energy class"
-          value={energy.energy_class}
+          // Null on a run that used several models with different classes. An
+          // em-dash is the honest answer there — asserting one segment's class
+          // over the other's tokens would be off by an order of magnitude.
+          value={energy.energy_class ?? NO_ESTIMATE}
           title="Calibrated order-of-magnitude bucket, not a measurement. Classes are roughly 2-5x apart."
         />
         <Stat label="Deployment" value={energy.deployment ?? NO_ESTIMATE} />
