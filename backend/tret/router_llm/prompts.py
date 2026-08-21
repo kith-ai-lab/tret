@@ -3,6 +3,8 @@ the version is persisted in every RoutingDecision so past routings stay interpre
 """
 from __future__ import annotations
 
+import hashlib
+
 from tret.providers.catalog import ModelInfo
 from tret.router_llm.objectives import DEFAULT_OBJECTIVE
 
@@ -128,6 +130,18 @@ def unrecorded_block(unrecorded: list[str]) -> list[str]:
     if not unrecorded:
         return []
     return ["  no record yet (untried here, not judged): " + ", ".join(sorted(unrecorded))]
+
+
+def prompt_sha256(prompt: str) -> str:
+    """Fingerprint of a rendered router prompt.
+
+    Covers the *rendered* half only — the part that differs per decision, and the
+    part stored beside it, so the hash is verifiable from what is persisted
+    rather than from what the reader hopes was in the source at the time. The
+    constant half (`ROUTER_SYSTEM`) is pinned by `ROUTING_PROMPT_VERSION`, which
+    is what that version string is for.
+    """
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
 def choose_model_schema(candidate_ids: list[str]) -> dict:

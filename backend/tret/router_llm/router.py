@@ -58,6 +58,7 @@ from tret.router_llm.prompts import (
     ROUTER_SYSTEM,
     ROUTING_PROMPT_VERSION,
     choose_model_schema,
+    prompt_sha256,
     render_router_prompt,
 )
 
@@ -138,6 +139,21 @@ class RoutingDecision:
     # them next month answers a different question than the one this decision
     # was answering.
     evidence: dict | None = None
+    # What the router was actually asked, and its fingerprint. Null on every path
+    # where no router was consulted — an override, a single candidate, or no
+    # usable router model — which is the same thing `router_model` being null
+    # means, said about the prompt.
+    #
+    # NOTE the deliberate deviation from `engine/context.ContextBlock`, which
+    # hashes doctrine and pointedly does *not* persist its text. That works there
+    # because the text is recoverable: doctrine lives in the pack, pinned by
+    # `content_hash`. A rendered routing prompt is recoverable from nowhere — its
+    # candidate list, its track record and its objective rules existed only at
+    # that instant — so a hash with nothing to compare against would be a
+    # fingerprint of a document nobody kept. Bounded by CANDIDATE_LIMIT to a few
+    # KB, against run rows that already carry whole transcripts.
+    router_prompt: str | None = None
+    router_prompt_sha256: str | None = None
     # What choosing cost. A routing call runs on `TRET_ROUTER_MODEL`, not on the
     # model it selects, so this is accounted against that model with its own
     # energy class and its provider's own grid factor — see
@@ -360,6 +376,8 @@ class ModelRouter:
         candidate_ids = [m.id for m in candidates]
 
         router_usable = router_info is not None
+        prompt = None
+        prompt_fingerprint = None
         if router_usable:
             prompt = render_router_prompt(
                 task_type=task_type,
@@ -373,6 +391,7 @@ class ModelRouter:
                 objective=objective,
                 priors=priors,
             )
+            prompt_fingerprint = prompt_sha256(prompt)
             start = time.monotonic()
             for _attempt in range(2):  # one retry
                 try:
@@ -407,6 +426,8 @@ class ModelRouter:
                             evidence=_evidence_snapshot(
                                 priors, candidate_ids, est_input_tokens
                             ),
+                            router_prompt=prompt,
+                            router_prompt_sha256=prompt_fingerprint,
                             spend=spend,
                             latency_ms=int((time.monotonic() - start) * 1000),
                         )
@@ -454,6 +475,13 @@ class ModelRouter:
             task_shape=task_shape,
             max_cost_tier=max_tier,
             evidence=_evidence_snapshot(priors, candidate_ids, est_input_tokens),
+            # Kept on the fallback path too, and this is where it earns its
+            # place: the router was asked something and either failed or
+            # answered with a model that was not on its own list. "What did we
+            # ask it?" is the first question, and without this the answer was
+            # unavailable exactly when it mattered.
+            router_prompt=prompt,
+            router_prompt_sha256=prompt_fingerprint,
             fallback_used=True,
         )
 

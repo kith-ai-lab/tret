@@ -380,3 +380,104 @@ async def test_a_capped_harness_with_nothing_left_still_fails_loudly():
 async def test_no_priors_leaves_the_decision_free_of_evidence():
     decision = await _route(ModelRouter(ModelCatalog(), _all_keys(), NoPriors()), _policy())
     assert decision.evidence is None
+
+
+# ── the router's own prompt is on the record ─────────────────────────────────
+class _AnsweringRegistry(ProviderRegistry):
+    """Keys, and a provider that actually answers the routing call."""
+
+    def __init__(self, providers: set[str], pick: str):
+        self._providers = providers
+        self._pick = pick
+
+    def has_key(self, provider: str) -> bool:
+        return provider in self._providers
+
+    def get(self, provider: str):
+        pick = self._pick
+
+        class _P:
+            async def complete_json(self, **kwargs):
+                from tret.providers.base import JsonCompletion, Usage
+
+                return JsonCompletion(
+                    payload={
+                        "model_id": pick,
+                        "reasoning": "because",
+                        "confidence": "high",
+                    },
+                    usage=Usage(input_tokens=900, output_tokens=40),
+                    model=kwargs.get("model", ""),
+                )
+
+        return _P()
+
+
+async def test_a_decision_records_what_the_router_was_asked():
+    catalog = ModelCatalog()
+    router = ModelRouter(catalog, _all_keys(), NoPriors())
+    pick = router._candidates(_policy())[0].id
+    router = ModelRouter(catalog, _AnsweringRegistry({"anthropic", "openrouter", "kimi"}, pick), NoPriors())
+
+    decision = await _route(router, _policy())
+    assert decision.chosen_model == pick
+    assert decision.router_prompt and "CANDIDATES" in decision.router_prompt
+    assert decision.router_prompt_sha256
+
+
+async def test_the_fingerprint_is_verifiable_from_what_was_stored():
+    # The point of hashing the rendered half rather than the whole exchange: a
+    # reader can recompute it from the row, without trusting that the source
+    # looked a particular way at the time.
+    from tret.router_llm.prompts import prompt_sha256
+
+    catalog = ModelCatalog()
+    pick = ModelRouter(catalog, _all_keys(), NoPriors())._candidates(_policy())[0].id
+    router = ModelRouter(catalog, _AnsweringRegistry({"anthropic", "openrouter", "kimi"}, pick), NoPriors())
+
+    decision = await _route(router, _policy())
+    assert decision.router_prompt_sha256 == prompt_sha256(decision.router_prompt)
+
+
+async def test_the_prompt_is_kept_when_the_router_failed_and_the_fallback_ran():
+    # Where it earns its place: the router was asked something and did not
+    # answer usefully, and "what did we ask it?" is the first question.
+    decision = await _route(ModelRouter(ModelCatalog(), _all_keys(), NoPriors()), _policy())
+    assert decision.fallback_used is True
+    assert decision.router_prompt and "TASK" in decision.router_prompt
+    assert decision.router_prompt_sha256
+
+
+async def test_an_override_records_no_prompt_because_none_was_rendered():
+    pinned = ModelCatalog().all(curated_only=True)[0].id
+    decision = await _route(
+        ModelRouter(ModelCatalog(), _all_keys(), NoPriors()), {"mode": "pinned", "model": pinned}
+    )
+    assert decision.router_prompt is None
+    assert decision.router_prompt_sha256 is None
+
+
+async def test_a_single_candidate_records_no_prompt_because_nothing_was_asked():
+    # Same claim `router_model` being null already makes, said about the prompt:
+    # with one permitted model there is no choice to put to a router, so no
+    # prompt was rendered and none is shown.
+    catalog = ModelCatalog()
+    only = next(m for m in catalog.all(curated_only=True) if m.provider == "openrouter")
+    decision = await _route(
+        ModelRouter(catalog, _Registry({"openrouter"}), NoPriors()),
+        _policy(allowed=[only.id]),
+    )
+    assert decision.chosen_model == only.id
+    assert decision.router_model is None
+    assert decision.router_prompt is None
+    assert decision.router_prompt_sha256 is None
+
+
+async def test_the_recorded_prompt_carries_the_evidence_the_router_saw():
+    catalog = ModelCatalog()
+    candidate = catalog.all(curated_only=True)[0].id
+    priors = _StubPriors({candidate: _prior(candidate, 0.88, floor=0.8)})
+    decision = await _route(ModelRouter(catalog, _all_keys(), priors), _policy())
+
+    assert "TRACK RECORD" in decision.router_prompt
+    assert candidate in decision.router_prompt
