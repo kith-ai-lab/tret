@@ -59,6 +59,18 @@ export interface BudgetWarning {
   budget: number
 }
 
+/** The engine started this run without a web tool (web_search/fetch_url) the
+ *  harness or task declared, because the deployment has web research switched
+ *  off (TRET_EGRESS_RESEARCH — harness.py, `withheld_web_tools`). Not a
+ *  failure — the run continues — but a run silently missing a capability its
+ *  author listed is exactly what this event exists to surface. Published at
+ *  most once, before the loop starts, so a single value is enough. */
+export interface ToolsWithheldNotice {
+  tools: string[]
+  reason: string
+  detail: string
+}
+
 /** Transport state of the SSE connection. Says nothing about the run: a run can
  *  be perfectly healthy while this reads `reconnecting`, and `closed` after a
  *  clean `done` is the normal end state. */
@@ -103,6 +115,9 @@ export interface RunStreamState {
   composition: ContextComposition | null
   /** The most recent budget nudge, if the run has crossed its soft output budget. */
   budget: BudgetWarning | null
+  /** Set once if the engine withheld a declared web tool for this deployment.
+   *  See `ToolsWithheldNotice`. */
+  toolsWithheld: ToolsWithheldNotice | null
   usage: UsageInfo | null
   status: string | null
   done: boolean
@@ -119,6 +134,7 @@ const initialState: RunStreamState = {
   routing: null,
   composition: null,
   budget: null,
+  toolsWithheld: null,
   usage: null,
   status: null,
   done: false,
@@ -203,6 +219,22 @@ export function useRunStream(runId: string | null): RunStreamState {
           budget: Number(d.budget ?? 0),
         },
       })),
+    )
+    // Published at most once, before the loop starts. Guarded on `tools` so a
+    // malformed frame cannot render an empty notice.
+    on('tools_withheld', (d) =>
+      setState((s) =>
+        Array.isArray(d?.tools)
+          ? {
+              ...s,
+              toolsWithheld: {
+                tools: d.tools.map(String),
+                reason: String(d.reason ?? ''),
+                detail: String(d.detail ?? ''),
+              },
+            }
+          : s,
+      ),
     )
     on('text_delta', (d) => setState((s) => ({ ...s, text: s.text + (typeof d.text === 'string' ? d.text : '') })))
     on('tool_call', (d) =>

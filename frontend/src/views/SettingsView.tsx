@@ -693,6 +693,7 @@ const CLASS_LABELS: Record<string, string> = {
   catalog: 'Model catalog',
   local: 'Local model server',
   research: 'Web search & page fetch',
+  search: 'Web search backend',
 }
 
 const CLASS_HINTS: Record<string, string> = {
@@ -700,6 +701,7 @@ const CLASS_HINTS: Record<string, string> = {
   catalog: 'the OpenRouter model list and key checks',
   local: 'your own server — not covered by the master switch',
   research: 'the only class an agent points at a URL it chose',
+  search: 'the configured SearXNG/Brave endpoint — no switch of its own, follows research',
 }
 
 function NetworkAccess() {

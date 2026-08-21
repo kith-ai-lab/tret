@@ -1,9 +1,21 @@
-"""`tret` CLI — pack authoring utilities, outcome bookkeeping, and `run`."""
+"""`tret` CLI — pack authoring utilities, outcome bookkeeping, egress, and `run`."""
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
+
+# Not lazy like the imports inside `_run_command` and friends: this is a thin
+# wrapper over stdlib + `tret.config`, the same core chain `tret.cli` itself
+# is allowed under (see `tests/test_sdk_import_hygiene.py`), and `EGRESS_CLASSES`
+# has to exist before `main()` builds argparse `choices=` — before any handler runs.
+from tret.net.policy import (
+    EGRESS_CLASSES,
+    MODE_OFF,
+    clear_runtime_override,
+    egress_status,
+    set_runtime_override,
+)
 
 # Duplicated from tret.router_llm.objectives / tret.local_run rather than
 # imported: every import `run` needs must be lazy, inside its handler (see
@@ -92,6 +104,86 @@ def _backfill_outcomes(limit: int | None) -> None:
     # Not an error: runs that failed before they were routed have no model to
     # attribute anything to, and cancelled runs are deliberately not evidence.
     print(f"  skipped: {stats['skipped']} (never routed, or carrying no lesson)")
+
+
+_PROCESS_LOCAL_WARNING = (
+    "this override lives in THIS CLI process's memory only — it does NOT reach a "
+    "running server. To cut egress on a live deployment, use the settings UI or "
+    "POST /api/settings/egress (admin). This command is for scripting around "
+    "restarts, and for headless boxes: set the env var and verify with "
+    "`tret egress status` before boot."
+)
+
+# Past this many characters an allow-hosts cell is truncated (with a trailing
+# "…") rather than blowing out the table's alignment on one wide class.
+_HOSTS_TRUNCATE_AT = 60
+
+
+def _egress_rows(status: dict, names: tuple[str, ...]) -> list[str]:
+    """Render a slice of `egress_status()` as an aligned CLASS/MODE/... table.
+
+    Takes `names` rather than always walking every class so the single-class
+    line printed after `cut`/`restore` can share the exact column logic (and
+    the exact header) as the full `status` table, instead of drifting into a
+    second, slightly-different format.
+    """
+    header = ("CLASS", "MODE", "CONFIGURED", "OVERRIDE", "HOSTS")
+    rows = []
+    for name in names:
+        c = status["classes"][name]
+        hosts = ", ".join(c["allow_hosts"]) if c["allow_hosts"] else "(any)"
+        if len(hosts) > _HOSTS_TRUNCATE_AT:
+            hosts = hosts[: _HOSTS_TRUNCATE_AT - 1] + "…"
+        rows.append((name, c["mode"], c["configured"], c["runtime_override"] or "-", hosts))
+    # HOSTS is left unpadded (last column) so a truncated cell doesn't leave a
+    # trail of meaningless spaces after the "…".
+    widths = [max(len(header[i]), *(len(r[i]) for r in rows)) for i in range(4)]
+    def _line(values: tuple[str, ...]) -> str:
+        return "  ".join(values[i].ljust(widths[i]) for i in range(4)) + "  " + values[4]
+    return [_line(header)] + [_line(r) for r in rows]
+
+
+def _egress_status() -> None:
+    """`tret egress status` — the kill-switch board: what every class is doing
+    right now, master switch and all.
+
+    Master and proxy print above the table because they gate everything in it:
+    a class can read "on" in its own row and still be dark because the master
+    switch is off, and that would be an easy thing to miss reading top-to-bottom
+    if it weren't stated first.
+    """
+    status = egress_status()
+    print(f"master: {status['master']}")
+    print(f"proxy:  {'configured' if status['proxy'] else 'not configured'}")
+    print()
+    for line in _egress_rows(status, EGRESS_CLASSES):
+        print(line)
+
+
+def _egress_cut(egress_class: str) -> None:
+    """`tret egress cut CLASS` — narrow one egress class to off, in THIS process.
+
+    This calls `set_runtime_override`, the same in-memory narrowing the settings
+    API uses — but that memory belongs to whatever process calls it, and a CLI
+    invocation is its own short-lived process, not the running server. A `cut`
+    here and a `cut` from the admin UI look identical in the code path and mean
+    completely different things in practice; printing `_PROCESS_LOCAL_WARNING`
+    after every cut/restore is what keeps that from being a footgun that looks
+    like it worked.
+    """
+    set_runtime_override(egress_class, MODE_OFF)
+    for line in _egress_rows(egress_status(), (egress_class,)):
+        print(line)
+    print(f"\nNOTE: {_PROCESS_LOCAL_WARNING}", file=sys.stderr)
+
+
+def _egress_restore(egress_class: str) -> None:
+    """`tret egress restore CLASS` — drop the runtime override, back to whatever
+    the environment says. Same process-local caveat as `cut`; see there."""
+    clear_runtime_override(egress_class)
+    for line in _egress_rows(egress_status(), (egress_class,)):
+        print(line)
+    print(f"\nNOTE: {_PROCESS_LOCAL_WARNING}", file=sys.stderr)
 
 
 def _run_command(args: argparse.Namespace) -> None:
@@ -213,6 +305,44 @@ def main() -> None:
         "--limit", type=int, default=None, help="Only score the N most recent runs"
     )
 
+    egress = sub.add_parser("egress", help="Inspect and cut outbound network access")
+    egress_sub = egress.add_subparsers(dest="egress_command", required=True)
+    egress_sub.add_parser("status", help="Show egress mode for every class, master switch included")
+    egress_cut = egress_sub.add_parser(
+        "cut",
+        help=(
+            "Narrow one class to off in THIS CLI process only — not a running "
+            "server. See `tret egress cut --help`."
+        ),
+        description=(
+            "Narrow one egress class to off, in this CLI process's memory only. "
+            f"{_PROCESS_LOCAL_WARNING}"
+        ),
+    )
+    egress_cut.add_argument(
+        "egress_class",
+        metavar="CLASS",
+        choices=EGRESS_CLASSES,
+        help=f"one of: {', '.join(EGRESS_CLASSES)}",
+    )
+    egress_restore = egress_sub.add_parser(
+        "restore",
+        help=(
+            "Drop the runtime override for one class in THIS CLI process only — "
+            "not a running server. See `tret egress restore --help`."
+        ),
+        description=(
+            "Drop the runtime override for one egress class, back to what the "
+            f"environment says, in this CLI process's memory only. {_PROCESS_LOCAL_WARNING}"
+        ),
+    )
+    egress_restore.add_argument(
+        "egress_class",
+        metavar="CLASS",
+        choices=EGRESS_CLASSES,
+        help=f"one of: {', '.join(EGRESS_CLASSES)}",
+    )
+
     run_cmd = sub.add_parser(
         "run", help="Route a task, run it (optionally over local files), print a receipt"
     )
@@ -259,6 +389,14 @@ def main() -> None:
             _validate(args.path)
         elif args.packs_command == "hash":
             _hash(args.path)
+        return
+    if args.command == "egress":
+        if args.egress_command == "status":
+            _egress_status()
+        elif args.egress_command == "cut":
+            _egress_cut(args.egress_class)
+        elif args.egress_command == "restore":
+            _egress_restore(args.egress_class)
         return
     if args.command == "run":
         _run_command(args)

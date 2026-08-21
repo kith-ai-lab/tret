@@ -142,6 +142,33 @@ export function RunDetailView() {
         </div>
       )}
 
+      {/* The engine started this run without a web tool (web_search/fetch_url)
+          the harness or task declared, because this deployment has web
+          research switched off (TRET_EGRESS_RESEARCH). The run is HEALTHY —
+          it just ran without the tool(s) named below — so this is amber, not
+          an error.
+          Persistence: `tools_withheld` is only ever seen on the live SSE
+          stream. RunDetailView attaches `useRunStream` solely while the run
+          is queued/running (see `isLive` above); a finished run is fetched
+          from `run` and never reopens the stream, so it cannot replay this
+          event even though the bus replays a backlog to late joiners on
+          runs it still holds (backend/tret/engine/events.py,
+          MAX_RETAINED_COMPLETED_RUNS = 32 finished runs). The event also
+          isn't part of `run.messages`, so `deriveReplay` below has nothing
+          to reconstruct it from either way. Net effect: reload this page
+          after the run finishes and the notice is gone, regardless of
+          retention — there is no persistence path for it today. */}
+      {stream.toolsWithheld && (
+        <div className="panel" style={{ borderColor: 'var(--amber)', padding: '8px 12px' }}>
+          <span className="mono-label" style={{ color: 'var(--amber)' }}>
+            tools withheld: {stream.toolsWithheld.tools.join(', ')}
+          </span>{' '}
+          <span className="mono-body" style={{ fontSize: 11.5 }}>
+            {stream.toolsWithheld.detail}
+          </span>
+        </div>
+      )}
+
       {/* Task input */}
       <div>
         <div className="mono-label" style={{ marginBottom: 6 }}>

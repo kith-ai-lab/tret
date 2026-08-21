@@ -4,6 +4,8 @@ import { Link } from 'react-router-dom'
 
 import {
   api,
+  type GuardrailEgressHost,
+  type GuardrailEgressStats,
   type GuardrailEnergyStat,
   type GuardrailHarnessStat,
   type GuardrailMethodError,
@@ -21,6 +23,7 @@ import {
 } from '../components/shared/format'
 import { type Column, MonoTable } from '../components/shared/MonoTable'
 import { RoutingHistoryPanel } from '../components/shared/RoutingHistory'
+import { StatusBadge } from '../components/shared/StatusBadge'
 
 const WINDOWS = [7, 30, 90, 365]
 
@@ -129,6 +132,13 @@ export function Analytics() {
               rowKey={(e) => `${e.at ?? ''}-${e.method_slug}-${e.error.slice(0, 24)}`}
               empty="No method errors in this window."
             />
+          </Section>
+
+          <Section
+            title="Network access"
+            hint="What the research tools (web_search, fetch_url) reached this window, and what policy refused. Provider and catalog calls are not in this table — see the scope note below."
+          >
+            <NetworkAccessPanel egress={data.egress} />
           </Section>
 
           <Section
@@ -326,6 +336,109 @@ const ERROR_COLUMNS: Column<GuardrailMethodError>[] = [
     ),
   },
 ]
+
+/** `GuardrailEgressStats['classes']` is keyed by whatever egress classes the
+ *  backend reports — rendered as-is, never against a hard-coded class list, so
+ *  a new class (like `search`, alongside `provider`/`catalog`/`local`/
+ *  `research`) shows up here without a frontend change. */
+function NetworkAccessPanel({ egress }: { egress: GuardrailEgressStats }) {
+  const research = egress.classes.research
+  const noTraffic = egress.allowed + egress.denied === 0
+  const researchOff = research?.mode === 'off'
+  const reasonEntries = Object.entries(egress.denials_by_reason)
+
+  return (
+    <div className="stack" style={{ gap: 12 }}>
+      <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+        {Object.entries(egress.classes).map(([cls, status]) => (
+          <span key={cls} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <StatusBadge status={status.mode} />
+            <span className="mono-body">{cls}</span>
+          </span>
+        ))}
+      </div>
+
+      {noTraffic ? (
+        <div className="empty">
+          {researchOff
+            ? 'Web research is switched off for this deployment — no research-class calls to report.'
+            : 'No research-class calls in this window.'}
+        </div>
+      ) : (
+        <>
+          <MonoTable
+            columns={EGRESS_HOST_COLUMNS}
+            rows={egress.hosts}
+            rowKey={(h) => h.host}
+            empty="No research-class calls in this window."
+          />
+
+          <div>
+            <div className="mono-label" style={{ marginBottom: 4 }}>
+              Denials by reason
+            </div>
+            {reasonEntries.length === 0 ? (
+              <div className="empty">No denials in this window.</div>
+            ) : (
+              <table className="mono-table">
+                <thead>
+                  <tr>
+                    <th>Reason</th>
+                    <th className="num">Count</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {reasonEntries.map(([reason, count]) => (
+                    <tr key={reason}>
+                      <td>{reason}</td>
+                      <td className="num">{formatTokens(count)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+
+      <div
+        style={{
+          fontFamily: 'var(--mono)',
+          fontSize: 10.5,
+          color: 'var(--text-muted)',
+        }}
+      >
+        {/* The backend's own wording, verbatim — it says what this audit does
+            and does not cover so the table cannot be read as "everything tret
+            talked to". */}
+        {egress.scope}
+      </div>
+    </div>
+  )
+}
+
+const EGRESS_HOST_COLUMNS: Column<GuardrailEgressHost>[] = [
+  { key: 'host', header: 'Host', render: (h) => h.host },
+  { key: 'allowed', header: 'Allowed', align: 'right', render: (h) => formatTokens(h.allowed) },
+  {
+    key: 'denied',
+    header: 'Denied',
+    align: 'right',
+    render: (h) => (
+      <span style={{ color: h.denied > 0 ? 'var(--red)' : undefined }}>
+        {formatTokens(h.denied)}
+      </span>
+    ),
+  },
+  { key: 'bytes', header: 'Bytes', align: 'right', render: (h) => formatBytes(h.bytes) },
+]
+
+/** Local, since neither `format.ts` nor this file has a general byte
+ *  formatter — egress payload sizes are the only bytes-shaped number here. */
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / 1024).toFixed(1)} KB`
+}
 
 function RoutingGroupTable({ group }: { group: RoutingGroup }) {
   return (

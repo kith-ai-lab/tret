@@ -991,6 +991,33 @@ export interface GuardrailTotals {
   co2e_g: number
 }
 
+/** One host's research-class traffic over the window — top 50, sorted by
+ *  the backend by total calls (allowed + denied). */
+export interface GuardrailEgressHost {
+  host: string
+  allowed: number
+  denied: number
+  bytes: number
+}
+
+/** Research-class egress over the window, plus the network-access status this
+ *  deployment is currently running under (reuses the `EgressMode`/
+ *  `EgressClassStatus` shapes the settings view already defines). `classes` is
+ *  keyed by whatever egress classes the backend reports — never assume a fixed
+ *  set of names. `scope` is the backend's own wording on what this audit does
+ *  and does not cover, and is meant to travel with the numbers verbatim. */
+export interface GuardrailEgressStats {
+  allowed: number
+  denied: number
+  bytes: number
+  hosts: GuardrailEgressHost[]
+  denials_by_reason: Record<string, number>
+  master: EgressMode
+  proxy: boolean
+  classes: Record<string, EgressClassStatus>
+  scope: string
+}
+
 export interface GuardrailAnalytics {
   window_days: number | null
   project_id: string | null
@@ -1000,6 +1027,7 @@ export interface GuardrailAnalytics {
   harnesses: GuardrailHarnessStat[]
   energy: GuardrailEnergyStat[]
   energy_basis: GuardrailEnergyBasis
+  egress: GuardrailEgressStats
 }
 
 // ── Routing track record ─────────────────────────────────────────────────
