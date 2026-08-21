@@ -2,13 +2,20 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type FormEvent, useEffect, useState } from 'react'
 
 import {
+  ADAPTIVE_DEFAULTS,
+  ADAPTIVE_LIMITS,
+  type AdaptivePolicy,
   api,
   ApiError,
+  COMPACTION_MODES,
+  type CompactionMode,
   COST_TIER_DESCRIPTIONS,
   COST_TIERS,
   type CostTier,
   DEFAULT_MAX_COST_TIER,
   DEFAULT_OBJECTIVE,
+  ESCALATION_MODES,
+  type EscalationMode,
   type Harness,
   type HarnessBody,
   type LoopConfig,
@@ -28,6 +35,21 @@ const DEFAULT_LOOP: LoopConfig = {
   max_output_tokens: 8192,
   temperature: 0.2,
   max_cost_usd: 2,
+}
+
+/** The muted one-line explanation under a control. Matches the objective and
+ *  cost-tier fields, which have always used exactly these three properties. */
+const HINT = { fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--mono)' } as const
+
+const ESCALATION_DESCRIPTIONS: Record<string, string> = {
+  off: 'A run never changes model, however stuck it gets.',
+  on_stall:
+    'A run that has stopped making progress — repeated schema failures, a retrieval loop, or most of its iteration budget spent with nothing recorded — may move to a better-performing model within this harness policy.',
+}
+
+const COMPACTION_DESCRIPTIONS: Record<string, string> = {
+  auto: 'When a run approaches its context window, older bulk tool results are replaced by markers and optionally summarized. Retrieved values and recorded results are never elided, and the stored transcript is never edited — only what the model is shown.',
+  off: 'A run that outgrows its context window fails there, rather than shrinking what it sends.',
 }
 
 const emptyForm: HarnessBody = {
@@ -179,6 +201,13 @@ function HarnessEditor({
   const taskProfiles = ['freeform', ...(selectedPack?.task_types ?? []).map((t) => t.slug)]
 
   const costTier = form.model_policy.max_cost_tier ?? DEFAULT_MAX_COST_TIER
+  // An absent block means every default, which is what the backend's
+  // `adaptive_of` returns for a policy nobody has edited — so the form shows the
+  // real effective settings rather than a row of blanks.
+  const adaptive = { ...ADAPTIVE_DEFAULTS, ...(form.model_policy.adaptive ?? {}) }
+  const isPinned = form.model_policy.mode === 'pinned'
+  const knownEscalation = (ESCALATION_MODES as readonly string[]).includes(adaptive.escalation)
+  const knownCompaction = (COMPACTION_MODES as readonly string[]).includes(adaptive.compaction)
   // A stored tier is a plain string on the wire, so narrowing is a check, not a
   // cast: a value this build does not know about must reach the "as stored"
   // option rather than be assumed to be one of the four.
@@ -188,6 +217,17 @@ function HarnessEditor({
 
   const setPolicy = (patch: Partial<ModelPolicy>) =>
     setForm((f) => ({ ...f, model_policy: { ...f.model_policy, ...patch } }))
+  const setAdaptive = (patch: Partial<AdaptivePolicy>) =>
+    // Written out in full once anything is touched. The backend refuses unknown
+    // keys rather than dropping them, so a partial write of a block it has never
+    // seen is the one shape that cannot go wrong quietly.
+    setForm((f) => ({
+      ...f,
+      model_policy: {
+        ...f.model_policy,
+        adaptive: { ...ADAPTIVE_DEFAULTS, ...(f.model_policy.adaptive ?? {}), ...patch },
+      },
+    }))
   const setLoop = (patch: Partial<LoopConfig>) =>
     setForm((f) => ({ ...f, loop_config: { ...f.loop_config, ...patch } }))
 
@@ -384,6 +424,104 @@ function HarnessEditor({
             </div>
           </>
         )}
+      </div>
+
+      {/* Adaptive behavior — what this harness lets tret do about what it
+          learns. Part of model_policy on the wire; its own panel here because
+          two of the five govern the engine mid-run rather than routing, and
+          burying "this run may change model on its own" inside "Model policy"
+          undersells what it does. */}
+      <div className="panel">
+        <div className="mono-label" style={{ marginBottom: 4 }}>
+          Adaptive behavior
+        </div>
+        <div style={{ ...HINT, marginBottom: 10 }}>
+          All of these default to on. A fresh install has no recorded outcomes, so
+          nothing changes until runs accumulate — the defaults are a no-op on day
+          one, not a silent behavior change.
+        </div>
+
+        <label className="check-row" style={{ padding: 0, marginBottom: 10 }}>
+          <input
+            type="checkbox"
+            checked={adaptive.learn_from_outcomes}
+            onChange={(e) => setAdaptive({ learn_from_outcomes: e.target.checked })}
+          />
+          <span>
+            Learn from recorded outcomes
+            <span className="desc">
+              {' '}
+              — past runs of this task shape steer which model is chosen.
+              {isPinned && ' Applies when routing is automatic.'}
+            </span>
+          </span>
+        </label>
+
+        <div className="field">
+          <label className="mono-label">Escalation</label>
+          <select
+            value={adaptive.escalation}
+            onChange={(e) => setAdaptive({ escalation: e.target.value as EscalationMode })}
+          >
+            {ESCALATION_MODES.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+            {/* A stored value this build does not recognize keeps its own
+                option: a select that renders blank invites overwriting a
+                setting the operator cannot see. Same rule as Max cost tier. */}
+            {!knownEscalation && <option value={adaptive.escalation}>{adaptive.escalation} (as stored)</option>}
+          </select>
+          <div style={HINT}>
+            {ESCALATION_DESCRIPTIONS[adaptive.escalation] ??
+              'Not a mode this build recognizes — kept exactly as stored unless you change it.'}
+            {isPinned && ' Applies when routing is automatic: a pinned model is never switched away from.'}
+          </div>
+        </div>
+
+        <div className="field">
+          <label className="mono-label">Context compaction</label>
+          <select
+            value={adaptive.compaction}
+            onChange={(e) => setAdaptive({ compaction: e.target.value as CompactionMode })}
+          >
+            {COMPACTION_MODES.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+            {!knownCompaction && <option value={adaptive.compaction}>{adaptive.compaction} (as stored)</option>}
+          </select>
+          <div style={HINT}>
+            {COMPACTION_DESCRIPTIONS[adaptive.compaction] ??
+              'Not a mode this build recognizes — kept exactly as stored unless you change it.'}
+          </div>
+        </div>
+
+        <div className="row" style={{ alignItems: 'flex-start' }}>
+          <NumberField
+            label="Context headroom"
+            value={adaptive.context_headroom}
+            step={0.05}
+            onChange={(v) => setAdaptive({ context_headroom: v })}
+          />
+          <NumberField
+            label="Max switches"
+            value={adaptive.max_switches}
+            onChange={(v) => setAdaptive({ max_switches: v })}
+          />
+        </div>
+        <div style={{ ...HINT, marginTop: 6 }}>
+          Headroom is the share of the model&rsquo;s context window a run may fill
+          before the engine compacts ({ADAPTIVE_LIMITS.context_headroom.min}–
+          {ADAPTIVE_LIMITS.context_headroom.max}); the remainder holds the answer
+          the model has yet to write, so it is not slack. Max switches bounds how
+          often one run may change model ({ADAPTIVE_LIMITS.max_switches.min}–
+          {ADAPTIVE_LIMITS.max_switches.max}) — each one voids the prompt cache and
+          re-sends the transcript at full price.
+          {isPinned && ' Switching applies when routing is automatic.'}
+        </div>
       </div>
 
       {/* Tools */}

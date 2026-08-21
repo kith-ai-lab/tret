@@ -524,12 +524,50 @@ export interface TaskType {
   instructions?: string
 }
 
+export const COMPACTION_MODES = ['auto', 'off'] as const
+export const ESCALATION_MODES = ['off', 'on_stall'] as const
+export type CompactionMode = (typeof COMPACTION_MODES)[number]
+export type EscalationMode = (typeof ESCALATION_MODES)[number]
+
+/** What a harness lets tret do about what it learns.
+ *
+ *  Every field is optional and every default is ON — an omitted block means
+ *  "all of it", which is what `tret/adaptive.py::adaptive_of` returns for a
+ *  policy that has never been edited. Mirrors that dataclass field for field;
+ *  the backend refuses unknown keys rather than ignoring them, so a name that
+ *  drifts here fails loudly at save rather than silently doing nothing. */
+export interface AdaptivePolicy {
+  /** Whether recorded outcomes steer routing at all. */
+  learn_from_outcomes?: boolean
+  /** Share of the model's context window a run may fill before the engine
+   *  intervenes. Backend range 0.3–0.95, default 0.8. */
+  context_headroom?: number
+  compaction?: CompactionMode
+  escalation?: EscalationMode
+  /** How many times one run may change model. Backend range 0–3, default 1. */
+  max_switches?: number
+}
+
+export const ADAPTIVE_DEFAULTS: Required<AdaptivePolicy> = {
+  learn_from_outcomes: true,
+  context_headroom: 0.8,
+  compaction: 'auto',
+  escalation: 'on_stall',
+  max_switches: 1,
+}
+
+export const ADAPTIVE_LIMITS = {
+  context_headroom: { min: 0.3, max: 0.95 },
+  max_switches: { min: 0, max: 3 },
+} as const
+
 export interface ModelPolicy {
   mode: 'auto' | 'pinned'
   model?: string
   allowed?: string[]
   max_cost_tier?: string
   objective?: RoutingObjective
+  adaptive?: AdaptivePolicy
 }
 
 export interface LoopConfig {
