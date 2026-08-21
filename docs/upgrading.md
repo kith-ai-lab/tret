@@ -65,10 +65,19 @@ TRET_DATABASE_URL=postgresql+asyncpg://bench:bench@postgres:5432/bench
 or rename them once and use the new default:
 
 ```bash
-docker compose up -d postgres
-docker compose exec postgres psql -U bench -d postgres -c 'ALTER DATABASE bench RENAME TO tret'
-docker compose exec postgres psql -U bench -d postgres -c 'ALTER ROLE bench RENAME TO tret'
+docker compose stop backend            # ALTER DATABASE needs no live connections
+docker compose exec postgres psql -U bench -d postgres -c 'CREATE ROLE tmp_admin LOGIN SUPERUSER'
+docker compose exec postgres psql -U tmp_admin -d postgres \
+  -c 'ALTER DATABASE bench RENAME TO tret' \
+  -c 'ALTER ROLE bench RENAME TO tret' \
+  -c "ALTER ROLE tret PASSWORD 'tret'"
+docker compose exec postgres psql -U tret -d postgres -c 'DROP ROLE tmp_admin'
 ```
+
+The detour through `tmp_admin` is not optional: Postgres refuses to rename
+the role you are connected as. The `ALTER ROLE ... PASSWORD` is not either —
+a rename keeps the old password, and the compose default the backend
+connects with is `tret`.
 
 **3. Fly volume: `bench_storage` → `tret_storage`.** `fly.toml` mounts
 `tret_storage`, and Fly will not rename a volume. Either set `source` back to
