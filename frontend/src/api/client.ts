@@ -108,6 +108,14 @@ export interface RoutingDecision {
   max_cost_tier?: string
   /** Null when no evidence was read: learning off, no history, or an override. */
   evidence?: RoutingEvidence | null
+  /** Exactly what the router was asked, and a sha256 of it. Null wherever no
+   *  router was consulted — an override, or a single permitted candidate —
+   *  which is the same claim `router_model: null` makes, about the prompt.
+   *  Present on the fallback path too: the router was asked and did not answer
+   *  usefully, and that is when the question matters most. The hash covers the
+   *  stored text, so it is verifiable from this object alone. */
+  router_prompt?: string | null
+  router_prompt_sha256?: string | null
   fallback_used: boolean
   override: string | null // "user_pin" | "run_override" | null
   latency_ms: number

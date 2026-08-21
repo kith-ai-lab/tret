@@ -32,6 +32,7 @@ function tierOf(routing: RoutingDecision): string | null {
  *  applies to keyboard activation too, which arrives as a bubbling click. */
 export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | null; tier?: string }) {
   const [open, setOpen] = useState(false)
+  const [showPrompt, setShowPrompt] = useState(false)
   const ref = useRef<HTMLSpanElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popId = useId()
@@ -162,6 +163,50 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
           <div className="mono-body" style={{ fontSize: 11.5, whiteSpace: 'pre-wrap' }}>
             {routing.reasoning || '—'}
           </div>
+
+          {/* What the router was asked. Collapsed by default — it runs to a few
+              KB — but present, because a decision you cannot see the question
+              for is a decision you have to take on trust. Null here is
+              meaningful rather than missing: no router was consulted. */}
+          {routing.router_prompt ? (
+            <>
+              <button
+                type="button"
+                className="btn btn-sm"
+                style={{ marginTop: 10 }}
+                onClick={() => setShowPrompt((v) => !v)}
+                aria-expanded={showPrompt}
+              >
+                {showPrompt ? 'Hide' : 'Show'} the prompt the router was given (
+                {routing.router_prompt.length.toLocaleString()} chars)
+              </button>
+              {showPrompt && (
+                <>
+                  <pre
+                    className="code-block"
+                    style={{ maxHeight: 320, marginTop: 8, fontSize: 11 }}
+                  >
+                    {routing.router_prompt}
+                  </pre>
+                  <div className="kv" style={{ marginTop: 6 }}>
+                    <span className="k">sha256</span>
+                    <span style={{ wordBreak: 'break-all' }}>
+                      {routing.router_prompt_sha256 ?? '—'}
+                    </span>
+                    <span className="k">System half</span>
+                    <span>
+                      pinned by prompt version {routing.routing_prompt_version} — constant
+                      for that version, in the source
+                    </span>
+                  </div>
+                </>
+              )}
+            </>
+          ) : (
+            <div className="mono-label" style={{ marginTop: 10 }}>
+              No prompt: {routing.override ? 'a model was named, so nothing was asked' : 'no router was consulted'}
+            </div>
+          )}
         </span>
       )}
     </span>
