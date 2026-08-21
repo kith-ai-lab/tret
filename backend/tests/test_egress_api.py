@@ -41,9 +41,27 @@ def client(monkeypatch):
 
 def test_status_reports_every_class(client):
     body = client.get("/api/settings/egress").json()
-    assert set(body["classes"]) == {"provider", "catalog", "local", "research"}
+    assert set(body["classes"]) == {"provider", "catalog", "local", "research", "search"}
     assert body["classes"]["research"]["mode"] == "on"
+    # Status must report the mode actually ENFORCED, not just what `search`
+    # mirrors from `research`. With research on but no search backend
+    # configured, policy_for() pins `search`'s mode to off (nothing to
+    # reach) — the status endpoint has to agree with that, not with
+    # effective_mode()'s "search rides research" rule in isolation.
+    assert body["classes"]["search"]["mode"] == "off"
     assert body["search_backend"] == "none"
+
+
+def test_status_reports_search_as_on_once_a_backend_is_configured(client, monkeypatch):
+    monkeypatch.setenv("TRET_SEARCH_PROVIDER", "searxng")
+    monkeypatch.setenv("TRET_SEARXNG_BASE_URL", "http://searxng:8080")
+    get_settings.cache_clear()
+    try:
+        body = client.get("/api/settings/egress").json()
+        assert body["classes"]["search"]["mode"] == "on"
+        assert body["classes"]["search"]["allow_hosts"] == ["searxng"]
+    finally:
+        get_settings.cache_clear()
 
 
 def test_an_admin_can_cut_a_class(client):

@@ -6,6 +6,10 @@ backend inside the chokepoint and this file under a page.
 
 The query leaves the deployment. That is inherent to a hosted search API and is
 the reason `searxng.py` exists next to this one.
+
+The endpoint is fixed (ENDPOINT below), operator-chosen the moment
+TRET_SEARCH_PROVIDER=brave is set — never a model-supplied URL — so these calls
+ride the `search` egress class (`tret/net/policy.py`), not `research`.
 """
 from __future__ import annotations
 
@@ -13,7 +17,7 @@ import httpx
 
 from tret.config import get_settings
 from tret.net.client import USER_AGENT, open_client
-from tret.net.policy import CLASS_RESEARCH
+from tret.net.policy import CLASS_SEARCH
 from tret.net.search.base import SearchResult, SearchUnavailable
 
 ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
@@ -38,7 +42,7 @@ class BraveSearchProvider:
         }
         timeout = float(get_settings().egress_research_timeout_seconds)
         try:
-            async with open_client(CLASS_RESEARCH, timeout=timeout, headers=headers) as client:
+            async with open_client(CLASS_SEARCH, timeout=timeout, headers=headers) as client:
                 resp = await client.get(
                     ENDPOINT, params={"q": query, "count": max(1, min(int(max_results), 20))}
                 )

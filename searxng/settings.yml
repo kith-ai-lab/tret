@@ -1,0 +1,36 @@
+# Minimal SearXNG config for the bundled `search` compose profile
+# (docker-compose.yml, service `searxng`). Mounted read-write at
+# /etc/searxng/settings.yml — SearXNG writes a few derived files next to it on
+# first boot, which is why the volume isn't :ro.
+#
+# This instance is internal-only (docs/hardening.md §9, tret/net/policy.py
+# CLASS_SEARCH): the backend reaches it at http://searxng:8080 on the compose
+# network, no port is published, and tret trusts this exact operator-configured
+# host without the SSRF checks it applies to a model-chosen URL. That trust is
+# only sound as long as this container is never reachable from anywhere else —
+# see the `searxng` service's comment in docker-compose.yml.
+use_default_settings: true
+
+server:
+  # Change this for anything longer-lived than a local demo — it signs
+  # SearXNG's own session data. ${SEARXNG_SECRET:-...} mirrors this repo's
+  # .env.example convention for documenting a default; SearXNG does not expand
+  # it itself, so replace the literal string if you deploy this for real.
+  secret_key: "${SEARXNG_SECRET:-change-me-searxng}"
+  # Deliberately off: SearXNG's limiter is aimed at a metasearch instance
+  # exposed to the public internet (bot/scrape throttling). This instance has
+  # no exposed port and no client but tret's backend, so the limiter would only
+  # add a way for a burst of `web_search` calls in one run to start failing
+  # against nothing. Do not flip this on without also publishing the service to
+  # a wider network — the two decisions go together.
+  limiter: false
+
+search:
+  # ESSENTIAL: without `json` here, SearXNG's search endpoint answers a
+  # `format=json` request with 403 Forbidden — its JSON API is opt-in per
+  # instance, not implied by asking for it in the query string. This is the
+  # single most common misconfiguration when standing up SearXNG behind an
+  # API-consuming client (tret/net/search/searxng.py requests `format: json`).
+  formats:
+    - html
+    - json

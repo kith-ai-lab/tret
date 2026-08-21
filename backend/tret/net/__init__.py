@@ -7,7 +7,7 @@
     tret.net.search   web search, behind a provider interface (default: none)
     tret.net.fetch    URL -> snapshot -> Document, the research evidence path
 
-Read `policy.py` first: it explains why egress is three switchable classes
+Read `policy.py` first: it explains why egress is five switchable classes
 rather than one boolean, and why every rule in this package narrows.
 """
 from tret.net.client import build_client, open_client
@@ -17,6 +17,7 @@ from tret.net.policy import (
     CLASS_LOCAL,
     CLASS_PROVIDER,
     CLASS_RESEARCH,
+    CLASS_SEARCH,
     EGRESS_CLASSES,
     MODE_OFF,
     MODE_ON,
@@ -33,6 +34,7 @@ __all__ = [
     "CLASS_LOCAL",
     "CLASS_PROVIDER",
     "CLASS_RESEARCH",
+    "CLASS_SEARCH",
     "EGRESS_CLASSES",
     "MODE_OFF",
     "MODE_ON",

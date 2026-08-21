@@ -250,6 +250,7 @@ a grep.
 | `catalog` | the OpenRouter model list, provider key validation | on |
 | `local` | a self-hosted model server at `TRET_LOCAL_BASE_URL` | on |
 | `research` | `web_search` and `fetch_url` | **off** |
+| `search` | the web search backend itself (`TRET_SEARXNG_BASE_URL` or Brave) | follows research |
 
 Every switch narrows and none widens. `TRET_EGRESS` is the master; each
 `TRET_EGRESS_<CLASS>` narrows it further; `POST /api/settings/egress` (admin)
@@ -288,6 +289,40 @@ does not take that on faith — with the master switch off, the `local` class
 secretly on the internet is refused rather than trusted for its name. Every
 cloud provider drops out of `available_providers()`, so routing degrades to
 local models instead of picking a model it cannot reach and failing the run.
+
+### The search class: trusting the backend, not the model
+
+`research` covers `web_search` and `fetch_url` as tools, but the search
+*backend* those calls hit — a self-hosted SearXNG instance, or Brave's API —
+has its own class, `search`, with different rules:
+
+- it has no switch of its own (no `TRET_EGRESS_SEARCH`). The search backend is
+  part of the research capability, not a separate one you could leave reachable
+  after turning research off, so `search` simply follows `TRET_EGRESS_RESEARCH`
+  — narrowed by the master switch and any runtime override exactly like
+  `research` is, with one difference: `research`'s `replay` mode serves cached
+  pages and makes no new requests, but there is no cache for a search backend to
+  serve from, so for `search`, `replay` reads as fully **off**;
+- its allowlist holds exactly one host — whichever backend
+  `TRET_SEARCH_PROVIDER` names — not the open web `research`'s empty allowlist
+  permits, and not `TRET_EGRESS_RESEARCH_ALLOW_HOSTS` either;
+- it skips the checks in the next section entirely: no https-only requirement,
+  no standard-ports-only requirement, no address resolution. The reason is what
+  chooses the destination. `research`'s checks exist because a **model** picks
+  the URL for `fetch_url`, from context that can include an uploaded document —
+  the classic prompt-injection surface. Nothing chooses the search backend's URL
+  except the operator who wrote `TRET_SEARXNG_BASE_URL` into the environment.
+  That is the same trust `local` gets for `TRET_LOCAL_BASE_URL` (§9's air-gapped
+  section above), extended here to the search endpoint for the same reason: an
+  operator-named destination is not the attack surface an SSRF check defends.
+  It is what makes `http://searxng:8080` — plain http, a non-standard port, a
+  private compose-network address — a normal, working configuration instead of
+  three separate denials.
+
+A host that is *not* the configured backend is still refused under `search`: the
+allowlist is one host, not a category, so pointing `fetch_url` (which stays on
+`research`) at your SearXNG instance is governed by `research`'s own allowlist,
+not by this trust.
 
 ### What the research class checks
 

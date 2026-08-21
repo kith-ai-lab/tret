@@ -149,7 +149,7 @@ class Settings(BaseSettings):
     packs_dir: str = "../packs"
 
     # ── outbound network (tret/net/) ─────────────────────────────────────────
-    # Egress is three classes, not one boolean, because tret must reach an LLM
+    # Egress is five classes, not one boolean, because tret must reach an LLM
     # provider to do anything and "no internet" is a different deployment from
     # "no *research* internet". Every switch here narrows: `egress` is the master,
     # each class switch narrows it further, and the settings API can narrow again
@@ -171,9 +171,10 @@ class Settings(BaseSettings):
     egress_research: str = "off"  # off | replay | on
     # Comma-separated hosts the research class may reach (subdomains included).
     # EMPTY MEANS THE PUBLIC WEB — a general web search cannot work against an
-    # allowlist, and pretending otherwise would be worse than saying so. Set it to
-    # turn research into a genuine allowlist; the configured search endpoint is
-    # always added, since the operator already chose that host.
+    # allowlist, and pretending otherwise would be worse than saying so. Set it
+    # to turn research into a genuine allowlist. The configured search endpoint
+    # does NOT need to be listed here — it rides its own `search` egress class
+    # (tret/net/policy.py CLASS_SEARCH), not this one.
     egress_research_allow_hosts: str = ""
     egress_research_max_bytes: int = 2_000_000  # per fetched page
     egress_research_timeout_seconds: float = 20.0

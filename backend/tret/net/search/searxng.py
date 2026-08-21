@@ -7,8 +7,10 @@ the work tret is built for the query is often the confidential part ("is
 one of those.
 
 Its base URL is operator-configured and may well be an internal address, so
-these calls are still `research` class but the host lands in the research
-allowlist automatically (`policy.research_allow_hosts`).
+these calls ride the `search` egress class (`tret/net/policy.py`), not
+`research`: the destination is something an operator named, not something a
+model chose, so it gets `search`'s allow-one-host, no-SSRF-check trust rather
+than `research`'s public-address verification.
 """
 from __future__ import annotations
 
@@ -18,7 +20,7 @@ import httpx
 
 from tret.config import get_settings
 from tret.net.client import USER_AGENT, open_client
-from tret.net.policy import CLASS_RESEARCH
+from tret.net.policy import CLASS_SEARCH
 from tret.net.search.base import SearchResult, SearchUnavailable
 
 
@@ -39,7 +41,7 @@ class SearxngSearchProvider:
         headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
         try:
             async with open_client(
-                CLASS_RESEARCH,
+                CLASS_SEARCH,
                 timeout=float(settings.egress_research_timeout_seconds),
                 headers=headers,
             ) as client:

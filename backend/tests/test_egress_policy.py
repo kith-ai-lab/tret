@@ -16,6 +16,7 @@ from tret.net.policy import (
     CLASS_LOCAL,
     CLASS_PROVIDER,
     CLASS_RESEARCH,
+    CLASS_SEARCH,
     MODE_OFF,
     MODE_ON,
     MODE_REPLAY,
@@ -141,9 +142,18 @@ def test_a_configured_research_allowlist_matches_subdomains_only():
     assert not host_allowed("example.com.evil.net", pol)
 
 
-def test_the_search_backend_is_always_reachable_under_an_allowlist():
-    """An operator who names a search backend has already chosen that host;
-    making them list it twice only produces a confusing outage."""
+def test_the_search_backend_no_longer_rides_the_research_allowlist():
+    """This used to be `..._is_always_reachable_under_an_allowlist`: research's
+    allowlist auto-added the configured search endpoint, since the operator had
+    already chosen that host. Now the search backend has its own class
+    (`search`, see the tests below) with its own trust rules — an
+    operator-configured destination gets the same treatment `local` gets for
+    TRET_LOCAL_BASE_URL, not research's SSRF checks. With the class split, the
+    auto-add is not just redundant but wrong: it would make research's
+    allowlist wider than what the operator actually typed into
+    TRET_EGRESS_RESEARCH_ALLOW_HOSTS. A `fetch_url` call a *model* makes to that
+    same host is still `research` traffic, governed by this allowlist alone,
+    same as any other host — which is exactly what this test now checks."""
     s = _settings(
         egress="on",
         egress_research="on",
@@ -151,7 +161,7 @@ def test_the_search_backend_is_always_reachable_under_an_allowlist():
         search_provider="searxng",
         searxng_base_url="https://searx.internal.example",
     )
-    assert host_allowed("searx.internal.example", policy_for(CLASS_RESEARCH, s))
+    assert not host_allowed("searx.internal.example", policy_for(CLASS_RESEARCH, s))
 
 
 def test_a_disabled_class_refuses_to_build_a_client():
@@ -161,6 +171,131 @@ def test_a_disabled_class_refuses_to_build_a_client():
     with pytest.raises(EgressDenied) as excinfo:
         build_client(CLASS_RESEARCH, policy=policy_for(CLASS_RESEARCH, _settings()))
     assert "TRET_EGRESS_RESEARCH" in str(excinfo.value)
+
+
+# ── the search class: the backend, not the model ─────────────────────────────
+# `search` carries the web SEARCH BACKEND (SearXNG, Brave) — an
+# operator-configured destination — not `fetch_url`'s model-chosen URL. It has
+# no switch of its own; it rides TRET_EGRESS_RESEARCH, and its allowlist is
+# exactly one host: whichever backend is actually configured.
+def test_effective_mode_of_search_mirrors_research():
+    """No TRET_EGRESS_SEARCH exists — the search backend is part of the
+    research capability and is cut by the same switch, so the two must track
+    exactly except for the replay rule below."""
+    on = _settings(egress="on", egress_research="on")
+    assert effective_mode(CLASS_SEARCH, on) == effective_mode(CLASS_RESEARCH, on) == MODE_ON
+
+    off = _settings(egress="on", egress_research="off")
+    assert effective_mode(CLASS_SEARCH, off) == effective_mode(CLASS_RESEARCH, off) == MODE_OFF
+
+    master_off = _settings(egress="off", egress_research="on")
+    assert effective_mode(CLASS_SEARCH, master_off) == effective_mode(CLASS_RESEARCH, master_off) == MODE_OFF
+
+
+def test_replay_reads_as_off_for_search_even_though_research_stays_in_replay():
+    """`replay` means "serve snapshots, fetch nothing new" for `fetch_url` —
+    there is no snapshot cache for a search backend to serve from, so `replay`
+    is not a meaningful state for `search` and must not be read as anything
+    other than off. tret/engine/tools.py::web_search already refuses to search
+    in replay mode; this is policy agreeing with that rather than contradicting
+    it with a `mode` that claims replay is still in force."""
+    s = _settings(egress="on", egress_research="replay")
+    assert effective_mode(CLASS_RESEARCH, s) == MODE_REPLAY
+    assert effective_mode(CLASS_SEARCH, s) == MODE_OFF
+
+
+def test_a_replay_override_on_search_itself_also_collapses_to_off():
+    """The runtime-override path, not just the env-configured one: the override
+    merges into research's mode via narrower() BEFORE the replay->off collapse,
+    so a `replay` override on "search" cannot leave `effective_mode` reporting
+    a `replay` search class — the docstring says search can never be `replay`."""
+    s = _settings(egress="on", egress_research="on")
+    policy.set_runtime_override(CLASS_SEARCH, MODE_REPLAY)
+    assert effective_mode(CLASS_SEARCH, s) == MODE_OFF
+
+
+def test_a_runtime_override_on_search_itself_narrows_further():
+    """Point 2 says search mirrors research's *switch* narrowing; this is the
+    other kind of narrowing — an override set directly on "search" (not
+    "research") composes on top via narrower(), same as any other class."""
+    s = _settings(egress="on", egress_research="on")
+    assert effective_mode(CLASS_SEARCH, s) == MODE_ON
+    policy.set_runtime_override(CLASS_SEARCH, MODE_OFF)
+    assert effective_mode(CLASS_SEARCH, s) == MODE_OFF
+    # Narrowing "search" does not narrow "research" — they are different keys
+    # in the override map, even though search's mode normally follows research.
+    assert effective_mode(CLASS_RESEARCH, s) == MODE_ON
+
+
+def test_search_policy_allows_only_the_configured_searxng_host():
+    s = _settings(
+        egress="on",
+        egress_research="on",
+        search_provider="searxng",
+        searxng_base_url="http://searxng:8080",
+    )
+    pol = policy_for(CLASS_SEARCH, s)
+    assert pol.mode == MODE_ON
+    assert pol.allow_hosts == frozenset({"searxng"})
+    assert type(pol.allow_hosts) is frozenset
+    assert host_allowed("searxng", pol)
+    # The allowlist is one host, not a category: a different host — even a
+    # plausible-looking one — is refused. This is what distinguishes `search`
+    # from `research`'s empty-allowlist-means-the-public-web.
+    assert not host_allowed("evil.example.com", pol)
+    assert not host_allowed("searxng.evil.example.com", pol)
+
+
+def test_search_policy_allows_only_the_configured_brave_host():
+    s = _settings(egress="on", egress_research="on", search_provider="brave", search_api_key="k")
+    pol = policy_for(CLASS_SEARCH, s)
+    assert pol.mode == MODE_ON
+    assert pol.allow_hosts == frozenset({"api.search.brave.com"})
+
+
+def test_search_policy_trusts_its_one_host_the_way_local_trusts_its_own():
+    """Operator-configured, never model-chosen — https-only, standard-ports-
+    only and address verification would all be defending against an attack
+    this destination cannot be steered into (docs/hardening.md §9)."""
+    from tret.net.policy import VERIFY_NONE
+
+    s = _settings(
+        egress="on",
+        egress_research="on",
+        search_provider="searxng",
+        searxng_base_url="http://searxng:8080",
+    )
+    pol = policy_for(CLASS_SEARCH, s)
+    assert pol.allow_http is True
+    assert pol.standard_ports_only is False
+    assert pol.verify_addresses == VERIFY_NONE
+
+
+def test_search_mode_is_off_with_no_backend_configured():
+    """host_allowed() itself is generic — empty allow_hosts reads as "any host"
+    for every class, `search` included, same as `research`'s empty allowlist
+    meaning the open web. What must NOT happen is a `search` class with nothing
+    configured behaving like an open one, and that guarantee lives one level up:
+    policy_for pins `mode` to MODE_OFF whenever no backend is configured, so
+    `check_url`/`build_client` refuse with `class_disabled` before host_allowed
+    is ever consulted (see test_no_search_provider_configured_means_the_class_is_off
+    in test_egress_guard.py for that end-to-end check)."""
+    s = _settings(egress="on", egress_research="on", search_provider="")
+    pol = policy_for(CLASS_SEARCH, s)
+    assert pol.mode == MODE_OFF
+    assert pol.allow_hosts == frozenset()
+
+
+def test_a_host_that_is_not_the_configured_backend_is_denied_under_search():
+    s = _settings(
+        egress="on",
+        egress_research="on",
+        search_provider="searxng",
+        searxng_base_url="https://searx.internal.example",
+    )
+    pol = policy_for(CLASS_SEARCH, s)
+    assert not host_allowed("api.search.brave.com", pol)
+    assert not host_allowed("attacker.example.com", pol)
 
 
 # ── availability follows egress ──────────────────────────────────────────────

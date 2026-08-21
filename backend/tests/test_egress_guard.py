@@ -19,6 +19,7 @@ from tret.net.policy import (
     CLASS_LOCAL,
     CLASS_PROVIDER,
     CLASS_RESEARCH,
+    CLASS_SEARCH,
     EgressDenied,
     policy_for,
 )
@@ -168,3 +169,81 @@ async def test_an_air_gapped_local_server_must_be_on_a_private_address(resolves)
     resolves("192.168.1.50")
     target = await check_url("http://ollama.example.com:11434/v1/models", CLASS_LOCAL, pol)
     assert target.port == 11434  # local servers live on odd ports; that is fine here
+
+
+# ── the search class ──────────────────────────────────────────────────────────
+# The web search *backend* (SearXNG, Brave), not `fetch_url`'s model-chosen
+# URL — an operator-configured destination, trusted like `local`, not checked
+# like `research`. DNS is stubbed here too even though CLASS_SEARCH's
+# VERIFY_NONE means _resolve is never called: it keeps this suite's style (every
+# test starts from "what would a real deployment's DNS say") consistent, and
+# guards against a future change to verify_addresses silently starting to
+# depend on a resolver nothing has stubbed.
+def _search(**kw):
+    return policy_for(
+        CLASS_SEARCH,
+        Settings(egress="on", egress_research="on", search_provider="searxng", **kw),
+    )
+
+
+async def test_the_configured_internal_searxng_host_is_allowed(resolves):
+    resolves("172.18.0.5")
+    pol = _search(searxng_base_url="http://searxng:8080")
+    target = await check_url("http://searxng:8080/search", CLASS_SEARCH, pol)
+    assert target.host == "searxng"
+    assert target.port == 8080
+    assert target.scheme == "http"
+
+
+async def test_a_trailing_dot_fqdn_in_the_base_url_does_not_brick_search(resolves):
+    """A trailing-dot FQDN (http://searxng./) used to yield allow_hosts
+    {"searxng."} — the dot never matches host_allowed's rstripped candidate,
+    so the operator's own configured host was denied. _hosts_from_urls()
+    rstrips the dot the same way host_allowed() already does."""
+    resolves("172.18.0.5")
+    pol = _search(searxng_base_url="http://searxng./")
+    assert pol.allow_hosts == frozenset({"searxng"})
+    target = await check_url("http://searxng:8080/search", CLASS_SEARCH, pol)
+    assert target.host == "searxng"
+
+
+async def test_the_search_backend_is_denied_when_research_is_off(resolves):
+    resolves("172.18.0.5")
+    pol = policy_for(
+        CLASS_SEARCH,
+        Settings(egress="on", egress_research="off", search_provider="searxng",
+                 searxng_base_url="http://searxng:8080"),
+    )
+    denied = await _denied("http://searxng:8080/search", egress_class=CLASS_SEARCH, policy=pol)
+    assert denied.reason == "class_disabled"
+
+
+async def test_the_search_backend_is_denied_under_replay(resolves):
+    """`research`'s replay mode still refuses new fetches (its own
+    `replay_only` reason); `search` has no replay concept at all, so it reads
+    straight through to `class_disabled` — see
+    test_replay_reads_as_off_for_search_even_though_research_stays_in_replay
+    in test_egress_policy.py for the mode-level version of this."""
+    resolves("172.18.0.5")
+    pol = policy_for(
+        CLASS_SEARCH,
+        Settings(egress="on", egress_research="replay", search_provider="searxng",
+                 searxng_base_url="http://searxng:8080"),
+    )
+    denied = await _denied("http://searxng:8080/search", egress_class=CLASS_SEARCH, policy=pol)
+    assert denied.reason == "class_disabled"
+
+
+async def test_a_host_other_than_the_configured_backend_is_denied(resolves):
+    """The search allowlist is one host, not a category — the whole point of
+    trusting it without SSRF checks is that nothing else can ever land here."""
+    resolves("93.184.216.34")
+    pol = _search(searxng_base_url="http://searxng:8080")
+    denied = await _denied("https://evil.example.com/search", egress_class=CLASS_SEARCH, policy=pol)
+    assert denied.reason == "host_not_allowed"
+
+
+async def test_no_search_provider_configured_means_the_class_is_off():
+    pol = policy_for(CLASS_SEARCH, Settings(egress="on", egress_research="on"))
+    denied = await _denied("http://searxng:8080/search", egress_class=CLASS_SEARCH, policy=pol)
+    assert denied.reason == "class_disabled"

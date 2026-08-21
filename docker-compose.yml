@@ -55,9 +55,10 @@ services:
       TRET_LOGIN_WINDOW_SECONDS: ${TRET_LOGIN_WINDOW_SECONDS:-300.0}
       TRET_METHODS_NETWORK_ISOLATION: ${TRET_METHODS_NETWORK_ISOLATION:-true}
       # ── outbound network (docs/hardening.md §9, tret/net/) ──────────────
-      # Three switchable classes plus `local`. TRET_EGRESS=off is the
-      # air-gapped deployment: no cloud provider, no catalog, no web — a local
-      # model server still works, provided it really is on a private address.
+      # Five switchable classes: provider, catalog, local, research, search.
+      # TRET_EGRESS=off is the air-gapped deployment: no cloud provider, no
+      # catalog, no web — a local model server still works, provided it
+      # really is on a private address.
       TRET_EGRESS: ${TRET_EGRESS:-on}
       TRET_EGRESS_PROVIDER: ${TRET_EGRESS_PROVIDER:-on}
       TRET_EGRESS_CATALOG: ${TRET_EGRESS_CATALOG:-on}
@@ -207,6 +208,29 @@ services:
         ollama pull "$$PULL_MODEL"
         echo "done: $$(ollama list)"
     restart: "no"
+
+  # ── bundled SearXNG search backend (opt-in) ────────────────────────────────
+  # `docker compose --profile search up` adds a self-hosted metasearch instance
+  # so `web_search` works with no hosted API key and the query itself never
+  # leaves your network. Set TRET_SEARCH_PROVIDER=searxng and
+  # TRET_SEARXNG_BASE_URL=http://searxng:8080 in .env to use it.
+  #
+  # These calls ride the `search` egress class (tret/net/policy.py,
+  # docs/hardening.md §9), not `research`: the backend's URL is something the
+  # operator named here, never something a model chooses, so it gets that
+  # class's allow-one-host trust instead of research's SSRF checks — which is
+  # exactly what lets an internal, unauthenticated, plain-http address like
+  # this one work at all.
+  searxng:
+    image: searxng/searxng:latest
+    profiles: ["search"]
+    volumes:
+      - ./searxng:/etc/searxng
+    # No published port: internal network only. The backend reaches it as
+    # http://searxng:8080 over the compose network — nothing else needs to,
+    # and this service must never be exposed to a network beyond that (it runs
+    # with its rate limiter off, see ./searxng/settings.yml).
+    restart: unless-stopped
 
 volumes:
   pgdata:

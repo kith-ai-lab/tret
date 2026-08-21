@@ -2,7 +2,7 @@
 
 Egress is not one boolean. tret must reach an LLM provider to do anything at
 all, so "no internet" and "no *research* internet" are different deployments and
-each needs its own switch. Three classes:
+each needs its own switch. Five classes:
 
     provider   cloud model calls (anthropic, kimi, openrouter)
     catalog    the OpenRouter model list and provider key validation
@@ -10,11 +10,16 @@ each needs its own switch. Three classes:
     research   web search and page fetch — the only class whose destination is
                chosen by a *model*, from text that may have come from an
                uploaded document
+    search     the web SEARCH BACKEND itself (Brave's endpoint, or an
+               operator's own SearXNG instance) — an *operator*-configured
+               destination, not a model-chosen one, so it carries `local`'s
+               trust rather than `research`'s SSRF checks, while still being
+               severed by the same switch as research (see CLASS_SEARCH below)
 
 `research` ships **off**. Turning it on is a deliberate act by an operator, and
 turning it back off severs the agent's internet without touching the rest of the
-product. `TRET_EGRESS=off` severs `provider`, `catalog` and `research`, which is
-the air-gapped deployment: local models only.
+product. `TRET_EGRESS=off` severs `provider`, `catalog`, `research` and `search`,
+which is the air-gapped deployment: local models only.
 
 Why `local` is its own class, exempt from the master switch: a request to a model
 server on your own machine never leaves the deployment, and an air-gapped tret
@@ -50,7 +55,8 @@ CLASS_PROVIDER = "provider"
 CLASS_CATALOG = "catalog"
 CLASS_LOCAL = "local"
 CLASS_RESEARCH = "research"
-EGRESS_CLASSES = (CLASS_PROVIDER, CLASS_CATALOG, CLASS_LOCAL, CLASS_RESEARCH)
+CLASS_SEARCH = "search"
+EGRESS_CLASSES = (CLASS_PROVIDER, CLASS_CATALOG, CLASS_LOCAL, CLASS_RESEARCH, CLASS_SEARCH)
 
 MODE_OFF = "off"
 MODE_REPLAY = "replay"
@@ -160,6 +166,8 @@ def _configured_mode(egress_class: str, settings) -> str:
         return _normalize(settings.egress_catalog)
     if egress_class == CLASS_LOCAL:
         return _normalize(settings.egress_local)
+    # `research` and `search` share TRET_EGRESS_RESEARCH — see CLASS_SEARCH's
+    # note in effective_mode() for why `search` has no env var of its own.
     return _normalize(settings.egress_research)
 
 
@@ -172,8 +180,25 @@ def effective_mode(egress_class: str, settings=None) -> str:
 
     `local` is not narrowed by the master switch — see the module docstring for
     why, and `policy_for` for the check that keeps the exemption honest.
+
+    `search` (the web search *backend*, e.g. SearXNG) has no env var of its
+    own: it rides TRET_EGRESS_RESEARCH, because the search backend is part of
+    the research capability, not a separate one an operator could leave on
+    after switching research off. So `search` mirrors `research` exactly,
+    with one difference — `research`'s `replay` reads as `replay` (serve
+    snapshots, refuse new fetches); `search` has no snapshot cache to serve
+    from, so for `search` `replay` reads as `off`, same as every other
+    non-research class. A runtime override set on "search" itself narrows
+    further, same as any other class.
     """
     s = settings or get_settings()
+    if egress_class == CLASS_SEARCH:
+        mode = effective_mode(CLASS_RESEARCH, s)
+        if egress_class in _runtime_overrides:
+            mode = narrower(mode, _runtime_overrides[egress_class])
+        if mode == MODE_REPLAY:
+            mode = MODE_OFF
+        return mode
     mode = _configured_mode(egress_class, s)
     if egress_class != CLASS_LOCAL:
         mode = narrower(_normalize(s.egress), mode)
@@ -192,21 +217,28 @@ def _hosts_from_urls(*urls: str) -> set[str]:
     for url in urls:
         host = urlsplit(url or "").hostname
         if host:
-            out.add(host.lower())
+            out.add(host.lower().rstrip("."))
     return out
 
 
 def research_allow_hosts(settings=None) -> frozenset[str]:
-    """Hosts the research class may reach.
+    """Hosts the research class (`fetch_url`, and a `web_search` call to a
+    provider that has no dedicated class of its own) may reach.
 
     Empty means *any public host*, which is what a general web search needs and
     is stated plainly in .env.example rather than hidden: an allowlist covering
     the open web is not an allowlist. Set the variable to turn research into a
     genuine allowlist (entries match the host itself and its subdomains).
 
-    Whatever the operator sets, the configured search endpoint is added — a
-    search backend the search tool cannot reach is a misconfiguration with a
-    confusing symptom, and the operator already chose that host by naming it.
+    The configured search endpoint is deliberately NOT added here. It used to
+    be, but that made this allowlist do double duty for a host that is not
+    model-chosen at all — the operator names it directly
+    (TRET_SEARXNG_BASE_URL / the fixed Brave endpoint). That host now has its
+    own class, `search` (see `search_backend_hosts` and `policy_for`), with its
+    own trust rules. A `fetch_url` call a *model* makes to that same host — say,
+    the model decided to fetch a SearXNG results page directly — is still
+    `research` traffic and is governed by this allowlist alone, same as any
+    other host.
     """
     s = settings or get_settings()
     configured = {
@@ -214,13 +246,28 @@ def research_allow_hosts(settings=None) -> frozenset[str]:
         for h in (s.egress_research_allow_hosts or "").split(",")
         if h.strip()
     }
-    if not configured:
-        return frozenset()
-    return frozenset(configured | _hosts_from_urls(s.searxng_base_url, _brave_endpoint(s)))
+    return frozenset(configured)
 
 
-def _brave_endpoint(settings) -> str:
-    return "https://api.search.brave.com" if (settings.search_provider or "").strip() == "brave" else ""
+def search_backend_hosts(settings=None) -> frozenset[str]:
+    """The one host the `search` class may reach: whichever search backend the
+    operator configured, and nothing else — this is an allowlist of size one,
+    not a category the way `research`'s is.
+
+    Empty means no backend is configured, which must mean *nothing* is
+    allowed — the opposite of what an empty `ClassPolicy.allow_hosts` usually
+    means (see `host_allowed`: empty there reads as "any host"). `policy_for`
+    is what makes that distinction hold: an unconfigured `search` class gets
+    `mode=MODE_OFF` outright, rather than relying on callers to treat this
+    frozenset's emptiness specially.
+    """
+    s = settings or get_settings()
+    provider = (s.search_provider or "").strip().lower()
+    if provider == "searxng":
+        return frozenset(_hosts_from_urls(s.searxng_base_url))
+    if provider == "brave":
+        return frozenset({"api.search.brave.com"})
+    return frozenset()
 
 
 def policy_for(egress_class: str, settings=None) -> ClassPolicy:
@@ -235,6 +282,30 @@ def policy_for(egress_class: str, settings=None) -> ClassPolicy:
             standard_ports_only=True,
             verify_addresses=VERIFY_PUBLIC,
             max_bytes=int(s.egress_research_max_bytes),
+            timeout_seconds=float(s.egress_research_timeout_seconds),
+        )
+    if egress_class == CLASS_SEARCH:
+        hosts = search_backend_hosts(s)
+        return ClassPolicy(
+            name=egress_class,
+            # An unconfigured backend must refuse outright rather than fall
+            # through to "empty allow_hosts = any host" — see
+            # search_backend_hosts()'s docstring for why that distinction
+            # cannot live in allow_hosts alone.
+            mode=mode if hosts else MODE_OFF,
+            allow_hosts=hosts,
+            # Same rationale as CLASS_LOCAL just below: this is an
+            # operator-configured destination (TRET_SEARXNG_BASE_URL, or the
+            # fixed Brave host) — the model calls `web_search`, never a URL, so
+            # none of the prompt-injection surface that justifies `research`'s
+            # SSRF checks reaches this host. http and non-standard ports are
+            # fine (an internal SearXNG instance is usually both), and there is
+            # nothing to gain by resolving: the one-host allowlist above
+            # already pins the destination.
+            allow_http=True,
+            standard_ports_only=False,
+            verify_addresses=VERIFY_NONE,
+            max_bytes=0,
             timeout_seconds=float(s.egress_research_timeout_seconds),
         )
     if egress_class == CLASS_LOCAL:
@@ -284,18 +355,20 @@ def host_allowed(host: str, policy: ClassPolicy) -> bool:
 def egress_status(settings=None) -> dict:
     """What is switched on right now, for the settings API and the boot log."""
     s = settings or get_settings()
+
+    def _class_status(name: str) -> dict:
+        pol = policy_for(name, s)
+        return {
+            "mode": pol.mode,
+            "configured": _configured_mode(name, s),
+            "runtime_override": _runtime_overrides.get(name),
+            "allow_hosts": sorted(pol.allow_hosts),
+        }
+
     return {
         "master": _normalize(s.egress),
         "proxy": bool((s.egress_proxy or "").strip()),
-        "classes": {
-            name: {
-                "mode": effective_mode(name, s),
-                "configured": _configured_mode(name, s),
-                "runtime_override": _runtime_overrides.get(name),
-                "allow_hosts": sorted(policy_for(name, s).allow_hosts),
-            }
-            for name in EGRESS_CLASSES
-        },
+        "classes": {name: _class_status(name) for name in EGRESS_CLASSES},
     }
 
 
@@ -321,5 +394,6 @@ def log_egress_at_boot(settings=None, logger=None) -> None:
                 CLASS_CATALOG: "the OpenRouter catalog and key validation are unavailable",
                 CLASS_LOCAL: "the configured local model server is unreachable",
                 CLASS_RESEARCH: "web_search and fetch_url are withheld from every run",
+                CLASS_SEARCH: "the web search backend is unreachable (research is off)",
             }[name],
         )
