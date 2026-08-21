@@ -50,6 +50,16 @@
   --chart-4: #8e5ba6;
   --chart-5: #c25b77;
   --chart-6: #7a8b99;
+  /* Brand constant — the launch site's copper slash gradient. Deliberately
+     identical in both themes (it sits on ink in the favicon and reads on both
+     surfaces); not a semantic token, do not reuse for status or series. */
+  --brand-slash: linear-gradient(
+    180deg,
+    rgba(180, 118, 59, 0.35),
+    #b4763b 18%,
+    #96602c 82%,
+    rgba(180, 118, 59, 0.25)
+  );
   --mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: "Instrument Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
@@ -145,16 +155,40 @@ h1, h2, h3, h4 {
 }
 
 .sidebar-brand {
-  font-family: var(--mono);
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  color: var(--text);
   padding: 4px 20px 18px;
 }
 
-.sidebar-brand span {
-  color: var(--accent);
+/* The launch site's wordmark ("tre" + copper slash + "t"), em-scaled from its
+   26px reference metrics so the same rules serve every placement. */
+.wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  color: var(--text);
+}
+
+.wm-text {
+  font-family: var(--sans);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.wm-slash-box {
+  display: inline-block;
+  position: relative;
+  width: 0.42em;
+  height: 1em;
+}
+
+.wm-slash {
+  position: absolute;
+  left: 0.15em;
+  top: 0.31em;
+  bottom: -0.08em;
+  width: 0.115em;
+  background: var(--brand-slash);
+  border-radius: 2px;
+  transform: skewX(-14deg);
 }
 
 .sidebar nav {

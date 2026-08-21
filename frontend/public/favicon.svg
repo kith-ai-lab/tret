@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#211F1A"/>
+  <defs>
+    <linearGradient id="copper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#B4763B" stop-opacity=".35"/>
+      <stop offset=".18" stop-color="#B4763B"/>
+      <stop offset=".82" stop-color="#96602C"/>
+      <stop offset="1" stop-color="#B4763B" stop-opacity=".25"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(32 32) skewX(-14)">
+    <rect x="-3.5" y="-16" width="7" height="34" rx="3.5" fill="url(#copper)"/>
+  </g>
+</svg>

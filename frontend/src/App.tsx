@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Wordmark } from './components/shared/Wordmark'
 import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 
@@ -114,7 +115,7 @@ function Sidebar({
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
-        tret<span>_</span>
+        <Wordmark size={20} />
       </div>
       <nav>
         {NAV.map((n) => (

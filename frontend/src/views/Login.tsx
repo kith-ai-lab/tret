@@ -1,4 +1,5 @@
 import { useMutation } from '@tanstack/react-query'
+import { Wordmark } from '../components/shared/Wordmark'
 import { type FormEvent, useState } from 'react'
 
 import { api } from '../api/client'
@@ -21,7 +22,7 @@ export function Login({ onLogin }: { onLogin: () => void }) {
     <div className="login-wrap">
       <form className="login-card" onSubmit={submit}>
         <div className="sidebar-brand" style={{ padding: '0 0 6px' }}>
-          tret<span style={{ color: 'var(--accent)' }}>_</span>
+          <Wordmark size={26} />
         </div>
         <div className="view-sub" style={{ marginBottom: 18 }}>
           analyst workbench — sign in
