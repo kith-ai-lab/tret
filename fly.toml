@@ -1,4 +1,6 @@
-app = "kith-tret"
+# The deployed Fly app predates the tret rename and Fly apps cannot be
+# renamed — "kith-bench" is the app's immutable name, not stale config.
+app = "kith-bench"
 primary_region = "iad"
 
 [build]
