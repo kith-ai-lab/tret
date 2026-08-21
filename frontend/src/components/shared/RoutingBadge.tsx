@@ -204,7 +204,16 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
             </>
           ) : (
             <div className="mono-label" style={{ marginTop: 10 }}>
-              No prompt: {routing.override ? 'a model was named, so nothing was asked' : 'no router was consulted'}
+              {/* Three different nothings, and saying the wrong one is worse
+                  than saying nothing. A decision made before tret kept the
+                  prompt DID consult a router — reporting that as "no router was
+                  consulted" would put a false claim on an audit surface. */}
+              No prompt:{' '}
+              {routing.override
+                ? 'a model was named, so nothing was asked'
+                : routing.router_model
+                  ? 'this decision predates tret recording the prompt'
+                  : 'no router was consulted'}
             </div>
           )}
         </span>
