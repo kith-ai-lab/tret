@@ -240,6 +240,33 @@ boundaries: installing a pack is deploying code you reviewed.
 
 See [docs/pack-authoring.md](docs/pack-authoring.md).
 
+## Embed it
+
+The router and its cost/carbon accounting also work outside the workbench —
+no Postgres, no FastAPI. From a checkout:
+
+```bash
+pip install -e backend  # core: SDK + CLI, no server deps (not on PyPI yet)
+```
+
+```python
+from tret import Router
+result = Router().run(task)
+result.receipt  # $ and gCO2e, per call
+```
+
+```bash
+$ tret run "Summarize the Q3 numbers in notes.txt in two sentences." --path ./q3-notes
+→ routed to gemini-3.5-flash-lite · a small, cheap-summary-optimized model is sufficient...
+In Q3, revenue reached $482,000, up 12% YoY, while churn fell to 3.1%.
+receipt · $0.0006 (+$0.0026 routing) · 0.02 gCO₂e · gemini-3.5-flash-lite · ledger #5bcc
+```
+
+`tret run` adds read-only local-file tools (`--path`), an optional `--json`
+payload, and an append-only `~/.tret/ledger.jsonl` receipt log — no packs, no
+DB, no network beyond the routed model's own provider. See
+[docs/embedding.md](docs/embedding.md).
+
 ## A tret for tret
 
 The guarantees above are only worth something if they cannot quietly stop being
@@ -302,6 +329,7 @@ See [docs/architecture.md](docs/architecture.md) and
 | [architecture.md](docs/architecture.md) | how the pieces fit |
 | [trust-doctrine.md](docs/trust-doctrine.md) | the rules, and why they are structural |
 | [pack-authoring.md](docs/pack-authoring.md) | write a domain pack |
+| [embedding.md](docs/embedding.md) | the SDK and the `tret run` CLI |
 | [eco-accounting.md](docs/eco-accounting.md) | routing objectives, energy and carbon |
 | [local-models.md](docs/local-models.md) | zero-cloud operation |
 | [evals.md](docs/evals.md) | the golden-run suite |

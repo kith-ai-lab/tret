@@ -188,6 +188,25 @@ task types would not have bounded anything on its own — each hop is a whole
 extra agent loop spending its own budget, with only the per-run cost cap in the
 way.
 
+## SDK and CLI
+
+`tret.sdk.Router` and the `tret run` CLI (`tret/local_run.py`) are a second,
+pip-installable entry point into the routing and accounting machinery above —
+not a second engine. Both build a `ModelRouter` over the same `get_catalog()` /
+`ProviderRegistry` / `NoPriors()` wiring `router_llm/` exposes, and both build
+their `Receipt` off the same `services/emissions.energy_accounting()` this
+run lifecycle's carbon numbers come from (`tret.sdk._build_receipt`, shared by
+both).
+
+What they don't share is `engine/harness.py`. `tret run`'s loop
+(`local_run.py::_run_agentic_loop`) is a small, separate single-model loop —
+no packs, no doctrine, no approval queue, no compaction, no mid-run model
+switching — that mirrors just enough of the harness's message-protocol shape
+(one assistant turn, then one tool-result message per call) to stay legible
+against it, reimplemented rather than imported because this module sits on
+the core (server-free) install path and cannot pull in `engine/*`'s
+SQLAlchemy dependency. See [docs/embedding.md](embedding.md).
+
 ## Providers
 
 `providers/base.py` defines canonical `Msg`/`ToolCall`/`ToolSpec` types and a
