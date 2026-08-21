@@ -33,7 +33,26 @@ HALF_LIFE_DAYS = 30.0
 OFF_BAND_WEIGHT = 0.25
 # Below this decayed sample count a model has no prior. Deliberately expressed in
 # *effective* samples, so five runs from last year do not qualify.
-MIN_EFFECTIVE_SAMPLES = 5.0
+#
+# Lowered from 5.0 after measuring it against a real install: 22 scored runs
+# across five (shape, objective) keys produced *nothing* rankable, because a
+# handful of runs two to four weeks old decay to under half their raw count. A
+# panel that is permanently empty teaches an operator that the feature does not
+# work, which is worse than a panel that shows a thin record honestly labelled
+# as thin.
+#
+# 3.0 rather than lower because lower buys nothing: on that same data every
+# other candidate sat under 2.2, so dropping further would have widened the gate
+# without admitting anyone through it. Pick the loosest value that changes an
+# answer, not the loosest value available.
+#
+# What stops this from being reckless is that the floor governs *visibility*,
+# not authority. Three effective samples is still deep in shrinkage territory
+# (SHRINKAGE_STRENGTH is 4.0, so the pooled mean outweighs the model's own
+# record at this n), and promotion into TIER_PROVEN reads `quality_ci_low`,
+# which at this sample count is far below EVIDENCE_GOOD_FLOOR. A model that
+# clears this line becomes *visible*; it does not become *trusted*.
+MIN_EFFECTIVE_SAMPLES = 3.0
 # How hard shrinkage pulls toward the pooled mean, in units of effective samples.
 SHRINKAGE_STRENGTH = 4.0
 # Where a key with no pooled evidence at all shrinks to. Mid-scale on purpose:
