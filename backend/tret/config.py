@@ -206,6 +206,13 @@ class Settings(BaseSettings):
     router_model: str = "anthropic/claude-haiku-4-5"
     router_timeout_seconds: float = 10.0
 
+    # Headless CLI ledger (`tret run`, tret/local_run.py). One JSON line is
+    # appended here per run: what it cost, what it's estimated to have emitted,
+    # which model, which ledger id. Empty means the default, ~/.tret/ledger.jsonl
+    # — not written here as a literal default because it must expand the
+    # *invoking user's* home directory, not one baked in at import time.
+    ledger_path: str = ""
+
     # ── ecological / emissions accounting (tret/services/emissions.py) ────────
     # Every figure below is an estimate, calibrated against published data where
     # published data exists. Read docs/emissions-methodology.md before quoting

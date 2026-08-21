@@ -33,6 +33,10 @@ services:
       TRET_OPENROUTER_API_KEY: ${TRET_OPENROUTER_API_KEY:-}
       TRET_ROUTER_MODEL: ${TRET_ROUTER_MODEL:-anthropic/claude-haiku-4-5}
       TRET_ROUTER_TIMEOUT_SECONDS: ${TRET_ROUTER_TIMEOUT_SECONDS:-10.0}
+      # `tret run`'s local ledger. Empty means ~/.tret/ledger.jsonl — meaningless
+      # inside this container (the CLI is a bare-metal / bind-mount workflow),
+      # kept wired anyway so the knob is never silently ignored.
+      TRET_LEDGER_PATH: ${TRET_LEDGER_PATH:-}
       # Every knob .env.example documents has to be listed here or it does not
       # reach the container: compose reads .env only to interpolate ${...}, and
       # nothing copies .env into the image. tests/test_compose_env.py asserts
