@@ -1,7 +1,70 @@
-/* tret — global theme. Dark default; every color routes through a variable
-   so a light theme is a variable swap away. */
+/* tret — global theme. Light default, matching the marketing site's cream/
+   copper palette; dark available via [data-theme="dark"]. Every color routes
+   through a variable so the whole theme is a variable swap. */
 
 :root {
+  color-scheme: light;
+
+  --bg: #f6f4ee;
+  --bg-panel: #fdfcf8;
+  --bg-input: #ffffff;
+  --bg-hover: #efece3;
+  --border: rgba(33, 31, 26, 0.14);
+  --border-subtle: rgba(33, 31, 26, 0.08);
+  --text: #211f1a;
+  --text-muted: #6e6a60;
+  --accent: #9a5b26;
+  --accent-dim: rgba(180, 118, 59, 0.12);
+  --accent-contrast: #ffffff;
+  --green: #2e6b5a;
+  --green-dim: rgba(46, 107, 90, 0.12);
+  --red: #a63a2c;
+  --red-dim: rgba(166, 58, 44, 0.1);
+  --amber: #8f6400;
+  --amber-dim: rgba(143, 100, 0, 0.12);
+  --violet: #6b5a9e;
+  --violet-dim: rgba(107, 90, 158, 0.12);
+  --blue: #3b648f;
+  --blue-dim: rgba(59, 100, 143, 0.1);
+  --gray: #6e6a60;
+  --gray-dim: rgba(33, 31, 26, 0.1);
+  /* Border tints for the accent colors, at the same 0.3 alpha this app has
+     always used for badge/pill/avatar outlines — kept as their own tokens
+     (rather than literal rgba() at each call site) so they move with the
+     palette instead of staying pinned to whichever theme wrote them first. */
+  --accent-border: rgba(154, 91, 38, 0.3);
+  --green-border: rgba(46, 107, 90, 0.3);
+  --red-border: rgba(166, 58, 44, 0.3);
+  --amber-border: rgba(143, 100, 0, 0.3);
+  --violet-border: rgba(107, 90, 158, 0.3);
+  --blue-border: rgba(59, 100, 143, 0.3);
+  --gray-border: rgba(110, 106, 96, 0.3);
+  --gray-stripe: rgba(110, 106, 96, 0.05);
+  /* Categorical series ramp — for multi-series charts (stacked bars, small
+     multiples). Hue-spaced apart from the semantic status tokens above so a
+     data series never reads as "success" or "failure". Never color a series
+     with --green/--red/etc.; cycle these six instead. */
+  --chart-1: #b4763b;
+  --chart-2: #3e7ca6;
+  --chart-3: #58803b;
+  --chart-4: #8e5ba6;
+  --chart-5: #c25b77;
+  --chart-6: #7a8b99;
+  --mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: "Instrument Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Categorical series ramp, dark-tuned counterparts of the light values. */
+  --chart-1: #d99a5b;
+  --chart-2: #6faad9;
+  --chart-3: #8fb56a;
+  --chart-4: #b98fd1;
+  --chart-5: #e08ba3;
+  --chart-6: #8fa3b3;
+
   --bg: #0e1013;
   --bg-panel: #14171c;
   --bg-input: #0b0d10;
@@ -12,6 +75,7 @@
   --text-muted: #7d8590;
   --accent: #8ab4f8;
   --accent-dim: rgba(138, 180, 248, 0.12);
+  --accent-contrast: #0b0d10;
   --green: #56c17e;
   --green-dim: rgba(86, 193, 126, 0.12);
   --red: #e06c6c;
@@ -24,8 +88,14 @@
   --blue-dim: rgba(138, 180, 248, 0.12);
   --gray: #7d8590;
   --gray-dim: rgba(125, 133, 144, 0.14);
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --accent-border: rgba(138, 180, 248, 0.3);
+  --green-border: rgba(86, 193, 126, 0.3);
+  --red-border: rgba(224, 108, 108, 0.3);
+  --amber-border: rgba(217, 166, 72, 0.3);
+  --violet-border: rgba(177, 138, 232, 0.3);
+  --blue-border: rgba(138, 180, 248, 0.3);
+  --gray-border: rgba(125, 133, 144, 0.3);
+  --gray-stripe: rgba(125, 133, 144, 0.05);
 }
 
 * {
@@ -113,6 +183,35 @@ h1, h2, h3, h4 {
   background: var(--accent-dim);
 }
 
+/* Sits at the bottom of the nav column, above the footer divider — the
+   vertical-nav equivalent of "the right end of the nav bar". */
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 4px 12px 0;
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.theme-toggle:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.theme-toggle span {
+  font-size: 12px;
+  line-height: 1;
+}
+
 .sidebar-footer {
   padding: 12px 20px 4px;
   border-top: 1px solid var(--border-subtle);
@@ -163,7 +262,7 @@ h1, h2, h3, h4 {
   gap: 12px;
   padding: 8px 28px;
   background: var(--amber-dim);
-  border-bottom: 1px solid rgba(217, 166, 72, 0.3);
+  border-bottom: 1px solid var(--amber-border);
   font-family: var(--mono);
   font-size: 12px;
   color: var(--text);
@@ -257,12 +356,12 @@ h1, h2, h3, h4 {
   white-space: nowrap;
 }
 
-.badge-green  { color: var(--green);  background: var(--green-dim);  border-color: rgba(86, 193, 126, 0.3); }
-.badge-red    { color: var(--red);    background: var(--red-dim);    border-color: rgba(224, 108, 108, 0.3); }
-.badge-amber  { color: var(--amber);  background: var(--amber-dim);  border-color: rgba(217, 166, 72, 0.3); }
-.badge-blue   { color: var(--blue);   background: var(--blue-dim);   border-color: rgba(138, 180, 248, 0.3); }
-.badge-violet { color: var(--violet); background: var(--violet-dim); border-color: rgba(177, 138, 232, 0.3); }
-.badge-gray   { color: var(--gray);   background: var(--gray-dim);   border-color: rgba(125, 133, 144, 0.3); }
+.badge-green  { color: var(--green);  background: var(--green-dim);  border-color: var(--green-border); }
+.badge-red    { color: var(--red);    background: var(--red-dim);    border-color: var(--red-border); }
+.badge-amber  { color: var(--amber);  background: var(--amber-dim);  border-color: var(--amber-border); }
+.badge-blue   { color: var(--blue);   background: var(--blue-dim);   border-color: var(--blue-border); }
+.badge-violet { color: var(--violet); background: var(--violet-dim); border-color: var(--violet-border); }
+.badge-gray   { color: var(--gray);   background: var(--gray-dim);   border-color: var(--gray-border); }
 
 .badge.clickable {
   cursor: pointer;
@@ -900,7 +999,7 @@ input[type="radio"] {
   height: 26px;
   border-radius: 7px;
   background: var(--accent-dim);
-  border: 1px solid rgba(138, 180, 248, 0.3);
+  border: 1px solid var(--accent-border);
   color: var(--accent);
   font-family: var(--mono);
   font-size: 13px;
@@ -984,13 +1083,13 @@ input[type="radio"] {
 
 .chat-pill.running {
   color: var(--amber);
-  border-color: rgba(217, 166, 72, 0.35);
+  border-color: var(--amber-border);
   background: var(--amber-dim);
 }
 
 .chat-pill.done {
   color: var(--violet);
-  border-color: rgba(177, 138, 232, 0.32);
+  border-color: var(--violet-border);
   background: var(--violet-dim);
 }
 
@@ -1164,7 +1263,7 @@ input[type="radio"] {
   border-radius: 10px;
   border: none;
   background: var(--accent);
-  color: #0b0d10;
+  color: var(--accent-contrast);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1690,8 +1789,8 @@ summary:focus-visible {
     -45deg,
     transparent,
     transparent 6px,
-    rgba(125, 133, 144, 0.05) 6px,
-    rgba(125, 133, 144, 0.05) 12px
+    var(--gray-stripe) 6px,
+    var(--gray-stripe) 12px
   );
 }
 

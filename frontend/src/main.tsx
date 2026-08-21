@@ -4,6 +4,10 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 
 import App from './App'
+// Self-hosted fonts: the product's network-isolation doctrine forbids a
+// Google Fonts CDN link, so these ship as woff2 assets in the build instead.
+import '@fontsource-variable/instrument-sans/wght.css'
+import '@fontsource-variable/jetbrains-mono/wght.css'
 import './theme/global.css'
 
 const queryClient = new QueryClient({
