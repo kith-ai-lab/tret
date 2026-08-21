@@ -3,14 +3,22 @@ import { shortModelName } from './RoutingBadge'
 
 /** One stable colour per model within a group. Assigned from the group's own
  *  `model_ids`, which the backend sorts, so a model keeps its colour across
- *  every bucket and across reloads. */
+ *  every bucket and across reloads.
+ *
+ *  These are the categorical tokens, deliberately not the semantic ones. An
+ *  earlier version of this file drew series in `--green`, `--red` and `--amber`,
+ *  which meant model A rendered in the same green as "succeeded" and model B in
+ *  the same red as "failed" — a signal that looked meaningful and was not. The
+ *  chart tokens are hue-distinct from the status colours for exactly that
+ *  reason. Cycle if a group ever has more than six models; do not add a seventh
+ *  token here. */
 const SERIES = [
-  'var(--blue)',
-  'var(--violet)',
-  'var(--green)',
-  'var(--amber)',
-  'var(--red)',
-  'var(--text-muted)',
+  'var(--chart-1)',
+  'var(--chart-2)',
+  'var(--chart-3)',
+  'var(--chart-4)',
+  'var(--chart-5)',
+  'var(--chart-6)',
 ]
 
 function colorOf(models: string[], id: string): string {
@@ -49,7 +57,7 @@ function ShareChart({ group }: { group: RoutingHistoryGroup }) {
               const h = share * H
               const rect = (
                 <rect key={id} x={x} y={y} width={bw} height={h}
-                      fill={colorOf(group.model_ids, id)} opacity={0.85}>
+                      fill={colorOf(group.model_ids, id)}>
                   <title>
                     {shortDate(b.start)} — {shortModelName(id)}: {(share * 100).toFixed(0)}% of{' '}
                     {b.runs} run{b.runs === 1 ? '' : 's'}
@@ -63,6 +71,8 @@ function ShareChart({ group }: { group: RoutingHistoryGroup }) {
                 happened in, because "the router picked wrong and the engine
                 fixed it" is a different event from "the router changed its
                 mind", and both belong on the same timeline. */}
+            {/* Semantic on purpose, and the one mark here that should be: it
+                means "something needed attention", not "series four". */}
             {b.switched_runs > 0 && (
               <circle cx={x + bw / 2} cy={H + 6} r={2.5} fill="var(--amber)">
                 <title>
@@ -95,8 +105,11 @@ function QualityChart({ group }: { group: RoutingHistoryGroup }) {
          aria-label={`Mean quality per model over time for ${group.task_shape}`}>
       {/* The delivered-cleanly anchor. Without it the y-axis is unreadable:
           0.70 is what a clean run with no human review scores. */}
-      <line x1={0} y1={H - 0.7 * H} x2={W} y2={H - 0.7 * H} stroke="var(--text-muted)"
-            strokeDasharray="2 4" opacity={0.4} />
+      {/* `--border` rather than muted-text-at-40%: this is a guide line, and the
+          border token is the one already tuned to read faintly against either
+          background. */}
+      <line x1={0} y1={H - 0.7 * H} x2={W} y2={H - 0.7 * H} stroke="var(--border)"
+            strokeDasharray="2 4" />
       {group.model_ids.map((id) => {
         const points = group.buckets
           .map((b, i) => [i * step, b.models[id]?.mean_quality] as const)
@@ -105,7 +118,7 @@ function QualityChart({ group }: { group: RoutingHistoryGroup }) {
         const d = points.map(([x, q], i) => `${i ? 'L' : 'M'}${x},${H - q * H}`).join(' ')
         return (
           <path key={id} d={d} fill="none" stroke={colorOf(group.model_ids, id)}
-                strokeWidth={1.5} opacity={0.9} />
+                strokeWidth={1.5} />
         )
       })}
     </svg>
