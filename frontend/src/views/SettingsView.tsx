@@ -9,6 +9,7 @@ import {
   takesApiKey,
   type User,
 } from '../api/client'
+import { BillingSection } from '../components/shared/BillingSection'
 import { formatDateTime } from '../components/shared/format'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { ProviderKeyForm } from '../components/shared/ProviderKeyForm'
@@ -26,6 +27,7 @@ export function SettingsView() {
       </div>
       <TeamSection />
       <ProviderKeys />
+      <BillingSection />
       <RouterInfo />
       <NetworkAccess />
       <DataRequests />

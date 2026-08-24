@@ -1340,6 +1340,36 @@ export interface DocPage {
 /** The one document the emissions UI links to, everywhere it shows a figure. */
 export const EMISSIONS_METHODOLOGY_SLUG = 'emissions-methodology'
 
+// ── Billing ───────────────────────────────────────────────────────────────
+// GET /api/billing/status 404s when the proprietary tret-cloud extension is not
+// loaded into this backend — that is a capability gate, not an error, and the
+// UI renders nothing at all for it. `enabled: false` is a different state: the
+// extension is present but this workspace has not activated billing yet.
+
+export interface BillingStatus {
+  enabled: boolean
+  plan: 'none' | 'solo' | 'team'
+  subscription_status: string
+  balance_usd: number
+  seats: number
+}
+
+/** One entry in the billing ledger — a credit purchase, a subscription charge,
+ *  or a run's metered spend. `run_id` is null unless the entry was incurred by
+ *  a specific run; `stripe_ref` is null for entries with no Stripe object
+ *  behind them. */
+export interface LedgerEntry {
+  id: string
+  kind: string
+  amount_usd: number
+  run_id: string | null
+  stripe_ref: string | null
+  balance_after: number
+  created_at: string
+}
+
+export type CheckoutKind = 'credits_small' | 'credits_large' | 'solo' | 'team'
+
 // ── Fetch wrapper ────────────────────────────────────────────────────────
 
 export class ApiError extends Error {
@@ -1530,5 +1560,18 @@ export const api = {
     const qs = new URLSearchParams({ days: String(days) })
     if (projectId) qs.set('project_id', projectId)
     return request<EmissionsAnalytics>(`/analytics/emissions?${qs.toString()}`)
+  },
+
+  // billing (tret-cloud, optional — /billing/status 404s when not loaded)
+  billingStatus: () => request<BillingStatus>('/billing/status'),
+  createCheckout: (kind: string) =>
+    request<{ url: string }>('/billing/checkout', { method: 'POST', body: { kind } }),
+  createPortalSession: () => request<{ url: string }>('/billing/portal', { method: 'POST' }),
+  billingUsage: (cursor?: string) => {
+    const qs = new URLSearchParams({ limit: '50' })
+    if (cursor) qs.set('cursor', cursor)
+    return request<{ items: LedgerEntry[]; next_cursor: string | null }>(
+      `/billing/usage?${qs.toString()}`,
+    )
   },
 }
