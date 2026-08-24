@@ -141,6 +141,21 @@ class Settings(BaseSettings):
     # query that needs a missing column — docs/upgrading.md, docs/hardening.md §8.
     skip_migrations: bool = False
 
+    # In-process extension modules (tret/engine/extensions.py), comma-separated
+    # dotted module names, e.g. TRET_EXTENSIONS=tret_billing.extension. Each
+    # module's `register(ext)` is called at boot with the shared ExtensionAPI.
+    # Empty (the default, and what every open-source deployment ships) means
+    # the extension seam is entirely inert: no router mounted, every pre-run
+    # gate allowed, no post-run hook run.
+    #
+    # Typed `list[str] | None` rather than `list[str]` on purpose: pydantic-
+    # settings tries to JSON-decode a non-optional complex field's env value and
+    # treats a parse failure as fatal, which a plain comma-separated string
+    # always is. The union form tolerates the failure and hands the raw string
+    # to `_parse_extensions` below instead — the same reason `grid_factors`
+    # above is `dict[str, GridFactor] | None` rather than plain `dict`.
+    extensions: list[str] | None = None
+
     # First-boot admin bootstrap (used only if no users exist)
     admin_email: str = "admin@example.com"
     admin_password: str = DEFAULT_ADMIN_PASSWORD
@@ -339,6 +354,24 @@ class Settings(BaseSettings):
                 "`replay` is meaningful only for TRET_EGRESS_RESEARCH."
             )
         return candidate
+
+    @field_validator("extensions", mode="before")
+    @classmethod
+    def _parse_extensions(cls, value):
+        """Comma-separated module names, matching `egress_research_allow_hosts`
+        rather than JSON — there is no nesting here to justify JSON's
+        punctuation.
+
+        None (unset) and a blank string both mean "no extensions", not a parse
+        error: a blank `${TRET_EXTENSIONS:-}` interpolation in docker-compose.yml
+        for an operator who never set the var must boot exactly like the var
+        being absent altogether.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [name.strip() for name in value.split(",") if name.strip()]
+        return value
 
     @field_validator("local_grid_co2e_g_per_kwh", mode="before")
     @classmethod

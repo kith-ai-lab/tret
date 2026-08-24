@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 from tret.providers.base import (
     JsonCompletion,
@@ -68,6 +69,11 @@ class ScriptedTurn:
     cache_read_tokens: int = 0
     stop_reason: str | None = None  # defaults from whether tools were called
     provider_error: str | None = None
+    # None (the default) means "this turn's provider reported nothing", the same
+    # as every real provider except OpenRouter. Set it to script a turn as if it
+    # came back from a provider that does report actuals — including Decimal(0)
+    # for a genuine free (":free") turn.
+    reported_cost_usd: Decimal | None = None
 
 
 @dataclass
@@ -170,6 +176,7 @@ class ReplayProvider(Provider):
                 input_tokens=turn.input_tokens,
                 output_tokens=turn.output_tokens,
                 cache_read_tokens=turn.cache_read_tokens,
+                reported_cost_usd=turn.reported_cost_usd,
             ),
             stop_reason=turn.stop_reason or ("tool_use" if calls else "end_turn"),
         )

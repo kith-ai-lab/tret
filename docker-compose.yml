@@ -144,6 +144,10 @@ services:
       # migrations as a separate deploy step — tret then assumes the database
       # is already at head (docs/upgrading.md).
       TRET_SKIP_MIGRATIONS: ${TRET_SKIP_MIGRATIONS:-false}
+      # In-process extension modules, comma-separated dotted module names.
+      # Empty (the default here) is what this image ships: the extension seam
+      # in tret/engine/extensions.py is entirely inert.
+      TRET_EXTENSIONS: ${TRET_EXTENSIONS:-}
     volumes:
       - ./packs:/packs:ro
       - storage:/data/storage

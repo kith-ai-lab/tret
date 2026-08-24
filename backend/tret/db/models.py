@@ -212,6 +212,18 @@ class Run(Base):
         BigInteger, nullable=False, default=0, server_default="0"
     )
     cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    # Best-known actual cost, summed per turn: the provider-reported actual
+    # where the provider gives one (OpenRouter only today, via its
+    # `cost`/`cost_details.upstream_inference_cost` usage fields — see
+    # providers/openai_compat.py — including a genuine 0 for :free models),
+    # otherwise that turn's catalog price. A run that switches providers
+    # mid-run (e.g. starts on OpenRouter, falls back to Anthropic) is not
+    # under-counted just because the second provider stays silent. Nullable
+    # with no default: null means this run has accrued no cost at all yet,
+    # not that the actual was zero. `cost_usd` above remains the pure
+    # catalog-priced figure used for routing and cost caps; this column is
+    # the one billing should charge against.
+    reported_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
     # Estimated energy drawn by this run, in watt-hours, with the full derivation
     # in energy_accounting ({"energy_wh","co2e_g","energy_class",
     # "energy_wh_per_mtok","grid_co2e_g_per_kwh","weighted_tokens",...}).

@@ -45,6 +45,13 @@ def _run_summary(run: Run) -> dict:
         "cache_read_tokens": run.cache_read_tokens,
         "cache_write_tokens": run.cache_write_tokens,
         "cost_usd": float(run.cost_usd or 0),
+        # Best-known actual cost, alongside the catalog-priced cost_usd above:
+        # per turn, the provider-reported figure when one exists (OpenRouter
+        # only today), the catalog price otherwise. Equals cost_usd when no
+        # turn reported. None only when the run spent nothing at all.
+        "reported_cost_usd": (
+            float(run.reported_cost_usd) if run.reported_cost_usd is not None else None
+        ),
         # Estimated ecological cost alongside the dollar cost. None (not 0) for
         # runs that predate eco accounting: no estimate is not the same as none
         # drawn. Full derivation is in the detail view's "energy" block.

@@ -20,9 +20,10 @@ from tret.api import (
     runs,
     settings as settings_api,
 )
-from tret.config import enforce_production_safety
+from tret.config import enforce_production_safety, get_settings
 from tret.db.engine import get_engine, get_session_factory
 from tret.db.migrate import ensure_schema
+from tret.engine.extensions import get_extension_registry, load_extensions
 from tret.net import log_egress_at_boot
 from tret.providers.catalog import get_catalog
 
@@ -42,6 +43,10 @@ async def lifespan(app: FastAPI):
 
     async with get_session_factory()() as db:
         await bootstrap(db)
+    # Extension seam: awaited, so an extension whose startup work (warming a
+    # cache, checking its own schema) must finish before the app is reachable
+    # gets to block boot on it. No-op with no extensions loaded.
+    await get_extension_registry().run_startup_tasks()
     # Discover local + dynamic models in the background. Deliberately *not*
     # awaited: a boot must never depend on a reachable Ollama or on
     # openrouter.ai, and a slow or hanging model server must not hold the socket
@@ -103,14 +108,18 @@ def create_app() -> FastAPI:
     app.include_router(findings.router)
     app.include_router(packs.router)
     app.include_router(settings_api.router)
+    # After every core router: an extension's own router (if it adds one) is
+    # additive to the open-source API surface, never a replacement for it.
+    # No-op with TRET_EXTENSIONS unset — load_extensions still runs, and sets
+    # the singleton get_extension_registry() returns to a default that allows
+    # everything and mounts nothing.
+    load_extensions(app, get_settings().extensions)
 
     @app.get("/api/healthz")
     async def healthz():
         return {"ok": True}
 
     # Single-app deployments (Fly, etc.): serve the built SPA from the backend.
-    from tret.config import get_settings
-
     frontend_dir = get_settings().serve_frontend_dir
     if frontend_dir:
         from fastapi.responses import FileResponse

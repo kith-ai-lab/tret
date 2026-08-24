@@ -38,6 +38,7 @@ from tret.engine.context import (
     tool_spec_block,
 )
 from tret.engine.events import RunEvent, get_event_bus
+from tret.engine.extensions import get_extension_registry
 from tret.engine.tools import (
     DELEGATION_DEPTH_KEY,
     WEB_TOOL_NAMES,
@@ -224,11 +225,23 @@ class HarnessEngine:
             run = await db.get(Run, run_id)
             if run is None:
                 return
+            # Fetched early so DB-key loading below can scope to this run's own
+            # workspace, and so the crash handler has it without a second round
+            # trip. `_execute_inner` fetches it again — free, same session
+            # identity map — because it needs `harness` as a local regardless of
+            # how `execute` got here.
+            harness = await db.get(Harness, run.harness_id)
+            # Captured as a plain value, not read off `harness` again later: the
+            # rollback below expires every instance in the session, and a
+            # post-rollback attribute access would need to lazy-load it with no
+            # greenlet context to do that in.
+            workspace_id = harness.workspace_id if harness else None
             # Rebuild registry/router per run so DB-stored keys (settings UI)
-            # are honored alongside env keys.
+            # are honored alongside env keys. Scoped to this run's workspace so
+            # one workspace's stored key is never handed to another's run.
             from tret.services.credentials import load_db_keys
 
-            self.registry = ProviderRegistry(await load_db_keys(db))
+            self.registry = ProviderRegistry(await load_db_keys(db, workspace_id))
             self.router = ModelRouter(self.catalog, self.registry, self.priors)
             try:
                 await self._execute_inner(db, run)
@@ -248,10 +261,27 @@ class HarnessEngine:
                 run.finished_at = _utcnow()
                 await db.commit()
                 await self.bus.publish(run_id, RunEvent("error", {"message": run.error}))
+                # A crashed run may still have accumulated cost — an extension
+                # tracking spend needs to see it even though the run never
+                # reached the normal finish path.
+                await get_extension_registry().run_post_run_hooks(db, run, workspace_id)
 
     async def _execute_inner(self, db, run: Run) -> None:
         harness = await db.get(Harness, run.harness_id)
         pack = await db.get(Pack, run.pack_id) if run.pack_id else None
+
+        # Extension seam: a loaded extension (the proprietary billing package,
+        # today) may veto a run before it spends anything — insufficient
+        # credits, a suspended workspace. No-op with no extensions loaded (see
+        # engine/extensions.py). Checked before any provider work, same as the
+        # unknown-task-type and unknown-tool refusals below.
+        gate = await get_extension_registry().check_pre_run(db, run, harness.workspace_id)
+        if not gate.allowed:
+            await self._fail_before_start(
+                db, run, f"{gate.reason}: {gate.detail}" if gate.detail else gate.reason
+            )
+            return
+
         documents = []
         if run.document_ids:
             documents = (
@@ -617,6 +647,15 @@ class HarnessEngine:
             run.cache_read_tokens = total_usage.cache_read_tokens
             run.cache_write_tokens = total_usage.cache_write_tokens
             run.cost_usd = (run.cost_usd or Decimal(0)) + turn_cost
+            # Best-known actual cost, alongside the pure catalog-priced figure
+            # above. Per turn: the provider-reported actual when there is one
+            # (only OpenRouter reports today, including a genuine 0 for :free
+            # models), otherwise that turn's catalog price. This keeps a run
+            # that switches providers mid-run (e.g. OpenRouter -> Anthropic)
+            # from under-billing on the turns the provider stayed silent on.
+            run.reported_cost_usd = (run.reported_cost_usd or Decimal(0)) + (
+                usage.reported_cost_usd if usage.reported_cost_usd is not None else turn_cost
+            )
             # Estimated energy/carbon, recomputed per segment from that segment's
             # running totals rather than accumulated per turn: the estimate is
             # linear in tokens, so a segment's total cannot drift from the sum of
@@ -925,6 +964,10 @@ class HarnessEngine:
         # carry no lesson (cancelled, or never routed) — see services/outcomes.py.
         await record_outcome(db, run)
         await db.commit()
+        # Extension seam: run persistence is durable first, so an extension
+        # metering this run against a balance sees its final cost. No-op with
+        # no extensions loaded.
+        await get_extension_registry().run_post_run_hooks(db, run, harness.workspace_id)
         # This run is now evidence, and the cached aggregate predates it. Cheap
         # to drop and the alternative is a bad look: a run finishing badly, and
         # the very next run of the same shape routing as though it had not.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from decimal import Decimal, InvalidOperation
 
 import httpx
 
@@ -97,6 +98,29 @@ def _cache_write_tokens(usage: dict) -> int:
     return 0
 
 
+def _reported_cost_usd(usage: dict) -> Decimal | None:
+    """OpenRouter's own billed USD cost for the turn, if the response carries one.
+
+    `cost_details.upstream_inference_cost` is preferred over the top-level
+    `cost` when both are present: the top-level figure is OpenRouter's own
+    charge (which can include its markup or be absent for BYOK requests),
+    while `upstream_inference_cost` is what the upstream provider actually
+    billed. Other OpenAI-compatible servers send neither, so this returns None
+    rather than 0 — 0 would claim a free turn nobody metered.
+    """
+    details = usage.get("cost_details")
+    if isinstance(details, dict) and details.get("upstream_inference_cost") is not None:
+        value = details["upstream_inference_cost"]
+    elif usage.get("cost") is not None:
+        value = usage["cost"]
+    else:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
 def _usage_from_openai(usage: dict) -> Usage:
     """Translate an OpenAI-style usage object into canonical Usage.
 
@@ -113,6 +137,7 @@ def _usage_from_openai(usage: dict) -> Usage:
         output_tokens=int(usage.get("completion_tokens") or 0),
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
+        reported_cost_usd=_reported_cost_usd(usage),
     )
 
 

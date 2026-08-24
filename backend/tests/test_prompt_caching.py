@@ -27,6 +27,7 @@ from tret.providers.openai_compat import (
     KimiProvider,
     OpenRouterProvider,
     _cached_prompt_tokens,
+    _reported_cost_usd,
     _to_openai_messages,
     _usage_from_openai,
 )
@@ -215,6 +216,58 @@ def test_cached_tokens_cannot_exceed_prompt_tokens():
         {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 9999}}
     )
     assert usage.input_tokens == 0 and usage.cache_read_tokens == 100
+
+
+# ── OpenRouter-reported actual cost ─────────────────────────────────────────
+# OpenRouter bills the upstream's real rate, which can differ from tret's
+# catalog price — `reported_cost_usd` carries that actual alongside the
+# catalog-priced `cost_usd` the engine still uses for routing and cost caps.
+def test_upstream_inference_cost_wins_when_both_are_present():
+    usage = _usage_from_openai(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "cost": "0.01",
+            "cost_details": {"upstream_inference_cost": "0.0042"},
+        }
+    )
+    assert usage.reported_cost_usd == Decimal("0.0042")
+
+
+def test_cost_is_used_when_upstream_inference_cost_is_absent():
+    usage = _usage_from_openai(
+        {"prompt_tokens": 100, "completion_tokens": 10, "cost": "0.01"}
+    )
+    assert usage.reported_cost_usd == Decimal("0.01")
+
+
+def test_reported_cost_is_none_when_neither_field_is_present():
+    """None, never 0: a provider that reports nothing did not report a free
+    turn — every non-OpenRouter OpenAI-compatible server hits this path."""
+    usage = _usage_from_openai({"prompt_tokens": 100, "completion_tokens": 10})
+    assert usage.reported_cost_usd is None
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"cost_details": {"upstream_inference_cost": None}},
+        {"cost_details": {}},
+        {"cost_details": None},
+        {"cost": None},
+    ],
+)
+def test_reported_cost_treats_a_present_but_null_field_as_absent(usage):
+    assert _reported_cost_usd(usage) is None
+
+
+def test_reported_cost_falls_back_to_cost_when_upstream_field_is_null():
+    usage = {"cost_details": {"upstream_inference_cost": None}, "cost": "0.02"}
+    assert _reported_cost_usd(usage) == Decimal("0.02")
+
+
+def test_unparseable_cost_reads_as_none_rather_than_raising():
+    assert _reported_cost_usd({"cost": "not-a-number"}) is None
 
 
 # ── OpenRouter cache_control passthrough ──────────────────────────────────────

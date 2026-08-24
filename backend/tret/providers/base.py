@@ -12,6 +12,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Literal
 
 
@@ -76,6 +77,14 @@ class Usage:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    # The provider's own reported actual USD cost for the turn. OpenRouter
+    # reports this (it bills the upstream's real rate, which can differ from
+    # tret's catalog price); every other provider leaves it None rather than 0,
+    # because 0 would claim a free turn tret never metered. `cost_usd` elsewhere
+    # in the engine — the catalog-priced figure used for routing and cost caps —
+    # is unaffected by this: the two numbers answer different questions and are
+    # never substituted for one another.
+    reported_cost_usd: Decimal | None = None
 
 
 @dataclass
