@@ -155,6 +155,47 @@ Rules that keep the trust story intact:
 - Every execution is recorded in `method_runs` with params, code sha, input
   hashes, and output hash; the agent cites method outputs like dataset rows.
 
+## Harnesses — ready-to-run presets
+
+A pack can ship one or more `harnesses:` entries — each installs as a real,
+editable workspace `Harness` row the moment the pack is installed, so a
+workspace gets a working starting point instead of an empty harness list.
+
+```yaml
+harnesses:
+  - name: Risk Reviewer
+    description: Reviews disclosures against this pack's own doctrine.
+    task_types: [risk_assessment]   # at most ONE of this pack's own task_types slugs; omit for freeform
+    tools: [lookup_dataset, read_document, record_verdict]
+    suggested_cost_tier: standard    # local|economy|standard|premium — a suggestion, not a pin
+```
+
+- **name** (required) becomes the installed harness's name.
+- **description** is optional free text, shown wherever the harness is listed.
+- **task_types** names **at most one** slug from this same manifest's own
+  `task_types:` list — `Harness.task_profile` holds exactly one value, so
+  `tret packs validate` fails a preset naming more than one. Omit it (or
+  leave it empty) and the harness installs scoped to `task_profile:
+  freeform`, the same default an ordinary hand-created harness gets.
+- **tools** names builtin tool names — see "Builtin tools you can grant"
+  below.
+- **suggested_cost_tier** is one of `local`, `economy`, `standard`, or
+  `premium`. It only seeds the installed harness's cost ceiling; it is a
+  suggestion the installing workspace is free to edit or remove afterward,
+  never a pin the pack enforces.
+
+Installing is idempotent **by harness name**, not by pack/version: if a
+non-archived harness with that name already exists in the workspace, the
+preset is skipped rather than duplicated or overwritten. That is also what
+makes upgrading a pack (installing a new version of the same slug) safe — it
+leaves a harness a workspace has already installed, and possibly edited,
+alone rather than mutating it back to the pack's defaults. An archived
+harness of the same name does not block re-creation, since archiving it was
+the operator's own choice.
+
+The climate-risk pack's "Climate Analyst" harness
+(`packs/climate-risk/pack.yaml`) is a working reference example.
+
 ## The safety scan your methods must pass
 
 `tret packs validate` AST-scans every method entrypoint and **fails the pack**

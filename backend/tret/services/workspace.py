@@ -7,12 +7,19 @@ plus a safety net (see bootstrap.py's docstring). Every call seeds the same
 non-negotiable minimum — one project, the Chat Assistant and General
 Assistant harnesses, and (TRET_SEED_DEFAULT_PACKS permitting) every pack
 found in TRET_PACKS_DIR — so a workspace is always immediately usable and a
-signup lands on a working pack rather than an empty shell. Demo *content*
-beyond the pack itself — the "Sample Engagement" project framing and the
-Climate Analyst harness that leans on the climate-risk pack's doctrine —
-stays additional and opt-in by default in multi-tenant mode: a paying
-tenant's fresh workspace should not open framed as a stranger's sample
-project, even though it now ships the same domain pack every workspace gets.
+signup lands on a working pack rather than an empty shell.
+
+Demo *content* beyond the pack itself — the "Sample Engagement" project
+framing — stays additional and opt-in by default in multi-tenant mode: a
+paying tenant's fresh workspace should not open framed as a stranger's
+sample project. The Climate Analyst harness is no longer part of that
+opt-in bundle: it now ships as the climate-risk pack's own `harnesses:`
+preset (`packs/climate-risk/pack.yaml`, installed by
+`tret.packs.loader.install_pack`), so it arrives in every workspace the pack
+installs into — which, like the pack itself, is every workspace regardless
+of `seed_demo_content`/`TRET_MULTI_TENANT`, gated only by
+`TRET_SEED_DEFAULT_PACKS`. `_seed_default_harnesses` below now seeds only
+the pack-agnostic General Assistant harness.
 """
 from __future__ import annotations
 
@@ -23,7 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.config import get_settings
-from tret.db.models import Harness, Pack, Project, User, Workspace, WorkspaceMember
+from tret.db.models import Harness, Project, User, Workspace, WorkspaceMember
 from tret.packs.loader import PackValidationError, install_pack
 
 log = logging.getLogger("tret.workspace")
@@ -56,9 +63,14 @@ async def create_workspace(
     Note this no longer controls pack installation — every new workspace gets
     every pack in `TRET_PACKS_DIR` installed whenever `Settings.seed_default_packs`
     (`TRET_SEED_DEFAULT_PACKS`, true by default) is set, regardless of this
-    parameter or `TRET_MULTI_TENANT`. `seed_demo_content` still controls the
-    project's "Sample Engagement" framing and the Climate Analyst harness —
-    see `seed_workspace_content` and `_seed_default_harnesses` below.
+    parameter or `TRET_MULTI_TENANT`. Nor does it control the Climate Analyst
+    harness any more — that now ships as the climate-risk pack's own
+    `harnesses:` preset (see `packs/climate-risk/pack.yaml`,
+    `tret.packs.loader.install_pack`), so it arrives wherever the pack does,
+    on the same `seed_default_packs` gate. `seed_demo_content` now controls
+    only the project's "Sample Engagement" framing right below —
+    `seed_workspace_content` (which this calls next) no longer takes it at
+    all.
     """
     if kind not in WORKSPACE_KINDS:
         raise ValueError(f"kind must be one of {WORKSPACE_KINDS}, got {kind!r}")
@@ -96,14 +108,12 @@ async def create_workspace(
     # savepoint of their own — roll back the whole creation instead of
     # leaving a half-seeded workspace sitting around counting against a
     # workspace cap.
-    await seed_workspace_content(db, workspace.id, project.id, seed_demo_content=demo)
+    await seed_workspace_content(db, workspace.id, project.id)
     await db.commit()
     return workspace
 
 
-async def seed_workspace_content(
-    db: AsyncSession, workspace_id, project_id, *, seed_demo_content: bool
-) -> None:
+async def seed_workspace_content(db: AsyncSession, workspace_id, project_id) -> None:
     """The idempotent part of workspace seeding: packs + the standard
     harnesses. Safe to call on every boot against an already-seeded
     workspace (that is exactly what `bootstrap.bootstrap()` does for
@@ -112,11 +122,17 @@ async def seed_workspace_content(
     install's chat harness still gains a newly added builtin tool), and it is
     what `create_workspace` calls right after creating a workspace's project.
 
-    Pack installation is gated on `Settings.seed_default_packs`
-    (`TRET_SEED_DEFAULT_PACKS`), not on `seed_demo_content` — every new
-    workspace gets the default pack(s) regardless of deployment mode.
-    `seed_demo_content` still governs the non-pack demo content
-    `_seed_default_harnesses` seeds (the Climate Analyst harness).
+    No `seed_demo_content` parameter here (there used to be one): every new
+    workspace gets the default pack(s) — gated only on `Settings.
+    seed_default_packs`/`TRET_SEED_DEFAULT_PACKS`, regardless of deployment
+    mode — and, with them, each pack's own `harnesses:` presets
+    (`tret.packs.loader.install_pack`). The Climate Analyst harness is one of
+    those now: it ships as the climate-risk pack's own preset rather than
+    being hardcoded here, so it is no longer demo-content-gated either.
+    `_seed_default_harnesses` below seeds only the pack-agnostic General
+    Assistant harness — `create_workspace`'s own `seed_demo_content` still
+    decides the "Sample Engagement" project framing, just nothing
+    harness-shaped downstream of it any more.
 
     This function commits, itself, immediately before attempting any pack
     install — not before (a caller's still-pending writes, e.g.
@@ -135,7 +151,7 @@ async def seed_workspace_content(
         await db.commit()
         await _install_configured_packs(db, workspace_id, project_id)
     await _seed_chat_harness(db, workspace_id)
-    await _seed_default_harnesses(db, workspace_id, seed_demo_content=seed_demo_content)
+    await _seed_default_harnesses(db, workspace_id)
 
 
 async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) -> None:
@@ -222,14 +238,25 @@ async def _seed_chat_harness(db: AsyncSession, workspace_id) -> None:
     )
 
 
-async def _seed_default_harnesses(db: AsyncSession, workspace_id, *, seed_demo_content: bool) -> None:
-    """General Assistant always; Climate Analyst only alongside demo content
-    (it needs the climate-risk pack, which `_install_configured_packs` only
-    installs when `seed_demo_content` is true)."""
+async def _seed_default_harnesses(db: AsyncSession, workspace_id) -> None:
+    """The one pack-agnostic harness left here: General Assistant. The
+    Climate Analyst harness that used to be seeded from here (gated on
+    `seed_demo_content`) has moved to the climate-risk pack's own
+    `harnesses:` preset — see `tret.packs.loader.install_pack`, which
+    `_install_configured_packs` (running earlier in `seed_workspace_content`)
+    already invokes for every pack in `TRET_PACKS_DIR`.
+
+    Checked by `name`, not by "any harness other than chat exists" (the
+    check this used before pack harness presets existed): that broader check
+    would now wrongly skip General Assistant's own creation on a workspace's
+    very first seeding, since `_install_configured_packs` may already have
+    created a pack's preset harness (e.g. Climate Analyst, task_profile
+    'divergence_assessment' — not 'chat') by the time this runs.
+    """
     existing = (
         await db.execute(
             select(Harness).where(
-                Harness.workspace_id == workspace_id, Harness.task_profile != "chat"
+                Harness.workspace_id == workspace_id, Harness.name == "General Assistant"
             )
         )
     ).scalars().first()
@@ -246,22 +273,3 @@ async def _seed_default_harnesses(db: AsyncSession, workspace_id, *, seed_demo_c
             tool_names=["read_document", "search_documents", "lookup_dataset", "list_prior_findings"],
         )
     )
-    if not seed_demo_content:
-        return
-    climate = (
-        await db.execute(
-            select(Pack).where(Pack.workspace_id == workspace_id, Pack.slug == "climate-risk")
-        )
-    ).scalars().first()
-    if climate is not None:
-        db.add(
-            Harness(
-                workspace_id=workspace_id,
-                pack_id=climate.id,
-                name="Climate Analyst",
-                description="Doctrine-driven climate risk assessment (divergence verdicts, "
-                "evidence extraction, TCFD drafting, QA).",
-                task_profile="divergence_assessment",
-                model_policy={"mode": "auto", "max_cost_tier": "premium"},
-            )
-        )

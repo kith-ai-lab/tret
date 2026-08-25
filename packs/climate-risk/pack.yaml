@@ -148,3 +148,18 @@ methods:
     params_schema:
       facility: { type: string, description: "Optional facility name filter, e.g. 'Alder Point'" }
     inputs: [carbon_workbook]
+
+# Ready-to-run workspace harnesses this pack installs alongside its sample
+# datasets (tret.packs.loader.install_pack, idempotent by harness name — see
+# that function's docstring). "Climate Analyst" used to be hardcoded in
+# services/workspace.py::_seed_default_harnesses; it now ships here instead,
+# so any workspace that installs this pack gets a ready-to-run harness for it
+# without that service module needing to know this pack exists.
+harnesses:
+  - name: Climate Analyst
+    description: >
+      Doctrine-driven climate risk assessment (divergence verdicts, evidence
+      extraction, TCFD drafting, QA).
+    task_types: [divergence_assessment]
+    tools: []
+    suggested_cost_tier: premium

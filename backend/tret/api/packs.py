@@ -126,6 +126,7 @@ def _out(p: Pack) -> dict:
         "content_hash": p.content_hash,
         "doctrine_files": manifest.get("doctrine", []),
         "task_types": manifest.get("task_types", []),
+        "harnesses": manifest.get("harnesses", []),
         "schemas": manifest.get("schemas", {}),
         "installed_at": p.installed_at.isoformat() if p.installed_at else None,
     }
@@ -275,12 +276,24 @@ async def delete_pack(
     db: AsyncSession = Depends(get_db),
 ):
     """Workspace-admin gated. 404s for a pack in another workspace (never
-    confirms it exists there), 409s while any Harness, Run, Finding, or
-    MethodRun in this workspace still references it (a used pack is not
-    deletable — its task types, doctrine and methods are load-bearing for
-    whatever used it; uninstall is for a mistaken install, not a pack with a
-    history), and otherwise deletes the `Pack` row plus its extracted
+    confirms it exists there), 409s while any *active* Harness, or any Run,
+    Finding, or MethodRun in this workspace still references it (a used pack
+    is not deletable — its task types, doctrine and methods are load-bearing
+    for whatever used it; uninstall is for a mistaken install, not a pack with
+    a history), and otherwise deletes the `Pack` row plus its extracted
     directory.
+
+    An *archived* Harness does not block the delete: an operator who installs
+    a preset pack by mistake archives the auto-created harness
+    (`PUT /api/harnesses/{id}` with `is_archived: true`) and then deletes the
+    pack — the harness's own doctrine/task-type dependency on the pack is
+    gone the moment it is archived (it can never run again), so there is
+    nothing left for the delete to protect. `Harness.pack_id` is nullable
+    (same as `Dataset.pack_id`), so archived harnesses still pointing at this
+    pack are severed (set to NULL) below rather than left dangling on a row
+    that is about to not exist — left as a real FK, deleting the pack out
+    from under one would be an integrity violation, not merely a semantic
+    concern.
 
     Pack-seeded datasets are deliberately left in place (ship minimal
     uninstall; the plan's own resolved judgment call) — deleting the pack
@@ -308,19 +321,29 @@ async def delete_pack(
         (Finding, "finding"),
         (MethodRun, "method run"),
     ):
-        referencing = (
-            await db.execute(select(model).where(model.pack_id == pack_id).limit(1))
-        ).scalar_one_or_none()
+        query = select(model).where(model.pack_id == pack_id)
+        if model is Harness:
+            # Archived harnesses don't count — see this endpoint's docstring.
+            query = query.where(Harness.is_archived.is_(False))
+        referencing = (await db.execute(query.limit(1))).scalar_one_or_none()
         if referencing is not None:
             name = getattr(referencing, "name", None) or str(referencing.id)
+            remedy = (
+                "archive the harness first, then delete the pack"
+                if model is Harness
+                else "uninstall targets mistaken installs"
+            )
             raise HTTPException(
                 409,
                 f"Pack '{pack.slug}@{pack.version}' is still referenced by a {label} "
-                f"('{name}') — used packs are not deletable; uninstall targets mistaken "
-                "installs.",
+                f"('{name}') — used packs are not deletable; {remedy}.",
             )
 
     await db.execute(update(Dataset).where(Dataset.pack_id == pack_id).values(pack_id=None))
+    # Only archived harnesses can still be referencing this pack at this
+    # point (an active one would have 409'd above) — sever them too, for the
+    # same FK reason Dataset is severed just above.
+    await db.execute(update(Harness).where(Harness.pack_id == pack_id).values(pack_id=None))
 
     source_path = pack.source_path
     await db.delete(pack)

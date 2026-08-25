@@ -830,6 +830,81 @@ async def test_delete_409s_while_a_harness_references_the_pack(
     assert (packs_root / str(pack_id)).is_dir()  # untouched
 
 
+async def test_delete_succeeds_once_the_referencing_harness_is_archived(
+    client, seed, storage, session_factory
+):
+    """The mistaken-install recovery path: install a preset pack, archive the
+    harness it auto-created, then delete the pack — the archived harness must
+    not still 409 the delete, and its now-dangling `pack_id` FK must be
+    nulled rather than left pointing at a row that no longer exists."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+    await login(client, admin.email)
+    pack = await _install_via_archive(client)
+    pack_id = uuid.UUID(pack["id"])
+
+    harness_id = uuid.uuid4()
+    async with session_factory() as db:
+        db.add(
+            Harness(
+                id=harness_id,
+                workspace_id=team.id,
+                pack_id=pack_id,
+                name="Uses the pack",
+                task_profile="freeform",
+                model_policy={"mode": "auto"},
+                tool_names=[],
+                is_archived=True,
+            )
+        )
+        await db.commit()
+
+    response = await client.delete(f"/api/packs/{pack_id}")
+    assert response.status_code == 200, response.text
+
+    async with session_factory() as db:
+        harness = await db.get(Harness, harness_id)
+    assert harness is not None  # archived harness survives the pack delete
+    assert harness.pack_id is None  # severed, not left pointing at a deleted row
+
+
+async def test_delete_409s_message_names_archiving_when_an_active_harness_references_the_pack(
+    client, seed, storage, session_factory
+):
+    """An *active* (non-archived) harness still blocks the delete — only the
+    409's own remedy text changed, from "uninstall targets mistaken installs"
+    to naming the actual fix (archive the harness first)."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+    await login(client, admin.email)
+    pack = await _install_via_archive(client)
+    pack_id = uuid.UUID(pack["id"])
+
+    async with session_factory() as db:
+        db.add(
+            Harness(
+                workspace_id=team.id,
+                pack_id=pack_id,
+                name="Uses the pack",
+                task_profile="freeform",
+                model_policy={"mode": "auto"},
+                tool_names=[],
+            )
+        )
+        await db.commit()
+
+    response = await client.delete(f"/api/packs/{pack_id}")
+    assert response.status_code == 409
+    assert "archive the harness first, then delete the pack" in response.text
+
+    packs_root = Path(get_settings().storage_dir).resolve() / "packs"
+    assert (packs_root / str(pack_id)).is_dir()  # untouched
+
+
 async def _seed_harness(session_factory, team, *, pack_id=None) -> uuid.UUID:
     """A Harness unrelated to the pack under test, just to satisfy Run's
     NOT NULL `harness_id` FK — with FK enforcement on (this file's `engine`

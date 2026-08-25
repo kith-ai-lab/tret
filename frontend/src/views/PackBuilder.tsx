@@ -5,9 +5,11 @@ import { Link } from 'react-router-dom'
 import {
   api,
   ApiError,
+  COST_TIERS,
   type DraftDetail,
   type DraftFileContent,
   type DraftManifest,
+  type HarnessPreset,
   type InputFieldSchema,
   type MarketplaceSubmission,
   type PackDatasetRef,
@@ -203,12 +205,13 @@ function SaveIndicator({ state, error }: { state: SaveState; error: ApiError | n
 
 // ── Draft editor shell ───────────────────────────────────────────────────
 
-type BuilderSubTab = 'metadata' | 'doctrine' | 'tasks' | 'schemas' | 'datasets' | 'templates'
+type BuilderSubTab = 'metadata' | 'doctrine' | 'tasks' | 'harnesses' | 'schemas' | 'datasets' | 'templates'
 
 const SUB_TABS: { key: BuilderSubTab; label: string }[] = [
   { key: 'metadata', label: 'Metadata' },
   { key: 'doctrine', label: 'Doctrine' },
   { key: 'tasks', label: 'Task types' },
+  { key: 'harnesses', label: 'Harnesses' },
   { key: 'schemas', label: 'Schemas' },
   { key: 'datasets', label: 'Datasets' },
   { key: 'templates', label: 'Templates' },
@@ -322,6 +325,7 @@ function DraftEditor({ draft, onDeleted }: { draft: DraftDetail; onDeleted: () =
         <DoctrineEditor manifest={manifest} setManifest={setManifest} files={files} setFiles={setFiles} />
       )}
       {subTab === 'tasks' && <TaskTypesEditor manifest={manifest} setManifest={setManifest} files={files} />}
+      {subTab === 'harnesses' && <HarnessesEditor manifest={manifest} setManifest={setManifest} />}
       {subTab === 'schemas' && <SchemasEditor files={files} setFiles={setFiles} />}
       {subTab === 'datasets' && (
         <DatasetsEditor manifest={manifest} setManifest={setManifest} files={files} setFiles={setFiles} />
@@ -1072,6 +1076,179 @@ function InputSchemaEditor({
       <button type="button" className="btn btn-sm" style={{ marginTop: 8 }} onClick={addField}>
         + Add field
       </button>
+    </div>
+  )
+}
+
+// ── Harnesses ──────────────────────────────────────────────────────────────
+// Shape verified against packs/schema.py::HarnessPreset (see client.ts).
+// Installing a pack that ships these turns each into a real, editable
+// `Harness` row (Packs.tsx's Installed pane says so); this editor only ever
+// writes the same small manifest slice every other sub-tab writes to.
+
+function HarnessesEditor({
+  manifest,
+  setManifest,
+}: {
+  manifest: DraftManifest
+  setManifest: (m: DraftManifest) => void
+}) {
+  const [activeIdx, setActiveIdx] = useState(0)
+  // Same live tool roster the Task types tab reads from — one source of
+  // truth for "what tools exist", not a second hardcoded list that could drift.
+  const toolsQuery = useQuery({ queryKey: ['tools'], queryFn: api.listTools })
+  const tools = toolsQuery.data ?? []
+  const presets = manifest.harnesses ?? []
+  const taskTypeOptions = manifest.task_types.map((t) => t.slug)
+
+  const setPresets = (next: HarnessPreset[]) => setManifest({ ...manifest, harnesses: next })
+
+  const addPreset = () => {
+    const name = window.prompt('Harness name (e.g. "Risk reviewer")')
+    if (!name || !name.trim()) return
+    if (presets.some((p) => p.name === name.trim())) {
+      window.alert('That name is already used.')
+      return
+    }
+    const created: HarnessPreset = { name: name.trim(), description: '', task_types: [], tools: [] }
+    setPresets([...presets, created])
+    setActiveIdx(presets.length)
+  }
+
+  const removePreset = (idx: number) => {
+    if (!window.confirm(`Delete harness preset "${presets[idx].name}"?`)) return
+    setPresets(presets.filter((_, i) => i !== idx))
+    setActiveIdx(0)
+  }
+
+  const patch = (idx: number, p: Partial<HarnessPreset>) => {
+    setPresets(presets.map((preset, i) => (i === idx ? { ...preset, ...p } : preset)))
+  }
+
+  const active = presets[activeIdx]
+
+  return (
+    <div className="row" style={{ alignItems: 'flex-start', gap: 20 }}>
+      <div style={{ width: 220, flexShrink: 0 }}>
+        <button type="button" className="btn btn-sm" style={{ marginBottom: 8, width: '100%' }} onClick={addPreset}>
+          + Add harness
+        </button>
+        {presets.length === 0 && (
+          <div className="empty" style={{ padding: '4px 0' }}>
+            No harness presets yet — optional; installing this pack works fine without any.
+          </div>
+        )}
+        {presets.map((p, i) => (
+          <ListItem
+            key={`${p.name}-${i}`}
+            active={i === activeIdx}
+            onClick={() => setActiveIdx(i)}
+            title={p.name}
+            sub={`${p.tools.length} tool${p.tools.length === 1 ? '' : 's'}`}
+          />
+        ))}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        {!active ? (
+          <div className="empty">Add a harness preset to begin.</div>
+        ) : (
+          <div className="panel stack" style={{ gap: 14 }}>
+            <div className="row">
+              <span className="mono-label">{active.name}</span>
+              <span style={{ flex: 1 }} />
+              <button type="button" className="btn btn-sm btn-danger" onClick={() => removePreset(activeIdx)}>
+                Delete
+              </button>
+            </div>
+            <div className="row">
+              <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+                <label className="mono-label">Name</label>
+                <input type="text" value={active.name} onChange={(e) => patch(activeIdx, { name: e.target.value })} />
+              </div>
+              <div className="field" style={{ width: 200, marginBottom: 0 }}>
+                <label className="mono-label">Suggested cost tier</label>
+                <select
+                  value={active.suggested_cost_tier ?? ''}
+                  onChange={(e) => patch(activeIdx, { suggested_cost_tier: e.target.value || undefined })}
+                >
+                  <option value="">— none —</option>
+                  {COST_TIERS.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label className="mono-label">Description</label>
+              <textarea
+                rows={3}
+                value={active.description ?? ''}
+                onChange={(e) => patch(activeIdx, { description: e.target.value })}
+              />
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label className="mono-label">Task type (this pack's own — leave unset for freeform)</label>
+              {taskTypeOptions.length === 0 ? (
+                <div className="empty" style={{ padding: '4px 0' }}>
+                  Add a task type in the Task types tab first.
+                </div>
+              ) : (
+                <select
+                  value={active.task_types?.[0] ?? ''}
+                  onChange={(e) => patch(activeIdx, { task_types: e.target.value ? [e.target.value] : [] })}
+                >
+                  <option value="">— freeform —</option>
+                  {taskTypeOptions.map((slug) => (
+                    <option key={slug} value={slug}>
+                      {slug}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label className="mono-label">Tools</label>
+              {tools.length === 0 ? (
+                <div className="empty" style={{ padding: '4px 0' }}>
+                  Loading tool list…
+                </div>
+              ) : (
+                <div
+                  style={{
+                    maxHeight: 170,
+                    overflowY: 'auto',
+                    border: '1px solid var(--border-subtle)',
+                    borderRadius: 5,
+                    padding: '6px 10px',
+                  }}
+                >
+                  {tools.map((tl) => {
+                    const checked = active.tools.includes(tl.name)
+                    return (
+                      <label key={tl.name} className="check-row">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const nextTools = e.target.checked
+                              ? [...active.tools, tl.name]
+                              : active.tools.filter((n) => n !== tl.name)
+                            patch(activeIdx, { tools: nextTools })
+                          }}
+                        />
+                        <span>{tl.name}</span>
+                        <span className="desc">{tl.available ? tl.description : `off here — ${tl.unavailable_reason}`}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

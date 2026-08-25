@@ -61,7 +61,7 @@ async def bootstrap(db: AsyncSession) -> None:
             # just-created project back out from under the workspace — see
             # workspace.py's _install_configured_packs.
             await db.commit()
-        await seed_workspace_content(db, workspace.id, project.id, seed_demo_content=True)
+        await seed_workspace_content(db, workspace.id, project.id)
         await db.commit()
 
     # Self-host only: in multi-tenant mode this backstop must never run. Its

@@ -5,6 +5,7 @@ import { useSearchParams } from 'react-router-dom'
 import {
   api,
   ApiError,
+  type HarnessPreset,
   type InputFieldSchema,
   type Pack,
   type PackMethodRef,
@@ -78,6 +79,40 @@ function MethodsBanner({ count, author }: { count: number | null; author?: strin
       {count === 1 ? '' : 's'} — vetted deterministic scripts, run only when the agent invokes them,
       never sandboxed, only deterred by a static scan.
       {author && <> Published by <strong>{author}</strong>.</>}
+    </div>
+  )
+}
+
+// ── Shared: harness presets table ──────────────────────────────────────────
+// A pack's `harnesses:` entries, shown identically before install (Find, so
+// an installer knows what they get) and after (Installed) — verified against
+// api/packs.py::_out (see HarnessPreset's own doc comment in client.ts).
+
+function HarnessPresetsTable({ presets }: { presets: HarnessPreset[] }) {
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table className="mono-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Description</th>
+            <th>Tools</th>
+            <th>Cost tier</th>
+            <th>Task types</th>
+          </tr>
+        </thead>
+        <tbody>
+          {presets.map((p, i) => (
+            <tr key={`${p.name}-${i}`}>
+              <td style={{ whiteSpace: 'nowrap' }}>{p.name}</td>
+              <td style={{ color: 'var(--text-muted)' }}>{p.description ?? '—'}</td>
+              <td style={{ color: 'var(--text-muted)' }}>{(p.tools ?? []).join(', ') || '—'}</td>
+              <td>{p.suggested_cost_tier ? <span className="chip">{p.suggested_cost_tier}</span> : '—'}</td>
+              <td style={{ color: 'var(--text-muted)' }}>{(p.task_types ?? []).join(', ') || '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -317,6 +352,21 @@ function PackDetailPane({ packId, canManage }: { packId: string; canManage: bool
           </table>
         </div>
       </div>
+
+      {pack.harnesses && pack.harnesses.length > 0 && (
+        <div>
+          <div className="mono-label" style={{ marginBottom: 6 }}>
+            Harnesses
+          </div>
+          <HarnessPresetsTable presets={pack.harnesses} />
+          <div
+            style={{ marginTop: 8, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}
+          >
+            Installing this pack created these as ordinary, editable harnesses in this workspace — see
+            the Harnesses view to change or archive them.
+          </div>
+        </div>
+      )}
 
       <PackMethods packId={packId} />
 
@@ -737,6 +787,16 @@ function FindDetailPane({
               </div>
             )}
           </div>
+
+          {(detail.manifest.harnesses ?? []).length > 0 && (
+            <div>
+              <div className="mono-label" style={{ marginBottom: 6 }}>
+                Ships {detail.manifest.harnesses!.length} ready-to-run harness
+                {detail.manifest.harnesses!.length === 1 ? '' : 'es'}
+              </div>
+              <HarnessPresetsTable presets={detail.manifest.harnesses!} />
+            </div>
+          )}
 
           {(detail.manifest.doctrine ?? []).length > 0 && (
             <div>

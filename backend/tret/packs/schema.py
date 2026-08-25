@@ -53,6 +53,57 @@ class PackMethod(BaseModel):
     timeout_seconds: float = 60.0
 
 
+class HarnessPreset(BaseModel):
+    """A ready-to-run workspace `Harness` this pack creates at install time
+    (`packs/loader.py::install_pack`), alongside its dataset seeding — see
+    that function's own docstring for the idempotency rule (skip if a
+    non-archived harness with this `name` already exists in the workspace).
+
+    Cross-referencing checks — `tools` against the engine's builtin tools
+    (exactly like `TaskType.tools`), `task_types` against this same
+    manifest's own `task_types` slugs, and `suggested_cost_tier` against the
+    router's cost-tier vocabulary — are validated in `loader.validate_pack`,
+    not here: the same split `TaskType` already uses for its `tools`/
+    `terminal_tool`/`doctrine` fields, since checking any of them needs
+    either `get_builtin_tools()` (an engine import deliberately kept out of
+    this schema module — see loader.py's own `TYPE_CHECKING` note) or the
+    manifest's other fields, neither of which a single model's own
+    `field_validator` can see.
+    """
+
+    # Stripped, and required non-empty (min length 1) *after* stripping: this
+    # becomes the created `Harness.name` verbatim (loader.py::install_pack),
+    # which is also the idempotency key a re-install or upgrade install
+    # matches against — leading/trailing whitespace a pack author didn't
+    # intend would otherwise make two presets that read as "the same name"
+    # collide, or fail to collide, unpredictably. The 200-char ceiling
+    # (checked post-strip too) mirrors the practical bound
+    # `api/harnesses.py::HarnessBody.name` leaves implicit; a pack preset gets
+    # the same ceiling explicitly since a manifest is less reviewed than an
+    # operator's own form input.
+    name: str
+    description: str | None = None
+    # Task type slug(s) this harness is scoped to. `Harness.task_profile`
+    # (db/models.py) holds exactly one slug, so a preset may name at most
+    # one — `loader.validate_pack` rejects more than one, rather than
+    # silently picking one entry off a multi-entry list. Empty (the default)
+    # installs with `task_profile="freeform"`, the same default ordinary
+    # harness creation uses (see api/harnesses.py::HarnessBody).
+    task_types: list[str] = Field(default_factory=list)
+    tools: list[str]
+    suggested_cost_tier: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_stripped_non_empty_and_bounded(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("harness preset name must not be blank")
+        if len(v) > 200:
+            raise ValueError("harness preset name must be at most 200 characters")
+        return v
+
+
 class PackManifest(BaseModel):
     pack: str
     version: str
@@ -73,3 +124,4 @@ class PackManifest(BaseModel):
     task_types: list[TaskType] = Field(default_factory=list)
     datasets: list[PackDataset] = Field(default_factory=list)
     methods: list[PackMethod] = Field(default_factory=list)
+    harnesses: list[HarnessPreset] = Field(default_factory=list)

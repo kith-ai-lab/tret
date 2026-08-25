@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { Navigate } from 'react-router-dom'
 
-import { api, type PackMethod, type ReviewQueueItem } from '../api/client'
+import { api, type HarnessPreset, type PackMethod, type ReviewQueueItem, type TaskType } from '../api/client'
 import { formatDateTime } from '../components/shared/format'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { StatusBadge } from '../components/shared/StatusBadge'
@@ -97,6 +97,91 @@ function MethodsReviewBanner({ methods }: { methods: PackMethod[] }) {
   )
 }
 
+// Presets are config, not code — no elevated-review banner like methods get
+// (MethodsReviewBanner above). Still worth a reviewer's eye: a preset's own
+// `tools` next to the tools its declared task types actually grant, so a tool
+// smuggled in beyond what the task type would allow stands out. This check is
+// cosmetic only — computed client-side from data already on the page, nothing
+// the backend enforces or that blocks a decision.
+function HarnessPresetsReview({ presets, taskTypes }: { presets: HarnessPreset[]; taskTypes: TaskType[] }) {
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 6 }}>
+        Harnesses ({presets.length})
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table className="mono-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Description</th>
+              <th>Tools</th>
+              <th>Cost tier</th>
+              <th>Task types</th>
+            </tr>
+          </thead>
+          <tbody>
+            {presets.map((p, i) => {
+              const slugs = p.task_types ?? []
+              // Union of tools the preset's own referenced task types grant.
+              // Empty `slugs` means "no task type named to check against", so
+              // nothing is flagged — there is no baseline to exceed.
+              const union = new Set<string>()
+              for (const slug of slugs) {
+                const tt = taskTypes.find((t) => t.slug === slug)
+                for (const tool of tt?.tools ?? []) union.add(tool)
+              }
+              // A referenced task type with an empty `tools: []` is not "this
+              // preset may have zero tools" — the engine falls back to the
+              // harness's own tool_names whenever a task declares none
+              // (engine/harness.py:328: `task.get("tools") or harness.tool_names`).
+              // So an empty union here means "no baseline was declared to
+              // check against", exactly like the `slugs.length === 0` case
+              // above, not "nothing is granted" — without the `union.size > 0`
+              // guard, every one of the preset's own tools would be flagged
+              // as unauthorized purely because the task type it references
+              // happens to leave `tools` empty.
+              const extra = new Set(
+                slugs.length > 0 && union.size > 0 ? (p.tools ?? []).filter((t) => !union.has(t)) : []
+              )
+              return (
+                <tr key={`${p.name}-${i}`}>
+                  <td style={{ whiteSpace: 'nowrap' }}>{p.name}</td>
+                  <td style={{ color: 'var(--text-muted)' }}>{p.description ?? '—'}</td>
+                  <td>
+                    <span className="row" style={{ gap: 4, display: 'inline-flex', flexWrap: 'wrap' }}>
+                      {(p.tools ?? []).map((t) => (
+                        <span
+                          key={t}
+                          className="chip"
+                          style={
+                            extra.has(t)
+                              ? { fontSize: 10, padding: '1px 7px', borderColor: 'var(--red-border)', color: 'var(--red)' }
+                              : { fontSize: 10, padding: '1px 7px' }
+                          }
+                          title={
+                            extra.has(t)
+                              ? "Not granted by this preset's own task types — cosmetic check, not enforced"
+                              : undefined
+                          }
+                        >
+                          {t}
+                        </span>
+                      ))}
+                    </span>
+                  </td>
+                  <td>{p.suggested_cost_tier ? <span className="chip">{p.suggested_cost_tier}</span> : '—'}</td>
+                  <td style={{ color: 'var(--text-muted)' }}>{slugs.join(', ') || '—'}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function ReviewDetailPane({ id }: { id: string }) {
   const detailQuery = useQuery({ queryKey: ['review-detail', id], queryFn: () => api.reviewDetail(id) })
   const queryClient = useQueryClient()
@@ -155,6 +240,10 @@ function ReviewDetailPane({ id }: { id: string }) {
       </div>
 
       {d.has_methods && <MethodsReviewBanner methods={d.manifest.methods} />}
+
+      {(d.manifest.harnesses ?? []).length > 0 && (
+        <HarnessPresetsReview presets={d.manifest.harnesses!} taskTypes={d.manifest.task_types} />
+      )}
 
       <div>
         <div className="mono-label" style={{ marginBottom: 6 }}>

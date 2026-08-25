@@ -782,6 +782,23 @@ export interface PackMethodRef extends PackMethod {
   pack_id: string
 }
 
+/** One `harnesses:` entry in a pack manifest — installing the pack turns each
+ *  of these into a real, editable `Harness` row in the workspace (same shape
+ *  `POST /api/harnesses` would create by hand), not a read-only template.
+ *  Verified against packs/schema.py — `tools` is required, everything else
+ *  optional, `suggested_cost_tier` is free text from `COST_TIERS` below rather
+ *  than a `Harness.model_policy` object, since a preset only *suggests* a
+ *  ceiling and never pins a model. `task_types` holds at most one slug —
+ *  `Harness.task_profile` is single-valued, so `loader.validate_pack` rejects
+ *  more than one entry; empty installs as `task_profile="freeform"`. */
+export interface HarnessPreset {
+  name: string
+  description?: string
+  task_types?: string[]
+  tools: string[]
+  suggested_cost_tier?: string
+}
+
 export interface Pack {
   id: string
   slug: string
@@ -813,6 +830,10 @@ export interface Pack {
 
 export interface PackDetail extends Pack {
   doctrine_contents: Record<string, string>
+  // Verified against packs/schema.py, defaulting to [] like every other
+  // manifest list here. Absent (older backend) reads identically to empty
+  // everywhere this is used.
+  harnesses?: HarnessPreset[]
 }
 
 export interface ModelInfo {
@@ -1521,6 +1542,9 @@ export interface RegistryPackManifest {
   datasets: PackDatasetRef[]
   methods: PackMethod[]
   doctrine_contents: Record<string, string>
+  // Verified against packs/schema.py — see `PackDetail.harnesses` above, same
+  // manifest field, mirrored onto the registry's own copy of the manifest.
+  harnesses?: HarnessPreset[]
 }
 
 /** One pack version's full detail — `api.py::_version_detail_out`. This is
@@ -1588,6 +1612,11 @@ export interface DraftManifest {
   task_types: TaskType[]
   datasets: PackDatasetRef[]
   methods: unknown[]
+  // Verified against packs/schema.py — same as `PackDetail.harnesses`/
+  // `RegistryPackManifest.harnesses` above — needed here too so the builder's
+  // Harnesses sub-tab has a slot in `manifest_json` to write to and PATCH,
+  // the same way every other sub-tab writes its own slice of this object.
+  harnesses?: HarnessPreset[]
 }
 
 export interface DraftSummary {

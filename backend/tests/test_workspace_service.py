@@ -93,8 +93,15 @@ async def test_multi_tenant_team_workspace_gets_the_default_pack(db, monkeypatch
     workspace ships with no packs at all (`seed_demo_content=False`). After
     the split, TRET_SEED_DEFAULT_PACKS (true by default) installs the pack
     regardless of TRET_MULTI_TENANT — while the non-pack demo content (the
-    "Sample Engagement" project framing, the Climate Analyst harness) stays
-    tied to seed_demo_content exactly as before."""
+    "Sample Engagement" project framing) stays tied to seed_demo_content
+    exactly as before.
+
+    Climate Analyst is no longer part of that non-pack demo-content split:
+    it now ships as the climate-risk pack's own `harnesses:` preset
+    (`packs/loader.py::install_pack`), so it arrives with the pack itself —
+    here, in a team workspace under TRET_MULTI_TENANT, same as everywhere
+    else the pack installs. Only the "General" (not "Sample Engagement")
+    project naming still marks this as a non-demo-content workspace."""
     monkeypatch.setenv("TRET_MULTI_TENANT", "true")
     get_settings.cache_clear()
 
@@ -108,9 +115,11 @@ async def test_multi_tenant_team_workspace_gets_the_default_pack(db, monkeypatch
     assert pack is not None
     assert pack.version
 
-    # The non-pack demo-content split held: no Climate Analyst, "General"
-    # project naming — team creation always passes seed_demo_content=False.
-    assert await _harness_names(db, workspace.id) == {"Chat Assistant", "General Assistant"}
+    assert await _harness_names(db, workspace.id) == {
+        "Chat Assistant",
+        "General Assistant",
+        "Climate Analyst",
+    }
 
 
 async def test_multi_tenant_personal_workspace_gets_the_default_pack(db, monkeypatch):

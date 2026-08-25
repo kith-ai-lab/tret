@@ -648,6 +648,78 @@ async def test_validate_a_clean_draft_is_valid(client, seed):
     assert body["summary"]["doctrine_files"] == ["doctrine.md"]
 
 
+# ── a draft with harnesses: presets validates like any other manifest field ──
+async def test_a_draft_with_a_valid_harness_preset_validates(client, seed):
+    """`manifest_json.harnesses` is not `methods` — `_reject_methods` must not
+    over-reject it — and a preset referencing a real task_type/tool in the
+    same draft round-trips through the unchanged `validate_pack` cleanly."""
+    _, _, admin = await _admin_workspace(seed)
+    await login(client, admin.email)
+    draft_id = (await client.post("/api/packs/drafts", json={"slug": "my-pack"})).json()["id"]
+    patched = await client.patch(
+        f"/api/packs/drafts/{draft_id}",
+        json={
+            "manifest_json": {
+                "pack": "my-pack",
+                "version": "0.1.0",
+                "display_name": "My Pack",
+                "doctrine": [],
+                "task_types": [
+                    {"slug": "t1", "display_name": "T1", "shape": "freeform"},
+                ],
+                "datasets": [],
+                "methods": [],
+                "harnesses": [
+                    {
+                        "name": "My Harness",
+                        "description": "A draft harness preset.",
+                        "task_types": ["t1"],
+                        "tools": ["lookup_dataset"],
+                        "suggested_cost_tier": "standard",
+                    }
+                ],
+            }
+        },
+    )
+    assert patched.status_code == 200, patched.text
+
+    response = await client.post(f"/api/packs/drafts/{draft_id}/validate")
+    body = response.json()
+    assert body["valid"] is True, body["errors"]
+
+
+async def test_a_draft_with_an_invalid_harness_preset_fails_validation(client, seed):
+    _, _, admin = await _admin_workspace(seed)
+    await login(client, admin.email)
+    draft_id = (await client.post("/api/packs/drafts", json={"slug": "my-pack"})).json()["id"]
+    await client.patch(
+        f"/api/packs/drafts/{draft_id}",
+        json={
+            "manifest_json": {
+                "pack": "my-pack",
+                "version": "0.1.0",
+                "display_name": "My Pack",
+                "doctrine": [],
+                "task_types": [],
+                "datasets": [],
+                "methods": [],
+                "harnesses": [
+                    {
+                        "name": "My Harness",
+                        "task_types": [],
+                        "tools": ["not_a_real_tool"],
+                    }
+                ],
+            }
+        },
+    )
+
+    response = await client.post(f"/api/packs/drafts/{draft_id}/validate")
+    body = response.json()
+    assert body["valid"] is False
+    assert any("unknown tool 'not_a_real_tool'" in e for e in body["errors"])
+
+
 # ── test-install: draft-suffixed version, no collision on repeat ────────────
 async def _make_installable_draft(client) -> str:
     draft_id = (await client.post("/api/packs/drafts", json={"slug": "my-pack"})).json()["id"]

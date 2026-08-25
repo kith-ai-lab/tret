@@ -111,7 +111,7 @@ def _stub_seeding(monkeypatch):
     async def _noop_admin(db):
         return None
 
-    async def _noop_seed(db, workspace_id, project_id, *, seed_demo_content):
+    async def _noop_seed(db, workspace_id, project_id):
         return None
 
     monkeypatch.setattr(bootstrap_module, "bootstrap_admin", _noop_admin)

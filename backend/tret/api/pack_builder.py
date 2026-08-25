@@ -173,6 +173,7 @@ async def create_draft(
         "task_types": [],
         "datasets": [],
         "methods": [],
+        "harnesses": [],
     }
     draft = DraftPack(
         workspace_id=ctx.id,
