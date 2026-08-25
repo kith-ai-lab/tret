@@ -601,6 +601,10 @@ export interface TaskType {
   tools?: string[]
   output_contract?: string
   instructions?: string
+  // Doctrine selectors this task narrows to (backend: packs/schema.py::TaskType.doctrine)
+  // — file paths from the pack's own `doctrine:` list, optionally `#`-narrowed to
+  // one heading. Empty means "every doctrine file", so existing packs are unaffected.
+  doctrine?: string[]
 }
 
 export const COMPACTION_MODES = ['auto', 'off'] as const
@@ -784,6 +788,13 @@ export interface Pack {
   version: string
   display_name: string
   description: string
+  // Provenance/marketplace metadata (Plan Phase 0) — optional, free-text, never
+  // read by the engine at run time. Absent on a pack installed before this
+  // landed, same as `content_hash` below.
+  author: string | null
+  license: string | null
+  homepage: string | null
+  tags: string[]
   frameworks: string[]
   doctrine_sha: string
   /** The integrity pin: sha256 over the pack's files, **recorded at install** and
@@ -1441,6 +1452,249 @@ export interface LedgerEntry {
 
 export type CheckoutKind = 'credits_small' | 'credits_large' | 'solo' | 'team'
 
+// ── Marketplace: registry (Find / Install) ───────────────────────────────
+// Everything below proxies through the backend's own registry client
+// (api/packs.py's `/registry/*` routes -> `_registry_get`/`_download_pack_archive`),
+// which itself proxies tret-cloud's `/api/marketplace/*` registry API. Shapes
+// verified against tret_cloud/marketplace/{api.py,models.py} (2026-08-25).
+
+/** One pack as a search result, or the base of a per-slug summary
+ *  (`GET /api/packs/registry/search`'s `items`, `GET /api/packs/registry/{slug}`
+ *  — `api.py::_pack_summary_out`). Note there is no `author` field here —
+ *  a pack's author lives only in each version's `manifest` (see
+ *  `RegistryPackManifest` below), not on the pack row itself. */
+export interface RegistryPackSummary {
+  id: string
+  slug: string
+  display_name: string
+  description: string
+  tags: string[]
+  frameworks: string[]
+  download_count: number
+  // The pack's currently-listed **version row's id** — NOT a version string
+  // ("vN available" logic and Find must resolve it against `versions` below
+  // to get the actual "vN" to show/fetch/install; see UpdateBadge/
+  // FindDetailPane in Packs.tsx). Null when nothing has ever been listed.
+  latest_listed_version: string | null
+  // Present only on the per-slug summary (`GET /packs/{slug}` ->
+  // `get_pack`, which adds this key); absent on a search result row.
+  versions?: RegistryPackVersionSummary[]
+}
+
+/** One listed/delisted version, as summarized in a per-slug summary's
+ *  `versions` list (`api.py::_version_summary_out`). */
+export interface RegistryPackVersionSummary {
+  id: string
+  version: string
+  state: string
+  has_methods: boolean
+  size_bytes: number
+  submitted_at: string
+  listed_at: string | null
+}
+
+/** `GET /api/packs/registry/search` -> the registry's `GET /packs`
+ *  (`api.py::list_packs`) — an object, cursor-paginated. */
+export interface RegistrySearchResult {
+  items: RegistryPackSummary[]
+  next_cursor: string | null
+}
+
+/** `PackManifest.model_dump()` (backend: packs/schema.py; same shape as
+ *  `DraftManifest`) plus `doctrine_contents` — every doctrine file's full
+ *  text, inlined at submission time so Find/review never re-read the
+ *  archive (`submission_checks.py::run_submission_checks`). Unlike
+ *  `DraftManifest.methods` (always empty on a draft), `methods` here can be
+ *  non-empty for a submitted/listed pack. */
+export interface RegistryPackManifest {
+  pack: string
+  version: string
+  display_name: string
+  description: string
+  author: string | null
+  license: string | null
+  homepage: string | null
+  tags: string[]
+  frameworks: string[]
+  doctrine: string[]
+  task_types: TaskType[]
+  datasets: PackDatasetRef[]
+  methods: PackMethod[]
+  doctrine_contents: Record<string, string>
+}
+
+/** One pack version's full detail — `api.py::_version_detail_out`. This is
+ *  the one shape shared by four different endpoints: the registry's
+ *  `GET /packs/{slug}/{version}` (Find/Install), `GET /my-submissions` and
+ *  `GET /review/queue` (arrays of this), and every review-decision response
+ *  (approve/request-changes/reject/delist) — none of those return a
+ *  narrower `{id, state}`-shaped body. Note the field is `slug`, not
+ *  `pack_slug`, and there is no `publisher_display_name` anywhere on it —
+ *  only `submitted_by`/`reviewed_by` user ids. */
+export interface MarketplacePackVersion {
+  id: string
+  pack_id: string
+  slug: string
+  display_name: string
+  version: string
+  state: string
+  manifest: RegistryPackManifest
+  content_hash: string
+  doctrine_sha: string
+  has_methods: boolean
+  size_bytes: number
+  review_notes: string | null
+  submitted_by: string
+  reviewed_by: string | null
+  submitted_at: string
+  reviewed_at: string | null
+  listed_at: string | null
+}
+
+/** Same object as `MarketplacePackVersion` — kept as its own name in the
+ *  registry (Find/Install) call sites, which never touch review/submission
+ *  fields, so those reads stay obviously scoped to what Find actually shows. */
+export type RegistryPackVersion = MarketplacePackVersion
+
+// ── Pack builder drafts (Plan Phase D) ────────────────────────────────────
+// backend: api/pack_builder.py. A draft's file content is `str` (text) or
+// `{b64}` (binary) — see DraftPack's own model docstring.
+export type DraftFileContent = string | { b64: string }
+
+export interface PackDatasetRef {
+  name: string
+  file: string // CSV path relative to the pack root, e.g. "datasets/foo.csv"
+}
+
+/** Mirrors `PackManifest.model_dump()` (backend: packs/schema.py) — the same
+ *  shape `pack.yaml` parses to. `methods` must always stay empty on a draft;
+ *  the builder has no methods editor and the backend rejects a non-empty one
+ *  with 422 (see pack_builder.py::_reject_methods). That rejection only
+ *  looks at this object — it is `DraftFileContent`'s own guard
+ *  (`files["pack.yaml"]` is a reserved name PATCH refuses, backend:
+ *  tret.packs.draft.RESERVED_ROOT_NAMES) that stops `files{}` from smuggling
+ *  a whole replacement manifest, methods included, past this check. */
+export interface DraftManifest {
+  pack: string
+  version: string
+  display_name: string
+  description: string
+  author: string | null
+  license: string | null
+  homepage: string | null
+  tags: string[]
+  frameworks: string[]
+  doctrine: string[]
+  task_types: TaskType[]
+  datasets: PackDatasetRef[]
+  methods: unknown[]
+}
+
+export interface DraftSummary {
+  id: string
+  slug: string
+  version: string | null
+  display_name: string
+  file_count: number
+  created_by: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface DraftDetail extends DraftSummary {
+  manifest_json: DraftManifest
+  files: Record<string, DraftFileContent>
+  test_install_seq: number
+}
+
+/** `POST /api/packs/drafts/{id}/validate` — mirrors `POST /api/packs/validate`'s
+ *  own response shape (same underlying `validate_pack`), plus a `summary` block. */
+export interface ValidateDraftResult {
+  valid: boolean
+  errors: string[]
+  summary: {
+    pack: string | null
+    version: string | null
+    task_types: string[]
+    schemas: string[]
+    doctrine_files: string[]
+  }
+}
+
+export interface TestInstallResult {
+  id: string
+  slug: string
+  version: string // "{version}+draft.{n}"
+}
+
+/** `POST /api/packs/drafts/{id}/submit` (tret_cloud/marketplace/submit.py
+ *  ::submit_draft) — cloud-only: the route does not exist until the
+ *  tret_cloud extension is loaded, so calling it on self-host 404s, which is
+ *  exactly the capability gate the UI reads. Its own small dict, deliberately
+ *  narrower than `MarketplacePackVersion` below (verified against
+ *  tret_cloud/marketplace). */
+export interface SubmitDraftResult {
+  version_id: string
+  pack_slug: string
+  version: string
+  state: string
+}
+
+// ── Marketplace submissions + review (cloud-only) ─────────────────────────
+// `/api/marketplace/*`, mounted via the same extension seam as `/api/billing/*`
+// — 404s entirely on a self-hosted instance with no tret-cloud extension
+// loaded. Shapes verified against tret_cloud/marketplace/api.py.
+
+/** `GET /api/marketplace/my-submissions` — an array of the caller's own full
+ *  `MarketplacePackVersion` objects (`api.py::my_submissions`). */
+export type MarketplaceSubmission = MarketplacePackVersion
+
+/** `GET /api/marketplace/review/queue` — same full-object shape, oldest
+ *  `in_review` submission first (`api.py::review_queue`). There is no
+ *  `publisher_display_name` field anywhere in this API — only
+ *  `submitted_by`/`reviewed_by` user ids. */
+export type ReviewQueueItem = MarketplacePackVersion
+
+/** `check_results` on `GET /api/marketplace/review/{id}` — the verbatim
+ *  output of `submission_checks.py::SubmissionCheckResult.as_check_results()`:
+ *  one overall pass/fail plus the collected errors and the pinned integrity
+ *  values, not a per-check list. */
+export interface MarketplaceCheckResults {
+  valid: boolean
+  errors: string[]
+  has_methods: boolean
+  size_bytes: number
+  content_hash: string | null
+  doctrine_sha: string | null
+}
+
+/** One manifest field that differs from the previously listed version
+ *  (`diff.py::manifest_field_changes`) — `previous` is null on a pack's
+ *  first-ever submission. */
+export interface ManifestFieldChange {
+  previous: unknown
+  current: unknown
+}
+
+/** `diff_against_previous_listed` on `GET /api/marketplace/review/{id}`
+ *  (`diff.py::build_diff`). */
+export interface MarketplaceDiff {
+  manifest_changes: Record<string, ManifestFieldChange>
+  // relpath -> unified diff text against the previously listed version;
+  // every doctrine file's full text (as an "add") on a pack's first
+  // submission, since there is nothing to diff against yet.
+  doctrine_diffs: Record<string, string>
+}
+
+/** `GET /api/marketplace/review/{id}` (`api.py::review_detail`) — the full
+ *  version object plus the two review-only blocks. `methods` for the
+ *  methods-review banner live at `manifest.methods` (inherited from
+ *  `MarketplacePackVersion`), not as a top-level field. */
+export interface ReviewDetail extends MarketplacePackVersion {
+  check_results: MarketplaceCheckResults
+  diff_against_previous_listed: MarketplaceDiff
+}
+
 // ── Fetch wrapper ────────────────────────────────────────────────────────
 
 export class ApiError extends Error {
@@ -1595,6 +1849,79 @@ export const api = {
       '/packs/validate',
       { method: 'POST', body: { path } },
     ),
+  deletePack: (id: string) => request<{ deleted: boolean }>(`/packs/${id}`, { method: 'DELETE' }),
+  installPackArchive: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<Pack>('/packs/install/archive', { method: 'POST', form })
+  },
+
+  // marketplace registry (Find / Install) — backend proxy, api/packs.py's own
+  // `/registry/*` routes, passing tret_cloud/marketplace's response bodies
+  // through verbatim. Shapes verified against tret_cloud/marketplace.
+  registrySearch: (params: { q?: string; tags?: string; framework?: string } = {}) => {
+    const qs = new URLSearchParams()
+    if (params.q) qs.set('q', params.q)
+    if (params.tags) qs.set('tags', params.tags)
+    if (params.framework) qs.set('framework', params.framework)
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    return request<RegistrySearchResult>(`/packs/registry/search${suffix}`)
+  },
+  registryPackSummary: (slug: string) =>
+    request<RegistryPackSummary>(`/packs/registry/${encodeURIComponent(slug)}`),
+  registryPackVersion: (slug: string, version: string) =>
+    request<RegistryPackVersion>(
+      `/packs/registry/${encodeURIComponent(slug)}/${encodeURIComponent(version)}`,
+    ),
+  registryInstall: (slug: string, version: string) =>
+    request<Pack>('/packs/registry/install', { method: 'POST', body: { slug, version } }),
+
+  // pack builder drafts (Plan Phase D) — backend: api/pack_builder.py
+  listDrafts: () => request<DraftSummary[]>('/packs/drafts'),
+  createDraft: (slug: string) => request<DraftDetail>('/packs/drafts', { method: 'POST', body: { slug } }),
+  getDraft: (id: string) => request<DraftDetail>(`/packs/drafts/${id}`),
+  patchDraft: (
+    id: string,
+    body: { manifest_json?: DraftManifest; files?: Record<string, DraftFileContent | null> },
+  ) => request<DraftDetail>(`/packs/drafts/${id}`, { method: 'PATCH', body }),
+  deleteDraft: (id: string) => request<{ deleted: boolean }>(`/packs/drafts/${id}`, { method: 'DELETE' }),
+  validateDraft: (id: string) =>
+    request<ValidateDraftResult>(`/packs/drafts/${id}/validate`, { method: 'POST' }),
+  testInstallDraft: (id: string) =>
+    request<TestInstallResult>(`/packs/drafts/${id}/test-install`, { method: 'POST' }),
+  // Not a fetch: a plain URL for an <a href download> — the browser handles the
+  // streamed tar.gz (and the session cookie) on its own, same-origin.
+  draftExportUrl: (id: string) => `/api/packs/drafts/${id}/export`,
+  // Cloud-only — see SubmitDraftResult's own doc comment. 404s on a self-hosted
+  // build with no registry client + marketplace API behind it yet, which is
+  // exactly the capability gate the UI reads (it never probes this directly;
+  // see PackBuilder.tsx's use of `mySubmissions` as the combined probe).
+  submitDraft: (id: string) => request<SubmitDraftResult>(`/packs/drafts/${id}/submit`, { method: 'POST' }),
+
+  // marketplace submissions + review (cloud-only; 404s where the extension is
+  // not loaded — same capability-gate convention as billing)
+  mySubmissions: () => request<MarketplaceSubmission[]>('/marketplace/my-submissions'),
+  reviewQueue: () => request<ReviewQueueItem[]>('/marketplace/review/queue'),
+  reviewDetail: (id: string) => request<ReviewDetail>(`/marketplace/review/${id}`),
+  // Each decision endpoint returns the full updated version object
+  // (`api.py`'s approve/request-changes/reject all end in
+  // `_version_detail_out(pack, pv)`), not a narrow `{id, state}` — verified
+  // against tret_cloud/marketplace.
+  reviewApprove: (id: string, notes?: string) =>
+    request<MarketplacePackVersion>(`/marketplace/review/${id}/approve`, {
+      method: 'POST',
+      body: { notes: notes ?? '' },
+    }),
+  reviewRequestChanges: (id: string, notes: string) =>
+    request<MarketplacePackVersion>(`/marketplace/review/${id}/request-changes`, {
+      method: 'POST',
+      body: { notes },
+    }),
+  reviewReject: (id: string, notes: string) =>
+    request<MarketplacePackVersion>(`/marketplace/review/${id}/reject`, {
+      method: 'POST',
+      body: { notes },
+    }),
 
   // deliverables
   listDeliverables: () => request<Deliverable[]>('/deliverables'),

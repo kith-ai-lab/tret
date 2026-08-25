@@ -8,6 +8,7 @@ import { Documents } from './views/Documents'
 import { Emissions } from './views/Emissions'
 import { Harnesses } from './views/Harnesses'
 import { InviteAccept } from './views/InviteAccept'
+import { MarketplaceReview } from './views/MarketplaceReview'
 import { Packs } from './views/Packs'
 import { RunDetailView } from './views/RunDetail'
 import { Runs } from './views/Runs'
@@ -28,6 +29,10 @@ export function AppRoutes() {
       <Route path="/deliverables" element={<Deliverables />} />
       <Route path="/documents" element={<Documents />} />
       <Route path="/packs" element={<Packs />} />
+      {/* Cloud-only; the component itself probes and bounces home if the
+          review API is not there (self-host, or an authenticated non-staff
+          user) — see MarketplaceReview.tsx's own doc comment. */}
+      <Route path="/marketplace-review" element={<MarketplaceReview />} />
       <Route path="/harnesses" element={<Harnesses />} />
       <Route path="/settings" element={<SettingsView />} />
       <Route path="/invite/:token" element={<InviteAccept />} />

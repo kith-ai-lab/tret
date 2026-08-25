@@ -24,6 +24,15 @@ const STATUS_COLOR: Record<string, string> = {
   on: 'badge-green',
   replay: 'badge-amber',
   off: 'badge-gray',
+  // marketplace submission / review state machine (Plan Phase B): draft ->
+  // submitted -> in_review -> {approved -> listed | changes_requested ->
+  // submitted | rejected}; listed -> delisted. `approved`/`rejected` are
+  // shared with the findings states above — same colors apply.
+  submitted: 'badge-blue',
+  in_review: 'badge-amber',
+  listed: 'badge-green',
+  changes_requested: 'badge-amber',
+  delisted: 'badge-gray',
 }
 
 export function StatusBadge({ status }: { status: string }) {

@@ -131,6 +131,7 @@ function Sidebar({
             {n.label}
           </NavLink>
         ))}
+        <MarketplaceReviewNavItem />
       </nav>
       <button
         type="button"
@@ -152,6 +153,19 @@ function Sidebar({
       </div>
     </aside>
   )
+}
+
+/** The Marketplace review nav item only exists at all for someone who can use
+ *  it: `GET /api/marketplace/review/queue` 404s wholesale where the cloud
+ *  extension is not loaded (self-host) and 403s for any authenticated user
+ *  who is not Kith review staff, same capability-gate posture as
+ *  BillingSection. A route still exists for it (router.tsx) so a direct link
+ *  still works for staff; this is only about whether everyone else sees an
+ *  entry that would just 403/404 for them. */
+function MarketplaceReviewNavItem() {
+  const probeQuery = useQuery({ queryKey: ['review-queue'], queryFn: api.reviewQueue, retry: false })
+  if (!probeQuery.isSuccess) return null
+  return <NavLink to="/marketplace-review">Marketplace review</NavLink>
 }
 
 // ── Workspace switcher ───────────────────────────────────────────────────
