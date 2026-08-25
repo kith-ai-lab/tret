@@ -7,6 +7,7 @@ import { Deliverables } from './views/Deliverables'
 import { Documents } from './views/Documents'
 import { Emissions } from './views/Emissions'
 import { Harnesses } from './views/Harnesses'
+import { InviteAccept } from './views/InviteAccept'
 import { Packs } from './views/Packs'
 import { RunDetailView } from './views/RunDetail'
 import { Runs } from './views/Runs'
@@ -29,6 +30,7 @@ export function AppRoutes() {
       <Route path="/packs" element={<Packs />} />
       <Route path="/harnesses" element={<Harnesses />} />
       <Route path="/settings" element={<SettingsView />} />
+      <Route path="/invite/:token" element={<InviteAccept />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

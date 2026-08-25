@@ -8,6 +8,8 @@ import {
   type LocalProviderTest,
   takesApiKey,
   type User,
+  type WorkspaceInviteCreated,
+  type WorkspaceMember,
 } from '../api/client'
 import { BillingSection } from '../components/shared/BillingSection'
 import { formatDateTime } from '../components/shared/format'
@@ -25,7 +27,8 @@ export function SettingsView() {
           requests.
         </div>
       </div>
-      <TeamSection />
+      <WorkspaceMembersSection />
+      <InstanceUsersSection />
       <ProviderKeys />
       <BillingSection />
       <RouterInfo />
@@ -35,7 +38,364 @@ export function SettingsView() {
   )
 }
 
-// ── Team ──────────────────────────────────────────────────────────────────
+// ── Workspace members ─────────────────────────────────────────────────────
+// The current workspace's own team: members with role controls, pending
+// invites, and the invite form. A personal workspace is just the one person
+// it belongs to, so this renders a create-team nudge instead — there is
+// nothing to manage yet.
+
+const WORKSPACE_ROLES = [
+  { value: 'owner', hint: 'full control, incl. billing' },
+  { value: 'admin', hint: 'manage members, invites and provider keys' },
+  { value: 'approver', hint: 'can approve/reject findings' },
+  { value: 'analyst', hint: 'runs work, cannot approve' },
+]
+
+const INVITE_ROLES = WORKSPACE_ROLES.filter((r) => r.value !== 'owner')
+
+function memberRoleBadge(role: string): string {
+  if (role === 'owner' || role === 'admin') return 'badge-violet'
+  if (role === 'approver') return 'badge-green'
+  return 'badge-blue'
+}
+
+function WorkspaceMembersSection() {
+  const queryClient = useQueryClient()
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const me = meQuery.data
+  const currentWorkspace = me?.workspaces.find((w) => w.id === me.current_workspace_id)
+  const workspaceId = currentWorkspace?.id
+
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteRole, setInviteRole] = useState('analyst')
+  const [lastInvite, setLastInvite] = useState<WorkspaceInviteCreated | null>(null)
+  const [copiedLink, setCopiedLink] = useState<string | null>(null)
+
+  const membersQuery = useQuery({
+    queryKey: ['workspace-members', workspaceId],
+    queryFn: () => api.workspaceMembers(workspaceId!),
+    enabled: !!workspaceId,
+  })
+  const invitesQuery = useQuery({
+    queryKey: ['workspace-invites', workspaceId],
+    queryFn: () => api.listInvites(workspaceId!),
+    enabled: !!workspaceId,
+  })
+  // The list endpoint returns every invite this workspace has ever issued —
+  // pending, accepted, and revoked alike — so this section (titled "Pending
+  // invites") filters to the ones still open.
+  const pendingInvites = (invitesQuery.data ?? []).filter((inv) => inv.status === 'pending')
+
+  const inviteMutation = useMutation({
+    mutationFn: () => api.createInvite(workspaceId!, inviteEmail.trim(), inviteRole),
+    onSuccess: (invite) => {
+      setLastInvite(invite)
+      setInviteEmail('')
+      setInviteRole('analyst')
+      queryClient.invalidateQueries({ queryKey: ['workspace-invites', workspaceId] })
+    },
+  })
+  const revokeMutation = useMutation({
+    mutationFn: (inviteId: string) => api.revokeInvite(workspaceId!, inviteId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['workspace-invites', workspaceId] }),
+  })
+  const roleMutation = useMutation({
+    mutationFn: ({ userId, newRole }: { userId: string; newRole: string }) =>
+      api.updateMemberRole(workspaceId!, userId, newRole),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['workspace-members', workspaceId] }),
+  })
+  const removeMutation = useMutation({
+    mutationFn: (userId: string) => api.removeMember(workspaceId!, userId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['workspace-members', workspaceId] }),
+  })
+  const createWorkspaceMutation = useMutation({
+    mutationFn: (name: string) => api.createWorkspace(name),
+    // A brand-new workspace means the whole active context changed — same
+    // full-drop rigor as switching workspaces or logging out.
+    onSuccess: () => queryClient.clear(),
+  })
+
+  if (!me || !currentWorkspace) return null
+
+  const canManage = ['owner', 'admin'].includes(me.role)
+
+  const copyLink = async (link: string) => {
+    try {
+      await navigator.clipboard.writeText(link)
+      setCopiedLink(link)
+      window.setTimeout(() => setCopiedLink((c) => (c === link ? null : c)), 1500)
+    } catch {
+      /* clipboard unavailable — the link stays selectable by hand */
+    }
+  }
+
+  if (currentWorkspace.kind === 'personal') {
+    return (
+      <div>
+        <div className="mono-label" style={{ marginBottom: 8 }}>
+          Team
+        </div>
+        <div className="panel">
+          <div className="mono-body" style={{ marginBottom: 12 }}>
+            Personal workspaces are just you — create a team to collaborate.
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={createWorkspaceMutation.isPending}
+            onClick={() => {
+              const name = window.prompt('Name your team workspace')
+              if (name && name.trim()) createWorkspaceMutation.mutate(name.trim())
+            }}
+          >
+            {createWorkspaceMutation.isPending ? 'Creating…' : 'Create team workspace'}
+          </button>
+          {createWorkspaceMutation.isError && (
+            <div className="error-text" style={{ marginTop: 10 }}>
+              {(createWorkspaceMutation.error as Error).message}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  const memberColumns: Column<WorkspaceMember>[] = [
+    {
+      key: 'member',
+      header: 'Member',
+      render: (m) => (
+        <div>
+          <div>{m.display_name}</div>
+          <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>{m.email}</div>
+        </div>
+      ),
+    },
+    {
+      key: 'role',
+      header: 'Role',
+      render: (m) => {
+        // Only an owner may hand out or take away the owner role; anyone
+        // else managing the team can move members between the other three.
+        const canEditThisRow = canManage && (m.role !== 'owner' || me.role === 'owner')
+        if (!canEditThisRow) {
+          return <span className={`badge ${memberRoleBadge(m.role)}`}>{m.role}</span>
+        }
+        return (
+          <select
+            value={m.role}
+            disabled={roleMutation.isPending}
+            onChange={(e) => roleMutation.mutate({ userId: m.user_id, newRole: e.target.value })}
+          >
+            {WORKSPACE_ROLES.filter((r) => r.value !== 'owner' || me.role === 'owner').map((r) => (
+              <option key={r.value} value={r.value}>
+                {r.value}
+              </option>
+            ))}
+          </select>
+        )
+      },
+    },
+    {
+      key: 'actions',
+      header: '',
+      render: (m) =>
+        canManage && m.user_id !== me.id && (m.role !== 'owner' || me.role === 'owner') ? (
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={removeMutation.isPending}
+            onClick={() => removeMutation.mutate(m.user_id)}
+          >
+            Remove
+          </button>
+        ) : null,
+    },
+  ]
+
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 8 }}>
+        Team — {currentWorkspace.name}
+      </div>
+
+      {membersQuery.isLoading ? (
+        <div className="empty pulse">Loading members…</div>
+      ) : membersQuery.isError ? (
+        <QueryError error={membersQuery.error} what="the workspace member list" />
+      ) : (
+        <div style={{ marginBottom: 14 }}>
+          <MonoTable
+            columns={memberColumns}
+            rows={membersQuery.data ?? []}
+            rowKey={(m) => m.user_id}
+            empty="No members."
+          />
+        </div>
+      )}
+      {(roleMutation.isError || removeMutation.isError) && (
+        <div className="error-text" style={{ marginBottom: 14 }}>
+          {((roleMutation.error ?? removeMutation.error) as Error).message}
+        </div>
+      )}
+
+      <div className="mono-label" style={{ marginBottom: 8 }}>
+        Pending invites
+      </div>
+      {invitesQuery.isLoading ? (
+        <div className="empty pulse">Loading invites…</div>
+      ) : invitesQuery.isError ? (
+        <QueryError error={invitesQuery.error} what="pending invites" />
+      ) : pendingInvites.length === 0 ? (
+        <div className="empty" style={{ marginBottom: 14 }}>
+          No pending invites.
+        </div>
+      ) : (
+        <table className="mono-table" style={{ marginBottom: 14 }}>
+          <thead>
+            <tr>
+              <th>Email</th>
+              <th>Role</th>
+              <th>When</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {pendingInvites.map((inv) => (
+              <tr key={inv.id}>
+                <td>{inv.email}</td>
+                <td>
+                  <span className={`badge ${memberRoleBadge(inv.role)}`}>{inv.role}</span>
+                </td>
+                <td>{formatDateTime(inv.created_at)}</td>
+                <td>
+                  {canManage && (
+                    // No copy-link button here: the list endpoint deliberately
+                    // never repeats the invite's token/link (see
+                    // WorkspaceInvite's doc comment in api/client.ts) — a lost
+                    // link means revoke-and-reinvite, not "look it up again".
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-danger"
+                      disabled={revokeMutation.isPending}
+                      onClick={() => revokeMutation.mutate(inv.id)}
+                    >
+                      Revoke
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {canManage && (
+        <form
+          className="panel"
+          onSubmit={(e) => {
+            e.preventDefault()
+            setLastInvite(null)
+            inviteMutation.mutate()
+          }}
+        >
+          <div className="mono-label" style={{ marginBottom: 10 }}>
+            Invite a member
+          </div>
+          <div className="row" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <div className="field" style={{ marginBottom: 0, flex: 1, minWidth: 200 }}>
+              <label className="mono-label">Email</label>
+              <input
+                type="email"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                autoComplete="off"
+                required
+              />
+            </div>
+            <div className="field" style={{ marginBottom: 0, width: 130 }}>
+              <label className="mono-label">Role</label>
+              <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}>
+                {INVITE_ROLES.map((r) => (
+                  <option key={r.value} value={r.value}>
+                    {r.value}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button
+              className="btn btn-primary"
+              type="submit"
+              disabled={inviteMutation.isPending || !inviteEmail.trim()}
+            >
+              {inviteMutation.isPending ? 'Sending…' : 'Send invite'}
+            </button>
+          </div>
+          <div
+            style={{
+              marginTop: 6,
+              fontFamily: 'var(--mono)',
+              fontSize: 10.5,
+              color: 'var(--text-muted)',
+            }}
+          >
+            {INVITE_ROLES.map((r) => `${r.value}: ${r.hint}`).join(' · ')}
+          </div>
+          {inviteMutation.isError && (
+            <div className="error-text" style={{ marginTop: 10 }}>
+              {(inviteMutation.error as Error).message}
+            </div>
+          )}
+          {lastInvite &&
+            (() => {
+              // invite_url is a path (`/invite/{token}`) — the backend leaves
+              // prefixing it with an origin to the caller.
+              const inviteLink = `${window.location.origin}${lastInvite.invite_url}`
+              return (
+                <div
+                  className="panel"
+                  style={{ marginTop: 12, borderColor: 'var(--amber)', background: 'var(--amber-dim)' }}
+                >
+                  <div className="mono-label" style={{ marginBottom: 6, color: 'var(--amber)' }}>
+                    {lastInvite.email_sent
+                      ? 'Invite sent — share this link too'
+                      : 'Email delivery is not set up — share this link'}
+                  </div>
+                  <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+                    <code
+                      style={{
+                        userSelect: 'all',
+                        background: 'var(--bg-input)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 4,
+                        padding: '2px 6px',
+                        flex: 1,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                      }}
+                    >
+                      {inviteLink}
+                    </code>
+                    <button type="button" className="btn btn-sm" onClick={() => void copyLink(inviteLink)}>
+                      {copiedLink === inviteLink ? 'copied' : 'copy'}
+                    </button>
+                  </div>
+                </div>
+              )
+            })()}
+        </form>
+      )}
+    </div>
+  )
+}
+
+// ── Instance users ────────────────────────────────────────────────────────
+// Self-host's instance-wide user management — POST/GET /api/auth/users*,
+// gated on the legacy global role rather than the current workspace's role,
+// so a self-hosted single-workspace deployment keeps working exactly as it
+// always has. Hidden entirely for anyone who isn't a global admin: a 403 here
+// is the ordinary case for every workspace-scoped role, so it reads as "this
+// does not apply to you" rather than as an error.
 
 const ROLES = [
   { value: 'admin', hint: 'everything, incl. keys and users' },
@@ -50,14 +410,15 @@ function generatePassword(): string {
   return [...bytes].map((b) => charset[b % charset.length]).join('')
 }
 
-function TeamSection() {
+function InstanceUsersSection() {
   const queryClient = useQueryClient()
   const usersQuery = useQuery({ queryKey: ['users'], queryFn: api.listUsers, retry: false })
-  // The signed-in user's own role, from the cache App already populated. Admin
-  // status is a property of the user, not of whether a list request happened to
-  // succeed: `isAdmin` used to be inferred as "the user list did not 403", so any
-  // *other* failure — a 500, a dropped connection — showed the admin-only user
-  // creation form (and its role picker and generated password) to an analyst.
+  // The signed-in user's own global role, from the cache App already
+  // populated. Admin status is a property of the user, not of whether a list
+  // request happened to succeed: `isAdmin` used to be inferred as "the user
+  // list did not 403", so any *other* failure — a 500, a dropped connection —
+  // showed the admin-only user creation form (and its role picker and
+  // generated password) to a non-admin.
   const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
 
   const [email, setEmail] = useState('')
@@ -83,7 +444,11 @@ function TeamSection() {
 
   const listError = usersQuery.error as ApiError | null
   const createError = createMutation.error as ApiError | null
-  const isAdmin = meQuery.data?.role === 'admin'
+  const isAdmin = meQuery.data?.global_role === 'admin'
+
+  // Not a global admin: this section does not apply to this account at all,
+  // so it disappears rather than showing an "admin only" placeholder.
+  if (usersQuery.isError && listError?.status === 403) return null
 
   const columns: Column<User>[] = [
     { key: 'email', header: 'Email', render: (u) => u.email },
@@ -93,9 +458,9 @@ function TeamSection() {
       header: 'Role',
       render: (u) => (
         <span
-          className={`badge ${u.role === 'admin' ? 'badge-violet' : u.role === 'approver' ? 'badge-green' : 'badge-blue'}`}
+          className={`badge ${u.global_role === 'admin' ? 'badge-violet' : u.global_role === 'approver' ? 'badge-green' : 'badge-blue'}`}
         >
-          {u.role}
+          {u.global_role}
         </span>
       ),
     },
@@ -110,19 +475,13 @@ function TeamSection() {
   return (
     <div>
       <div className="mono-label" style={{ marginBottom: 8 }}>
-        Team
+        Instance users
       </div>
 
       {usersQuery.isLoading ? (
         <div className="empty pulse">Loading users…</div>
       ) : usersQuery.isError ? (
-        // 403 is the ordinary non-admin case and reads as a normal empty state;
-        // anything else genuinely failed and reads as an error.
-        listError?.status === 403 ? (
-          <div className="empty">Admin only.</div>
-        ) : (
-          <QueryError error={usersQuery.error} what="the team list" />
-        )
+        <QueryError error={usersQuery.error} what="the instance user list" />
       ) : (
         <div style={{ marginBottom: 14 }}>
           <MonoTable

@@ -14,7 +14,12 @@ import { api, ApiError, takesApiKey } from '../../api/client'
  *
  *  A successful save invalidates ['providers'] and ['models']. That is also
  *  what dismisses the first-run surface — it watches the same ['providers']
- *  query, so no extra wiring is needed for it to disappear. */
+ *  query, so no extra wiring is needed for it to disappear.
+ *
+ *  Gated client-side on owner/admin in the current workspace, mirroring
+ *  `POST /settings/providers`'s own admin requirement — the request would
+ *  403 either way, but a form that hides itself for a role that cannot use it
+ *  reads better than one that lets you fill it in and fail at submit. */
 export function ProviderKeyForm({
   heading = 'Set provider key (admin, write-only)',
   onSaved,
@@ -25,6 +30,7 @@ export function ProviderKeyForm({
 }) {
   const queryClient = useQueryClient()
   const providersQuery = useQuery({ queryKey: ['providers'], queryFn: api.providerStatus })
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
 
   const keyProviders = (providersQuery.data ?? []).map((p) => p.provider).filter(takesApiKey)
 
@@ -54,6 +60,19 @@ export function ProviderKeyForm({
   }
 
   const setKeyError = setKeyMutation.error as ApiError | null
+
+  // Wait for `me` to settle before deciding — App.tsx already resolves it
+  // before this component can mount, so this is normally instant, but a
+  // brief flash of "requires admin" ahead of the real answer would be worse
+  // than the wait.
+  if (meQuery.isLoading) return null
+  if (!['owner', 'admin'].includes(meQuery.data?.role ?? '')) {
+    return (
+      <div className="panel mono-body" style={{ color: 'var(--text-muted)' }}>
+        Setting provider keys requires the owner or admin role in this workspace.
+      </div>
+    )
+  }
 
   return (
     <form onSubmit={submit} className="panel">

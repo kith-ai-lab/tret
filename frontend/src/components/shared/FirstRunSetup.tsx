@@ -30,7 +30,7 @@ export function FirstRunSetup() {
   if (!providersQuery.isSuccess) return null
   if (providersQuery.data.some((p) => p.configured)) return null
 
-  const isAdmin = meQuery.data?.role === 'admin'
+  const isAdmin = ['owner', 'admin'].includes(meQuery.data?.role ?? '')
   const closeWelcome = () => setWelcomeOpen(false)
 
   return (

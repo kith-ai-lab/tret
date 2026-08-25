@@ -24,12 +24,14 @@ export function BillingSection() {
 }
 
 function BillingPanel({ status }: { status: BillingStatus }) {
-  // Same pattern TeamSection uses: the signed-in user's own role, cached
-  // independently of whether some other admin-only request happened to
-  // succeed. `me` is already fetched by TeamSection above this section with
-  // staleTime: Infinity, so this is normally a cache hit, not a second request.
+  // Same pattern the other Settings sections use: the signed-in user's own
+  // role in the current workspace, cached independently of whether some other
+  // admin-only request happened to succeed. `me` is already fetched elsewhere
+  // in Settings with staleTime: Infinity, so this is normally a cache hit,
+  // not a second request. Billing is workspace-scoped, so this is
+  // owner/admin — not the instance-wide `global_role`.
   const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
-  const isAdmin = meQuery.data?.role === 'admin'
+  const isAdmin = ['owner', 'admin'].includes(meQuery.data?.role ?? '')
 
   const checkoutMutation = useMutation({
     mutationFn: (kind: CheckoutKind) => api.createCheckout(kind),

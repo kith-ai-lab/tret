@@ -1,9 +1,9 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Wordmark } from './components/shared/Wordmark'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 
-import { api, type User } from './api/client'
+import { api, ApiError, type User } from './api/client'
 import { FirstRunSetup } from './components/shared/FirstRunSetup'
 import { AppRoutes } from './router'
 import { Login } from './views/Login'
@@ -74,8 +74,15 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggleTheme}
         onLogout={async () => {
-          await api.logout()
+          // Local session first (the cookie always needs clearing), then hand
+          // off to the IdP's own end-session endpoint when the backend names
+          // one — `both` mode has no single "next place" to send a user after
+          // an IdP logout, so it never sets this and the redirect is skipped.
+          const result = await api.logout()
           queryClient.clear()
+          if (result.oidc_logout_url) {
+            window.location.href = result.oidc_logout_url
+          }
         }}
       />
       {/* Column, not just <Main/>: the first-run setup banner sits above every
@@ -117,6 +124,7 @@ function Sidebar({
       <div className="sidebar-brand">
         <Wordmark size={20} />
       </div>
+      {user.workspaces.length >= 1 && <WorkspaceSwitcher user={user} />}
       <nav>
         {NAV.map((n) => (
           <NavLink key={n.to} to={n.to} end={n.to === '/'}>
@@ -143,5 +151,113 @@ function Sidebar({
         </button>
       </div>
     </aside>
+  )
+}
+
+// ── Workspace switcher ───────────────────────────────────────────────────
+// Sits above the nav: the current workspace (with a personal/team hint),
+// opening onto every workspace this user belongs to plus a "create team"
+// action. Switching re-mints the session cookie server-side, so the cache is
+// dropped wholesale afterward — every workspace-scoped query in the app
+// (runs, findings, documents, …) is stale the instant the active workspace
+// changes, and a full drop is the only way to guarantee none of it survives
+// into the new context. Matches the rigor `onLogout` already uses.
+
+function WorkspaceSwitcher({ user }: { user: User }) {
+  const queryClient = useQueryClient()
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const switchMutation = useMutation({
+    mutationFn: (workspaceId: string) => api.switchWorkspace(workspaceId),
+    onSuccess: () => queryClient.clear(),
+  })
+
+  const createMutation = useMutation({
+    mutationFn: (name: string) => api.createWorkspace(name),
+    onSuccess: () => queryClient.clear(),
+  })
+
+  const current = user.workspaces.find((w) => w.id === user.current_workspace_id)
+  const switchError = switchMutation.error as ApiError | null
+  const createError = createMutation.error as ApiError | null
+  const pending = switchMutation.isPending || createMutation.isPending
+
+  const createTeam = () => {
+    const name = window.prompt('Name your team workspace')
+    if (name && name.trim()) {
+      setOpen(false)
+      createMutation.mutate(name.trim())
+    }
+  }
+
+  return (
+    <div className="workspace-switcher" ref={wrapRef}>
+      <button
+        type="button"
+        className="workspace-switcher-trigger"
+        aria-expanded={open}
+        aria-haspopup="true"
+        disabled={pending}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="workspace-switcher-name">
+          {pending ? 'switching…' : (current?.name ?? 'select workspace')}
+        </span>
+        {current && <span className="workspace-switcher-kind">{current.kind}</span>}
+      </button>
+
+      {open && (
+        <div className="workspace-switcher-pop" role="menu">
+          {user.workspaces.map((w) => (
+            <button
+              key={w.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={w.id === user.current_workspace_id}
+              className={`list-item${w.id === user.current_workspace_id ? ' active' : ''}`}
+              disabled={pending}
+              onClick={() => {
+                setOpen(false)
+                if (w.id !== user.current_workspace_id) switchMutation.mutate(w.id)
+              }}
+            >
+              {w.name}
+              <span className="sub">{w.kind}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            className="list-item workspace-switcher-create"
+            disabled={pending}
+            onClick={createTeam}
+          >
+            {createMutation.isPending ? 'Creating…' : '+ Create team workspace'}
+          </button>
+        </div>
+      )}
+
+      {(switchError || createError) && (
+        <div className="error-text" style={{ marginTop: 4, fontSize: 10.5 }}>
+          {(switchError ?? createError)?.message}
+        </div>
+      )}
+    </div>
   )
 }

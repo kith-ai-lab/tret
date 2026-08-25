@@ -191,6 +191,77 @@ h1, h2, h3, h4 {
   transform: skewX(-14deg);
 }
 
+/* ── Workspace switcher ────────────────────────────────────────────────── */
+
+.workspace-switcher {
+  position: relative;
+  margin: 0 12px 14px;
+}
+
+.workspace-switcher-trigger {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 7px 10px;
+  font-family: var(--mono);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  color: var(--text);
+  text-align: left;
+  transition: border-color 0.12s ease;
+}
+
+.workspace-switcher-trigger:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.workspace-switcher-trigger:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.workspace-switcher-name {
+  font-size: 12px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-switcher-kind {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.workspace-switcher-pop {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.workspace-switcher-create {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 2px;
+  padding-top: 8px;
+  color: var(--accent);
+}
+
 .sidebar nav {
   display: flex;
   flex-direction: column;
@@ -1434,6 +1505,27 @@ input[type="radio"] {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 28px;
+}
+
+/* Separates the password form from the SSO button in `auth_mode: "both"`. */
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
 }
 
 .pulse {

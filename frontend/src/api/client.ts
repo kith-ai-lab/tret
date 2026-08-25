@@ -3,11 +3,82 @@
 
 // ── Resource types ───────────────────────────────────────────────────────
 
+/** One workspace a user belongs to, and their role in it (backend:
+ *  api/auth.py::WorkspaceSummary). */
+export interface WorkspaceSummary {
+  id: string
+  name: string
+  kind: 'personal' | 'team'
+  role: string // owner | admin | approver | analyst — this user's role in this workspace
+}
+
+/** backend: api/auth.py::UserOut, from /api/auth/me, login, and workspace
+ *  switch. Breaking change from the pre-tenancy shape (CHANGELOG.md): `role`
+ *  now means this user's role *in the current workspace*, and the old
+ *  instance-wide meaning moved to `global_role`. */
 export interface User {
   id: string
   email: string
   display_name: string
-  role: string // admin | analyst | approver
+  // Role in the resolved current workspace: owner | admin | approver | analyst.
+  role: string
+  // The instance-wide legacy role (admin | analyst | approver) — what `role`
+  // meant before workspaces had their own roles. Still what gates
+  // /api/auth/users* (self-host's instance user management).
+  global_role: string
+  // False once an admin has deactivated the account.
+  active: boolean
+  workspaces: WorkspaceSummary[]
+  // Null when it cannot be resolved to exactly one workspace (no membership,
+  // or more than one with nothing selected) — a client must then call
+  // POST /api/auth/workspace before anything workspace-scoped will work.
+  current_workspace_id: string | null
+}
+
+/** GET /api/auth/config — public, unauthenticated: what the login screen
+ *  needs to decide which form(s) to show, before there is any session. */
+export interface AuthConfig {
+  auth_mode: 'password' | 'oidc' | 'both'
+  oidc_configured: boolean
+  oidc_login_url: string | null
+}
+
+/** One member of the current workspace (backend: api/workspaces.py::MemberOut,
+ *  from GET /api/workspaces/{id}/members and the PATCH .../members/{user_id}
+ *  role-change response). The backend also carries `joined_at`; unused here. */
+export interface WorkspaceMember {
+  user_id: string
+  email: string
+  display_name: string
+  role: string // owner | admin | approver | analyst
+}
+
+/** One invite into the current workspace, as GET /api/workspaces/{id}/invites
+ *  lists it (backend: api/workspaces.py::InviteOut). Every status the
+ *  workspace has ever issued comes back — pending, accepted, and revoked
+ *  alike — so a caller wanting only the open ones filters on `status`. */
+export interface WorkspaceInvite {
+  id: string
+  email: string
+  role: string
+  status: string // pending | accepted | revoked
+  created_at: string
+  expires_at: string
+}
+
+/** What POST /api/workspaces/{id}/invites returns on top of WorkspaceInvite
+ *  (backend: api/workspaces.py::InviteCreateOut) — shown once, right after
+ *  creation, so the link can be copied immediately. The list endpoint
+ *  deliberately never repeats `token`/`invite_url` (see workspaces.py's own
+ *  comment on InviteCreateOut): a lost link means revoke-and-reinvite, not
+ *  "look it up again".
+ *
+ *  `invite_url` is a *path* (`/invite/{token}`), not an absolute URL — prefix
+ *  it with `window.location.origin` before showing or copying it. */
+export interface WorkspaceInviteCreated extends WorkspaceInvite {
+  invite_url: string
+  token: string
+  email_sent: boolean
 }
 
 /** What the router was asked to optimize for (backend: router_llm/objectives.py). */
@@ -1420,13 +1491,52 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
 export const api = {
   // auth
+  authConfig: () => request<AuthConfig>('/auth/config'),
   login: (email: string, password: string) =>
     request<User>('/auth/login', { method: 'POST', body: { email, password } }),
-  logout: () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
+  // `oidc_logout_url`, when present, is where the browser should go next —
+  // tret's own cookie is already cleared by this call either way.
+  logout: () => request<{ ok: boolean; oidc_logout_url?: string }>('/auth/logout', { method: 'POST' }),
   me: () => request<User>('/auth/me'),
+  switchWorkspace: (workspaceId: string) =>
+    request<User>('/auth/workspace', { method: 'POST', body: { workspace_id: workspaceId } }),
+  acceptInvite: (token: string) =>
+    // Mirrors switch_workspace, by design (backend: api/workspaces.py
+    // ::accept_invite): joins + switches to the invited workspace and
+    // re-mints the cookie, returning the same UserOut shape.
+    request<User>(`/auth/invites/${encodeURIComponent(token)}/accept`, { method: 'POST' }),
   listUsers: () => request<User[]>('/auth/users'),
   createUser: (body: { email: string; display_name: string; password: string; role: string }) =>
     request<User>('/auth/users', { method: 'POST', body }),
+
+  // workspaces (team creation, membership and invites).
+  createWorkspace: (name: string) =>
+    // Mirrors switch_workspace, by design (backend: api/workspaces.py
+    // ::create_team_workspace): creates the team workspace, makes this user
+    // its owner, switches the session to it, and returns UserOut.
+    request<User>('/workspaces', { method: 'POST', body: { name } }),
+  workspaceMembers: (workspaceId: string) =>
+    request<WorkspaceMember[]>(`/workspaces/${workspaceId}/members`),
+  createInvite: (workspaceId: string, email: string, role: string) =>
+    request<WorkspaceInviteCreated>(`/workspaces/${workspaceId}/invites`, {
+      method: 'POST',
+      body: { email, role },
+    }),
+  listInvites: (workspaceId: string) =>
+    request<WorkspaceInvite[]>(`/workspaces/${workspaceId}/invites`),
+  revokeInvite: (workspaceId: string, inviteId: string) =>
+    request<{ ok: boolean }>(`/workspaces/${workspaceId}/invites/${inviteId}`, {
+      method: 'DELETE',
+    }),
+  updateMemberRole: (workspaceId: string, userId: string, role: string) =>
+    request<WorkspaceMember>(`/workspaces/${workspaceId}/members/${userId}`, {
+      method: 'PATCH',
+      body: { role },
+    }),
+  removeMember: (workspaceId: string, userId: string) =>
+    request<{ ok: boolean }>(`/workspaces/${workspaceId}/members/${userId}`, {
+      method: 'DELETE',
+    }),
 
   // runs
   createRun: (body: CreateRunBody) =>
