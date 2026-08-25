@@ -291,6 +291,18 @@ class Settings(BaseSettings):
     # Packs auto-installed at boot (colon-separated dirs)
     packs_dir: str = "../packs"
 
+    # Whether every *new* workspace — self-host's boot-time Default workspace,
+    # a multi-tenant JIT personal workspace (services/identity.py), or a Phase C
+    # team workspace (api/workspaces.py) — gets every pack found in
+    # TRET_PACKS_DIR installed. True (the default) is deliberate for every
+    # deployment mode, multi-tenant included: a signup should land on a working
+    # pack, not an empty shell. This is independent of `seed_demo_content`
+    # (services/workspace.py), which is about *sample* content beyond the pack
+    # (a "Sample Engagement" project name/description, the premium-tier Climate
+    # Analyst harness) and still follows TRET_MULTI_TENANT by default. Set
+    # false to ship every new workspace pack-less regardless of mode.
+    seed_default_packs: bool = True
+
     # ── outbound network (tret/net/) ─────────────────────────────────────────
     # Egress is five classes, not one boolean, because tret must reach an LLM
     # provider to do anything and "no internet" is a different deployment from

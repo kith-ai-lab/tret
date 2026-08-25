@@ -5,10 +5,14 @@ multi-tenant user's personal workspace, or a team workspace (Phase C).
 Extracted from services/bootstrap.py, which becomes a thin caller of this
 plus a safety net (see bootstrap.py's docstring). Every call seeds the same
 non-negotiable minimum — one project, the Chat Assistant and General
-Assistant harnesses — so a workspace is always immediately usable. Demo
-content (the climate-risk pack and its harness) is additional and opt-in by
-default in multi-tenant mode: a paying tenant's fresh workspace should not
-open on a stranger's sample project.
+Assistant harnesses, and (TRET_SEED_DEFAULT_PACKS permitting) every pack
+found in TRET_PACKS_DIR — so a workspace is always immediately usable and a
+signup lands on a working pack rather than an empty shell. Demo *content*
+beyond the pack itself — the "Sample Engagement" project framing and the
+Climate Analyst harness that leans on the climate-risk pack's doctrine —
+stays additional and opt-in by default in multi-tenant mode: a paying
+tenant's fresh workspace should not open framed as a stranger's sample
+project, even though it now ships the same domain pack every workspace gets.
 """
 from __future__ import annotations
 
@@ -48,6 +52,13 @@ async def create_workspace(
     install today. True/False overrides that for a specific call (Phase C's
     "create a team workspace" endpoint always passes False; a future "give me
     a sample project" action could pass True even in multi-tenant mode).
+
+    Note this no longer controls pack installation — every new workspace gets
+    every pack in `TRET_PACKS_DIR` installed whenever `Settings.seed_default_packs`
+    (`TRET_SEED_DEFAULT_PACKS`, true by default) is set, regardless of this
+    parameter or `TRET_MULTI_TENANT`. `seed_demo_content` still controls the
+    project's "Sample Engagement" framing and the Climate Analyst harness —
+    see `seed_workspace_content` and `_seed_default_harnesses` below.
     """
     if kind not in WORKSPACE_KINDS:
         raise ValueError(f"kind must be one of {WORKSPACE_KINDS}, got {kind!r}")
@@ -75,6 +86,16 @@ async def create_workspace(
     db.add(project)
     await db.flush()
 
+    # No commit here (there used to be one, right after the project above) —
+    # see seed_workspace_content's docstring for why that protection now
+    # lives there instead, immediately before the one step it actually
+    # protects against. Everything created so far (workspace, owner
+    # membership, project) stays uncommitted until then, which is what makes
+    # a failure in the *unprotected* steps below — `_seed_chat_harness` /
+    # `_seed_default_harnesses`, which run after packs and have no per-step
+    # savepoint of their own — roll back the whole creation instead of
+    # leaving a half-seeded workspace sitting around counting against a
+    # workspace cap.
     await seed_workspace_content(db, workspace.id, project.id, seed_demo_content=demo)
     await db.commit()
     return workspace
@@ -90,15 +111,52 @@ async def seed_workspace_content(
     `TRET_PACKS_DIR` after first boot still gets installed, and an upgraded
     install's chat harness still gains a newly added builtin tool), and it is
     what `create_workspace` calls right after creating a workspace's project.
+
+    Pack installation is gated on `Settings.seed_default_packs`
+    (`TRET_SEED_DEFAULT_PACKS`), not on `seed_demo_content` — every new
+    workspace gets the default pack(s) regardless of deployment mode.
+    `seed_demo_content` still governs the non-pack demo content
+    `_seed_default_harnesses` seeds (the Climate Analyst harness).
+
+    This function commits, itself, immediately before attempting any pack
+    install — not before (a caller's still-pending writes, e.g.
+    `create_workspace`'s freshly-created workspace/owner/project, stay
+    protected right up to the last possible moment) and not after (a pack
+    that fails must never take the caller's other writes down with it — see
+    `_install_configured_packs`'s own SAVEPOINT protection, unchanged). When
+    `seed_default_packs` is off, nothing here commits at all: there is
+    nothing pack-related to protect against, so a failure in
+    `_seed_chat_harness` / `_seed_default_harnesses` below is left free to
+    roll back everything, including whatever the caller had pending. Callers
+    that need their own writes durable before *that* case (there are none
+    today) would need their own commit first.
     """
-    if seed_demo_content:
+    if get_settings().seed_default_packs:
+        await db.commit()
         await _install_configured_packs(db, workspace_id, project_id)
     await _seed_chat_harness(db, workspace_id)
     await _seed_default_harnesses(db, workspace_id, seed_demo_content=seed_demo_content)
 
 
 async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) -> None:
-    """Auto-install every pack found in TRET_PACKS_DIR into this workspace."""
+    """Auto-install every pack found in TRET_PACKS_DIR into this workspace.
+
+    A pack that fails never takes the workspace down with it: a validation
+    failure (PackValidationError) and any other unexpected failure (a bad
+    dataset file, a DB constraint) are both logged and skipped. Each attempt
+    runs inside its own SAVEPOINT (`db.begin_nested()`) so a failure rolls
+    back only that pack's own partial writes — necessary because a failed
+    write mid-install can otherwise leave the transaction unusable for
+    whatever runs next (Postgres aborts a transaction after a failed
+    statement; SQLite is more forgiving, but the fix must hold on the backend
+    this actually runs on). A plain `db.rollback()` would "work" for that but
+    is wrong here: it unconditionally *expires* every object already loaded
+    in the session (workspace, project, ...), and AsyncSession cannot
+    transparently re-fetch an expired attribute outside an explicit
+    `await`— the very next unguarded `workspace.id` access anywhere after
+    that raises `MissingGreenlet`. A SAVEPOINT rollback only reverts (and
+    only expires) what happened inside it.
+    """
     settings = get_settings()
     for packs_root in settings.packs_dir.split(":"):
         root = Path(packs_root)
@@ -108,7 +166,8 @@ async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) 
             if not (pack_dir / "pack.yaml").exists():
                 continue
             try:
-                pack = await install_pack(db, pack_dir, workspace_id, project_id)
+                async with db.begin_nested():
+                    pack = await install_pack(db, pack_dir, workspace_id, project_id)
                 log.info(
                     "pack ready: %s@%s (content %s)",
                     pack.slug,
@@ -119,6 +178,12 @@ async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) 
                 log.error("pack %s failed validation and was NOT installed:", pack_dir.name)
                 for error in e.errors:
                     log.error("  - %s", error)
+            except Exception:  # noqa: BLE001 - a pack failure must never break workspace creation
+                log.exception(
+                    "pack %s failed to install and was skipped; the workspace continues "
+                    "without it",
+                    pack_dir.name,
+                )
 
 
 async def _seed_chat_harness(db: AsyncSession, workspace_id) -> None:

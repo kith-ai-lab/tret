@@ -21,13 +21,14 @@ import pytest
 import pytest_asyncio
 from argon2 import PasswordHasher
 from fastapi import FastAPI
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from tests.evals.golden_world import install_sqlite_type_shims
 from tret.api import auth, workspaces as workspaces_api
 from tret.db.engine import get_db
-from tret.db.models import Base, Invite, User, Workspace, WorkspaceMember
+from tret.db.models import Base, Invite, Pack, User, Workspace, WorkspaceMember
 from tret.engine import extensions as extensions_module
 from tret.engine.extensions import ExtensionAPI, GateResult
 
@@ -148,6 +149,43 @@ async def test_creating_a_team_switches_the_session_to_it(client, seed):
 
     me = await client.get("/api/auth/me")
     assert me.json()["current_workspace_id"] == new_workspace_id
+
+
+async def test_creating_a_team_gets_the_default_pack_in_multi_tenant_mode(
+    client, seed, session_factory, monkeypatch
+):
+    """services/workspace.py::create_workspace's pack installation now
+    follows TRET_SEED_DEFAULT_PACKS (true by default), independent of
+    TRET_MULTI_TENANT — a team created on a multi-tenant deployment still
+    gets the flagship pack, even though it still gets none of the *other*
+    demo content (seed_demo_content=False here, unaffected by this change)."""
+    from tret.config import get_settings
+
+    home = make_workspace("Solo")
+    user = make_user("teampack@example.com")
+    await seed(home, user, make_member(user, home, role="owner"))
+    await login(client, user.email)
+
+    monkeypatch.setenv("TRET_MULTI_TENANT", "true")
+    get_settings.cache_clear()
+    try:
+        response = await client.post("/api/workspaces", json={"name": "Climate Co"})
+        assert response.status_code == 200, response.text
+        new_workspace_id = response.json()["current_workspace_id"]
+    finally:
+        monkeypatch.delenv("TRET_MULTI_TENANT", raising=False)
+        get_settings.cache_clear()
+
+    async with session_factory() as db:
+        pack = (
+            await db.execute(
+                select(Pack).where(
+                    Pack.workspace_id == uuid.UUID(new_workspace_id),
+                    Pack.slug == "climate-risk",
+                )
+            )
+        ).scalars().first()
+        assert pack is not None
 
 
 async def test_creating_a_team_is_capped_when_configured(client, seed, monkeypatch):

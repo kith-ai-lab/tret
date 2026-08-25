@@ -147,6 +147,10 @@ services:
       # Multi-tenant SaaS mode (tret_cloud). false is every self-hosted
       # deployment: one workspace, no personal-workspace-per-user seeding.
       TRET_MULTI_TENANT: ${TRET_MULTI_TENANT:-false}
+      # Whether every new workspace gets every pack in TRET_PACKS_DIR
+      # installed. true (the default) ships the flagship pack(s) into every
+      # workspace regardless of TRET_MULTI_TENANT.
+      TRET_SEED_DEFAULT_PACKS: ${TRET_SEED_DEFAULT_PACKS:-true}
       # Cap on team workspaces one user may own via POST /api/workspaces.
       # 0 (the default) is unlimited.
       TRET_MAX_TEAM_WORKSPACES_PER_USER: ${TRET_MAX_TEAM_WORKSPACES_PER_USER:-0}

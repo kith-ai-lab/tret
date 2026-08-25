@@ -57,6 +57,10 @@ async def bootstrap(db: AsyncSession) -> None:
             )
             db.add(project)
             await db.flush()
+            # A pack failing to install below must not be able to roll this
+            # just-created project back out from under the workspace — see
+            # workspace.py's _install_configured_packs.
+            await db.commit()
         await seed_workspace_content(db, workspace.id, project.id, seed_demo_content=True)
         await db.commit()
 
