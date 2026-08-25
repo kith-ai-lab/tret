@@ -58,6 +58,16 @@ class PackManifest(BaseModel):
     version: str
     display_name: str
     description: str = ""
+    # Provenance/marketplace metadata. All optional and free-text (`license` is
+    # SPDX-shaped by convention, not validated as one — a marketplace review
+    # step is where that gets enforced, not every self-hosted install). None of
+    # this is read by the engine at run time; it exists to be shown back to a
+    # human deciding whether to install or trust a pack. Absent on every
+    # existing fixture, so nothing already installed needs updating.
+    author: str | None = None
+    license: str | None = None
+    homepage: str | None = None
+    tags: list[str] = Field(default_factory=list)
     frameworks: list[str] = Field(default_factory=list)
     doctrine: list[str] = Field(default_factory=list)
     task_types: list[TaskType] = Field(default_factory=list)
