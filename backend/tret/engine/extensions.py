@@ -20,6 +20,17 @@ a run against a balance, say) with no verdict to enforce, so every hook runs
 and every exception is caught — a broken extension must never flip a run's
 `status` or blank its `error`.
 
+A workspace gate (`add_workspace_gate`, `check_workspace_gate`) is the same
+fail-open, first-refusal-wins, veto-short-circuits contract as a pre-run gate,
+asked about a different kind of decision: not "may this run start" but "may
+this workspace-scoped action happen at all" (Phase C's motivating case is
+tret_cloud's team-plan seat limit — "may this workspace gain one more member,
+via an invite or its redemption"). It takes `(db, workspace_id, action)`
+rather than `(db, run, workspace_id)` — there is no `Run` in play — and
+`action` is a short machine string (`"invite"`, `"invite_redeem"`) the gate
+switches on, the same way `GateResult.reason` is a short machine string a
+caller switches on.
+
 With no extensions loaded, `get_extension_registry()` returns a default
 `ExtensionAPI` that allows everything and does nothing — the whole surface is
 inert when `TRET_EXTENSIONS` is unset, which is the open-source deployment.
@@ -63,6 +74,10 @@ class GateResult:
 PreRunGate = Callable[[AsyncSession, Run, uuid.UUID], Awaitable[GateResult]]
 PostRunHook = Callable[[AsyncSession, Run, uuid.UUID], Awaitable[None]]
 StartupTask = Callable[[], Awaitable[None]]
+# (db, workspace_id, action) -> GateResult. `action` is a short machine string
+# naming what is being asked, e.g. "invite" (workspaces.py creating one) or
+# "invite_redeem" (services/identity.py accepting one during OIDC login).
+WorkspaceGate = Callable[[AsyncSession, uuid.UUID, str], Awaitable[GateResult]]
 
 
 class ExtensionAPI:
@@ -77,6 +92,7 @@ class ExtensionAPI:
         self._pre_run_gates: list[PreRunGate] = []
         self._post_run_hooks: list[PostRunHook] = []
         self._startup_tasks: list[StartupTask] = []
+        self._workspace_gates: list[WorkspaceGate] = []
 
     def include_router(self, router: APIRouter) -> None:
         if self._app is not None:
@@ -90,6 +106,9 @@ class ExtensionAPI:
 
     def add_startup_task(self, fn: StartupTask) -> None:
         self._startup_tasks.append(fn)
+
+    def add_workspace_gate(self, fn: WorkspaceGate) -> None:
+        self._workspace_gates.append(fn)
 
     async def run_startup_tasks(self) -> None:
         """Await every registered startup task, in registration order."""
@@ -132,6 +151,36 @@ class ExtensionAPI:
                 except Exception:
                     await ext_db.rollback()
                     log.exception("pre-run gate %r raised; failing open", gate)
+                    continue
+                if not result.allowed:
+                    return result
+        return GateResult(allowed=True)
+
+    async def check_workspace_gate(
+        self, db: AsyncSession, workspace_id: uuid.UUID, action: str
+    ) -> GateResult:
+        """Ask every workspace gate in turn; the first explicit refusal wins.
+
+        Identical contract to `check_pre_run` (same module docstring section
+        applies verbatim), asked about a workspace-scoped action instead of a
+        run: fail-open on a raising gate, short-circuit on the first explicit
+        `GateResult(allowed=False)`, and a fresh session from tret's own
+        session factory per call rather than the caller's `db` — a gate
+        touching a table the engine knows nothing about must not be able to
+        poison the caller's own transaction on Postgres. No session opened,
+        and the database never touched, when nothing is registered.
+        """
+        if not self._workspace_gates:
+            return GateResult(allowed=True)
+        from tret.db.engine import get_session_factory
+
+        async with get_session_factory()() as ext_db:
+            for gate in self._workspace_gates:
+                try:
+                    result = await gate(ext_db, workspace_id, action)
+                except Exception:
+                    await ext_db.rollback()
+                    log.exception("workspace gate %r raised; failing open", gate)
                     continue
                 if not result.allowed:
                     return result

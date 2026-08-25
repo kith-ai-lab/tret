@@ -141,6 +141,134 @@ class Settings(BaseSettings):
     # query that needs a missing column — docs/upgrading.md, docs/hardening.md §8.
     skip_migrations: bool = False
 
+    # Multi-tenant SaaS mode (tret_cloud; OIDC login lands in a later phase).
+    # False is every open-source/self-hosted deployment: bootstrap seeds one
+    # workspace, every user is a member of it, and the demo content (climate
+    # pack, sample harnesses) is seeded as it always has been. True changes
+    # what bootstrap seeds for a *new* workspace (no demo content — a paying
+    # tenant does not want a stranger's sample project) and is the switch OIDC
+    # provisioning (Phase B) reads to decide whether a new user gets their own
+    # personal workspace or joins the sole one. Tenancy primitives themselves
+    # (memberships, workspace-scoped queries, the switch endpoint) are always
+    # active — this flag only ever changes bootstrap's seeding choice, never
+    # what a self-hosted deployment's single workspace looks like.
+    multi_tenant: bool = False
+
+    # Cap on how many *team* workspaces one user may own, via
+    # `POST /api/workspaces` (api/workspaces.py::create_team_workspace).
+    # 0 (the default) is unlimited — every self-hosted deployment, and a
+    # multi-tenant one that hasn't chosen to bound this. Counted by
+    # membership `role == 'owner'` in a `kind='team'` workspace, since that
+    # is exactly what creating one grants the caller — a user who owns N
+    # already and is at the cap gets a 403, not a 500 from an unbounded table
+    # scan an operator never asked to allow.
+    max_team_workspaces_per_user: int = 0
+
+    # ── login (tret/api/auth.py, tret/api/oidc.py) ────────────────────────────
+    # password (default — every self-hosted deployment) | oidc (single sign-on
+    # only; POST /api/auth/login and every password-setting endpoint refuse
+    # with 403) | both (password stays available alongside SSO, e.g. during a
+    # migration window). Setting this to oidc/both with `oidc_issuer` below
+    # left blank disables password login with nothing to replace it, so pair
+    # the two — nothing here validates that combination, on purpose: this
+    # flag and the router mount (main.py) are deliberately independent
+    # switches, the same way `multi_tenant` and OIDC are.
+    auth_mode: str = "password"  # password | oidc | both
+
+    # Generic OIDC login (tret/api/oidc.py) via authlib — deliberately never an
+    # Auth0 SDK, so any spec-compliant issuer works (Auth0, Okta, Keycloak,
+    # Google...). The router mounts only when this is set (main.py); every
+    # self-hosted deployment leaves it blank and gets exactly today's
+    # password-only login.
+    oidc_issuer: str = ""  # e.g. your-tenant.us.auth0.com — scheme optional
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    # The callback URL tret registers with the IdP, e.g.
+    # https://cloud.tret.kithailab.com/api/auth/oidc/callback. Preferred over
+    # deriving one from the incoming request: tret does not trust
+    # X-Forwarded-Proto any more than api/auth.py's login limiter trusts
+    # X-Forwarded-For, so behind Fly's TLS-terminating proxy `request.url`
+    # alone reports `http://` and the IdP will refuse a redirect_uri mismatch.
+    # Left blank, tret falls back to a same-origin guess from the request —
+    # fine for a bare local/dev OIDC setup, wrong behind any real proxy.
+    oidc_redirect_url: str = ""
+    # Where the browser lands after logout, once tret's own session cookie is
+    # already cleared. Verbatim if set. Left blank in `oidc` mode, tret builds
+    # Auth0's own non-standard `/v2/logout` URL as a convenience fallback (see
+    # api/auth.py::_oidc_logout_url) — there is no OIDC-standard end-session
+    # endpoint to fall back to, so any other IdP must set this explicitly.
+    oidc_logout_url: str = ""
+    # Allowlist for who a fresh OIDC sign-in may JIT-provision an account
+    # for (services/identity.py::match_or_provision) — comma-separated
+    # domains ("kithailab.com,example.org"), matched against the part of the
+    # verified email after "@". Empty (the default) means no domain
+    # restriction of its own; self-host still falls back to requiring an
+    # invitation in that case (see match_or_provision's own docstring) —
+    # this is the operator-facing knob for a multi-tenant deployment (or a
+    # self-host one) that wants to say "anyone at these domains", instead.
+    # Checked before every JIT-provision, never before matching an sub/email
+    # already on file — an existing linked account must keep signing in even
+    # if this list changes later.
+    oidc_allowed_email_domains: list[str] | None = None
+
+    @field_validator("oidc_allowed_email_domains", mode="before")
+    @classmethod
+    def _parse_oidc_allowed_email_domains(cls, value):
+        """Comma-separated domains, same shape and same None/blank-means-
+        empty handling as `extensions` above."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [d.strip().lower() for d in value.split(",") if d.strip()]
+        return value
+
+    @field_validator("auth_mode", mode="before")
+    @classmethod
+    def _known_auth_mode(cls, value):
+        candidate = str(value if value is not None else "").strip().lower()
+        if candidate not in ("password", "oidc", "both"):
+            raise ValueError(f"auth_mode must be one of password|oidc|both, got {value!r}")
+        return candidate
+
+    # This deployment's own public base URL — the one place it has to be
+    # written down for a link that is *emailed out* rather than followed by a
+    # browser already on the site (an invite link, api/workspaces.py). Every
+    # other cross-origin URL in the app (oidc_redirect_url, static asset URLs)
+    # is either same-origin already or a destination tret is *reaching*, not
+    # one it is *handing out* — this is the first setting that needs the
+    # latter. e.g. https://cloud.tret.kithailab.com.
+    app_url: str = "http://localhost:8000"
+
+    # ── invite email (tret/services/mailer.py) ────────────────────────────────
+    # off (default) | resend | smtp. Every self-hosted deployment ships off:
+    # POST /api/workspaces/{id}/invites still works with nothing configured
+    # here — it always returns the invite link itself, so copy-link never
+    # depends on this.
+    email_mode: str = "off"
+    # Resend (https://resend.com): TRET_EMAIL_MODE=resend posts through
+    # tret.net, same egress pattern as api/oidc.py — see mailer.py.
+    resend_api_key: str = ""
+    # The From address every invite email is sent as, either mode. Must be a
+    # verified sending domain in Resend for `resend` mode; any address your
+    # relay accepts for `smtp`.
+    email_from: str = ""
+    # Self-hosted SMTP relay. `smtp_tls` issues STARTTLS after connecting —
+    # leave it on for any real relay; only a local/dev relay with no TLS
+    # support needs it off.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_tls: bool = True
+
+    @field_validator("email_mode", mode="before")
+    @classmethod
+    def _known_email_mode(cls, value):
+        candidate = str(value if value is not None else "").strip().lower()
+        if candidate not in ("off", "resend", "smtp"):
+            raise ValueError(f"email_mode must be one of off|resend|smtp, got {value!r}")
+        return candidate
+
     # In-process extension modules (tret/engine/extensions.py), comma-separated
     # dotted module names, e.g. TRET_EXTENSIONS=tret_billing.extension. Each
     # module's `register(ext)` is called at boot with the shared ExtensionAPI.

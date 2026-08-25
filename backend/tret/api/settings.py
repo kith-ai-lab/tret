@@ -9,13 +9,13 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user, require_admin
+from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_admin
 from tret.config import get_settings
 from tret.db.engine import get_db
-from tret.db.models import ProviderCredential, User, Workspace
+from tret.db.models import ProviderCredential, User
 from tret.engine.tools import WEB_TOOL_NAMES, get_builtin_tools
 from tret.net import CLASS_RESEARCH, EGRESS_CLASSES, MODE_OFF, effective_mode, egress_status
 from tret.net.policy import MODES, clear_runtime_override, set_runtime_override
@@ -56,9 +56,16 @@ LOCAL_TEST_TIMEOUT_SECONDS = 45.0
 
 
 @router.get("/settings/providers")
-async def provider_status(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def provider_status(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
     settings = get_settings()
-    db_keys = await load_db_keys(db)
+    # Scoped to the caller's current workspace: an unscoped load_db_keys()
+    # would leak another tenant's key presence/last4 and "configured" status
+    # into this workspace's response.
+    db_keys = await load_db_keys(db, ctx.id)
     # Which Settings attribute holds each provider's env key: read off the same
     # ProviderSpec rows the registry constructs providers from, so the two can no
     # longer disagree about where a key lives.
@@ -181,27 +188,30 @@ class SetKeyBody(BaseModel):
 
 @router.post("/settings/providers")
 async def set_provider_key(
-    body: SetKeyBody, user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
+    body: SetKeyBody,
+    ctx: WorkspaceContext = Depends(require_workspace_admin),
+    db: AsyncSession = Depends(get_db),
 ):
     if body.provider not in PROVIDERS:
         raise HTTPException(422, f"provider must be one of {PROVIDERS}")
-    workspace = (await db.execute(select(Workspace))).scalars().first()
     encrypted = get_fernet().encrypt(body.api_key.encode())
-    existing = await db.get(ProviderCredential, (workspace.id, body.provider))
+    existing = await db.get(ProviderCredential, (ctx.id, body.provider))
     if existing:
         existing.encrypted_key = encrypted
     else:
         db.add(
-            ProviderCredential(
-                workspace_id=workspace.id, provider=body.provider, encrypted_key=encrypted
-            )
+            ProviderCredential(workspace_id=ctx.id, provider=body.provider, encrypted_key=encrypted)
         )
     await db.commit()
     return {"ok": True}
 
 
 @router.get("/models")
-async def list_models(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def list_models(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
     catalog = get_catalog()
     try:
         # Concurrent and capped: a refresh that does not finish in time is
@@ -220,7 +230,10 @@ async def list_models(user: User = Depends(current_user), db: AsyncSession = Dep
             "use POST /api/settings/providers/local/test to diagnose it.",
             MODELS_DISCOVERY_TIMEOUT_SECONDS,
         )
-    registry = ProviderRegistry(await load_db_keys(db))
+    # Scoped to the caller's current workspace — same reasoning as
+    # provider_status above: model "available"-ness must not reveal whether
+    # a *different* tenant has a key configured.
+    registry = ProviderRegistry(await load_db_keys(db, ctx.id))
     return [
         {**m.to_json(), "available": registry.has_key(m.provider)}
         for m in catalog.all()

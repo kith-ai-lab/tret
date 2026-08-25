@@ -22,6 +22,8 @@ from replay_provider import ReplayProvider, ScriptedCall, ScriptedTurn, cite, to
 from test_golden_runs import DIVERGENCE_NOTE, PERIL, SITE, run_happy_path
 
 from tret.api.runs import get_run
+from tret.api.workspace import WorkspaceContext
+from tret.db.models import Workspace
 from tret.engine import harness as harness_module
 from tret.engine import tools as tools_module
 from tret.engine.validation import validate_cited_values
@@ -85,8 +87,9 @@ async def test_run_records_what_its_context_was_made_of(world):
 async def test_runs_api_exposes_the_composition(world):
     """Legibility is the point: the breakdown reaches whoever reads the run."""
     result = await run_happy_path(world)
+    ctx = WorkspaceContext(Workspace(id=world.workspace_id, name="W", kind="team"), "owner")
     async with world.session_factory() as db:
-        payload = await get_run(result.run.id, user=None, db=db)
+        payload = await get_run(result.run.id, user=None, ctx=ctx, db=db)
     assert payload["context_composition"] == result.run.context_composition
     assert payload["context_composition"]["by_kind"]["doctrine"] > 0
 

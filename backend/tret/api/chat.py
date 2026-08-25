@@ -18,8 +18,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
+from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.db.engine import get_db, get_session_factory
-from tret.db.models import Conversation, Dataset, Harness, Pack, Project, Run, User
+from tret.db.models import Conversation, Dataset, Harness, Pack, Run, User
 from tret.engine.harness import get_harness_engine
 from tret.router_llm.objectives import OBJECTIVES
 from tret.services.emissions import emission_summary_fields, energy_wh_field
@@ -44,12 +45,26 @@ def _conversation_out(c: Conversation, full: bool = False) -> dict:
     return out
 
 
-async def _capability_catalog(db: AsyncSession) -> str:
-    """Snapshot of installed pack task types, persisted with each chat run."""
+async def _capability_catalog(db: AsyncSession, workspace_id, project_id) -> str:
+    """Snapshot of this workspace's installed pack task types, persisted with
+    each chat run."""
     harnesses = (
-        (await db.execute(select(Harness).where(Harness.is_archived.is_(False)))).scalars().all()
+        (
+            await db.execute(
+                select(Harness).where(
+                    Harness.workspace_id == workspace_id, Harness.is_archived.is_(False)
+                )
+            )
+        )
+        .scalars()
+        .all()
     )
-    packs = {p.id: p for p in (await db.execute(select(Pack))).scalars().all()}
+    packs = {
+        p.id: p
+        for p in (
+            await db.execute(select(Pack).where(Pack.workspace_id == workspace_id))
+        ).scalars().all()
+    }
     lines = ["## Capability catalog (for run_harness_task)"]
     seen = set()
     for h in harnesses:
@@ -95,7 +110,11 @@ async def _capability_catalog(db: AsyncSession) -> str:
         )
         lines.extend(method_lines)
 
-    datasets = (await db.execute(select(Dataset).order_by(Dataset.name))).scalars().all()
+    datasets = (
+        await db.execute(
+            select(Dataset).where(Dataset.project_id == project_id).order_by(Dataset.name)
+        )
+    ).scalars().all()
     if datasets:
         lines.append("\n## Datasets available via lookup_dataset")
         for ds in datasets:
@@ -160,9 +179,23 @@ def _run_task_input(
 
 
 @router.get("")
-async def list_conversations(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def list_conversations(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    project = await current_project(db, ctx.id)
+    if project is None:
+        return []
     convs = (
-        (await db.execute(select(Conversation).order_by(Conversation.updated_at.desc()).limit(100)))
+        (
+            await db.execute(
+                select(Conversation)
+                .where(Conversation.project_id == project.id)
+                .order_by(Conversation.updated_at.desc())
+                .limit(100)
+            )
+        )
         .scalars()
         .all()
     )
@@ -173,17 +206,22 @@ async def list_conversations(user: User = Depends(current_user), db: AsyncSessio
 async def create_conversation(
     body: CreateConversationBody,
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
     harness = None
     if body.harness_id:
         harness = await db.get(Harness, body.harness_id)
+        if harness is not None and harness.workspace_id != ctx.id:
+            harness = None
     if harness is None:
         harness = (
             (
                 await db.execute(
                     select(Harness).where(
-                        Harness.task_profile == "chat", Harness.is_archived.is_(False)
+                        Harness.workspace_id == ctx.id,
+                        Harness.task_profile == "chat",
+                        Harness.is_archived.is_(False),
                     )
                 )
             )
@@ -192,7 +230,9 @@ async def create_conversation(
         )
     if harness is None:
         raise HTTPException(500, "No chat harness exists")
-    project = (await db.execute(select(Project))).scalars().first()
+    project = await current_project(db, ctx.id)
+    if project is None:
+        raise HTTPException(500, "No project exists")
     conv = Conversation(
         project_id=project.id, harness_id=harness.id, created_by=user.id, messages=[]
     )
@@ -205,10 +245,11 @@ async def create_conversation(
 async def get_conversation(
     conversation_id: uuid.UUID,
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
     conv = await db.get(Conversation, conversation_id)
-    if conv is None:
+    if conv is None or await project_in_workspace(db, conv.project_id, ctx.id) is None:
         raise HTTPException(404, "Conversation not found")
     return _conversation_out(conv, full=True)
 
@@ -218,10 +259,11 @@ async def send_message(
     conversation_id: uuid.UUID,
     body: SendMessageBody,
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
     conv = await db.get(Conversation, conversation_id)
-    if conv is None:
+    if conv is None or await project_in_workspace(db, conv.project_id, ctx.id) is None:
         raise HTTPException(404, "Conversation not found")
     text = body.text.strip()
     if not text:
@@ -243,7 +285,7 @@ async def send_message(
         task_input=_run_task_input(
             text,
             history,
-            await _capability_catalog(db),
+            await _capability_catalog(db, ctx.id, conv.project_id),
             body.model_override,
             body.objective,
         ),

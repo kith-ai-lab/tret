@@ -4,15 +4,28 @@ Kept behind small dependencies (`current_user`, `require_admin`) so an OIDC
 implementation can replace this module without touching other routers.
 
 **Credential lifecycle.** Sessions are stateless signed cookies, so there is no
-session table to delete rows from. Revocation is instead bound to the credential:
-every cookie carries a short fingerprint of the password hash it was minted
-against (`credential_version`), and `current_user` refuses a cookie whose
-fingerprint no longer matches. Setting a password therefore invalidates every
-session for that account — a self-service change (`POST /api/auth/password`), an
-admin rotation (`POST /api/auth/users/{id}/password`), or a deactivation that
-clears the credential entirely (`POST /api/auth/users/{id}/deactivate`). This is
-what docs/hardening.md's instruction to rotate credentials after an incident
-needs in order to mean anything.
+session table to delete rows from. Revocation is instead bound to a fingerprint
+carried in the cookie (`credential_version`), refused by `current_user` the
+moment it no longer matches. Two independent things can move that fingerprint:
+
+* the password hash — changed by a self-service change (`POST /api/auth/password`)
+  or an admin rotation (`POST /api/auth/users/{id}/password`);
+* `session_epoch` — bumped explicitly by `POST /api/auth/users/{id}/revoke-sessions`,
+  for ending every session an account holds *without* touching its password
+  (and the only lever an OIDC-only account, which has no password hash at all,
+  will ever have).
+
+Deactivation (`POST /api/auth/users/{id}/deactivate`) is a separate signal,
+`User.disabled`, checked before the fingerprint at all: the account's password
+is kept (a later `POST /api/auth/users/{id}/password` both restores access and
+rotates the credential, exactly as it always has), but no cookie for it —
+however fresh — is honoured while it is set. Grep this module for `disabled`
+if a "deactivated" or "active" check ever needs to move: `password_hash is
+None` stopped being that signal the day this was written, and this is a very
+easy check to reintroduce by accident.
+
+This is what docs/hardening.md's instruction to rotate credentials after an
+incident needs in order to mean anything.
 
 Login is rate limited by a small in-memory sliding window. It is per-process —
 correct for the single-worker deployment tret ships, and a speed bump rather
@@ -24,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import time
 import uuid
+from urllib.parse import quote
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
@@ -33,9 +47,9 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tret.config import get_settings
+from tret.config import Settings, get_settings
 from tret.db.engine import get_db
-from tret.db.models import User
+from tret.db.models import User, Workspace, WorkspaceMember
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -130,19 +144,27 @@ def _login_buckets(request: Request, email: str, settings) -> list[tuple[str, in
 def credential_version(user: User) -> str:
     """Fingerprint of the credential a session was minted against.
 
-    argon2 salts every hash, so setting a password always changes this value and
-    every cookie carrying the old one stops resolving. Only the fingerprint
-    travels in the cookie, never the hash: it is a truncated digest of an already
-    high-entropy string, and it is not a credential in itself.
+    Two things move it: the password hash (argon2 salts every hash, so setting
+    one — even to the same password — always changes this value) and
+    `session_epoch` (bumped explicitly by `POST /api/auth/users/{id}/revoke-
+    sessions` to end every session without touching the password at all — the
+    only revocation lever an OIDC-only account, which has no password hash,
+    will ever have). Either one changing invalidates every cookie carrying the
+    old fingerprint.
 
-    A user with no password hash (deactivated, or an OIDC-only user later) has no
-    valid credential version, so no cookie can be minted against one.
+    Only the fingerprint travels in the cookie, never the hash: it is a
+    truncated digest of an already high-entropy string plus a small integer,
+    and it is not a credential in itself.
     """
-    return hashlib.sha256((user.password_hash or "").encode()).hexdigest()[:16]
+    epoch = user.session_epoch or 0
+    return hashlib.sha256(f"{user.password_hash or ''}|{epoch}".encode()).hexdigest()[:16]
 
 
-def _issue_session(response: Response, user: User) -> None:
-    token = _serializer().dumps({"uid": str(user.id), "cv": credential_version(user)})
+def _issue_session(response: Response, user: User, wid: uuid.UUID | None = None) -> None:
+    payload: dict = {"uid": str(user.id), "cv": credential_version(user)}
+    if wid is not None:
+        payload["wid"] = str(wid)
+    token = _serializer().dumps(payload)
     response.set_cookie(
         SESSION_COOKIE,
         token,
@@ -153,19 +175,34 @@ def _issue_session(response: Response, user: User) -> None:
     )
 
 
+def _session_payload(request: Request) -> dict | None:
+    """The signed cookie's payload, or None if there is none / it does not
+    verify / it does not have the expected shape. Shared with
+    api/workspace.py::current_workspace, which reads `wid` out of the same
+    payload `current_user` below already validated for `uid`/`cv`.
+    """
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return None
+    try:
+        payload = _serializer().loads(token, max_age=SESSION_MAX_AGE)
+    except BadSignature:
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("uid"), str):
+        return None
+    return payload
+
+
 async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         raise HTTPException(401, "Not authenticated")
-    try:
-        payload = _serializer().loads(token, max_age=SESSION_MAX_AGE)
-    except BadSignature:
-        raise HTTPException(401, "Invalid session")
     # Cookies minted before credential-bound sessions carried a bare user id
-    # string. They are refused rather than accepted: honouring the old shape
-    # would be a way around revocation, and the cost is one re-login per user
-    # after the upgrade that introduced this.
-    if not isinstance(payload, dict) or not isinstance(payload.get("uid"), str):
+    # string, and any signature failure, land here as one 401: honouring the
+    # old shape would be a way around revocation, and the cost is one
+    # re-login per user after the upgrade that introduced this.
+    payload = _session_payload(request)
+    if payload is None:
         raise HTTPException(401, "Invalid session")
     try:
         user_id = uuid.UUID(payload["uid"])
@@ -174,7 +211,7 @@ async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> 
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(401, "Unknown user")
-    if not user.password_hash:
+    if user.disabled:
         raise HTTPException(401, "Account deactivated")
     if payload.get("cv") != credential_version(user):
         raise HTTPException(401, "Session ended: this account's password was changed")
@@ -182,6 +219,10 @@ async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> 
 
 
 async def require_admin(user: User = Depends(current_user)) -> User:
+    """Instance-wide admin. Gates only /api/auth/users* (creating, listing and
+    managing user accounts across the whole deployment) — anything scoped to
+    one workspace's own data uses api/workspace.py's `require_workspace_admin`
+    instead, even for a user whose global role also happens to be admin."""
     if user.role != "admin":
         raise HTTPException(403, "Admin role required")
     return user
@@ -193,28 +234,170 @@ async def require_approver(user: User = Depends(current_user)) -> User:
     return user
 
 
+def _reject_if_password_disabled(settings=None) -> None:
+    """Refuse a password-lifecycle endpoint outright once `auth_mode=oidc`
+    has made password login unreachable: `login` itself and every endpoint
+    that only exists to set or rotate a password (`create_user`'s password
+    field included — an admin-created *password* account makes no sense once
+    nothing can authenticate with one). `auth_mode="both"` leaves all of
+    these alone; only `"oidc"` (SSO-only) gates them.
+    """
+    settings = settings or get_settings()
+    if settings.auth_mode == "oidc":
+        raise HTTPException(
+            403,
+            "Password authentication is disabled on this deployment — sign in with "
+            "single sign-on instead (GET /api/auth/config for the login URL).",
+        )
+
+
+def _oidc_logout_url(settings: Settings, request: Request) -> str | None:
+    """Where the browser should go after logout, once tret's own cookie is
+    already cleared — `None` when there is nothing OIDC-specific to add.
+
+    `settings.oidc_logout_url` wins verbatim when set (any IdP). Left blank,
+    tret builds Auth0's own `/v2/logout` URL as a convenience — **this one
+    fallback is Auth0-specific**: there is no OIDC-standard end-session
+    endpoint to build instead, so any other IdP must set
+    `TRET_OIDC_LOGOUT_URL` explicitly rather than get a URL that 404s. The
+    fallback only applies in `oidc` mode (SSO-only) — in `both`, a logged-out
+    user still has a password fallback on this same app, so there is no
+    single "next place" to send them without asking, and the frontend's own
+    post-logout screen is that ask.
+    """
+    if not settings.oidc_issuer:
+        return None
+    if settings.oidc_logout_url:
+        return settings.oidc_logout_url
+    if settings.auth_mode != "oidc":
+        return None
+    issuer = settings.oidc_issuer.strip()
+    if not issuer.startswith(("http://", "https://")):
+        issuer = f"https://{issuer}"
+    return_to = str(request.base_url).rstrip("/")
+    return (
+        f"{issuer.rstrip('/')}/v2/logout"
+        f"?client_id={quote(settings.oidc_client_id)}&returnTo={quote(return_to)}"
+    )
+
+
+class AuthConfigOut(BaseModel):
+    auth_mode: str
+    oidc_configured: bool
+    oidc_login_url: str | None = None
+
+
+@router.get("/config", response_model=AuthConfigOut)
+async def auth_config():
+    """Public, unauthenticated: what the login screen needs to decide which
+    form(s) to show, before there is any session to check. `main.py` mounts
+    `api/oidc.py`'s router once `oidc_issuer` alone is set; `oidc_configured`
+    here is deliberately stricter (issuer *and* client id *and* client
+    secret) — an issuer with no client credentials would 503 on the first
+    real call, so 'configured' means 'this will actually work', not just
+    'the router exists'.
+    """
+    settings = get_settings()
+    configured = bool(settings.oidc_issuer and settings.oidc_client_id and settings.oidc_client_secret)
+    return AuthConfigOut(
+        auth_mode=settings.auth_mode,
+        oidc_configured=configured,
+        oidc_login_url="/api/auth/oidc/login" if configured else None,
+    )
+
+
 class LoginBody(BaseModel):
     email: str
     password: str
+
+
+class WorkspaceSummary(BaseModel):
+    id: uuid.UUID
+    name: str
+    kind: str
+    role: str  # this user's role in this workspace
 
 
 class UserOut(BaseModel):
     id: uuid.UUID
     email: str
     display_name: str
+    # This user's role *in the resolved current workspace* — see
+    # `_resolve_workspaces` for exactly how that is resolved, and
+    # `global_role` below for the meaning this field used to carry.
     role: str
-    # False once an admin has cleared the account's credential: the user cannot
-    # log in and holds no valid session. Reversible by setting a new password.
+    # The instance-wide role (admin | analyst | approver): what `role` meant
+    # before workspaces had their own roles, and still what gates
+    # /api/auth/users*. Breaking change from the pre-tenancy shape, called out
+    # in CHANGELOG.md.
+    global_role: str
+    # False once an admin has deactivated the account: it holds no valid
+    # session and cannot log in, regardless of whether its password is still
+    # set (see this module's docstring). Reversible with
+    # `POST /users/{id}/password`.
     active: bool = True
+    workspaces: list[WorkspaceSummary] = []
+    # Null when it cannot be resolved to exactly one workspace (no membership
+    # at all, or more than one with nothing selected) — this endpoint always
+    # succeeds regardless; a null here is what tells a client it must call
+    # `POST /api/auth/workspace` before anything workspace-scoped will work.
+    current_workspace_id: uuid.UUID | None = None
 
 
-def _user_out(user: User) -> UserOut:
+async def _resolve_workspaces(
+    db: AsyncSession, user: User, *, preferred_wid: uuid.UUID | None = None
+) -> tuple[list[WorkspaceSummary], str, uuid.UUID | None]:
+    """The `(workspaces, role, current_workspace_id)` triple behind UserOut.
+
+    `preferred_wid`, when given and it names one of this user's memberships,
+    wins outright — this is `/me` reading the session's `wid`, and login /
+    `POST /api/auth/workspace` reflecting the workspace a fresh cookie was
+    just minted against. Absent a preference (or an unresolvable one — the
+    membership was removed since the cookie was minted), a sole membership is
+    used unambiguously; with zero or more than one membership there is no
+    single answer, so `role` falls back to the user's global role and
+    `current_workspace_id` is null. This must always produce *something* —
+    unlike `api.workspace.current_workspace`, it never 409s, because `/me` is
+    exactly the endpoint a client needs a clean answer from before it can
+    even offer a workspace picker.
+    """
+    memberships = (
+        await db.execute(select(WorkspaceMember).where(WorkspaceMember.user_id == user.id))
+    ).scalars().all()
+    workspaces: list[WorkspaceSummary] = []
+    for member in memberships:
+        workspace = await db.get(Workspace, member.workspace_id)
+        if workspace is None:  # a dangling FK should not happen, but skip rather than 500
+            continue
+        workspaces.append(
+            WorkspaceSummary(id=workspace.id, name=workspace.name, kind=workspace.kind, role=member.role)
+        )
+
+    if preferred_wid is not None:
+        match = next((m for m in memberships if m.workspace_id == preferred_wid), None)
+        if match is not None:
+            return workspaces, match.role, preferred_wid
+    if len(memberships) == 1:
+        member = memberships[0]
+        return workspaces, member.role, member.workspace_id
+    return workspaces, user.role, None
+
+
+async def _user_out(
+    user: User, db: AsyncSession, *, preferred_wid: uuid.UUID | None = None
+) -> UserOut:
+    workspaces, role, current_workspace_id = await _resolve_workspaces(
+        db, user, preferred_wid=preferred_wid
+    )
     return UserOut(
         id=user.id,
         email=user.email,
         display_name=user.display_name,
-        role=user.role,
-        active=bool(user.password_hash),
+        role=role,
+        global_role=user.role,
+        active=not user.disabled,
+        workspaces=workspaces,
+        current_workspace_id=current_workspace_id,
     )
 
 
@@ -226,6 +409,7 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ):
     settings = get_settings()
+    _reject_if_password_disabled(settings)
     buckets = _login_buckets(request, body.email, settings)
     retry_after = max(
         login_limiter.check(key, limit, settings.login_window_seconds) for key, limit in buckets
@@ -243,9 +427,12 @@ async def login(
         return HTTPException(401, "Invalid credentials")
 
     user = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
-    # No password hash: never set, or cleared by a deactivation. Indistinguishable
-    # from "no such user" on purpose.
-    if user is None or not user.password_hash:
+    # No such user, no password hash (never set, or an OIDC-only account —
+    # password login has nothing to verify against), or deactivated: all one
+    # answer, on purpose (see test_login_never_reveals_whether_an_account_is_
+    # deactivated). Checked before the password so a disabled account cannot
+    # be distinguished from a wrong password by trying the right one.
+    if user is None or not user.password_hash or user.disabled:
         raise _reject()
     try:
         _hasher.verify(user.password_hash, body.password)
@@ -253,19 +440,68 @@ async def login(
         raise _reject()
     for key, _limit in buckets:  # a success clears the window for this account
         login_limiter.reset(key)
-    _issue_session(response, user)
-    return _user_out(user)
+    workspaces, role, current_workspace_id = await _resolve_workspaces(db, user)
+    _issue_session(response, user, wid=current_workspace_id)
+    return UserOut(
+        id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        role=role,
+        global_role=user.role,
+        active=True,
+        workspaces=workspaces,
+        current_workspace_id=current_workspace_id,
+    )
 
 
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(request: Request, response: Response):
     response.delete_cookie(SESSION_COOKIE)
-    return {"ok": True}
+    result: dict = {"ok": True}
+    oidc_url = _oidc_logout_url(get_settings(), request)
+    if oidc_url:
+        result["oidc_logout_url"] = oidc_url
+    return result
 
 
 @router.get("/me", response_model=UserOut)
-async def me(user: User = Depends(current_user)):
-    return _user_out(user)
+async def me(request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    payload = _session_payload(request)
+    wid = payload.get("wid") if payload else None
+    preferred_wid = None
+    if wid:
+        try:
+            preferred_wid = uuid.UUID(wid)
+        except ValueError:
+            preferred_wid = None
+    return await _user_out(user, db, preferred_wid=preferred_wid)
+
+
+class SwitchWorkspaceBody(BaseModel):
+    workspace_id: uuid.UUID
+
+
+@router.post("/workspace", response_model=UserOut)
+async def switch_workspace(
+    body: SwitchWorkspaceBody,
+    response: Response,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Switch the session's active workspace. Validates membership, then
+    re-mints the cookie with the new `wid` — the same re-mint `login` does,
+    just against a workspace the caller picked instead of inferred."""
+    member = (
+        await db.execute(
+            select(WorkspaceMember).where(
+                WorkspaceMember.user_id == user.id, WorkspaceMember.workspace_id == body.workspace_id
+            )
+        )
+    ).scalar_one_or_none()
+    if member is None:
+        raise HTTPException(404, "Not a member of that workspace")
+    _issue_session(response, user, wid=body.workspace_id)
+    return await _user_out(user, db, preferred_wid=body.workspace_id)
 
 
 class CreateUserBody(BaseModel):
@@ -273,24 +509,47 @@ class CreateUserBody(BaseModel):
     display_name: str
     password: str
     role: str = "analyst"  # admin | analyst | approver
+    # Which workspace this user joins. Required only when the instance has
+    # more than one workspace to choose from (self-host's single workspace is
+    # inferred, unchanged from before workspaces existed); the join happens at
+    # this same `role` — the account's global role and its role in the one
+    # workspace admin-created accounts join are the same thing, exactly as
+    # every self-host user's role has always worked.
+    workspace_id: uuid.UUID | None = None
 
 
 @router.get("/users")
 async def list_users(user: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     users = (await db.execute(select(User).order_by(User.email))).scalars().all()
-    return [_user_out(u) for u in users]
+    return [await _user_out(u, db) for u in users]
 
 
 @router.post("/users", response_model=UserOut)
 async def create_user(
     body: CreateUserBody, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)
 ):
+    _reject_if_password_disabled()
     if body.role not in ("admin", "analyst", "approver"):
         raise HTTPException(422, "role must be admin|analyst|approver")
     _check_password_strength(body.password)
     dupe = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
     if dupe:
         raise HTTPException(409, f"A user with email '{body.email}' already exists")
+
+    workspaces = (await db.execute(select(Workspace))).scalars().all()
+    if body.workspace_id is not None:
+        target = next((w for w in workspaces if w.id == body.workspace_id), None)
+        if target is None:
+            raise HTTPException(422, f"workspace '{body.workspace_id}' not found")
+    elif len(workspaces) == 1:
+        target = workspaces[0]
+    else:
+        raise HTTPException(
+            422,
+            "workspace_id is required: this instance has more than one workspace, so "
+            "which one this user joins cannot be inferred.",
+        )
+
     user = User(
         email=body.email,
         display_name=body.display_name,
@@ -298,8 +557,10 @@ async def create_user(
         role=body.role,
     )
     db.add(user)
+    await db.flush()
+    db.add(WorkspaceMember(user_id=user.id, workspace_id=target.id, role=body.role))
     await db.commit()
-    return _user_out(user)
+    return await _user_out(user, db)
 
 
 # ── credential lifecycle ─────────────────────────────────────────────────────
@@ -331,6 +592,7 @@ async def change_password(
     be used as an unthrottled oracle for the existing password.
     """
     settings = get_settings()
+    _reject_if_password_disabled(settings)
     key = f"pwchange|{user.id}"
     retry_after = login_limiter.check(
         key, settings.login_max_attempts, settings.login_window_seconds
@@ -369,7 +631,7 @@ async def _active_admin_count(db: AsyncSession) -> int:
         await db.execute(
             select(func.count())
             .select_from(User)
-            .where(User.role == "admin", User.password_hash.is_not(None))
+            .where(User.role == "admin", User.disabled.is_(False))
         )
     ).scalar_one()
 
@@ -382,14 +644,39 @@ async def admin_set_password(
     db: AsyncSession = Depends(get_db),
 ):
     """Set another user's password: rotation after an incident, or restoring a
-    deactivated account. Ends every session that account currently holds."""
+    deactivated account. Ends every session that account currently holds, and
+    clears `disabled` — exactly the "restore" half of deactivation, unchanged
+    since before `disabled` existed as its own column."""
+    _reject_if_password_disabled()
     _check_password_strength(body.new_password)
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(404, "User not found")
     target.password_hash = _hasher.hash(body.new_password)
+    target.disabled = False
     await db.commit()
-    return _user_out(target)
+    return await _user_out(target, db)
+
+
+@router.post("/users/{user_id}/revoke-sessions", response_model=UserOut)
+async def revoke_sessions(
+    user_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """End every session this account currently holds, without touching its
+    password or its `disabled` state. Bumps `session_epoch`, which
+    `credential_version` folds in — every outstanding cookie's fingerprint
+    stops matching immediately. The lever an OIDC-only account (no password
+    to rotate) will have for "sign me out everywhere", and the one to reach
+    for after an incident when the password itself is not suspected.
+    """
+    target = await db.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, "User not found")
+    target.session_epoch = (target.session_epoch or 0) + 1
+    await db.commit()
+    return await _user_out(target, db)
 
 
 @router.post("/users/{user_id}/deactivate", response_model=UserOut)
@@ -398,11 +685,14 @@ async def deactivate_user(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Deactivate a user: clears the credential and ends every session it holds.
+    """Deactivate a user: `current_user` refuses every cookie for the account
+    from this point on, and its password is left alone rather than cleared —
+    `POST /users/{id}/password` is what restores it, and restoring no longer
+    requires picking a new password to go with it.
 
     The row is kept, not deleted — approvals and runs point at it, and an audit
     trail that can lose the name of the human who signed something is not an
-    audit trail. Reversible with `POST /users/{id}/password`.
+    audit trail.
     """
     target = await db.get(User, user_id)
     if target is None:
@@ -411,17 +701,49 @@ async def deactivate_user(
         raise HTTPException(
             422, "You cannot deactivate your own account — ask another admin to do it"
         )
-    if not target.password_hash:
-        return _user_out(target)  # already deactivated: idempotent
+    if target.disabled:
+        return await _user_out(target, db)  # already deactivated: idempotent
     if target.role == "admin" and await _active_admin_count(db) <= 1:
         raise HTTPException(
             409,
             "Refusing to deactivate the last active admin: nobody would be able to "
             "manage users, provider keys or packs afterwards.",
         )
-    target.password_hash = None
+    target.disabled = True
+    # Belt and braces alongside the `disabled` check in `current_user`: a
+    # session minted before this call stops working even if `disabled` were
+    # ever bypassed or the account is later re-enabled without a password
+    # rotation (there is no such path today, but this is what keeps that safe
+    # to add later).
+    target.session_epoch = (target.session_epoch or 0) + 1
     await db.commit()
-    return _user_out(target)
+    return await _user_out(target, db)
+
+
+@router.post("/users/{user_id}/reactivate", response_model=UserOut)
+async def reactivate_user(
+    user_id: uuid.UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reverse `deactivate_user`: clear `disabled`, nothing else.
+
+    Deliberately NOT behind `_reject_if_password_disabled()` the way
+    `admin_set_password` is — that endpoint is gated because *setting a
+    password* is meaningless once `auth_mode=oidc` (nothing authenticates
+    with one), but before this endpoint existed it was the only way to clear
+    `disabled`, making deactivation irreversible on an OIDC-only deployment:
+    an admin locked out under `auth_mode=oidc` had no password to be set and
+    therefore no way back in. Reactivation itself is not a password
+    operation — it does not touch `password_hash` or `session_epoch` — so it
+    stays available regardless of `auth_mode`.
+    """
+    target = await db.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, "User not found")
+    target.disabled = False
+    await db.commit()
+    return await _user_out(target, db)
 
 
 async def bootstrap_admin(db: AsyncSession) -> None:

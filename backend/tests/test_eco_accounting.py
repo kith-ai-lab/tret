@@ -27,8 +27,9 @@ import yaml
 
 from tret.providers.base import JsonCompletion
 from tret.api.runs import _run_summary, get_run
+from tret.api.workspace import WorkspaceContext
 from tret.config import Settings
-from tret.db.models import Run
+from tret.db.models import Project, Run, Workspace
 from tret.providers import catalog as catalog_module
 from tret.providers.catalog import (
     DEFAULT_ENERGY_CLASS,
@@ -427,13 +428,19 @@ def _run(**over) -> Run:
 
 
 class _StubDb:
-    """The one method api.runs.get_run uses."""
+    """The methods api.runs.get_run uses: the run itself, and the project
+    ownership check current tenancy scoping adds."""
 
     def __init__(self, run: Run):
         self._run = run
+        self._project = Project(id=run.project_id, workspace_id=uuid.uuid4(), name="P")
 
-    async def get(self, _model, _id):
-        return self._run
+    async def get(self, model, _id):
+        return self._project if model is Project else self._run
+
+
+def _ctx_for(db: _StubDb) -> WorkspaceContext:
+    return WorkspaceContext(Workspace(id=db._project.workspace_id, name="W", kind="team"), "owner")
 
 
 def test_run_summary_carries_energy_beside_dollars():
@@ -455,7 +462,8 @@ def test_a_run_predating_eco_accounting_reports_none_not_zero():
 async def test_run_detail_exposes_the_full_derivation():
     accounting = energy_accounting(_model("L"), 100_000, 10_000, grid_g_per_kwh=400.0)
     run = _run(energy_wh=Decimal("132.0"), energy_accounting=accounting)
-    detail = await get_run(run.id, user=None, db=_StubDb(run))
+    db = _StubDb(run)
+    detail = await get_run(run.id, user=None, ctx=_ctx_for(db), db=db)
     assert detail["energy"] == accounting
     assert detail["energy"]["energy_class"] == "L"
     assert detail["energy_wh"] == 132.0

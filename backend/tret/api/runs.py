@@ -10,8 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
+from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.db.engine import get_db
-from tret.db.models import Harness, Project, Run, User
+from tret.db.models import Document, Harness, Project, Run, User
 from tret.engine.events import get_event_bus
 from tret.engine.harness import get_harness_engine
 from tret.services.emissions import emission_summary_fields, energy_wh_field
@@ -72,17 +73,38 @@ def _run_summary(run: Run) -> dict:
 
 @router.post("")
 async def create_run(
-    body: CreateRunBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    body: CreateRunBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
     harness = await db.get(Harness, body.harness_id)
-    if harness is None or harness.is_archived:
+    if harness is None or harness.is_archived or harness.workspace_id != ctx.id:
         raise HTTPException(404, "Harness not found")
     project_id = body.project_id
     if project_id is None:
-        project = (await db.execute(select(Project))).scalars().first()
+        project = await current_project(db, ctx.id)
         if project is None:
             raise HTTPException(500, "No project exists")
         project_id = project.id
+    elif await project_in_workspace(db, project_id, ctx.id) is None:
+        raise HTTPException(404, "Project not found")
+
+    if body.document_ids:
+        # Every attached document must belong to *this* workspace — the engine
+        # loads them by id alone at harness.py:288, with no workspace filter
+        # of its own, so an unvalidated id here is a cross-workspace document
+        # read. A join through the document's project, not a workspace_id on
+        # Document itself: documents don't carry one directly.
+        found_ids = (
+            await db.execute(
+                select(Document.id)
+                .join(Project, Document.project_id == Project.id)
+                .where(Document.id.in_(body.document_ids), Project.workspace_id == ctx.id)
+            )
+        ).scalars().all()
+        if set(found_ids) != set(body.document_ids):
+            raise HTTPException(404, "Document not found")
 
     task_input = dict(body.task_input)
     if body.model_override:
@@ -109,10 +131,23 @@ async def create_run(
 
 @router.get("")
 async def list_runs(
-    limit: int = 50, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    limit: int = 50,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
+    project = await current_project(db, ctx.id)
+    if project is None:
+        return []
     runs = (
-        (await db.execute(select(Run).order_by(Run.created_at.desc()).limit(min(limit, 200))))
+        (
+            await db.execute(
+                select(Run)
+                .where(Run.project_id == project.id)
+                .order_by(Run.created_at.desc())
+                .limit(min(limit, 200))
+            )
+        )
         .scalars()
         .all()
     )
@@ -121,10 +156,13 @@ async def list_runs(
 
 @router.get("/{run_id}")
 async def get_run(
-    run_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    run_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
     run = await db.get(Run, run_id)
-    if run is None:
+    if run is None or await project_in_workspace(db, run.project_id, ctx.id) is None:
         raise HTTPException(404, "Run not found")
     return {**_run_summary(run), "task_input": run.task_input, "messages": run.messages,
             "document_ids": [str(d) for d in (run.document_ids or [])],
@@ -159,13 +197,16 @@ async def get_run(
 
 @router.get("/method-runs/{method_run_id}")
 async def get_method_run(
-    method_run_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    method_run_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
     """Resolve a method/<slug>/<id> citation to its full execution manifest."""
     from tret.db.models import MethodRun
 
     mr = await db.get(MethodRun, method_run_id)
-    if mr is None:
+    if mr is None or await project_in_workspace(db, mr.project_id, ctx.id) is None:
         raise HTTPException(404, "Method run not found")
     return {
         "id": str(mr.id),
@@ -185,7 +226,15 @@ async def get_method_run(
 
 
 @router.get("/{run_id}/events")
-async def run_events(run_id: uuid.UUID, user: User = Depends(current_user)):
+async def run_events(
+    run_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await db.get(Run, run_id)
+    if run is None or await project_in_workspace(db, run.project_id, ctx.id) is None:
+        raise HTTPException(404, "Run not found")
     bus = get_event_bus()
 
     async def stream():
@@ -201,10 +250,13 @@ async def run_events(run_id: uuid.UUID, user: User = Depends(current_user)):
 
 @router.post("/{run_id}/cancel")
 async def cancel_run(
-    run_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    run_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
     run = await db.get(Run, run_id)
-    if run is None:
+    if run is None or await project_in_workspace(db, run.project_id, ctx.id) is None:
         raise HTTPException(404, "Run not found")
     get_harness_engine().cancel(run_id)
     return {"ok": True}

@@ -9,7 +9,9 @@ a cap for exactly this reason, and this one had none.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -17,8 +19,11 @@ from fastapi.testclient import TestClient
 
 from tret.api import settings as settings_api
 from tret.api.auth import current_user
+from tret.api.workspace import WorkspaceContext, current_workspace
 from tret.db.engine import get_db
 from tret.providers.catalog import ModelInfo
+
+_WORKSPACE_ID = uuid.uuid4()
 
 
 def _model(model_id: str, provider: str) -> ModelInfo:
@@ -75,6 +80,13 @@ def client() -> TestClient:
     app.include_router(settings_api.router)
     app.dependency_overrides[get_db] = lambda: FakeSession()
     app.dependency_overrides[current_user] = lambda: None
+    # /api/models is workspace-scoped (finding: unscoped load_db_keys() leaked
+    # another tenant's key presence) — stub the workspace the same way
+    # current_user is stubbed, since this file is about the discovery/timeout
+    # behaviour, not tenancy.
+    app.dependency_overrides[current_workspace] = lambda: WorkspaceContext(
+        SimpleNamespace(id=_WORKSPACE_ID), "owner"
+    )
     return TestClient(app)
 
 

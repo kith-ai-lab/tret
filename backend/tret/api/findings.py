@@ -12,27 +12,21 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tret.api.auth import current_user, require_approver
+from tret.api.auth import current_user
+from tret.api.workspace import (
+    WorkspaceContext,
+    current_project,
+    current_workspace,
+    project_in_workspace,
+    require_workspace_approver,
+)
 from tret.db.engine import get_db
-from tret.db.models import Approval, DataRequest, Finding, Project, User
+from tret.db.models import Approval, DataRequest, Finding, User
 from tret.services.outcomes import record_outcome_for_finding
 
 router = APIRouter(prefix="/api", tags=["findings"])
 
 APPROVAL_ACTIONS = ("approve", "reject")
-
-
-async def _current_project(db: AsyncSession) -> Project | None:
-    """The project tret operates on.
-
-    tret is single-project today (bootstrap seeds exactly one, and the UI has no
-    project picker). This is the one place that assumption is written down, so the
-    deliverable listing and the deliverable export agree on *which* project they
-    mean — before this existed the listing spanned every project while the export
-    read the first one, so in a two-project database the UI offered deliverables
-    whose export could only 404.
-    """
-    return (await db.execute(select(Project).order_by(Project.created_at))).scalars().first()
 
 
 def _finding_out(f: Finding, approvals: list[Approval] | None = None) -> dict:
@@ -66,9 +60,18 @@ async def list_findings(
     run_id: uuid.UUID | None = None,
     limit: int = 100,
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Finding).order_by(Finding.created_at.desc()).limit(min(limit, 500))
+    project = await current_project(db, ctx.id)
+    if project is None:
+        return []
+    q = (
+        select(Finding)
+        .where(Finding.project_id == project.id)
+        .order_by(Finding.created_at.desc())
+        .limit(min(limit, 500))
+    )
     if status:
         q = q.where(Finding.status == status)
     if schema_slug:
@@ -81,10 +84,13 @@ async def list_findings(
 
 @router.get("/findings/{finding_id}")
 async def get_finding(
-    finding_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    finding_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
     f = await db.get(Finding, finding_id)
-    if f is None:
+    if f is None or await project_in_workspace(db, f.project_id, ctx.id) is None:
         raise HTTPException(404, "Finding not found")
     approvals = (
         (await db.execute(select(Approval).where(Approval.finding_id == finding_id)))
@@ -110,7 +116,8 @@ class ApprovalBody(BaseModel):
 async def decide_finding(
     finding_id: uuid.UUID,
     body: ApprovalBody,
-    user: User = Depends(require_approver),
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
     db: AsyncSession = Depends(get_db),
 ):
     if body.action not in APPROVAL_ACTIONS:
@@ -122,7 +129,7 @@ async def decide_finding(
     # lock makes the second request re-read the committed status and lose to the
     # 'already decided' branch below.
     f = await db.get(Finding, finding_id, with_for_update=True)
-    if f is None:
+    if f is None or await project_in_workspace(db, f.project_id, ctx.id) is None:
         raise HTTPException(404, "Finding not found")
     if f.status != "draft":
         raise HTTPException(409, f"Finding is already '{f.status}'")
@@ -145,10 +152,14 @@ async def decide_finding(
 
 
 @router.get("/deliverables")
-async def list_deliverables(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def list_deliverables(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
     """Deliverables = draft_section findings grouped by subject.deliverable,
     latest finding per section winning (same rule as assembly)."""
-    project = await _current_project(db)
+    project = await current_project(db, ctx.id)
     if project is None:
         return []
     findings = (
@@ -156,7 +167,7 @@ async def list_deliverables(user: User = Depends(current_user), db: AsyncSession
             await db.execute(
                 select(Finding)
                 .where(
-                    # Same project as the export resolves — see _current_project.
+                    # Same project as the export resolves — see api.workspace.current_project.
                     Finding.project_id == project.id,
                     Finding.schema_slug == "draft_section",
                 )
@@ -200,6 +211,7 @@ async def export_deliverable(
     format: str = "markdown",
     include_draft: bool = False,
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
     from fastapi.responses import HTMLResponse, PlainTextResponse, Response
@@ -208,7 +220,7 @@ async def export_deliverable(
 
     if format not in ("markdown", "html", "json", "pdf"):
         raise HTTPException(422, "format must be markdown|html|json|pdf")
-    project = await _current_project(db)
+    project = await current_project(db, ctx.id)
     if project is None:
         raise HTTPException(404, "No approved sections exist for this deliverable")
     result = await assemble_deliverable(db, project.id, deliverable_slug, include_draft)
@@ -258,9 +270,20 @@ async def export_deliverable(
 
 @router.get("/data-requests")
 async def list_data_requests(
-    status: str | None = None, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    status: str | None = None,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
-    q = select(DataRequest).order_by(DataRequest.created_at.desc()).limit(200)
+    project = await current_project(db, ctx.id)
+    if project is None:
+        return []
+    q = (
+        select(DataRequest)
+        .where(DataRequest.project_id == project.id)
+        .order_by(DataRequest.created_at.desc())
+        .limit(200)
+    )
     if status:
         q = q.where(DataRequest.status == status)
     reqs = (await db.execute(q)).scalars().all()
@@ -287,12 +310,13 @@ async def update_data_request(
     request_id: uuid.UUID,
     body: DataRequestUpdate,
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
     if body.status not in ("fulfilled", "dismissed", "open"):
         raise HTTPException(422, "status must be open|fulfilled|dismissed")
     r = await db.get(DataRequest, request_id)
-    if r is None:
+    if r is None or await project_in_workspace(db, r.project_id, ctx.id) is None:
         raise HTTPException(404, "Data request not found")
     r.status = body.status
     await db.commit()

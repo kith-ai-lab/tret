@@ -336,8 +336,9 @@ def _export_client(findings):
 
     from tret.api import findings as findings_api
     from tret.api.auth import current_user
+    from tret.api.workspace import WorkspaceContext, current_workspace
     from tret.db.engine import get_db
-    from tret.db.models import Project
+    from tret.db.models import Project, Workspace
 
     project = Project(id=uuid.uuid4(), workspace_id=uuid.uuid4(), name="p")
     db = _FakeDb(findings, runs=())
@@ -346,6 +347,9 @@ def _export_client(findings):
     app = FastAPI()
     app.include_router(findings_api.router)
     app.dependency_overrides[current_user] = lambda: None
+    app.dependency_overrides[current_workspace] = lambda: WorkspaceContext(
+        Workspace(id=project.workspace_id, name="W", kind="team"), "owner"
+    )
     app.dependency_overrides[get_db] = lambda: db
     return TestClient(app)
 

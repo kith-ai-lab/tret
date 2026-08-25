@@ -228,6 +228,81 @@ async def test_legacy_recovery_preserves_existing_rows(engine):
     assert survivors == 1
 
 
+async def test_workspace_member_backfill_promotes_the_oldest_admin_to_owner(engine):
+    """35ed0d08502b's role backfill copies each user's pre-tenancy global role
+    (admin|analyst|approver) straight across — none of which is 'owner' — so
+    without the extra promotion this migration adds, every upgraded database
+    would end up with zero workspace owners and every owner-gated action
+    (api/workspaces.py) a dead end. The oldest admin-role member of the one
+    workspace the backfill targets must come out as 'owner'; everyone else
+    keeps their backfilled role unchanged."""
+    async with engine.connect() as conn:
+        await conn.run_sync(_upgrade, "15981123afd0")  # just before workspace_members exists
+        await conn.commit()
+        await conn.execute(
+            text(
+                "INSERT INTO workspaces (id, name, settings, created_at) "
+                "VALUES ('11111111-1111-1111-1111-111111111111', 'Default', '{}'::jsonb, now())"
+            )
+        )
+        # Three users, oldest first: an analyst, then two admins — the
+        # *older* of the two admins must be the one promoted.
+        await conn.execute(
+            text(
+                "INSERT INTO users (id, email, display_name, role, created_at) VALUES "
+                "('22222222-2222-2222-2222-222222222222', 'first-analyst@example.com', 'A', "
+                "'analyst', now() - interval '3 hours'), "
+                "('33333333-3333-3333-3333-333333333333', 'older-admin@example.com', 'B', "
+                "'admin', now() - interval '2 hours'), "
+                "('44444444-4444-4444-4444-444444444444', 'newer-admin@example.com', 'C', "
+                "'admin', now() - interval '1 hour')"
+            )
+        )
+        await conn.commit()
+        await conn.run_sync(_upgrade, "head")
+        await conn.commit()
+
+    async with engine.connect() as conn:
+        rows = (
+            await conn.execute(text("SELECT user_id, role FROM workspace_members"))
+        ).all()
+    roles_by_user = {str(user_id): role for user_id, role in rows}
+    assert roles_by_user == {
+        "22222222-2222-2222-2222-222222222222": "analyst",  # unchanged
+        "33333333-3333-3333-3333-333333333333": "owner",  # oldest admin, promoted
+        "44444444-4444-4444-4444-444444444444": "admin",  # younger admin, unchanged
+    }
+
+
+async def test_workspace_member_backfill_promotes_no_one_without_an_admin(engine):
+    """A workspace whose backfilled members are all non-admin ends up with no
+    owner — exactly the pre-migration state, not something this migration can
+    invent an owner out of."""
+    async with engine.connect() as conn:
+        await conn.run_sync(_upgrade, "15981123afd0")
+        await conn.commit()
+        await conn.execute(
+            text(
+                "INSERT INTO workspaces (id, name, settings, created_at) "
+                "VALUES ('55555555-5555-5555-5555-555555555555', 'Default', '{}'::jsonb, now())"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO users (id, email, display_name, role, created_at) VALUES "
+                "('66666666-6666-6666-6666-666666666666', 'analyst-only@example.com', 'A', "
+                "'analyst', now())"
+            )
+        )
+        await conn.commit()
+        await conn.run_sync(_upgrade, "head")
+        await conn.commit()
+
+    async with engine.connect() as conn:
+        roles = (await conn.execute(text("SELECT role FROM workspace_members"))).scalars().all()
+    assert roles == ["analyst"]
+
+
 async def test_legacy_database_already_at_head_is_stamped_without_migrating(engine):
     """A create_all database built by the *current* release: schema is right,
     stamp is missing. Stamp head; run nothing."""

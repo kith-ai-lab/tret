@@ -28,11 +28,13 @@ from fastapi.testclient import TestClient
 from tret.api import documents
 from tret.api.auth import current_user
 from tret.api.documents import safe_content_type, safe_filename
+from tret.api.workspace import WorkspaceContext, current_workspace
 from tret.config import get_settings
 from tret.db.engine import get_db
-from tret.db.models import Document, Project, User
+from tret.db.models import Document, Project, User, Workspace
 
 PROJECT = Project(id=uuid.uuid4(), workspace_id=uuid.uuid4(), name="P")
+WORKSPACE = Workspace(id=PROJECT.workspace_id, name="W", kind="team")
 UPLOADER = User(id=uuid.uuid4(), email="a@example.com", display_name="A", role="analyst")
 
 
@@ -90,6 +92,7 @@ def client(db, storage) -> TestClient:
     app.include_router(documents.router)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[current_user] = lambda: UPLOADER
+    app.dependency_overrides[current_workspace] = lambda: WorkspaceContext(WORKSPACE, "owner")
     return TestClient(app)
 
 

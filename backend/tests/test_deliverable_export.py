@@ -30,8 +30,9 @@ from fastapi.testclient import TestClient
 
 from tret.api import findings as findings_api
 from tret.api.auth import current_user
+from tret.api.workspace import WorkspaceContext, current_workspace
 from tret.db.engine import get_db
-from tret.db.models import Finding, Project, Run
+from tret.db.models import Finding, Project, Run, Workspace
 from tret.services.export import assemble_deliverable, render_pdf
 
 PROJECT_ID = uuid.uuid4()
@@ -400,6 +401,16 @@ def _client(db) -> TestClient:
     app = FastAPI()
     app.include_router(findings_api.router)
     app.dependency_overrides[current_user] = lambda: None
+
+    # The workspace this fake db's project actually belongs to — read off the
+    # fixture rather than a fixed id, since callers construct `Project` (and
+    # therefore its `workspace_id`) fresh per FakeSession.
+    def _fake_current_workspace():
+        projects = db.rows.get("Project") or []
+        workspace_id = projects[0].workspace_id if projects else uuid.uuid4()
+        return WorkspaceContext(Workspace(id=workspace_id, name="W", kind="team"), "owner")
+
+    app.dependency_overrides[current_workspace] = _fake_current_workspace
     app.dependency_overrides[get_db] = lambda: db
     return TestClient(app)
 

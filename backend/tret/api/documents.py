@@ -19,9 +19,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
+from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.config import get_settings
 from tret.db.engine import get_db
-from tret.db.models import Dataset, DatasetRow, Document, Project, User
+from tret.db.models import Dataset, DatasetRow, Document, User
 from tret.services.documents import extract_text
 
 log = logging.getLogger("tret.documents")
@@ -165,6 +166,7 @@ async def upload_document(
     request: Request,
     file: UploadFile,
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
     """Store an uploaded document and extract its text.
@@ -183,7 +185,7 @@ async def upload_document(
         if int(declared) > MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_ALLOWANCE:
             raise _too_large()
 
-    project = (await db.execute(select(Project))).scalars().first()
+    project = await current_project(db, ctx.id)
     if project is None:
         raise HTTPException(500, "No project exists")
 
@@ -222,9 +224,23 @@ async def upload_document(
 
 
 @router.get("/documents")
-async def list_documents(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def list_documents(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    project = await current_project(db, ctx.id)
+    if project is None:
+        return []
     docs = (
-        (await db.execute(select(Document).order_by(Document.created_at.desc()).limit(200)))
+        (
+            await db.execute(
+                select(Document)
+                .where(Document.project_id == project.id)
+                .order_by(Document.created_at.desc())
+                .limit(200)
+            )
+        )
         .scalars()
         .all()
     )
@@ -233,17 +249,31 @@ async def list_documents(user: User = Depends(current_user), db: AsyncSession = 
 
 @router.get("/documents/{document_id}")
 async def get_document(
-    document_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    document_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
     d = await db.get(Document, document_id)
-    if d is None:
+    if d is None or await project_in_workspace(db, d.project_id, ctx.id) is None:
         raise HTTPException(404, "Document not found")
     return {**_doc_out(d), "extracted_text": (d.extracted_text or "")[:100_000]}
 
 
 @router.get("/datasets")
-async def list_datasets(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    datasets = (await db.execute(select(Dataset).order_by(Dataset.name))).scalars().all()
+async def list_datasets(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    project = await current_project(db, ctx.id)
+    if project is None:
+        return []
+    datasets = (
+        await db.execute(
+            select(Dataset).where(Dataset.project_id == project.id).order_by(Dataset.name)
+        )
+    ).scalars().all()
     return [
         {
             "id": str(ds.id),
@@ -261,8 +291,12 @@ async def dataset_rows(
     dataset_id: uuid.UUID,
     limit: int = 20,
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
+    ds = await db.get(Dataset, dataset_id)
+    if ds is None or await project_in_workspace(db, ds.project_id, ctx.id) is None:
+        raise HTTPException(404, "Dataset not found")
     rows = (
         await db.execute(
             select(DatasetRow)

@@ -288,19 +288,20 @@ def test_duplicate_tool_names_are_left_alone():
 
 
 def test_the_seeded_harnesses_name_only_real_tools():
-    """The bootstrap's own harnesses must satisfy the rule the API now enforces.
+    """Every workspace's seeded harnesses must satisfy the rule the API now enforces.
 
     A seeded harness naming a tool the engine dropped would fail its very first
     run under the loud run-time guard, on a fresh install, before an operator had
-    touched anything. Parsed out of the source rather than by booting the
-    bootstrap, which needs a database.
+    touched anything. Parsed out of the source rather than by booting a workspace,
+    which needs a database. The seeding itself lives in services/workspace.py
+    (services/bootstrap.py is a thin caller of it — see that module's docstring).
     """
-    source = (Path(__file__).parent.parent / "tret/services/bootstrap.py").read_text()
+    source = (Path(__file__).parent.parent / "tret/services/workspace.py").read_text()
     builtins = set(get_builtin_tools())
     seeded: set[str] = set()
     for literal in re.findall(r"tool_names=\[(.*?)\]", source, re.DOTALL):
         seeded |= set(re.findall(r'"([^"]+)"', literal))
-    assert seeded, "no seeded tool_names found — has bootstrap.py changed shape?"
+    assert seeded, "no seeded tool_names found — has services/workspace.py changed shape?"
     assert seeded <= builtins, f"bootstrap seeds unknown tool(s): {sorted(seeded - builtins)}"
 
 

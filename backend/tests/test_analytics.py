@@ -7,12 +7,12 @@ from sqlalchemy.dialects import postgresql
 
 from tret.api.analytics import (
     _energy_stats,
+    _guardrails_response,
     _method_stats,
     _rate,
     _recent_method_errors,
     _validation_errors_in,
     _validation_stats,
-    guardrails,
 )
 from tret.config import get_settings
 from tret.db.models import utcnow
@@ -101,7 +101,7 @@ async def test_queries_compile_for_postgres():
 
 
 async def test_guardrails_shape_with_no_data():
-    out = await guardrails(project_id=None, days=7, user=None, db=RecordingSession())
+    out = await _guardrails_response(project_id=None, days=7, user=None, db=RecordingSession())
     assert out["window_days"] == 7
     assert out["methods"] == []
     assert out["harnesses"] == []
@@ -278,10 +278,10 @@ def _outcome(model_id: str, quality: str, *, shape="verdict", objective="balance
 
 
 async def test_routing_query_compiles_for_postgres():
-    from tret.api.analytics import routing
+    from tret.api.analytics import _routing_response
 
     db = _RowsSession([])
-    out = await routing(project_id=uuid.uuid4(), days=90, size_band=None, user=None, db=db)
+    out = await _routing_response(project_id=uuid.uuid4(), days=90, size_band=None, user=None, db=db)
     assert out["groups"] == []
     assert out["rows_scanned"] == 0
     for statement in db.statements:
@@ -289,14 +289,14 @@ async def test_routing_query_compiles_for_postgres():
 
 
 async def test_routing_groups_by_shape_and_objective_and_ranks_within_a_group():
-    from tret.api.analytics import routing
+    from tret.api.analytics import _routing_response
 
     rows = (
         [_outcome("m/good", "0.9") for _ in range(12)]
         + [_outcome("m/poor", "0.2") for _ in range(12)]
         + [_outcome("m/other", "0.8", shape="drafting") for _ in range(12)]
     )
-    out = await routing(project_id=None, days=90, size_band=None, user=None, db=_RowsSession(rows))
+    out = await _routing_response(project_id=None, days=90, size_band=None, user=None, db=_RowsSession(rows))
 
     keys = {(g["task_shape"], g["objective"]) for g in out["groups"]}
     assert keys == {("verdict", "balanced"), ("drafting", "balanced")}
@@ -306,21 +306,21 @@ async def test_routing_groups_by_shape_and_objective_and_ranks_within_a_group():
 
 
 async def test_models_under_the_evidence_floor_are_named_not_hidden():
-    from tret.api.analytics import routing
+    from tret.api.analytics import _routing_response
 
     # "not enough evidence yet" and "not in the running" are different claims,
     # and an operator reading the panel has to be able to tell them apart.
     rows = [_outcome("m/known", "0.8") for _ in range(12)] + [_outcome("m/new", "0.9")]
-    out = await routing(project_id=None, days=90, size_band=None, user=None, db=_RowsSession(rows))
+    out = await _routing_response(project_id=None, days=90, size_band=None, user=None, db=_RowsSession(rows))
     group = out["groups"][0]
     assert [m["model_id"] for m in group["models"]] == ["m/known"]
     assert group["models_below_evidence_floor"] == ["m/new"]
 
 
 async def test_routing_response_states_that_it_is_observational():
-    from tret.api.analytics import routing
+    from tret.api.analytics import _routing_response
 
-    out = await routing(project_id=None, days=90, size_band=None, user=None, db=_RowsSession([]))
+    out = await _routing_response(project_id=None, days=90, size_band=None, user=None, db=_RowsSession([]))
     assert out["basis"]["observational"] is True
     assert "routed to stronger models" in out["basis"]["note"]
     assert out["score_version"] and out["priors_version"]
@@ -448,10 +448,10 @@ def test_history_separates_shapes_and_lists_every_model_seen():
 
 
 async def test_history_query_compiles_for_postgres():
-    from tret.api.analytics import routing_history_endpoint
+    from tret.api.analytics import _routing_history_response
 
     db = _RowsSession([])
-    out = await routing_history_endpoint(
+    out = await _routing_history_response(
         project_id=uuid.uuid4(), days=180, bucket_days=7, user=None, db=db
     )
     assert out["groups"] == []

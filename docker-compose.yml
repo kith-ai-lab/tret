@@ -144,6 +144,40 @@ services:
       # migrations as a separate deploy step — tret then assumes the database
       # is already at head (docs/upgrading.md).
       TRET_SKIP_MIGRATIONS: ${TRET_SKIP_MIGRATIONS:-false}
+      # Multi-tenant SaaS mode (tret_cloud). false is every self-hosted
+      # deployment: one workspace, no personal-workspace-per-user seeding.
+      TRET_MULTI_TENANT: ${TRET_MULTI_TENANT:-false}
+      # Cap on team workspaces one user may own via POST /api/workspaces.
+      # 0 (the default) is unlimited.
+      TRET_MAX_TEAM_WORKSPACES_PER_USER: ${TRET_MAX_TEAM_WORKSPACES_PER_USER:-0}
+      # Single sign-on (generic OIDC, tret/api/oidc.py). password is every
+      # self-hosted deployment; the OIDC router only mounts once
+      # TRET_OIDC_ISSUER is also set.
+      TRET_AUTH_MODE: ${TRET_AUTH_MODE:-password}
+      TRET_OIDC_ISSUER: ${TRET_OIDC_ISSUER:-}
+      TRET_OIDC_CLIENT_ID: ${TRET_OIDC_CLIENT_ID:-}
+      TRET_OIDC_CLIENT_SECRET: ${TRET_OIDC_CLIENT_SECRET:-}
+      TRET_OIDC_REDIRECT_URL: ${TRET_OIDC_REDIRECT_URL:-}
+      TRET_OIDC_LOGOUT_URL: ${TRET_OIDC_LOGOUT_URL:-}
+      # Who a fresh OIDC sign-in may create an account for, comma-separated
+      # email domains. Empty (the default) means no domain restriction of
+      # its own — a self-hosted, non-multi-tenant deployment still falls
+      # back to requiring an invitation in that case.
+      TRET_OIDC_ALLOWED_EMAIL_DOMAINS: ${TRET_OIDC_ALLOWED_EMAIL_DOMAINS:-}
+      # This deployment's own public base URL — used only to build an invite
+      # link that gets emailed out, never to reach anything.
+      TRET_APP_URL: ${TRET_APP_URL:-http://localhost:8000}
+      # Invite email. off is every self-hosted deployment: the invite API
+      # still works with nothing set here — it always returns the invite
+      # link itself, so copy-link never depends on this.
+      TRET_EMAIL_MODE: ${TRET_EMAIL_MODE:-off}
+      TRET_RESEND_API_KEY: ${TRET_RESEND_API_KEY:-}
+      TRET_EMAIL_FROM: ${TRET_EMAIL_FROM:-}
+      TRET_SMTP_HOST: ${TRET_SMTP_HOST:-}
+      TRET_SMTP_PORT: ${TRET_SMTP_PORT:-587}
+      TRET_SMTP_USERNAME: ${TRET_SMTP_USERNAME:-}
+      TRET_SMTP_PASSWORD: ${TRET_SMTP_PASSWORD:-}
+      TRET_SMTP_TLS: ${TRET_SMTP_TLS:-true}
       # In-process extension modules, comma-separated dotted module names.
       # Empty (the default here) is what this image ships: the extension seam
       # in tret/engine/extensions.py is entirely inert.

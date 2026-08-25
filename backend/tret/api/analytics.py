@@ -30,11 +30,12 @@ import uuid
 from datetime import timedelta, timezone
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
+from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.config import (
     GRID_BASIS_LOCATION,
     GRID_BASIS_MARKET,
@@ -75,6 +76,32 @@ ROUTING_SCAN_LIMIT = 5000
 VALIDATION_MARKER = transcript.VALIDATION_MARKER
 EXHAUSTED_MARKER = transcript.EXHAUSTED_MARKER
 _validation_errors_in = transcript.validation_errors_in
+
+
+async def _scoped_project_id(
+    db: AsyncSession, ctx: WorkspaceContext, project_id: uuid.UUID | None
+) -> uuid.UUID:
+    """The `project_id` every query below actually filters on.
+
+    Every helper in this module treats `project_id=None` as "no filter" —
+    which used to mean every project in the whole database, the pre-existing
+    hole this closes. A `project_id` given by the caller must belong to the
+    current workspace (404 otherwise, not 403 — a member of one workspace
+    must not learn that a project id in another one exists); omitted, it
+    defaults to this workspace's own project rather than every workspace's.
+
+    Always returns a concrete id — a workspace with no project at all should
+    not happen by construction (services/workspace.py seeds one with every
+    workspace), so that case is a 500 rather than a silently unscoped query.
+    """
+    if project_id is not None:
+        if await project_in_workspace(db, project_id, ctx.id) is None:
+            raise HTTPException(404, "Project not found")
+        return project_id
+    project = await current_project(db, ctx.id)
+    if project is None:
+        raise HTTPException(500, "This workspace has no project yet")
+    return project.id
 
 
 def _rate(part: int, whole: int) -> float:
@@ -303,9 +330,27 @@ async def guardrails(
     project_id: uuid.UUID | None = None,
     days: int | None = Query(default=30, ge=1, le=3650),
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
-    """Aggregate guardrail stats: method reliability, validation pressure, energy."""
+    """Aggregate guardrail stats: method reliability, validation pressure, energy.
+
+    A thin workspace-scoping wrapper around `_guardrails_response`, which does
+    the actual aggregation and stays a plain function of `(project_id, days,
+    user, db)` — `project_id=None` there still means "no filter", unlike this
+    route, which never lets that reach it unresolved (see `_scoped_project_id`).
+    """
+    return await _guardrails_response(
+        project_id=await _scoped_project_id(db, ctx, project_id), days=days, user=user, db=db
+    )
+
+
+async def _guardrails_response(
+    project_id: uuid.UUID | None,
+    days: int | None,
+    user: User,
+    db: AsyncSession,
+):
     since = utcnow() - timedelta(days=days) if days else None
     methods = await _method_stats(db, project_id, since)
     harnesses, runs_scanned = await _validation_stats(db, project_id, since)
@@ -651,7 +696,25 @@ async def emissions(
     project_id: uuid.UUID | None = None,
     days: int | None = Query(default=30, ge=1, le=3650),
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
+):
+    """Estimated emissions over the window, summed as recorded.
+
+    A thin workspace-scoping wrapper — see `_emissions_response` for the
+    actual rollup, and `_guardrails_response`'s neighbouring docstring for why
+    the split exists.
+    """
+    return await _emissions_response(
+        project_id=await _scoped_project_id(db, ctx, project_id), days=days, user=user, db=db
+    )
+
+
+async def _emissions_response(
+    project_id: uuid.UUID | None,
+    days: int | None,
+    user: User,
+    db: AsyncSession,
 ):
     """Estimated emissions over the window, summed as recorded.
 
@@ -981,7 +1044,29 @@ async def routing(
     days: int | None = Query(default=90, ge=1, le=3650),
     size_band: str | None = Query(default=None),
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
+):
+    """How each model has actually performed, per shape of task and objective.
+
+    A thin workspace-scoping wrapper — see `_routing_response`, and
+    `_guardrails_response`'s neighbouring docstring for why the split exists.
+    """
+    return await _routing_response(
+        project_id=await _scoped_project_id(db, ctx, project_id),
+        days=days,
+        size_band=size_band,
+        user=user,
+        db=db,
+    )
+
+
+async def _routing_response(
+    project_id: uuid.UUID | None,
+    days: int | None,
+    size_band: str | None,
+    user: User,
+    db: AsyncSession,
 ):
     """How each model has actually performed, per shape of task and objective.
 
@@ -1149,7 +1234,29 @@ async def routing_history_endpoint(
     days: int | None = Query(default=180, ge=1, le=3650),
     bucket_days: int = Query(default=DEFAULT_HISTORY_BUCKET_DAYS, ge=1, le=90),
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
+):
+    """How routing has moved over time: what got picked, how well it did, when it changed.
+
+    A thin workspace-scoping wrapper — see `_routing_history_response`, and
+    `_guardrails_response`'s neighbouring docstring for why the split exists.
+    """
+    return await _routing_history_response(
+        project_id=await _scoped_project_id(db, ctx, project_id),
+        days=days,
+        bucket_days=bucket_days,
+        user=user,
+        db=db,
+    )
+
+
+async def _routing_history_response(
+    project_id: uuid.UUID | None,
+    days: int | None,
+    bucket_days: int,
+    user: User,
+    db: AsyncSession,
 ):
     """How routing has moved over time: what got picked, how well it did, when it changed.
 

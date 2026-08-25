@@ -19,6 +19,7 @@ from tret.api import (
     packs,
     runs,
     settings as settings_api,
+    workspaces as workspaces_api,
 )
 from tret.config import enforce_production_safety, get_settings
 from tret.db.engine import get_engine, get_session_factory
@@ -97,6 +98,18 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="tret", version="0.1.0", lifespan=lifespan)
     app.include_router(auth.router)
+    # Teams, members and invites (api/workspaces.py) — always mounted, like
+    # api/workspace.py's context resolution: tenancy primitives are core, not
+    # gated behind multi_tenant/auth_mode.
+    app.include_router(workspaces_api.router)
+    app.include_router(workspaces_api.invite_accept_router)
+    # Generic OIDC login (tret/api/oidc.py) — mounted only when an issuer is
+    # configured, so every self-hosted deployment (the default) never even
+    # imports this module. See config.py::oidc_issuer.
+    if get_settings().oidc_issuer:
+        from tret.api import oidc as oidc_api
+
+        app.include_router(oidc_api.router)
     app.include_router(analytics.router)
     app.include_router(chat.router)
     app.include_router(runs.router)

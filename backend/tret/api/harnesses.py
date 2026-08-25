@@ -9,8 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.adaptive import validation_error as adaptive_validation_error
 from tret.api.auth import current_user
+from tret.api.workspace import WorkspaceContext, current_workspace
 from tret.db.engine import get_db
-from tret.db.models import Harness, Pack, User, Workspace
+from tret.db.models import Harness, Pack, User
 from tret.engine.context import assemble_system_prompt, task_config
 from tret.engine.tools import WEB_TOOL_NAMES, get_builtin_tools, withheld_web_tools
 from tret.providers.catalog import get_catalog
@@ -113,22 +114,40 @@ def _validate_policy(policy: dict) -> None:
 
 
 @router.get("")
-async def list_harnesses(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def list_harnesses(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
     harnesses = (
-        (await db.execute(select(Harness).where(Harness.is_archived.is_(False)).order_by(Harness.name)))
+        (
+            await db.execute(
+                select(Harness)
+                .where(Harness.workspace_id == ctx.id, Harness.is_archived.is_(False))
+                .order_by(Harness.name)
+            )
+        )
         .scalars()
         .all()
     )
-    packs = {p.id: p for p in (await db.execute(select(Pack))).scalars().all()}
+    packs = {
+        p.id: p
+        for p in (await db.execute(select(Pack).where(Pack.workspace_id == ctx.id))).scalars().all()
+    }
     return [_out(h, packs.get(h.pack_id)) for h in harnesses]
 
 
 @router.get("/{harness_id}")
 async def get_harness(
-    harness_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    harness_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
     h = await db.get(Harness, harness_id)
-    if h is None:
+    # Cross-workspace: 404, not 403 — a member of one workspace must not be
+    # able to tell a harness in another exists at all.
+    if h is None or h.workspace_id != ctx.id:
         raise HTTPException(404, "Harness not found")
     pack = await db.get(Pack, h.pack_id) if h.pack_id else None
     out = _out(h, pack)
@@ -155,20 +174,26 @@ async def get_harness(
 
 @router.post("")
 async def create_harness(
-    body: HarnessBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    body: HarnessBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
     _validate_policy(body.model_policy)
     _validate_tool_names(body.tool_names)
-    workspace = (await db.execute(select(Workspace))).scalars().first()
     dupe = (
         await db.execute(
-            select(Harness).where(Harness.name == body.name, Harness.is_archived.is_(False))
+            select(Harness).where(
+                Harness.workspace_id == ctx.id,
+                Harness.name == body.name,
+                Harness.is_archived.is_(False),
+            )
         )
     ).scalars().first()
     if dupe:
         raise HTTPException(409, f"A harness named '{body.name}' already exists")
     h = Harness(
-        workspace_id=workspace.id,
+        workspace_id=ctx.id,
         created_by=user.id,
         **body.model_dump(),
     )
@@ -184,10 +209,11 @@ async def update_harness(
     harness_id: uuid.UUID,
     body: HarnessBody,
     user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
     h = await db.get(Harness, harness_id)
-    if h is None:
+    if h is None or h.workspace_id != ctx.id:
         raise HTTPException(404, "Harness not found")
     _validate_policy(body.model_policy)
     _validate_tool_names(body.tool_names)
@@ -199,10 +225,13 @@ async def update_harness(
 
 @router.delete("/{harness_id}")
 async def archive_harness(
-    harness_id: uuid.UUID, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+    harness_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
 ):
     h = await db.get(Harness, harness_id)
-    if h is None:
+    if h is None or h.workspace_id != ctx.id:
         raise HTTPException(404, "Harness not found")
     h.is_archived = True
     await db.commit()

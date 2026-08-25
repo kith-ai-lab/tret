@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from tret.api import analytics
-from tret.api.analytics import _recorded_emissions, emissions
+from tret.api.analytics import _emissions_response, _recorded_emissions
 from tret.api.runs import _run_summary
 from tret.config import Settings
 from tret.db.models import Run, utcnow
@@ -1244,7 +1244,7 @@ async def test_rollup_sums_stored_values_and_is_not_recomputed(monkeypatch):
 
     monkeypatch.setattr(analytics, "get_settings", lambda: _settings(grid_co2e_g_per_kwh=30.0))
     db = _EmissionRows([_row(reports[0]), _row(reports[1])])
-    out = await emissions(project_id=None, days=30, user=None, db=db)
+    out = await _emissions_response(project_id=None, days=30, user=None, db=db)
 
     assert out["totals"]["co2e_g"] == pytest.approx(expected_co2e)
     assert out["totals"]["runs_with_estimate"] == 2
@@ -1271,7 +1271,7 @@ async def test_rollup_sums_stored_values_and_is_not_recomputed(monkeypatch):
 async def test_rollup_flags_a_window_recorded_under_differing_factors():
     cloud = _account(_model("L"), _settings(grid_co2e_g_per_kwh=400.0))
     greener = _account(_model("L"), _settings(grid_co2e_g_per_kwh=30.0))
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None, days=30, user=None, db=_EmissionRows([_row(cloud), _row(greener)])
     )
     assert out["factors"]["mixed_factors"] is True
@@ -1283,7 +1283,7 @@ async def test_a_window_mixing_cloud_and_self_hosted_is_also_flagged_and_split()
     settings = _settings()
     cloud = _account(_model("L"), settings)
     local = _account(_local_model(), settings)
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None, days=30, user=None, db=_EmissionRows([_row(cloud), _row(local)])
     )
     totals = out["totals"]
@@ -1301,7 +1301,7 @@ async def test_a_window_mixing_cloud_and_self_hosted_is_also_flagged_and_split()
 async def test_runs_without_an_estimate_are_excluded_and_counted():
     report = _account(_model("L"))
     db = _EmissionRows([_row(report), _row(None), _row({"estimated": True}), _row("junk")])
-    out = await emissions(project_id=None, days=30, user=None, db=db)
+    out = await _emissions_response(project_id=None, days=30, user=None, db=db)
     totals = out["totals"]
     assert totals["runs"] == 4
     assert totals["runs_with_estimate"] == 1
@@ -1313,7 +1313,7 @@ async def test_runs_without_an_estimate_are_excluded_and_counted():
 
 async def test_legacy_runs_keep_their_carbon_but_not_a_fabricated_scope_split():
     legacy = {"estimated": True, "energy_wh": 10.0, "co2e_g": 4.0, "grid_co2e_g_per_kwh": 400}
-    out = await emissions(project_id=None, days=30, user=None, db=_EmissionRows([_row(legacy)]))
+    out = await _emissions_response(project_id=None, days=30, user=None, db=_EmissionRows([_row(legacy)]))
     totals = out["totals"]
     assert totals["co2e_g"] == 4.0
     assert totals["runs_without_scope_split"] == 1
@@ -1331,7 +1331,7 @@ async def test_rollup_sums_money_and_the_band_alongside_carbon():
         _account(_model("L", id="anthropic/heavy"), settings),
         _account(_model("M", id="anthropic/light"), settings),
     ]
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None, days=30, user=None, db=_EmissionRows([_row(r) for r in reports])
     )
     totals = out["totals"]
@@ -1356,7 +1356,7 @@ async def test_rollup_sums_money_and_the_band_alongside_carbon():
 
 async def test_a_legacy_run_contributes_its_central_figure_to_both_band_ends():
     legacy = {"estimated": True, "energy_wh": 10.0, "co2e_g": 4.0, "grid_co2e_g_per_kwh": 400}
-    out = await emissions(project_id=None, days=30, user=None, db=_EmissionRows([_row(legacy)]))
+    out = await _emissions_response(project_id=None, days=30, user=None, db=_EmissionRows([_row(legacy)]))
     totals = out["totals"]
     assert totals["runs_without_uncertainty_band"] == 1
     assert totals["runs_without_money_comparison"] == 1
@@ -1375,7 +1375,7 @@ async def test_a_window_mixing_ghg_protocol_grid_bases_is_flagged():
         _local_model(),
         _settings(local_grid_co2e_g_per_kwh=100.0, local_grid_co2e_basis="market_based"),
     )
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None, days=30, user=None, db=_EmissionRows([_row(location), _row(market)])
     )
     assert out["factors"]["mixed_factors"] is True
@@ -1397,7 +1397,7 @@ async def test_a_basis_mixed_window_reports_no_carbon_total_only_subtotals():
         _model("L", id="anthropic/mkt"),
         _settings(grid_factors='{"anthropic": {"g_per_kwh": 120, "basis": "market_based"}}'),
     )
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None, days=30, user=None, db=_EmissionRows([_row(location), _row(market)])
     )
     totals = out["totals"]
@@ -1451,7 +1451,7 @@ async def test_a_single_basis_window_still_reports_one_carbon_total():
     grid figure) still sum, and still flag mixed_factors."""
     coarse = _account(_model("L"), _settings(grid_co2e_g_per_kwh=400.0))
     corrected = _account(_model("L"), _settings(grid_co2e_g_per_kwh=30.0))
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None, days=30, user=None, db=_EmissionRows([_row(coarse), _row(corrected)])
     )
     totals = out["totals"]
@@ -1475,7 +1475,7 @@ async def test_a_window_with_legacy_basis_less_runs_is_its_own_group():
     Its own carbon survives; what disappears is the combined total."""
     modern = _account(_model("L"), _settings())
     legacy = {"estimated": True, "energy_wh": 10.0, "co2e_g": 4.0, "grid_co2e_g_per_kwh": 400}
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None, days=30, user=None, db=_EmissionRows([_row(modern), _row(legacy)])
     )
     totals = out["totals"]
@@ -1496,7 +1496,7 @@ async def test_a_legacy_only_window_keeps_its_carbon_total():
     """One basis group, even if that group is "unrecorded": nothing is being mixed,
     so there is nothing to withhold."""
     legacy = {"estimated": True, "energy_wh": 10.0, "co2e_g": 4.0}
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None, days=30, user=None, db=_EmissionRows([_row(legacy), _row(legacy)])
     )
     assert out["totals"]["carbon_is_summable"] is True
@@ -1514,7 +1514,7 @@ async def test_rollup_rows_carry_their_own_bases_and_usually_stay_summable():
         _settings(grid_factors='{"anthropic": {"g_per_kwh": 120, "basis": "market_based"}}'),
     )
     harness = uuid.uuid4()
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None,
         days=30,
         user=None,
@@ -1552,7 +1552,7 @@ async def test_the_rollup_shows_which_rule_chose_each_recorded_factor():
         ),
     )
     legacy = _account(_local_model(), _settings(local_grid_co2e_g_per_kwh=30.0))
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None, days=30, user=None, db=_EmissionRows([_row(market), _row(legacy)])
     )
     recorded = {r["grid_co2e_source"]: r for r in out["factors"]["recorded"]}
@@ -1567,7 +1567,7 @@ async def test_the_rollup_reports_the_configured_overrides_for_reference_only(mo
         grid_factors='{"local": {"g_per_kwh": 42, "basis": "location_based", "label": "IESO"}}'
     )
     monkeypatch.setattr(analytics, "get_settings", lambda: configured)
-    out = await emissions(project_id=None, days=30, user=None, db=_EmissionRows([]))
+    out = await _emissions_response(project_id=None, days=30, user=None, db=_EmissionRows([]))
     assert out["factors"]["grid_factors"] == {
         "local": {"g_per_kwh": 42.0, "basis": "location_based", "label": "IESO"}
     }
@@ -1575,7 +1575,7 @@ async def test_the_rollup_reports_the_configured_overrides_for_reference_only(mo
 
 
 async def test_rollup_points_at_per_run_provenance_rather_than_its_own_settings():
-    out = await emissions(project_id=None, days=30, user=None, db=_EmissionRows([]))
+    out = await _emissions_response(project_id=None, days=30, user=None, db=_EmissionRows([]))
     factors = out["factors"]
     assert factors["grid_co2e_basis"] == "location_based"
     assert factors["onprem_pue"] == 1.56
@@ -1597,7 +1597,7 @@ async def test_rollup_groups_by_model_harness_and_day():
             _row(light, harness_id=harness, at=utcnow()),
         ]
     )
-    out = await emissions(project_id=None, days=30, user=None, db=db)
+    out = await _emissions_response(project_id=None, days=30, user=None, db=db)
 
     assert [m["model"] for m in out["by_model"]] == ["anthropic/heavy", "anthropic/light"]
     assert out["by_model"][0]["energy_class"] == "XL"
@@ -1613,7 +1613,7 @@ async def test_rollup_groups_by_model_harness_and_day():
 
 
 async def test_avoided_pct_is_signed_and_safe_when_there_is_no_baseline():
-    empty = await emissions(project_id=None, days=30, user=None, db=_EmissionRows([]))
+    empty = await _emissions_response(project_id=None, days=30, user=None, db=_EmissionRows([]))
     assert empty["totals"] == {
         "runs": 0,
         "runs_with_estimate": 0,
@@ -1647,7 +1647,7 @@ async def test_avoided_pct_is_signed_and_safe_when_there_is_no_baseline():
         "not_summable_note": None,
     }
     heavier = _account(_model("XL"), _settings(emissions_baseline_model="anthropic/claude-haiku-4-5"))
-    out = await emissions(project_id=None, days=30, user=None, db=_EmissionRows([_row(heavier)]))
+    out = await _emissions_response(project_id=None, days=30, user=None, db=_EmissionRows([_row(heavier)]))
     assert out["totals"]["avoided_co2e_g"] < 0
     assert out["totals"]["avoided_pct"] < 0
     assert out["totals"]["avoided_usd_pct"] < 0
@@ -1669,7 +1669,7 @@ async def test_money_rollups_sum_dollars_rather_than_average_percentages():
     assert also_cheap["cost"]["avoided_pct"] == pytest.approx(70.0)
 
     db = _EmissionRows([_row(cheap, model_used="anthropic/test"), _row(also_cheap, model_used="anthropic/test")])
-    out = await emissions(project_id=None, days=30, user=None, db=db)
+    out = await _emissions_response(project_id=None, days=30, user=None, db=db)
 
     # Summed-dollars identity: (7 + 700) avoided over (10 + 1,000) baseline.
     expected_pct = 100.0 * (7.0 + 700.0) / (10.0 + 1_000.0)
@@ -1688,7 +1688,7 @@ async def test_money_rollup_pct_is_null_without_averaging_to_zero():
     settings = _settings(emissions_baseline_model="anthropic/claude-fable-5")
     priced = _account(_model("L"), settings, tokens=(1_000_000, 0, 0, 0))
     legacy = {"estimated": True, "co2e_g": 4.0}  # predates baseline/money entirely
-    out = await emissions(
+    out = await _emissions_response(
         project_id=None,
         days=30,
         user=None,
@@ -1702,7 +1702,7 @@ async def test_money_rollup_pct_is_null_without_averaging_to_zero():
 
 
 async def test_rollup_declares_its_scan_bound_and_never_claims_measurement():
-    out = await emissions(project_id=None, days=7, user=None, db=_EmissionRows([]))
+    out = await _emissions_response(project_id=None, days=7, user=None, db=_EmissionRows([]))
     assert out["window_days"] == 7
     assert out["estimated"] is True
     assert out["scan"] == {
@@ -1723,7 +1723,7 @@ async def test_rollup_query_is_bounded_and_filtered_without_json_predicates():
     from sqlalchemy.dialects import postgresql
 
     db = _EmissionRows([])
-    await emissions(project_id=uuid.uuid4(), days=30, user=None, db=db)
+    await _emissions_response(project_id=uuid.uuid4(), days=30, user=None, db=db)
     compiled = str(db.statements[0].compile(dialect=postgresql.dialect()))
     assert "LIMIT" in compiled
     assert "runs.created_at >=" in compiled
@@ -1868,13 +1868,25 @@ def test_emissions_requires_authentication():
     assert client.get("/api/analytics/emissions").status_code == 401
 
 
-def test_emissions_is_readable_by_any_authenticated_user():
+def test_emissions_is_readable_by_any_authenticated_user(monkeypatch):
     from tret.api.auth import current_user
+    from tret.api.workspace import WorkspaceContext, current_workspace
     from tret.db.engine import get_db
+    from tret.db.models import Workspace
 
     app = FastAPI()
     app.include_router(analytics.router)
     app.dependency_overrides[current_user] = lambda: None
+    # Workspace scoping is exercised elsewhere (tests/test_tenancy_isolation.py);
+    # this test is only about authentication and response shape, so the
+    # scoping resolution itself is stubbed rather than taught to _EmissionRows.
+    workspace = Workspace(id=uuid.uuid4(), name="W", kind="team")
+    app.dependency_overrides[current_workspace] = lambda: WorkspaceContext(workspace, "owner")
+
+    async def _fixed_project_id(db, ctx, project_id):
+        return project_id or uuid.uuid4()
+
+    monkeypatch.setattr(analytics, "_scoped_project_id", _fixed_project_id)
     app.dependency_overrides[get_db] = lambda: _EmissionRows([])
     client = TestClient(app)
     body = client.get("/api/analytics/emissions?days=7").json()

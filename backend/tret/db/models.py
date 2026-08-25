@@ -52,8 +52,31 @@ class User(Base):
     email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     password_hash: Mapped[str | None] = mapped_column(Text)  # argon2; null once OIDC lands
+    # Instance-wide role: gates only /api/auth/users* (instance user management).
+    # A user's role *within a workspace* lives on WorkspaceMember instead — see
+    # api/auth.py::UserOut, where this becomes `global_role`.
     role: Mapped[str] = mapped_column(Text, nullable=False, default="analyst")  # admin|analyst|approver
+    # OIDC subject claim (`sub`), unique per issuer-less-single-IdP deployment.
+    # Null for a password-only user; set on first OIDC login/link (Phase B).
+    oidc_sub: Mapped[str | None] = mapped_column(Text, unique=True)
+    # Bumped to invalidate every outstanding session without touching the
+    # credential itself — the `POST /api/auth/users/{id}/revoke-sessions` lever,
+    # and the second half of `credential_version` alongside `password_hash`. An
+    # OIDC-only user has no password to rotate, so this is that account's only
+    # revocation mechanism.
+    session_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Whether the account may authenticate at all. Replaces "password_hash is
+    # None" as the deactivation signal (see api/auth.py) — an OIDC user can be
+    # disabled without ever having had a password to clear.
+    disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = created_at_col()
+
+
+# Workspace membership roles, ranked weakest to strongest. Kept here (not just
+# in api/workspace.py) because it is schema-adjacent vocabulary the membership
+# table's `role` column is constrained to, the same way Run.status values are
+# documented beside the column rather than only where they are checked.
+WORKSPACE_ROLES = ("analyst", "approver", "admin", "owner")
 
 
 class Workspace(Base):
@@ -61,7 +84,66 @@ class Workspace(Base):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    # 'team' (the default — any workspace with >1 potential member) or
+    # 'personal' (auto-created per user in multi-tenant mode, permanently
+    # single-member by founder decision — see docs/plan). Self-host's sole
+    # workspace is 'team' with one member, which is exactly today's shape.
+    kind: Mapped[str] = mapped_column(Text, nullable=False, default="team")
+    # Set only on a 'personal' workspace: the user it belongs to. UNIQUE enforces
+    # one personal workspace per user. Null on every 'team' workspace.
+    personal_owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), unique=True
+    )
     settings: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = created_at_col()
+
+
+class WorkspaceMember(Base):
+    """Who belongs to a workspace, and at what role.
+
+    Composite PK rather than a surrogate id: membership is the (user, workspace)
+    pair itself, there is at most one row per pair, and nothing else ever
+    references a membership by its own identity.
+    """
+
+    __tablename__ = "workspace_members"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False, default="analyst")  # WORKSPACE_ROLES
+    created_at: Mapped[datetime] = created_at_col()
+
+
+class Invite(Base):
+    """A pending (or resolved) invitation to join a workspace.
+
+    Phase A ships the table so the migration and the model exist together;
+    Phase C (workspaces.py) is what creates, lists, revokes and redeems rows
+    here. `token` is the redemption secret — opaque, unguessable, and never the
+    row's id, so listing invites never leaks the value a link carries.
+    """
+
+    __tablename__ = "invites"
+    __table_args__ = (
+        Index("ix_invites_workspace_id", "workspace_id"),
+        Index("ix_invites_email", "email"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    email: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False, default="analyst")  # WORKSPACE_ROLES
+    token: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    invited_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    # pending | accepted | revoked | expired
+    expires_at: Mapped[datetime] = mapped_column(nullable=False)
     created_at: Mapped[datetime] = created_at_col()
 
 

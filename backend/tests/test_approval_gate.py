@@ -35,7 +35,7 @@ from itsdangerous import URLSafeTimedSerializer
 from tret.api import auth, findings
 from tret.api.auth import SESSION_COOKIE, login_limiter
 from tret.db.engine import get_db
-from tret.db.models import Approval, Finding, Project, User
+from tret.db.models import Approval, Finding, Project, User, Workspace, WorkspaceMember
 
 PASSWORD = "correct-horse-battery"
 _HASH = PasswordHasher().hash(PASSWORD)  # once: argon2 is deliberately slow
@@ -77,12 +77,19 @@ def _criteria(stmt) -> list[tuple[str, object]]:
 class FakeSession:
     """Enough AsyncSession for these endpoints, and a record of every write."""
 
-    def __init__(self, *, users=(), findings_=(), approvals=(), projects=()):
+    def __init__(
+        self, *, users=(), findings_=(), approvals=(), projects=(), workspaces=(), members=()
+    ):
         self.store: dict[str, dict] = {
             "User": {u.id: u for u in users},
             "Finding": {f.id: f for f in findings_},
             "Approval": {a.id: a for a in approvals},
             "Project": {p.id: p for p in projects},
+            "Workspace": {w.id: w for w in workspaces},
+            # WorkspaceMember has no single-attribute PK; keyed on position
+            # rather than `.id` (it has none) — current_workspace only ever
+            # selects these, never `db.get`s one, so the key is unused.
+            "WorkspaceMember": dict(enumerate(members)),
         }
         self.added: list = []
         self.commits = 0
@@ -117,11 +124,17 @@ def _user(role: str, email: str, name: str) -> User:
     return User(id=uuid.uuid4(), email=email, display_name=name, password_hash=_HASH, role=role)
 
 
+# Every finding `_finding()` builds lives in this one project by default, so
+# every finding a test constructs resolves against the single seeded Project
+# row (see the `db` fixture) without each call site having to say so.
+PROJECT_ID = uuid.uuid4()
+
+
 def _finding(status: str = "draft", **over) -> Finding:
     base = dict(
         id=uuid.uuid4(),
         run_id=uuid.uuid4(),
-        project_id=uuid.uuid4(),
+        project_id=PROJECT_ID,
         schema_slug="draft_section",
         subject={"deliverable": "tcfd-report", "section": "governance"},
         payload={"markdown": "# Governance\n\nSome drafted prose."},
@@ -141,17 +154,38 @@ def people() -> dict[str, User]:
     }
 
 
+WORKSPACE = Workspace(id=uuid.uuid4(), name="W", kind="team")
+
+# Every person's workspace role, matching the exact pass/fail boundary the
+# global `role` used to draw on its own: admin and approver both clear
+# `require_workspace_approver`'s floor, analyst does not. Admin maps to
+# 'owner' (a workspace's own top role) rather than 'admin' — either one is
+# above the approver floor, and 'owner' is what an instance-admin-created
+# account would actually hold in a workspace it was auto-joined into.
+_WORKSPACE_ROLE = {"admin": "owner", "approver": "approver", "analyst": "analyst"}
+
+
+@pytest.fixture
+def members(people) -> list[WorkspaceMember]:
+    return [
+        WorkspaceMember(user_id=u.id, workspace_id=WORKSPACE.id, role=_WORKSPACE_ROLE[u.role])
+        for u in people.values()
+    ]
+
+
 @pytest.fixture
 def draft() -> Finding:
     return _finding()
 
 
 @pytest.fixture
-def db(people, draft) -> FakeSession:
+def db(people, draft, members) -> FakeSession:
     return FakeSession(
         users=people.values(),
         findings_=[draft],
-        projects=[Project(id=draft.project_id, workspace_id=uuid.uuid4(), name="P")],
+        projects=[Project(id=PROJECT_ID, workspace_id=WORKSPACE.id, name="P")],
+        workspaces=[WORKSPACE],
+        members=members,
     )
 
 
@@ -227,7 +261,7 @@ def test_an_analyst_cannot_approve(client, db, draft, people):
     login_as(client, people["analyst"])
     response = decide(client, draft.id, action="approve")
     assert response.status_code == 403
-    assert "Approver role required" in response.json()["detail"]
+    assert "role or higher is required" in response.json()["detail"]
     assert draft.status == "draft"
     assert db.wrote_nothing()
 
@@ -253,11 +287,18 @@ def test_approvers_and_admins_can_approve(client, db, draft, people, role):
     }
 
 
-def test_role_is_read_from_the_database_not_the_cookie(client, db, draft, people):
-    """A demotion takes effect on the next request, not when the cookie expires."""
+def test_role_is_read_from_the_database_not_the_cookie(client, db, draft, people, members):
+    """A demotion takes effect on the next request, not when the cookie expires.
+
+    Authority for this decision is the caller's *workspace* role
+    (`WorkspaceMember.role`), not their instance-wide `User.role` — so the
+    demotion that matters here is to the membership row, exactly the row
+    `require_workspace_approver` re-reads on every request.
+    """
     approver = people["approver"]
     login_as(client, approver)
-    approver.role = "analyst"  # demoted mid-session
+    membership = next(m for m in members if m.user_id == approver.id)
+    membership.role = "analyst"  # demoted mid-session
     assert decide(client, draft.id, action="approve").status_code == 403
     assert draft.status == "draft"
     assert db.wrote_nothing()
