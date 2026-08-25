@@ -303,6 +303,26 @@ class Settings(BaseSettings):
     # false to ship every new workspace pack-less regardless of mode.
     seed_default_packs: bool = True
 
+    # Base URL of the pack marketplace registry (tret-cloud's `/api/marketplace`
+    # API) that `GET/POST /api/packs/registry/*` (api/packs.py) proxy through
+    # to for Find/Install — see that module's own note on the invariant this
+    # protects: the RUN path (executing a task with an already-installed pack)
+    # never reads this setting at all, only Find/Install/Submit do.
+    #
+    # OPT-IN, empty by default: unset, the registry client is disabled
+    # entirely (those endpoints 503 rather than doing nothing quietly, and
+    # the Find tab / update badges degrade to a friendly empty state) and
+    # tret makes zero marketplace network calls — no installed-pack slug,
+    # search query, or version check ever leaves the deployment. README's
+    # "No telemetry, ever" would be false for a self-hoster if this defaulted
+    # to Kith's own registry, so it does not: an operator who wants Find/
+    # Install sets `TRET_PACK_REGISTRY_URL` themselves, to Kith's registry
+    # (https://cloud.tret.kithailab.com/api/marketplace) or a private mirror.
+    # tret-cloud's own deployment (fly.toml) sets this for itself — the
+    # hosted product opts in on its own behalf, self-host never opts in for
+    # the operator.
+    pack_registry_url: str = ""
+
     # ── outbound network (tret/net/) ─────────────────────────────────────────
     # Egress is five classes, not one boolean, because tret must reach an LLM
     # provider to do anything and "no internet" is a different deployment from

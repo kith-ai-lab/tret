@@ -175,6 +175,28 @@ def master_is_off(settings=None) -> bool:
     return _normalize((settings or get_settings()).egress) == MODE_OFF
 
 
+def master_mode(settings=None) -> str:
+    """The master switch (`TRET_EGRESS`) alone, normalized the same way
+    `effective_mode` normalizes it for every class that is not `research`:
+    `replay` has no meaning outside research (there is nothing non-research
+    to replay), so it folds to `off` here exactly as it does there — see
+    `effective_mode`'s own comment on that fold. Always returns `off` or
+    `on`, never `replay`.
+
+    For a destination gated only by the master switch and not one of
+    `EGRESS_CLASSES` (the pack marketplace registry, `api/packs.py`'s
+    `_marketplace_policy`, is the one example today — a single
+    operator-configured host with no research-style snapshot cache of its
+    own to serve `replay` from), this is what to compare against rather than
+    `master_is_off`: that only catches a literal `off`, not `replay` or any
+    other spelling `_normalize` folds to `off` — and a master switch that
+    folds `provider`/`catalog`/`local` to off must not leave a class outside
+    the lattice sitting on.
+    """
+    mode = _normalize((settings or get_settings()).egress)
+    return MODE_OFF if mode == MODE_REPLAY else mode
+
+
 def effective_mode(egress_class: str, settings=None) -> str:
     """The mode actually in force: master ∧ class ∧ runtime override.
 

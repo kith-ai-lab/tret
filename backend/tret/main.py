@@ -16,6 +16,7 @@ from tret.api import (
     documents,
     findings,
     harnesses,
+    pack_builder,
     packs,
     runs,
     settings as settings_api,
@@ -119,6 +120,14 @@ def create_app() -> FastAPI:
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)
     app.include_router(findings.router)
+    # In-app pack builder (Plan Phase D): draft CRUD + validate/test-install/
+    # export. Additive to the path-install and archive-install surfaces below,
+    # never a replacement for either. Mounted *before* `packs.router`: FastAPI
+    # matches routes in registration order, and packs.router's own
+    # `GET|DELETE /api/packs/{pack_id}` would otherwise swallow
+    # `GET|POST /api/packs/drafts` first, failing pack_id's UUID conversion
+    # with a 422 rather than ever reaching this router's list/create routes.
+    app.include_router(pack_builder.router)
     app.include_router(packs.router)
     app.include_router(settings_api.router)
     # After every core router: an extension's own router (if it adds one) is

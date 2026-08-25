@@ -151,6 +151,13 @@ services:
       # installed. true (the default) ships the flagship pack(s) into every
       # workspace regardless of TRET_MULTI_TENANT.
       TRET_SEED_DEFAULT_PACKS: ${TRET_SEED_DEFAULT_PACKS:-true}
+      # Pack marketplace registry (Find/Install, tret/api/packs.py's
+      # /api/packs/registry/* — the RUN path never reads this). OPT-IN: unset
+      # (the default) means the Find tab and update badges degrade to a
+      # friendly empty state and tret makes zero marketplace network calls.
+      # Set to Kith's hosted registry (https://cloud.tret.kithailab.com/api/marketplace)
+      # or a private mirror to enable Find/Install.
+      TRET_PACK_REGISTRY_URL: ${TRET_PACK_REGISTRY_URL:-}
       # Cap on team workspaces one user may own via POST /api/workspaces.
       # 0 (the default) is unlimited.
       TRET_MAX_TEAM_WORKSPACES_PER_USER: ${TRET_MAX_TEAM_WORKSPACES_PER_USER:-0}

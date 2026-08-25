@@ -172,6 +172,49 @@ class Pack(Base):
     installed_at: Mapped[datetime] = created_at_col()
 
 
+class DraftPack(Base):
+    """An in-app-built pack before it is a real, installed `Pack` — the
+    workspace-scoped scratch state behind the builder (Plan Phase D, in-app
+    pack builder). Never read by the engine at run time: a draft only ever
+    becomes a directory on disk (`tret.packs.draft.materialize_draft`) for
+    the three actions that need one — validate, test-install, export — and is
+    otherwise a plain JSONB row.
+
+    `manifest_json` mirrors `PackManifest.model_dump()` (the same shape
+    `pack.yaml` parses to), authored directly by the builder's editors rather
+    than read off a file. `methods` must always be empty here — a draft may
+    never carry executable method code; `api/pack_builder.py`'s PATCH handler
+    is where that is enforced, by rejecting a non-empty `manifest_json["methods"]`.
+    That check alone would not be enough, though: `files` maps a pack-relative
+    path to its content — a `str` for text (markdown doctrine, JSON schemas,
+    CSV datasets) or `{"b64": "..."}` for binary content, `tret.packs.draft`
+    is the one place both shapes are read — and a `files["pack.yaml"]` entry
+    could otherwise smuggle a whole replacement manifest, methods included,
+    straight past the `manifest_json` check. `tret.packs.draft.validate_draft_relpath`
+    rejects that key by name (`RESERVED_ROOT_NAMES`) for exactly this reason,
+    and `materialize_draft`/`build_draft_archive` refuse to let it win even if
+    one somehow reached this row some other way.
+
+    `test_install_seq` is the per-draft counter behind `{version}+draft.{n}`
+    (`api/pack_builder.py`'s test-install action) — incremented, not reset,
+    on every test-install so two successive ones never collide on the
+    `(workspace_id, slug, version)` unique constraint `Pack` already has.
+    """
+
+    __tablename__ = "draft_packs"
+    __table_args__ = (Index("ix_draft_packs_workspace_id", "workspace_id"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id"), nullable=False)
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    manifest_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    files: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    test_install_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at_col()
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class Harness(Base):
     __tablename__ = "harnesses"
 
