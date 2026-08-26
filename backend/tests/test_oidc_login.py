@@ -17,6 +17,7 @@ Project, Harness, Invite).
 from __future__ import annotations
 
 import base64
+import json
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -59,13 +60,18 @@ _JWKS = {
 }
 
 
-def _discovery_doc() -> dict:
-    return {
+def _discovery_doc(**overrides) -> dict:
+    doc = {
         "issuer": f"{ISSUER_URL}/",
         "authorization_endpoint": f"{ISSUER_URL}/authorize",
         "token_endpoint": f"{ISSUER_URL}/oauth/token",
         "jwks_uri": f"{ISSUER_URL}/.well-known/jwks.json",
     }
+    doc.update(overrides)
+    return doc
+
+
+_OMIT = object()  # `_sign_id_token(exp=_OMIT)` drops a claim the default payload sets
 
 
 def _sign_id_token(**claims) -> str:
@@ -81,7 +87,59 @@ def _sign_id_token(**claims) -> str:
         "exp": now + 300,
     }
     payload.update(claims)
+    payload = {k: v for k, v in payload.items() if v is not _OMIT}
     token: bytes = jose_jwt.encode({"alg": "RS256", "kid": KID}, payload, _RSA_KEY)
+    return token.decode("ascii")
+
+
+def _sign_alg_none_id_token(**claims) -> str:
+    """A hand-built, entirely unsigned JWT (`alg: none`) — authlib's own
+    `jwt.encode` refuses to produce one (`none` was never in the algorithm
+    list `authlib.jose.jwt` was constructed with), which is exactly why this
+    needs to be crafted by hand: it is the forgery the pinned-algorithms
+    check must reject, not something the library would let a legitimate
+    caller generate by accident.
+    """
+    now = int(time.time())
+    payload = {
+        "iss": f"{ISSUER_URL}/",
+        "aud": CLIENT_ID,
+        "sub": "sub-1",
+        "email": "person@example.com",
+        "email_verified": True,
+        "name": "Person One",
+        "iat": now,
+        "exp": now + 300,
+    }
+    payload.update(claims)
+
+    def _b64(obj: dict) -> str:
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode("ascii")
+
+    return f"{_b64({'alg': 'none', 'typ': 'JWT'})}.{_b64(payload)}."
+
+
+def _sign_hs256_id_token(**claims) -> str:
+    """A validly-*signed* (HS256, not RS256) id_token — the algorithm-
+    confusion repro: the secret below is known only to whoever signs this
+    token, never published anywhere the real IdP's JWKS is, but the header's
+    `alg` alone is what tells authlib which key-shape to expect. Used to
+    confirm `_callback` rejects this cleanly (401) rather than crashing
+    (authlib's own internals raise a bare `KeyError` trying to coerce this
+    callback's asymmetric JWKS keys into an HMAC secret for HS256)."""
+    now = int(time.time())
+    payload = {
+        "iss": f"{ISSUER_URL}/",
+        "aud": CLIENT_ID,
+        "sub": "sub-1",
+        "email": "person@example.com",
+        "email_verified": True,
+        "name": "Person One",
+        "iat": now,
+        "exp": now + 300,
+    }
+    payload.update(claims)
+    token: bytes = jose_jwt.encode({"alg": "HS256"}, payload, "attacker-controlled-hs256-secret")
     return token.decode("ascii")
 
 
@@ -256,7 +314,9 @@ def client(db, monkeypatch):
 
 
 # ── round-trip helpers ───────────────────────────────────────────────────────
-def _login_redirect(client, *, next_path: str = "/", time_offset: float = 0.0) -> tuple[str, str]:
+def _login_redirect(
+    client, *, next_path: str = "/", time_offset: float = 0.0, discovery: dict | None = None
+) -> tuple[str, str]:
     """GET /api/auth/oidc/login; returns (state, raw_nonce) parsed off the
     redirect to the (mocked) authorization endpoint.
 
@@ -267,7 +327,7 @@ def _login_redirect(client, *, next_path: str = "/", time_offset: float = 0.0) -
     """
     with respx.mock(assert_all_called=False) as respx_mock:
         respx_mock.get(f"{ISSUER_URL}/.well-known/openid-configuration").mock(
-            return_value=httpx.Response(200, json=_discovery_doc())
+            return_value=httpx.Response(200, json=discovery or _discovery_doc())
         )
         if time_offset:
             with mock.patch("time.time", return_value=time.time() + time_offset):
@@ -283,11 +343,13 @@ def _login_redirect(client, *, next_path: str = "/", time_offset: float = 0.0) -
     return qs["state"][0], qs["nonce"][0]
 
 
-def _callback(client, state: str, id_token: str, *, code: str = "test-code"):
+def _callback(
+    client, state: str, id_token: str, *, code: str = "test-code", discovery: dict | None = None
+):
     """GET /api/auth/oidc/callback against a mocked JWKS + token exchange."""
     with respx.mock(assert_all_called=False) as respx_mock:
         respx_mock.get(f"{ISSUER_URL}/.well-known/openid-configuration").mock(
-            return_value=httpx.Response(200, json=_discovery_doc())
+            return_value=httpx.Response(200, json=discovery or _discovery_doc())
         )
         respx_mock.get(f"{ISSUER_URL}/.well-known/jwks.json").mock(
             return_value=httpx.Response(200, json=_JWKS)
@@ -336,11 +398,18 @@ def _tamper_state_payload(state: str) -> str:
     return f"{tampered_segment}.{timestamp_b64}.{sig_b64}"
 
 
-def _round_trip(client, *, claims: dict | None = None, next_path: str = "/"):
+def _round_trip(
+    client,
+    *,
+    claims: dict | None = None,
+    next_path: str = "/",
+    discovery: dict | None = None,
+    token_signer=_sign_id_token,
+):
     """login -> callback, with the id_token's nonce wired to what login sent."""
-    state, nonce = _login_redirect(client, next_path=next_path)
-    token = _sign_id_token(nonce=nonce, **(claims or {}))
-    return _callback(client, state, token)
+    state, nonce = _login_redirect(client, next_path=next_path, discovery=discovery)
+    token = token_signer(nonce=nonce, **(claims or {}))
+    return _callback(client, state, token, discovery=discovery)
 
 
 # ── full round trip ──────────────────────────────────────────────────────────
@@ -450,6 +519,121 @@ def test_sid_cookie_is_set_on_login_and_cleared_on_successful_callback(client, d
     cleared = [h for h in set_cookie_headers if h.startswith(f"{oidc.SID_COOKIE}=")]
     assert cleared, set_cookie_headers
     assert 'Max-Age=0' in cleared[0] or 'max-age=0' in cleared[0].lower()
+
+
+# ── id_token claim hardening ──────────────────────────────────────────────────
+# These pin authlib's own gaps rather than tret's logic: `validate_exp` silently
+# no-ops when "exp" is simply absent (RFC 7519 makes it OPTIONAL; OIDC id_tokens
+# do not have that luxury), and a bare `aud` check never looks at `azp` at all.
+# All of these are exploitable only with control of the token endpoint's
+# response — defence in depth, not a reachable-today attacker path.
+def test_id_token_without_exp_is_refused(client, db):
+    db.add(_workspace("Default"))
+    state, nonce = _login_redirect(client)
+    token = _sign_id_token(nonce=nonce, exp=_OMIT)
+    response = _callback(client, state, token)
+    assert response.status_code == 401
+
+
+def test_multi_audience_id_token_without_azp_is_refused(client, db):
+    """OIDC Core 3.1.3.7 #4: more than one audience without an `azp` naming
+    us is ambiguous — could this token have been intended for someone else
+    who then leaked/replayed it?"""
+    db.add(_workspace("Default"))
+    state, nonce = _login_redirect(client)
+    token = _sign_id_token(nonce=nonce, aud=[CLIENT_ID, "some-other-client"])
+    response = _callback(client, state, token)
+    assert response.status_code == 401
+    assert "azp" in response.json()["detail"].lower()
+
+
+def test_multi_audience_id_token_with_correct_azp_is_accepted(client, db):
+    """OIDC Core 3.1.3.7 #5: `azp` present and equal to our client_id
+    resolves the ambiguity multiple audiences raise — login proceeds."""
+    db.add(_workspace("Default"))
+    response = _round_trip(
+        client,
+        claims={
+            "sub": "sub-azp-ok",
+            "email": "azpok@example.com",
+            "aud": [CLIENT_ID, "some-other-client"],
+            "azp": CLIENT_ID,
+        },
+    )
+    assert response.status_code == 302
+
+
+def test_single_audience_id_token_with_wrong_azp_is_refused(client, db):
+    """`azp`, when present at all, must name us — even on a single-audience
+    token that would otherwise need no `azp` to disambiguate anything: an
+    `azp` naming some other client is itself evidence this token was minted
+    for someone else, not something a single-valued `aud` should excuse."""
+    db.add(_workspace("Default"))
+    response = _round_trip(client, claims={"azp": "some-other-client"})
+    assert response.status_code == 401
+    assert "azp" in response.json()["detail"].lower()
+
+
+def test_id_token_with_alg_outside_the_advertised_set_is_refused(client, db):
+    """The issuer's discovery document says id_tokens are only ever signed
+    with ES256; a token signed RS256 (otherwise a perfectly valid signature
+    from the same key set) must be refused rather than accepted because
+    RS256 happens to be in authlib's own default algorithm list."""
+    db.add(_workspace("Default"))
+    discovery = _discovery_doc(id_token_signing_alg_values_supported=["ES256"])
+    response = _round_trip(client, discovery=discovery)
+    assert response.status_code == 401
+
+
+def test_id_token_with_alg_none_is_refused(client, db):
+    """`alg: none` (an entirely unsigned token) must never be accepted —
+    already true before this change (authlib's default algorithm set never
+    included "none"), kept here as a regression test."""
+    db.add(_workspace("Default"))
+    response = _round_trip(client, token_signer=_sign_alg_none_id_token)
+    assert response.status_code == 401
+
+
+def test_id_token_with_hs256_alg_is_refused_with_401_not_500(client, db):
+    """Repro for the algorithm-confusion crash: an HS256-headed id_token
+    verified against this callback's `key_set` (a JWKS — asymmetric public
+    keys only) makes authlib try to coerce a public key into an HMAC secret
+    and raise a bare `KeyError` from its own internals, not a `JoseError`.
+    That must still come back as a 401 (untrusted token, rejected), never an
+    unhandled 500."""
+    db.add(_workspace("Default"))
+    response = _round_trip(client, token_signer=_sign_hs256_id_token)
+    assert response.status_code == 401
+
+
+def test_issuer_advertising_hs256_and_rs256_pins_to_rs256_only(client, db):
+    """`_signing_algorithms` intersects the issuer's advertised list with
+    authlib's *asymmetric* algorithms only — HS256 is dropped even though the
+    issuer listed it, because this callback's key material (a JWKS) can never
+    legitimately verify a symmetric signature. An RS256-signed token (the
+    only alg left after the intersection) is still accepted; an HS256-signed
+    one, under that same discovery document, is refused."""
+    db.add(_workspace("Default"))
+    discovery = _discovery_doc(id_token_signing_alg_values_supported=["HS256", "RS256"])
+
+    response = _round_trip(client, discovery=discovery)
+    assert response.status_code == 302
+
+    response = _round_trip(client, discovery=discovery, token_signer=_sign_hs256_id_token)
+    assert response.status_code == 401
+
+
+def test_authlib_supported_algs_pin_matches_installed_authlib():
+    """Guards `_AUTHLIB_SUPPORTED_ALGS` against silently drifting out of sync
+    with the installed authlib's own default `jwt` algorithm set — the
+    fallback `_signing_algorithms` falls back to when an issuer's discovery
+    document doesn't advertise anything, and the universe `_ASYMMETRIC_ALGS`
+    is drawn from. If a future authlib release adds or drops an algorithm
+    from its default `jwt` object, this must fail loudly rather than let the
+    two lists quietly disagree."""
+    from authlib.jose import jwt as installed_default_jwt
+
+    assert oidc._AUTHLIB_SUPPORTED_ALGS == frozenset(installed_default_jwt._jws._algorithms)
 
 
 # ── verified-email link / collisions ─────────────────────────────────────────

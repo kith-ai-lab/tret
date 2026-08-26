@@ -202,6 +202,14 @@ alembic downgrade <that release's revision>
 Downgrades drop the columns their upgrade added, so the data in them is gone.
 Take a backup first.
 
+One downgrade needs more than a backup to be safe: `8eef9d61c7c4` (adds
+`users.disabled`) drops that column without touching `password_hash`.
+Deactivation keeps `password_hash` intact by design, so any account
+deactivated since this revision was applied comes back silently active the
+moment the column recording that fact is gone. Before downgrading past it,
+record which accounts are currently disabled and re-deactivate them by
+whatever mechanism the older release uses, immediately after.
+
 ## For contributors: never let the models drift from the migrations
 
 The bug this page exists for started as a model change without a migration. Any

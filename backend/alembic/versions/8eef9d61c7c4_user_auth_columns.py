@@ -11,6 +11,22 @@ is not its own migration here). Pre-tenancy deactivation
 this backfill such an account would read as *active* under the new
 `disabled`-column contract the moment anything (a future passwordless login
 method) stops treating a null hash as itself meaning deactivated.
+
+**WARNING — downgrading this revision silently reactivates every account
+deactivated since it was applied.** Post-tenancy deactivation
+(`api/auth.py::deactivate_user`) sets `disabled = true` and deliberately
+*keeps* `password_hash` intact (so a later password reset can restore access
+without re-provisioning the account — see `api/auth.py`'s module docstring).
+`downgrade()` below drops the `disabled` column entirely; it does not touch
+`password_hash`, and cannot recover which rows were disabled once the column
+holding that fact is gone. Anyone paired with old application code that still
+treats "password_hash IS NULL" as the deactivation signal (the pre-tenancy
+contract this same column replaced) will read every one of those accounts as
+active again — with no error, warning, or trace that a rollback caused it.
+Do not run this downgrade against a database with any accounts deactivated
+under the `disabled`-column contract unless you have independently recorded
+which users they are and re-deactivate them (by whatever mechanism the
+downgraded application version uses) immediately after.
 """
 from alembic import op
 import sqlalchemy as sa
@@ -41,6 +57,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """WARNING: drops `users.disabled` without touching `password_hash`.
+
+    Deactivation under this revision's contract keeps `password_hash` intact
+    (see this module's docstring), so any account disabled since this
+    migration was applied comes back silently active the moment the column
+    recording that fact is gone — no error, no log line. Confirm no account
+    is currently disabled (or that you have recorded and will re-deactivate
+    every one of them post-downgrade) before running this.
+    """
     op.drop_column('users', 'disabled')
     op.drop_column('users', 'session_epoch')
     op.drop_constraint('uq_users_oidc_sub', 'users', type_='unique')

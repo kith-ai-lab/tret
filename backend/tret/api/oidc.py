@@ -66,7 +66,7 @@ import time
 from urllib.parse import urlencode, urlsplit
 
 import httpx
-from authlib.jose import JsonWebKey, jwt
+from authlib.jose import JsonWebKey, JsonWebToken, jwt
 from authlib.jose.errors import JoseError
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
@@ -96,6 +96,54 @@ _EGRESS_CLASS = "oidc"  # audit-log label only — see module docstring for why 
 _CACHE_TTL_SECONDS = 3600.0
 _discovery_cache: dict[str, tuple[float, dict]] = {}
 _jwks_cache: dict[str, tuple[float, dict]] = {}
+
+# authlib's own default `jwt` (imported above) accepts this fixed set — never
+# "none" (OIDC Core 3.1.3.7 #1: an id_token MUST be signed; there is no
+# registered "none" JWS algorithm here to accept even if an IdP's discovery
+# document listed it). Used as the fallback when an issuer's discovery
+# document does not advertise `id_token_signing_alg_values_supported` (that
+# field is optional in the discovery spec even though every real IdP sends
+# it), and as the full universe `_ASYMMETRIC_ALGS` below is drawn from.
+_AUTHLIB_SUPPORTED_ALGS = frozenset(
+    {
+        "HS256", "HS384", "HS512",
+        "RS256", "RS384", "RS512",
+        "ES256", "ES256K", "ES384", "ES512",
+        "PS256", "PS384", "PS512",
+        "EdDSA",
+    }
+)
+
+# The subset of the above this module will ever actually pin to. `jwks` here
+# is always a public-key set (an IdP's JWKS endpoint never publishes an HMAC
+# secret), so an HS* algorithm is never legitimate against it — selecting one
+# would mean handing authlib a public asymmetric key and asking it to treat
+# those bytes as a symmetric secret, which is not a real verification path,
+# only a crash waiting to happen (see the `except` in `_callback` around the
+# `token_verifier.decode` call). Dropped here, at the universe every alg list
+# is filtered against, rather than trusted to an issuer's discovery document
+# — or an attacker's — to never advertise "HS256" alongside the real ones.
+_ASYMMETRIC_ALGS = frozenset(alg for alg in _AUTHLIB_SUPPORTED_ALGS if not alg.startswith("HS"))
+
+
+def _signing_algorithms(metadata: dict) -> list[str] | None:
+    """Which JWS `alg` values an id_token from this issuer may use, per its
+    own discovery document — the algorithm-confusion defence OIDC Core
+    3.1.3.7 #8 asks for: an attacker able to influence the header (e.g. by
+    getting a relying party to accept any registered algorithm) should not
+    be able to pick a scheme the issuer never advertised. `None` means the
+    issuer didn't advertise the (optional) field at all, in which case the
+    caller falls back to authlib's own default algorithm set rather than
+    failing every IdP that omits it.
+    """
+    supported = metadata.get("id_token_signing_alg_values_supported")
+    if not supported:
+        return None
+    # Filtered through the asymmetric subset of what authlib supports (never
+    # HS*/symmetric — see `_ASYMMETRIC_ALGS`), and "none" dropped explicitly
+    # even though it was never in that set — defence in depth against a
+    # future authlib version registering it.
+    return [alg for alg in supported if alg in _ASYMMETRIC_ALGS and alg != "none"]
 
 
 def _state_serializer() -> URLSafeTimedSerializer:
@@ -311,18 +359,58 @@ async def oidc_callback(
 
     jwks = await _jwks(metadata["jwks_uri"])
     key_set = JsonWebKey.import_key_set(jwks)
+    # Pinned to the issuer's own advertised algorithms when it advertises
+    # any (see `_signing_algorithms`); otherwise the same fixed default set
+    # authlib's shared `jwt` object already accepts. Passing `algorithms`
+    # makes authlib reject a header `alg` outside this set — including
+    # "none" — before it ever looks at the key, rather than after a
+    # signature it might (with the wrong key type) still appear to verify.
+    allowed_algs = _signing_algorithms(metadata)
+    token_verifier = jwt if allowed_algs is None else JsonWebToken(allowed_algs)
     try:
-        claims = jwt.decode(
+        claims = token_verifier.decode(
             id_token,
             key_set,
             claims_options={
                 "iss": {"essential": True, "values": [metadata["issuer"]]},
                 "aud": {"essential": True, "values": [settings.oidc_client_id]},
+                # authlib's own `validate_exp` silently no-ops when "exp" is
+                # simply absent from the payload (it only checks the value
+                # *if* the key is present) — `essential` forces
+                # `_validate_essential_claims` to reject a token missing it
+                # outright, ahead of every other check.
+                "exp": {"essential": True},
             },
         )
         claims.validate()  # exp/iat/iss/aud — everything but nonce, checked by hand below
-    except JoseError as exc:
+    except (JoseError, KeyError, ValueError, TypeError) as exc:
+        # Not just `JoseError`: authlib's own internals raise plain
+        # `KeyError`/`ValueError`/`TypeError` — not a `JoseError` subclass —
+        # when a header `alg` and the key material fundamentally don't match
+        # in kind, rather than failing the signature check cleanly. Repro: an
+        # HS256-headed token verified against this `key_set`, which (being a
+        # JWKS) holds only asymmetric public keys — authlib tries to coerce
+        # a public key into an HMAC secret and blows up in its own
+        # key-preparation code with a bare `KeyError`. That must still surface
+        # as a 401 (untrusted token, rejected), not an unhandled 500.
         raise HTTPException(401, f"Could not verify the identity provider's token: {exc}") from exc
+
+    # OIDC Core 3.1.3.7 #4/#5: an id_token naming more than one audience must
+    # carry `azp` (authorized party) naming *us*, so a token an attacker
+    # legitimately obtained for some other audience — which also lists our
+    # client_id, e.g. because that other party requested it — cannot be
+    # replayed here. A single-audience token has nothing to disambiguate, but
+    # the spec still requires `azp`, when present at all, to name us — an
+    # `azp` naming some other party is itself evidence the token was minted
+    # for someone else, so it is checked whenever the claim is present, not
+    # only when a multi-valued `aud` forces the issue.
+    aud = claims.get("aud")
+    azp = claims.get("azp")
+    if isinstance(aud, list) and len(aud) > 1:
+        if not azp or azp != settings.oidc_client_id:
+            raise HTTPException(401, "Token audience is ambiguous — missing or mismatched azp")
+    elif azp is not None and azp != settings.oidc_client_id:
+        raise HTTPException(401, "Token azp does not match this client")
 
     token_nonce = claims.get("nonce")
     if not token_nonce or hashlib.sha256(str(token_nonce).encode()).hexdigest() != nonce_hash:
