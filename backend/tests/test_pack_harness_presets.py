@@ -11,7 +11,8 @@ it. See `install_pack`'s own docstring.
 
 Real sqlite database, FK enforcement on — same harness as
 `test_pack_archive.py`'s loader-integration section (a `Harness` row here has
-a real FK on both `workspace_id` and `pack_id`).
+a real FK on `workspace_id`, and its link to a pack is a real FK'd
+`harness_packs` row rather than a column on `Harness` itself).
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from sqlalchemy.pool import StaticPool
 
 from tests.evals.golden_world import install_sqlite_type_shims
 from tret.db.models import Base, Harness, Pack, Project, Workspace
+from tret.packs.links import packs_for_harness
 from tret.packs.loader import install_pack, install_pack_from_archive
 
 PACKS_DIR = Path(__file__).parent.parent.parent / "packs"
@@ -107,6 +109,13 @@ async def _harness(session_factory, workspace_id, *, name: str = "Preset Harness
         ).scalars().first()
 
 
+async def _linked_pack_ids(session_factory, harness: Harness) -> list[uuid.UUID]:
+    """A preset harness's linked packs, in position order — the replacement
+    for the old single `harness.pack_id` column."""
+    async with session_factory() as db:
+        return [p.id for p in await packs_for_harness(db, harness)]
+
+
 # ── install_pack creates the harness with the right shape ───────────────────
 
 
@@ -121,7 +130,7 @@ async def test_install_creates_a_harness_from_the_preset(session_factory, seed, 
 
     harness = await _harness(session_factory, workspace.id)
     assert harness is not None
-    assert harness.pack_id == pack.id
+    assert await _linked_pack_ids(session_factory, harness) == [pack.id]
     assert harness.description == "v1 description"
     assert harness.task_profile == "t1"
     assert harness.tool_names == ["lookup_dataset"]
@@ -226,7 +235,7 @@ async def test_upgrade_install_leaves_the_v1_harness_untouched(session_factory, 
             )
         ).scalars().all()
     assert len(rows) == 1  # still just the one from v1
-    assert rows[0].pack_id == v1_pack.id
+    assert await _linked_pack_ids(session_factory, rows[0]) == [v1_pack.id]
     assert rows[0].description == "v1 description"
 
 
@@ -317,7 +326,7 @@ async def test_cross_pack_name_collision_logs_a_warning_naming_both_packs(
             )
         ).scalars().all()
     assert len(rows) == 1  # pack_b's preset was skipped, not duplicated
-    assert rows[0].pack_id == pack_a.id
+    assert await _linked_pack_ids(session_factory, rows[0]) == [pack_a.id]
 
 
 # ── archive install round-trip ───────────────────────────────────────────────
@@ -350,7 +359,7 @@ async def test_archive_install_also_creates_the_preset_harness(
 
     harness = await _harness(session_factory, workspace.id)
     assert harness is not None
-    assert harness.pack_id == pack.id
+    assert await _linked_pack_ids(session_factory, harness) == [pack.id]
     assert harness.tool_names == ["lookup_dataset"]
 
 
@@ -369,7 +378,7 @@ async def test_installing_the_real_climate_risk_pack_creates_climate_analyst(
 
     harness = await _harness(session_factory, workspace.id, name="Climate Analyst")
     assert harness is not None
-    assert harness.pack_id == pack.id
+    assert await _linked_pack_ids(session_factory, harness) == [pack.id]
     assert harness.task_profile == "divergence_assessment"
     assert harness.model_policy == {"mode": "auto", "max_cost_tier": "premium"}
     assert harness.tool_names == []

@@ -32,7 +32,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from tests.evals.golden_world import install_sqlite_type_shims
-from tret.api import auth, packs as packs_api
+from tret.api import auth
+from tret.api import packs as packs_api
 from tret.config import get_settings
 from tret.db.engine import get_db
 from tret.db.models import (
@@ -40,6 +41,7 @@ from tret.db.models import (
     Dataset,
     Finding,
     Harness,
+    HarnessPack,
     MethodRun,
     Pack,
     Project,
@@ -57,6 +59,7 @@ from tret.packs.archive import (
     extract_pack_archive,
 )
 from tret.packs.integrity import pack_content_hash
+from tret.packs.links import set_harness_packs
 from tret.packs.loader import (
     PackInstallConflict,
     _swap_into_final_dir,
@@ -810,16 +813,16 @@ async def test_delete_409s_while_a_harness_references_the_pack(
     pack_id = uuid.UUID(pack["id"])
 
     async with session_factory() as db:
-        db.add(
-            Harness(
-                workspace_id=team.id,
-                pack_id=pack_id,
-                name="Uses the pack",
-                task_profile="freeform",
-                model_policy={"mode": "auto"},
-                tool_names=[],
-            )
+        harness = Harness(
+            workspace_id=team.id,
+            name="Uses the pack",
+            task_profile="freeform",
+            model_policy={"mode": "auto"},
+            tool_names=[],
         )
+        db.add(harness)
+        await db.flush()
+        await set_harness_packs(db, harness, [pack_id])
         await db.commit()
 
     response = await client.delete(f"/api/packs/{pack_id}")
@@ -835,8 +838,8 @@ async def test_delete_succeeds_once_the_referencing_harness_is_archived(
 ):
     """The mistaken-install recovery path: install a preset pack, archive the
     harness it auto-created, then delete the pack — the archived harness must
-    not still 409 the delete, and its now-dangling `pack_id` FK must be
-    nulled rather than left pointing at a row that no longer exists."""
+    not still 409 the delete, and its now-dangling `harness_packs` link row
+    must be gone rather than left pointing at a row that no longer exists."""
     team = make_workspace("Co")
     project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
     admin = make_user("admin@example.com")
@@ -847,18 +850,17 @@ async def test_delete_succeeds_once_the_referencing_harness_is_archived(
 
     harness_id = uuid.uuid4()
     async with session_factory() as db:
-        db.add(
-            Harness(
-                id=harness_id,
-                workspace_id=team.id,
-                pack_id=pack_id,
-                name="Uses the pack",
-                task_profile="freeform",
-                model_policy={"mode": "auto"},
-                tool_names=[],
-                is_archived=True,
-            )
+        harness = Harness(
+            id=harness_id,
+            workspace_id=team.id,
+            name="Uses the pack",
+            task_profile="freeform",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+            is_archived=True,
         )
+        db.add(harness)
+        await set_harness_packs(db, harness, [pack_id])
         await db.commit()
 
     response = await client.delete(f"/api/packs/{pack_id}")
@@ -866,8 +868,11 @@ async def test_delete_succeeds_once_the_referencing_harness_is_archived(
 
     async with session_factory() as db:
         harness = await db.get(Harness, harness_id)
-    assert harness is not None  # archived harness survives the pack delete
-    assert harness.pack_id is None  # severed, not left pointing at a deleted row
+        assert harness is not None  # archived harness survives the pack delete
+        links = (
+            await db.execute(select(HarnessPack).where(HarnessPack.harness_id == harness_id))
+        ).scalars().all()
+    assert links == []  # severed, not left pointing at a deleted row
 
 
 async def test_delete_409s_message_names_archiving_when_an_active_harness_references_the_pack(
@@ -885,16 +890,16 @@ async def test_delete_409s_message_names_archiving_when_an_active_harness_refere
     pack_id = uuid.UUID(pack["id"])
 
     async with session_factory() as db:
-        db.add(
-            Harness(
-                workspace_id=team.id,
-                pack_id=pack_id,
-                name="Uses the pack",
-                task_profile="freeform",
-                model_policy={"mode": "auto"},
-                tool_names=[],
-            )
+        harness = Harness(
+            workspace_id=team.id,
+            name="Uses the pack",
+            task_profile="freeform",
+            model_policy={"mode": "auto"},
+            tool_names=[],
         )
+        db.add(harness)
+        await db.flush()
+        await set_harness_packs(db, harness, [pack_id])
         await db.commit()
 
     response = await client.delete(f"/api/packs/{pack_id}")
@@ -905,7 +910,7 @@ async def test_delete_409s_message_names_archiving_when_an_active_harness_refere
     assert (packs_root / str(pack_id)).is_dir()  # untouched
 
 
-async def _seed_harness(session_factory, team, *, pack_id=None) -> uuid.UUID:
+async def _seed_harness(session_factory, team) -> uuid.UUID:
     """A Harness unrelated to the pack under test, just to satisfy Run's
     NOT NULL `harness_id` FK — with FK enforcement on (this file's `engine`
     fixture), Run/Finding rows below need a real one to point at."""
@@ -915,7 +920,6 @@ async def _seed_harness(session_factory, team, *, pack_id=None) -> uuid.UUID:
             Harness(
                 id=harness_id,
                 workspace_id=team.id,
-                pack_id=pack_id,
                 name="Generic",
                 task_profile="freeform",
                 model_policy={"mode": "auto"},

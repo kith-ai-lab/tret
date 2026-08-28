@@ -21,6 +21,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     Numeric,
+    SmallInteger,
     Text,
     UniqueConstraint,
 )
@@ -220,7 +221,13 @@ class Harness(Base):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id"), nullable=False)
-    pack_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("packs.id"))  # null = generic
+    # Which packs this harness can draw on lives in `harness_packs`, not here —
+    # a harness may link zero (generic), one, or several packs. Deliberately no
+    # ORM relationship onto that table: every reader goes through
+    # `tret.packs.links` (`packs_for_harness`/`pack_map_for_harnesses`), which
+    # loads in position order and batches across many harnesses — a lazy
+    # relationship here is exactly the per-harness N+1 query that helper exists
+    # to prevent, and async SQLAlchemy raises on an unawaited lazy load anyway.
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     system_prompt_extra: Mapped[str | None] = mapped_column(Text)
@@ -239,6 +246,32 @@ class Harness(Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = created_at_col()
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class HarnessPack(Base):
+    """One (harness, pack) link, ordered. Replaces the old single nullable
+    `Harness.pack_id` — a harness may now draw on several packs at once.
+
+    `position` orders the links ascending; position 0 is the harness's
+    *primary* pack (`tret.packs.links.resolve_pack_for_task`'s fallback for
+    chat/freeform, and what a legacy single-`pack_id` API caller gets back).
+    Composite PK rather than a surrogate id: the link itself is the (harness,
+    pack) pair, and nothing references a link by its own identity. `ON DELETE
+    CASCADE` on `harness_id` so archiving-then-deleting a harness never leaves
+    orphaned link rows; a pack delete goes through `api/packs.py`'s own
+    reference check instead (a pack still linked by an active harness 409s
+    before any row is touched), so there is deliberately no cascade on
+    `pack_id`.
+    """
+
+    __tablename__ = "harness_packs"
+    __table_args__ = (Index("ix_harness_packs_pack_id", "pack_id"),)
+
+    harness_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("harnesses.id", ondelete="CASCADE"), primary_key=True
+    )
+    pack_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("packs.id"), primary_key=True)
+    position: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
 
 
 class Conversation(Base):

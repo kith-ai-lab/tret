@@ -43,6 +43,7 @@ from tret.db.models import (
 )
 from tret.engine.events import RunEvent, get_event_bus
 from tret.engine.harness import HarnessEngine
+from tret.packs.links import set_harness_packs
 from tret.packs.loader import install_pack
 from tret.providers.base import Provider
 from tret.providers.catalog import ModelCatalog
@@ -179,7 +180,6 @@ class GoldenWorld:
         async with self.session_factory() as db:
             harness = Harness(
                 workspace_id=self.workspace_id,
-                pack_id=self.pack_id if with_pack else None,
                 name=name,
                 task_profile="pack" if with_pack else "freeform",
                 system_prompt_extra=system_prompt_extra,
@@ -194,6 +194,9 @@ class GoldenWorld:
                 created_by=self.user_id,
             )
             db.add(harness)
+            await db.flush()  # populate harness.id for the link below
+            if with_pack:
+                await set_harness_packs(db, harness, [self.pack_id])
             await db.commit()
             return harness.id
 

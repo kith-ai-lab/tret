@@ -605,6 +605,12 @@ export interface TaskType {
   // — file paths from the pack's own `doctrine:` list, optionally `#`-narrowed to
   // one heading. Empty means "every doctrine file", so existing packs are unaffected.
   doctrine?: string[]
+  // Only set on the entries in `HarnessDetail.task_types` — that list is the
+  // union across every pack a harness links, so each entry names which pack
+  // it came from. Absent everywhere else (a pack's own `task_types`, the
+  // registry manifest, the pack builder draft).
+  pack_slug?: string
+  pack_id?: string
 }
 
 export const COMPACTION_MODES = ['auto', 'off'] as const
@@ -664,8 +670,15 @@ export interface Harness {
   id: string
   name: string
   description: string | null
-  pack_id: string | null
-  pack_slug: string | null
+  // Legacy single-pack fields — still populated (primary pack, i.e. the first
+  // of `pack_ids`, or null for a generic harness) for callers that have not
+  // moved to the ordered lists, but no longer written to by this frontend.
+  pack_id?: string | null
+  pack_slug?: string | null
+  // Every pack this harness links, in link order — the first is primary.
+  // Same order and length; `pack_slugs[i]` names `pack_ids[i]`.
+  pack_ids: string[]
+  pack_slugs: string[]
   task_profile: string
   system_prompt_extra: string | null
   model_policy: ModelPolicy
@@ -677,13 +690,22 @@ export interface Harness {
 
 export interface HarnessDetail extends Harness {
   assembled_system_prompt: string
+  // The union of task types across every linked pack — each entry names its
+  // own `pack_slug`/`pack_id` (see `TaskType`) since more than one pack can
+  // contribute now.
   task_types?: TaskType[]
 }
 
 export interface HarnessBody {
   name: string
   description: string | null
-  pack_id: string | null
+  /** @deprecated superseded by `pack_ids` — kept optional only so a body built
+   *  against the older single-pack shape still type-checks; the backend still
+   *  accepts it, but this frontend always sends `pack_ids` instead. */
+  pack_id?: string | null
+  // Ordered list of linked packs; first is primary. Empty for a generic
+  // harness. Replaces `pack_id` as of the multi-pack harness API.
+  pack_ids: string[]
   task_profile: string
   system_prompt_extra: string | null
   model_policy: ModelPolicy

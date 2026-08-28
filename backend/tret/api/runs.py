@@ -15,6 +15,7 @@ from tret.db.engine import get_db
 from tret.db.models import Document, Harness, Project, Run, User
 from tret.engine.events import get_event_bus
 from tret.engine.harness import get_harness_engine
+from tret.packs.links import packs_for_harness, resolve_pack_for_task
 from tret.services.emissions import emission_summary_fields, energy_wh_field
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -110,10 +111,13 @@ async def create_run(
     if body.model_override:
         task_input["_model_override"] = body.model_override
 
+    packs = await packs_for_harness(db, harness)
+    pack = resolve_pack_for_task(packs, body.task_type)
+
     run = Run(
         project_id=project_id,
         harness_id=harness.id,
-        pack_id=harness.pack_id,
+        pack_id=pack.id if pack else None,
         task_type=body.task_type,
         task_input=task_input,
         document_ids=body.document_ids,

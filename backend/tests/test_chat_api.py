@@ -1,19 +1,46 @@
 """Chat turn payload + per-turn routing/model overrides.
 
-No network and no DB: `_assistant_message` is exercised with detached ORM
-`Run` objects (as in test_eco_accounting.py), and the request-time helpers
-(`_validate_objective`, `_run_task_input`) are pure functions called directly.
+Most of this file is network- and DB-free: `_assistant_message` is exercised
+with detached ORM `Run` objects (as in test_eco_accounting.py), and the
+request-time helpers (`_validate_objective`, `_run_task_input`) are pure
+functions called directly.
+
+The final section (a harness may now link more than one pack) is the
+exception — it drives `POST /api/chat` end to end against a real sqlite
+database, `httpx.AsyncClient` + `ASGITransport` directly against the app,
+same harness as test_harnesses_api.py — because what is under test there is
+`send_message`'s own pack resolution, which needs a real `Conversation` /
+`Harness` / `HarnessPack` row to resolve through.
 """
 from __future__ import annotations
 
 import uuid
 from decimal import Decimal
 
+import httpx
 import pytest
-from fastapi import HTTPException
+import pytest_asyncio
+from argon2 import PasswordHasher
+from fastapi import FastAPI, HTTPException
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
+from tests.evals.golden_world import install_sqlite_type_shims
+from tret.api import auth
+from tret.api import chat as chat_api
 from tret.api.chat import SendMessageBody, _assistant_message, _run_task_input, _validate_objective
-from tret.db.models import Run
+from tret.db.engine import get_db
+from tret.db.models import (
+    Base,
+    Harness,
+    Pack,
+    Project,
+    Run,
+    User,
+    Workspace,
+    WorkspaceMember,
+)
+from tret.packs.links import set_harness_packs
 from tret.providers.catalog import ModelInfo, energy_accounting
 from tret.router_llm.objectives import OBJECTIVES
 
@@ -197,3 +224,214 @@ def test_assistant_message_summarizes_delegated_tool_activity():
     assert message["activity"] == [
         {"tool": "run_harness_task", "summary": "delegated evidence_extraction"}
     ]
+
+
+# ── send_message's pack resolution (a harness may link more than one pack) ──
+HASHER = PasswordHasher()
+PASSWORD = "correct-horse-battery-1"
+
+
+class _NoopEngine:
+    async def execute(self, run_id):  # pragma: no cover - never actually asserted on
+        return None
+
+
+@pytest_asyncio.fixture
+async def engine():
+    install_sqlite_type_shims()
+    eng = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield eng
+    await eng.dispose()
+
+
+@pytest_asyncio.fixture
+async def session_factory(engine):
+    return async_sessionmaker(engine, expire_on_commit=False)
+
+
+@pytest_asyncio.fixture
+async def seed(session_factory):
+    async def _seed(*rows):
+        async with session_factory() as db:
+            db.add_all(rows)
+            await db.commit()
+
+    return _seed
+
+
+@pytest_asyncio.fixture
+async def client(session_factory, monkeypatch):
+    # The engine is never actually invoked here — these tests only assert on
+    # the Run row `send_message` creates before the background task starts.
+    monkeypatch.setattr(chat_api, "get_harness_engine", lambda: _NoopEngine())
+
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.include_router(chat_api.router)
+
+    async def _get_db():
+        async with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = _get_db
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+def make_user(email: str) -> User:
+    return User(
+        id=uuid.uuid4(),
+        email=email,
+        display_name=email.split("@")[0].title(),
+        password_hash=HASHER.hash(PASSWORD),
+        role="analyst",
+    )
+
+
+def make_workspace(name: str) -> Workspace:
+    return Workspace(id=uuid.uuid4(), name=name, kind="team")
+
+
+def make_member(user: User, workspace: Workspace, *, role: str) -> WorkspaceMember:
+    return WorkspaceMember(user_id=user.id, workspace_id=workspace.id, role=role)
+
+
+def make_pack(workspace: Workspace, *, slug: str) -> Pack:
+    return Pack(
+        id=uuid.uuid4(),
+        workspace_id=workspace.id,
+        slug=slug,
+        version="1.0.0",
+        doctrine_sha="deadbeef",
+        manifest={"pack": slug, "version": "1.0.0", "display_name": slug.title(), "task_types": []},
+        source_path=f"/tmp/{slug}",
+    )
+
+
+async def login_(client: httpx.AsyncClient, email: str) -> None:
+    response = await client.post("/api/auth/login", json={"email": email, "password": PASSWORD})
+    assert response.status_code == 200, response.text
+
+
+async def test_a_chat_turn_on_a_pack_linked_harness_resolves_to_the_primary_pack(
+    client, seed, session_factory
+):
+    """A pack-linked chat harness loads that pack's doctrine into the turn —
+    deliberate (see chat.py::send_message's comment): `resolve_pack_for_task`
+    falls back to the primary (first-linked) pack for task_type "chat"."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    user = make_user("analyst@example.com")
+    pack = make_pack(team, slug="pack-a")
+    await seed(team, project, user, make_member(user, team, role="analyst"), pack)
+
+    async with session_factory() as db:
+        harness = Harness(
+            workspace_id=team.id,
+            name="Pack Chat",
+            task_profile="chat",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+        )
+        db.add(harness)
+        await db.flush()
+        await set_harness_packs(db, harness, [pack.id])
+        await db.commit()
+        harness_id = harness.id
+
+    await login_(client, user.email)
+    created = await client.post("/api/chat", json={"harness_id": str(harness_id)})
+    assert created.status_code == 200, created.text
+    conversation_id = created.json()["id"]
+
+    sent = await client.post(
+        f"/api/chat/{conversation_id}/messages", json={"text": "Hello"}
+    )
+    assert sent.status_code == 200, sent.text
+    run_id = uuid.UUID(sent.json()["run_id"])
+
+    async with session_factory() as db:
+        run = await db.get(Run, run_id)
+    assert run.pack_id == pack.id
+
+
+async def test_a_chat_turn_on_the_default_pack_less_harness_leaves_pack_id_none(
+    client, seed, session_factory
+):
+    """The seeded, pack-less Chat Assistant must resolve to `pack_id=None`,
+    byte-identical to before a harness could link any pack at all."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    user = make_user("analyst@example.com")
+    await seed(team, project, user, make_member(user, team, role="analyst"))
+
+    async with session_factory() as db:
+        harness = Harness(
+            workspace_id=team.id,
+            name="Chat Assistant",
+            task_profile="chat",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+        )
+        db.add(harness)
+        await db.commit()
+        harness_id = harness.id
+
+    await login_(client, user.email)
+    created = await client.post("/api/chat", json={"harness_id": str(harness_id)})
+    assert created.status_code == 200, created.text
+    conversation_id = created.json()["id"]
+
+    sent = await client.post(
+        f"/api/chat/{conversation_id}/messages", json={"text": "Hello"}
+    )
+    assert sent.status_code == 200, sent.text
+    run_id = uuid.UUID(sent.json()["run_id"])
+
+    async with session_factory() as db:
+        run = await db.get(Run, run_id)
+    assert run.pack_id is None
+
+
+async def test_an_archived_harness_id_falls_back_to_the_default_chat_harness(
+    client, seed, session_factory
+):
+    """An archived harness id on POST /api/chat reads as unknown: the
+    conversation lands on the default chat harness instead. The composer
+    persists its harness choice in localStorage, so a stale id from a
+    since-archived harness is an expected input, and POST /api/runs already
+    refuses archived harnesses — chat must not honor them either."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    user = make_user("analyst@example.com")
+    await seed(team, project, user, make_member(user, team, role="analyst"))
+
+    async with session_factory() as db:
+        default_chat = Harness(
+            workspace_id=team.id,
+            name="Chat Assistant",
+            task_profile="chat",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+        )
+        archived = Harness(
+            workspace_id=team.id,
+            name="Retired Specialist",
+            task_profile="freeform",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+            is_archived=True,
+        )
+        db.add_all([default_chat, archived])
+        await db.commit()
+        default_id, archived_id = default_chat.id, archived.id
+
+    await login_(client, user.email)
+    created = await client.post("/api/chat", json={"harness_id": str(archived_id)})
+    assert created.status_code == 200, created.text
+    assert created.json()["harness_id"] == str(default_id)

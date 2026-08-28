@@ -855,8 +855,9 @@ async def run_harness_task(
     ctx: RunContext, task_type: str, task_input: dict, harness_name: str | None = None
 ) -> str:
     # Lazy imports avoid a circular dependency with the engine module.
-    from tret.db.models import Harness, Pack, Run
+    from tret.db.models import Harness, Run
     from tret.engine.harness import get_harness_engine
+    from tret.packs.links import pack_map_for_harnesses
 
     if task_type in ("chat", "freeform"):
         raise ToolError("run_harness_task is for specialist pack tasks, not chat/freeform")
@@ -891,22 +892,21 @@ async def run_harness_task(
         .scalars()
         .all()
     )
-    packs = {
-        p.id: p
-        for p in (
-            (await ctx.db.execute(select(Pack).where(Pack.workspace_id == workspace_id)))
-            .scalars()
-            .all()
-        )
-    }
+    # One query for every harness's linked packs, not one per harness. The
+    # harness list above is already workspace-scoped, and links are validated
+    # workspace-local at save (api/harnesses.py::_resolve_pack_ids), so this
+    # reaches only the parent workspace's packs — the same boundary the
+    # workspace-filtered pack query used to draw.
+    pack_map = await pack_map_for_harnesses(ctx.db, [h.id for h in harnesses])
 
-    def supports(h: Harness) -> bool:
-        pack = packs.get(h.pack_id)
-        return pack is not None and any(
-            t["slug"] == task_type for t in pack.manifest.get("task_types", [])
-        )
+    def declaring_pack(h: Harness):
+        """The first of `h`'s linked packs that declares `task_type`, or None."""
+        for pack in pack_map.get(h.id, []):
+            if any(t["slug"] == task_type for t in pack.manifest.get("task_types", [])):
+                return pack
+        return None
 
-    candidates = [h for h in harnesses if supports(h)]
+    candidates = [h for h in harnesses if declaring_pack(h) is not None]
     if harness_name:
         candidates = [h for h in candidates if h.name == harness_name]
     if not candidates:
@@ -914,8 +914,8 @@ async def run_harness_task(
             {
                 t["slug"]
                 for h in harnesses
-                if h.pack_id in packs
-                for t in packs[h.pack_id].manifest.get("task_types", [])
+                for pack in pack_map.get(h.id, [])
+                for t in pack.manifest.get("task_types", [])
             }
         )
         raise ToolError(
@@ -924,11 +924,12 @@ async def run_harness_task(
             + f". Available task types: {available}"
         )
     harness = candidates[0]
+    declaring = declaring_pack(harness)
 
     child = Run(
         project_id=ctx.project_id,
         harness_id=harness.id,
-        pack_id=harness.pack_id,
+        pack_id=declaring.id if declaring else None,
         task_type=task_type,
         # The hop counter travels with the child, so the chain is bounded however
         # it was reached; the engine reads it back off task_input.

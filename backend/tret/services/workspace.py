@@ -218,7 +218,6 @@ async def _seed_chat_harness(db: AsyncSession, workspace_id) -> None:
     db.add(
         Harness(
             workspace_id=workspace_id,
-            pack_id=None,
             name="Chat Assistant",
             description="Conversational front door: answers directly from documents and "
             "datasets, and delegates structured work to specialist harnesses.",
@@ -265,7 +264,6 @@ async def _seed_default_harnesses(db: AsyncSession, workspace_id) -> None:
     db.add(
         Harness(
             workspace_id=workspace_id,
-            pack_id=None,
             name="General Assistant",
             description="Freeform analyst assistant with document and dataset tools.",
             task_profile="freeform",

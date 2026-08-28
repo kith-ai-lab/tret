@@ -9,7 +9,7 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +17,7 @@ from tret.api.auth import current_user, require_admin
 from tret.api.workspace import WorkspaceContext, current_project, current_workspace, require_workspace_admin
 from tret.config import get_settings
 from tret.db.engine import get_db
-from tret.db.models import Dataset, Finding, Harness, MethodRun, Pack, Project, Run, User
+from tret.db.models import Dataset, Finding, Harness, HarnessPack, MethodRun, Pack, Project, Run, User
 from tret.net import EgressDenied, build_client
 from tret.net.policy import ClassPolicy, MODE_OFF, MODE_ON, VERIFY_NONE, master_mode
 from tret.packs.archive import MAX_COMPRESSED_BYTES, PackArchiveError
@@ -288,12 +288,12 @@ async def delete_pack(
     (`PUT /api/harnesses/{id}` with `is_archived: true`) and then deletes the
     pack — the harness's own doctrine/task-type dependency on the pack is
     gone the moment it is archived (it can never run again), so there is
-    nothing left for the delete to protect. `Harness.pack_id` is nullable
-    (same as `Dataset.pack_id`), so archived harnesses still pointing at this
-    pack are severed (set to NULL) below rather than left dangling on a row
-    that is about to not exist — left as a real FK, deleting the pack out
-    from under one would be an integrity violation, not merely a semantic
-    concern.
+    nothing left for the delete to protect. A harness's packs are `harness_packs`
+    link rows, not a column on `Harness` (one harness may link several packs),
+    so archived harnesses still linked to this pack have those link rows
+    deleted below rather than left dangling on a `pack_id` that is about to
+    not exist — left as a real FK, deleting the pack out from under one would
+    be an integrity violation, not merely a semantic concern.
 
     Pack-seeded datasets are deliberately left in place (ship minimal
     uninstall; the plan's own resolved judgment call) — deleting the pack
@@ -302,14 +302,14 @@ async def delete_pack(
     than blocking the delete or being deleted themselves.
 
     Ordering matters here: the row delete is committed *before* the directory
-    is removed, not after. `Pack.id` is a foreign key on Harness/Run/Finding/
-    MethodRun (checked above) and on Dataset (severed above), so committing
-    first is what makes the DB the source of truth — if the directory removal
-    below fails partway, the row is already gone either way, and a leaked
-    directory is a cheap, logged loose end rather than a `Pack` row left
-    pointing at bytes that no longer exist (the previous ordering's failure
-    mode: `db.commit()` could still fail with an FK violation *after* the
-    directory was already destroyed).
+    is removed, not after. `Pack.id` is a foreign key on `harness_packs`/Run/
+    Finding/MethodRun (checked above) and on Dataset (severed above), so
+    committing first is what makes the DB the source of truth — if the
+    directory removal below fails partway, the row is already gone either
+    way, and a leaked directory is a cheap, logged loose end rather than a
+    `Pack` row left pointing at bytes that no longer exist (the previous
+    ordering's failure mode: `db.commit()` could still fail with an FK
+    violation *after* the directory was already destroyed).
     """
     pack = await db.get(Pack, pack_id)
     if pack is None or pack.workspace_id != ctx.id:
@@ -321,10 +321,17 @@ async def delete_pack(
         (Finding, "finding"),
         (MethodRun, "method run"),
     ):
-        query = select(model).where(model.pack_id == pack_id)
         if model is Harness:
-            # Archived harnesses don't count — see this endpoint's docstring.
-            query = query.where(Harness.is_archived.is_(False))
+            # A harness references a pack via `harness_packs`, not a column
+            # on Harness itself. Archived harnesses don't count — see this
+            # endpoint's docstring.
+            query = (
+                select(Harness)
+                .join(HarnessPack, HarnessPack.harness_id == Harness.id)
+                .where(HarnessPack.pack_id == pack_id, Harness.is_archived.is_(False))
+            )
+        else:
+            query = select(model).where(model.pack_id == pack_id)
         referencing = (await db.execute(query.limit(1))).scalar_one_or_none()
         if referencing is not None:
             name = getattr(referencing, "name", None) or str(referencing.id)
@@ -340,10 +347,14 @@ async def delete_pack(
             )
 
     await db.execute(update(Dataset).where(Dataset.pack_id == pack_id).values(pack_id=None))
-    # Only archived harnesses can still be referencing this pack at this
-    # point (an active one would have 409'd above) — sever them too, for the
-    # same FK reason Dataset is severed just above.
-    await db.execute(update(Harness).where(Harness.pack_id == pack_id).values(pack_id=None))
+    # Only archived harnesses can still be linked to this pack at this point
+    # (an active one would have 409'd above) — delete their `harness_packs`
+    # rows explicitly, for the same FK reason Dataset is severed just above.
+    # Explicit delete rather than an ON DELETE CASCADE on
+    # `harness_packs.pack_id` (see `HarnessPack`'s docstring), so this is the
+    # one place orphaned links are prevented rather than relying on the DB to
+    # clean them up when the Pack row disappears below.
+    await db.execute(delete(HarnessPack).where(HarnessPack.pack_id == pack_id))
 
     source_path = pack.source_path
     await db.delete(pack)

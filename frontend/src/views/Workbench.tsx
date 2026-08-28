@@ -129,7 +129,7 @@ export function Workbench() {
                 {(harnessesQuery.data ?? []).map((h) => (
                   <option key={h.id} value={h.id}>
                     {h.name}
-                    {h.pack_slug ? ` — ${h.pack_slug}` : ''}
+                    {h.pack_slugs.length > 0 ? ` — ${h.pack_slugs.join(', ')}` : ''}
                   </option>
                 ))}
               </select>

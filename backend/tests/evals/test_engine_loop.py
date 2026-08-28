@@ -20,8 +20,10 @@ from replay_provider import ProviderCall, ReplayProvider, ScriptedCall, Scripted
 from sqlalchemy import select
 from test_golden_runs import PERIL, SITE, divergence_happy_script
 
-from tret.db.models import Run
+from tret.db.models import Harness, Run
 from tret.engine.tools import MAX_DELEGATION_DEPTH
+from tret.packs.links import set_harness_packs
+from tret.packs.loader import install_pack
 from tret.providers.base import TextDelta, ToolCall, ToolCallComplete, TurnComplete, Usage
 
 
@@ -361,3 +363,73 @@ async def test_delegation_still_refuses_the_generic_task_types(world, task_type)
     )
     assert [e["tool"] for e in result.tool_errors] == ["run_harness_task"]
     assert "not chat/freeform" in result.tool_errors[0]["result"]
+
+
+# ── (e) delegation searches every linked pack, not just the primary ───────────
+SECOND_PACK_YAML = """\
+pack: second-pack
+version: 0.1.0
+display_name: Second Pack
+task_types:
+  - slug: second_task
+    display_name: Second task
+    shape: freeform
+    output_contract: Free text.
+    instructions: Reply with a short confirmation. Do not call any tools.
+"""
+
+
+async def test_delegation_finds_a_harness_whose_second_linked_pack_declares_the_task_type(
+    world, tmp_path
+):
+    """A harness may now link more than one pack (one harness, many packs).
+    `run_harness_task` must search every pack a candidate harness links, not
+    only its primary one, and the child run it creates must carry the
+    *declaring* pack's id — here the harness's second-linked pack, not its
+    primary (climate-risk, from `world.create_harness`'s default)."""
+    second_pack_dir = tmp_path / "second-pack"
+    second_pack_dir.mkdir()
+    (second_pack_dir / "pack.yaml").write_text(SECOND_PACK_YAML)
+    async with world.session_factory() as db:
+        second_pack = await install_pack(db, second_pack_dir, world.workspace_id, world.project_id)
+
+    harness_id = await world.create_harness(tool_names=["run_harness_task"])
+    async with world.session_factory() as db:
+        harness = await db.get(Harness, harness_id)
+        # Primary pack stays climate-risk (position 0, from create_harness);
+        # the pack that actually declares `second_task` is linked second.
+        await set_harness_packs(db, harness, [world.pack_id, second_pack.id])
+        await db.commit()
+
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Delegating the second task.",
+                tool_calls=[
+                    ScriptedCall(
+                        "run_harness_task",
+                        {"task_type": "second_task", "task_input": {}},
+                    )
+                ],
+            ),
+            ScriptedTurn(text="Confirmed."),  # the child run's only turn
+            ScriptedTurn(text="The specialist confirmed the second task."),
+        ]
+    )
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={"message": "Please delegate the second task."},
+    )
+
+    assert result.run.status == "completed", result.run.error
+    assert result.tool_errors == []
+
+    async with world.session_factory() as db:
+        child = (
+            await db.execute(select(Run).where(Run.task_type == "second_task"))
+        ).scalars().one()
+    assert child.harness_id == harness_id
+    assert child.pack_id == second_pack.id  # the declaring pack, not the primary
+    assert child.status == "completed"

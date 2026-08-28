@@ -5,6 +5,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import {
   api,
   type ChatMessage,
+  type Harness,
   type ModelInfo,
   type ModelPolicy,
   objectiveDescription,
@@ -36,6 +37,11 @@ import { ModelSelect, overrideWarning } from './Workbench'
 // picking the empty option.
 const OBJECTIVE_STORAGE_KEY = 'tret.chat.objective'
 const MODEL_OVERRIDE_STORAGE_KEY = 'tret.chat.modelOverride'
+// Which harness a *new* chat will use. Empty means "default" — the backend's
+// own chat harness (the first non-archived task_profile == 'chat' harness).
+// Fixed per conversation once one exists (see `harness_id` on the
+// conversation itself), so this key only ever governs the next new chat.
+const HARNESS_STORAGE_KEY = 'tret.chat.harness'
 
 const EXAMPLE_PROMPTS = [
   {
@@ -90,6 +96,23 @@ export function Chat() {
   )
   useEffect(() => localStorage.setItem(OBJECTIVE_STORAGE_KEY, objective), [objective])
   useEffect(() => localStorage.setItem(MODEL_OVERRIDE_STORAGE_KEY, modelOverride), [modelOverride])
+
+  // Which harness the *next new* chat will start on. Empty means "default".
+  // Persisted the same way as the two overrides above, but it only ever
+  // applies before a conversation exists — once one does, its harness is
+  // fixed and this selection is irrelevant to it.
+  const [selectedHarnessId, setSelectedHarnessId] = useState<string>(
+    () => localStorage.getItem(HARNESS_STORAGE_KEY) ?? '',
+  )
+  useEffect(() => localStorage.setItem(HARNESS_STORAGE_KEY, selectedHarnessId), [selectedHarnessId])
+  // A stored id from a harness that has since been archived or deleted falls
+  // back to "default" rather than silently sending a dangling id.
+  useEffect(() => {
+    if (harnessesQuery.data === undefined) return
+    if (selectedHarnessId && !harnessesQuery.data.some((h) => h.id === selectedHarnessId)) {
+      setSelectedHarnessId('')
+    }
+  }, [harnessesQuery.data, selectedHarnessId])
 
   // Default to the most recent conversation once the list first loads. Never
   // override the user's explicit selection (incl. the deliberate null of a
@@ -160,7 +183,7 @@ export function Chat() {
       if (!trimmed || inFlight) return
       let conversationId = selectedId
       if (!conversationId) {
-        const conv = await api.createConversation()
+        const conv = await api.createConversation(selectedHarnessId || undefined)
         queryClient.setQueryData(['conversation', conv.id], conv)
         queryClient.invalidateQueries({ queryKey: ['conversations'] })
         setSelectedId(conv.id)
@@ -169,21 +192,34 @@ export function Chat() {
       setDraft('')
       sendMutation.mutate({ conversationId, text: trimmed })
     },
-    [inFlight, selectedId, queryClient, sendMutation],
+    [inFlight, selectedId, selectedHarnessId, queryClient, sendMutation],
   )
 
   const conversation = selectedId ? conversationQuery.data : undefined
   // The policy the composer's override is bound by: this conversation's own
   // harness, or — on the landing screen, before a conversation exists — the
-  // seeded chat harness the backend would pick (api/chat.py::create_conversation
-  // selects the first non-archived `task_profile == 'chat'` harness). Undefined
-  // if neither resolves, which leaves the picker unfiltered rather than
-  // filtering against a guess.
+  // harness the *next* message would actually create the conversation on: the
+  // selected harness if one is picked, else the seeded chat harness the
+  // backend would pick (api/chat.py::create_conversation selects the first
+  // non-archived `task_profile == 'chat'` harness). Undefined if neither
+  // resolves, which leaves the picker unfiltered rather than filtering
+  // against a guess.
   const chatPolicy: ModelPolicy | undefined = (() => {
     const list = harnessesQuery.data ?? []
-    const own = conversation && list.find((h) => h.id === conversation.harness_id)
-    return (own ?? list.find((h) => h.task_profile === 'chat'))?.model_policy
+    const chatDefault = list.find((h) => h.task_profile === 'chat')
+    if (conversation) {
+      return (list.find((h) => h.id === conversation.harness_id) ?? chatDefault)?.model_policy
+    }
+    const selected = selectedHarnessId && list.find((h) => h.id === selectedHarnessId)
+    return (selected || chatDefault)?.model_policy
   })()
+  // The harness dropdown's own state: fixed to the conversation's harness
+  // once one exists (a chat's harness never changes mid-conversation), else
+  // the pending selection for the chat about to be created.
+  const harnesses = harnessesQuery.data ?? []
+  const harnessFixed = !!conversation
+  const harnessSelectValue = conversation ? conversation.harness_id : selectedHarnessId
+
   const messages = conversation?.messages ?? []
   const showLive = !!pending && pending.conversationId === selectedId
   const isLanding = !selectedId && !inFlight && messages.length === 0
@@ -235,6 +271,10 @@ export function Chat() {
             modelOverride={modelOverride}
             onModelOverrideChange={setModelOverride}
             policy={chatPolicy}
+            harnesses={harnesses}
+            harnessValue={harnessSelectValue}
+            harnessFixed={harnessFixed}
+            onHarnessChange={setSelectedHarnessId}
           />
         ) : (
           <>
@@ -260,6 +300,10 @@ export function Chat() {
                   modelOverride={modelOverride}
                   onModelOverrideChange={setModelOverride}
                   policy={chatPolicy}
+                  harnesses={harnesses}
+                  harnessValue={harnessSelectValue}
+                  harnessFixed={harnessFixed}
+                  onHarnessChange={setSelectedHarnessId}
                 />
                 <div className="chat-hint">
                   Responses are drafts — structured findings go to Approvals before they count.
@@ -342,6 +386,10 @@ function Landing({
   modelOverride,
   onModelOverrideChange,
   policy,
+  harnesses,
+  harnessValue,
+  harnessFixed,
+  onHarnessChange,
 }: {
   draft: string
   onDraft: (v: string) => void
@@ -353,6 +401,10 @@ function Landing({
   modelOverride: string
   onModelOverrideChange: (v: string) => void
   policy?: ModelPolicy
+  harnesses: Harness[]
+  harnessValue: string
+  harnessFixed: boolean
+  onHarnessChange: (v: string) => void
 }) {
   return (
     <div className="chat-landing">
@@ -378,6 +430,10 @@ function Landing({
           modelOverride={modelOverride}
           onModelOverrideChange={onModelOverrideChange}
           policy={policy}
+          harnesses={harnesses}
+          harnessValue={harnessValue}
+          harnessFixed={harnessFixed}
+          onHarnessChange={onHarnessChange}
         />
         <div className="chat-cards">
           {EXAMPLE_PROMPTS.map((ex) => (
@@ -724,6 +780,10 @@ function Composer({
   modelOverride,
   onModelOverrideChange,
   policy,
+  harnesses,
+  harnessValue,
+  harnessFixed,
+  onHarnessChange,
 }: {
   value: string
   onChange: (v: string) => void
@@ -737,6 +797,10 @@ function Composer({
   modelOverride: string
   onModelOverrideChange: (v: string) => void
   policy?: ModelPolicy
+  harnesses: Harness[]
+  harnessValue: string
+  harnessFixed: boolean
+  onHarnessChange: (v: string) => void
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -770,6 +834,10 @@ function Composer({
         modelOverride={modelOverride}
         onModelOverrideChange={onModelOverrideChange}
         policy={policy}
+        harnesses={harnesses}
+        harnessValue={harnessValue}
+        harnessFixed={harnessFixed}
+        onHarnessChange={onHarnessChange}
       />
       <div className={`chat-inputbox${disabled ? ' disabled' : ''}`}>
         <textarea
@@ -807,6 +875,10 @@ function ComposerControls({
   modelOverride,
   onModelOverrideChange,
   policy,
+  harnesses,
+  harnessValue,
+  harnessFixed,
+  onHarnessChange,
 }: {
   models: ModelInfo[]
   objective: string
@@ -814,12 +886,47 @@ function ComposerControls({
   modelOverride: string
   onModelOverrideChange: (v: string) => void
   policy?: ModelPolicy
+  harnesses: Harness[]
+  harnessValue: string
+  harnessFixed: boolean
+  onHarnessChange: (v: string) => void
 }) {
   // A per-turn override the chat harness's policy would refuse is called out
   // here rather than discovered as a failed run after the message is sent.
   const overrideProblem = overrideWarning(modelOverride, models, policy)
+  // The value picked for a chat that no longer exists in the harness list
+  // (deleted since, or — while fixed — a harness this account can no longer
+  // see) still needs its own option, same reasoning as ModelSelect: dropping
+  // it would make the select silently fall back to a different harness.
+  const harnessKnown = harnesses.some((h) => h.id === harnessValue)
   return (
     <div className="chat-controls">
+      <span className="chat-control">
+        <select
+          className="chat-control-select"
+          value={harnessValue}
+          onChange={(e) => onHarnessChange(e.target.value)}
+          disabled={harnessFixed}
+          title={
+            harnessFixed
+              ? 'harness is fixed when a chat starts'
+              : 'Which harness this new chat runs on'
+          }
+          aria-label="Harness for this chat"
+        >
+          <option value="">harness: default</option>
+          {harnesses.map((h) => (
+            <option key={h.id} value={h.id}>
+              harness: {h.name}
+            </option>
+          ))}
+          {harnessValue && !harnessKnown && (
+            <option value={harnessValue} disabled>
+              harness: {harnessValue} (not found)
+            </option>
+          )}
+        </select>
+      </span>
       <span className="chat-control">
         <select
           className="chat-control-select"

@@ -233,6 +233,7 @@ async def install_pack(
     from sqlalchemy import select
 
     from tret.db.models import Dataset, DatasetRow, Harness, Pack
+    from tret.packs.links import packs_for_harness, set_harness_packs
 
     pack_dir = pack_dir.resolve()
     manifest, schemas, errors = validate_pack(pack_dir)
@@ -338,14 +339,14 @@ async def install_pack(
             )
         ).scalar_one_or_none()
         if already is not None:
-            if already.pack_id != pack.id:
+            already_packs = await packs_for_harness(db, already)
+            if pack.id not in {p.id for p in already_packs}:
                 # Cross-pack (or no-pack) name collision: silent today, worth
                 # a log line naming both sides so an operator debugging "why
                 # didn't my preset harness show up" has somewhere to look.
-                other_pack = await db.get(Pack, already.pack_id) if already.pack_id else None
                 other_desc = (
-                    f"pack '{other_pack.slug}@{other_pack.version}'"
-                    if other_pack is not None
+                    ", ".join(f"pack '{p.slug}@{p.version}'" for p in already_packs)
+                    if already_packs
                     else "no pack (created outside any pack install)"
                 )
                 log.warning(
@@ -371,17 +372,17 @@ async def install_pack(
         model_policy: dict = {"mode": "auto"}
         if preset.suggested_cost_tier:
             model_policy["max_cost_tier"] = preset.suggested_cost_tier
-        db.add(
-            Harness(
-                workspace_id=workspace_id,
-                pack_id=pack.id,
-                name=preset.name,
-                description=preset.description,
-                task_profile=task_profile,
-                model_policy=model_policy,
-                tool_names=list(preset.tools),
-            )
+        preset_harness = Harness(
+            workspace_id=workspace_id,
+            name=preset.name,
+            description=preset.description,
+            task_profile=task_profile,
+            model_policy=model_policy,
+            tool_names=list(preset.tools),
         )
+        db.add(preset_harness)
+        await db.flush()  # populate preset_harness.id for the link below
+        await set_harness_packs(db, preset_harness, [pack.id])
 
     await db.commit()
     return pack

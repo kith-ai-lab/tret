@@ -22,6 +22,7 @@ from tret.api.workspace import WorkspaceContext, current_project, current_worksp
 from tret.db.engine import get_db, get_session_factory
 from tret.db.models import Conversation, Dataset, Harness, Pack, Run, User
 from tret.engine.harness import get_harness_engine
+from tret.packs.links import pack_map_for_harnesses, packs_for_harness, resolve_pack_for_task
 from tret.router_llm.objectives import OBJECTIVES
 from tret.services.emissions import emission_summary_fields, energy_wh_field
 
@@ -59,39 +60,35 @@ async def _capability_catalog(db: AsyncSession, workspace_id, project_id) -> str
         .scalars()
         .all()
     )
-    packs = {
-        p.id: p
-        for p in (
-            await db.execute(select(Pack).where(Pack.workspace_id == workspace_id))
-        ).scalars().all()
-    }
+    pack_map = await pack_map_for_harnesses(db, [h.id for h in harnesses])
     lines = ["## Capability catalog (for run_harness_task)"]
     seen = set()
     for h in harnesses:
-        pack = packs.get(h.pack_id)
-        if pack is None:
-            continue
-        for t in pack.manifest.get("task_types", []):
-            key = (t["slug"], h.name)
-            if key in seen:
-                continue
-            seen.add(key)
-            fields = ", ".join(
-                f"{name} ({spec.get('type', 'string')}"
-                + (f": {'|'.join(spec['enum'])}" if spec.get("enum") else "")
-                + ")"
-                + (f" — {spec['description']}" if spec.get("description") else "")
-                for name, spec in (t.get("input_schema") or {}).items()
-            )
-            lines.append(
-                f"- task_type: {t['slug']} — {t.get('display_name', t['slug'])} "
-                f"[harness: {h.name}] — inputs: {fields or '(none)'} — {t.get('output_contract', '').strip()}"
-            )
+        for pack in pack_map.get(h.id, []):
+            for t in pack.manifest.get("task_types", []):
+                key = (t["slug"], h.name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                fields = ", ".join(
+                    f"{name} ({spec.get('type', 'string')}"
+                    + (f": {'|'.join(spec['enum'])}" if spec.get("enum") else "")
+                    + ")"
+                    + (f" — {spec['description']}" if spec.get("description") else "")
+                    for name, spec in (t.get("input_schema") or {}).items()
+                )
+                lines.append(
+                    f"- task_type: {t['slug']} — {t.get('display_name', t['slug'])} "
+                    f"[harness: {h.name}] — inputs: {fields or '(none)'} — {t.get('output_contract', '').strip()}"
+                )
     if len(lines) == 1:
         lines.append("(no specialist tasks installed)")
 
+    all_packs = (
+        await db.execute(select(Pack).where(Pack.workspace_id == workspace_id))
+    ).scalars().all()
     method_lines: list[str] = []
-    for p in packs.values():
+    for p in all_packs:
         for m in p.manifest.get("methods", []):
             fields = ", ".join(
                 f"{name} ({spec.get('type', 'string')}"
@@ -212,7 +209,12 @@ async def create_conversation(
     harness = None
     if body.harness_id:
         harness = await db.get(Harness, body.harness_id)
-        if harness is not None and harness.workspace_id != ctx.id:
+        # Archived is treated like unknown: fall back to the default chat
+        # harness rather than 404. The chat composer persists its harness
+        # choice in localStorage, so a stale id from a since-archived harness
+        # is an expected input here, not a client bug — and POST /api/runs
+        # already refuses archived harnesses, so this keeps chat consistent.
+        if harness is not None and (harness.workspace_id != ctx.id or harness.is_archived):
             harness = None
     if harness is None:
         harness = (
@@ -277,10 +279,16 @@ async def send_message(
         if m.get("role") in ("user", "assistant") and m.get("content")
     ]
 
+    # A pack-linked harness's primary pack loads its doctrine into this chat
+    # turn — deliberate: the seeded, pack-less Chat Assistant still resolves
+    # to None here, byte-identical to before this harness could carry a pack.
+    harness = await db.get(Harness, conv.harness_id)
+    pack = resolve_pack_for_task(await packs_for_harness(db, harness), "chat") if harness else None
+
     run = Run(
         project_id=conv.project_id,
         harness_id=conv.harness_id,
-        pack_id=None,
+        pack_id=pack.id if pack else None,
         task_type="chat",
         task_input=_run_task_input(
             text,

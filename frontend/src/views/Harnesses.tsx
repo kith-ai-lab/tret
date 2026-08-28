@@ -21,6 +21,7 @@ import {
   type LoopConfig,
   type ModelPolicy,
   OBJECTIVE_DESCRIPTIONS,
+  type Pack,
   ROUTING_OBJECTIVES,
   type RoutingObjective,
 } from '../api/client'
@@ -55,7 +56,7 @@ const COMPACTION_DESCRIPTIONS: Record<string, string> = {
 const emptyForm: HarnessBody = {
   name: '',
   description: null,
-  pack_id: null,
+  pack_ids: [],
   task_profile: 'freeform',
   system_prompt_extra: null,
   model_policy: { mode: 'auto', max_cost_tier: DEFAULT_MAX_COST_TIER, objective: DEFAULT_OBJECTIVE },
@@ -115,7 +116,7 @@ export function Harnesses() {
                   active={h.id === selectedId}
                   onClick={() => setSelectedId(h.id)}
                   title={h.name}
-                  sub={h.pack_slug ?? 'generic'}
+                  sub={h.pack_slugs.length > 0 ? h.pack_slugs.join(', ') : 'generic'}
                 />
               ))}
             </>
@@ -169,7 +170,7 @@ function HarnessEditor({
       ? {
           name: harness.name,
           description: harness.description,
-          pack_id: harness.pack_id,
+          pack_ids: [...harness.pack_ids],
           task_profile: harness.task_profile,
           system_prompt_extra: harness.system_prompt_extra,
           model_policy: { ...harness.model_policy },
@@ -197,8 +198,29 @@ function HarnessEditor({
   const packs = packsQuery.data ?? []
   const models = modelsQuery.data ?? []
   const tools = toolsQuery.data ?? []
-  const selectedPack = packs.find((p) => p.id === form.pack_id) ?? null
-  const taskProfiles = ['freeform', ...(selectedPack?.task_types ?? []).map((t) => t.slug)]
+  // Linked packs, in link order — the first is primary. Filtered against the
+  // installed-packs list so a pack uninstalled since this harness was last
+  // saved just quietly drops out of the picker rather than crashing it.
+  const linkedPacks = form.pack_ids
+    .map((id) => packs.find((p) => p.id === id))
+    .filter((p): p is Pack => !!p)
+  const availablePacks = packs.filter((p) => !form.pack_ids.includes(p.id))
+  // Task types offered on "Task profile" are the union across every linked
+  // pack, deduped by slug — if two packs declare the same slug, save will
+  // 422 and surface the server's own message rather than this list silently
+  // picking one.
+  const taskProfiles = [
+    'freeform',
+    ...new Set(linkedPacks.flatMap((p) => p.task_types.map((t) => t.slug))),
+  ]
+
+  const addPack = (id: string) => {
+    if (!id || form.pack_ids.includes(id)) return
+    setForm((f) => ({ ...f, pack_ids: [...f.pack_ids, id], task_profile: 'freeform' }))
+  }
+  const removePack = (id: string) => {
+    setForm((f) => ({ ...f, pack_ids: f.pack_ids.filter((pid) => pid !== id), task_profile: 'freeform' }))
+  }
 
   const costTier = form.model_policy.max_cost_tier ?? DEFAULT_MAX_COST_TIER
   // An absent block means every default, which is what the backend's
@@ -276,21 +298,62 @@ function HarnessEditor({
           />
         </div>
         <div className="field">
-          <label className="mono-label">Pack</label>
-          <select
-            value={form.pack_id ?? ''}
-            onChange={(e) => {
-              const pack_id = e.target.value || null
-              setForm((f) => ({ ...f, pack_id, task_profile: 'freeform' }))
-            }}
-          >
-            <option value="">— none (generic) —</option>
-            {packs.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.display_name} ({p.slug} v{p.version})
-              </option>
-            ))}
-          </select>
+          <label className="mono-label">
+            Packs{linkedPacks.length > 0 && ` (${linkedPacks.length} linked, order matters — first is primary)`}
+          </label>
+          {linkedPacks.length === 0 ? (
+            <div className="empty" style={{ padding: '4px 0' }}>
+              No packs linked — generic harness.
+            </div>
+          ) : (
+            <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+              {linkedPacks.map((p, i) => (
+                <span
+                  key={p.id}
+                  className="chip"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6, borderRadius: 4 }}
+                >
+                  {i === 0 && (
+                    <span className="badge badge-gray" style={{ padding: '1px 5px', fontSize: 9 }}>
+                      primary
+                    </span>
+                  )}
+                  {p.slug}
+                  <button
+                    type="button"
+                    onClick={() => removePack(p.id)}
+                    aria-label={`Remove ${p.slug}`}
+                    title={`Remove ${p.slug}`}
+                    style={{
+                      border: 'none',
+                      background: 'none',
+                      padding: 0,
+                      lineHeight: 1,
+                      color: 'var(--text-muted)',
+                      cursor: 'pointer',
+                      font: 'inherit',
+                    }}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          {availablePacks.length > 0 && (
+            <select
+              value=""
+              onChange={(e) => addPack(e.target.value)}
+              aria-label="Add a pack"
+            >
+              <option value="">+ add pack…</option>
+              {availablePacks.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.display_name} ({p.slug} v{p.version})
+                </option>
+              ))}
+            </select>
+          )}
         </div>
         <div className="field" style={{ marginBottom: 0 }}>
           <label className="mono-label">Task profile</label>
