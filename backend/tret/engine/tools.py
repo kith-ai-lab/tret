@@ -851,12 +851,37 @@ async def run_harness_task(
             "you have, or report what the delegated runs already found and say what is missing."
         )
 
+    # Delegation may only resolve harnesses and packs in the parent run's own
+    # workspace: harness names repeat across workspaces (every workspace gets
+    # the same seeded presets), and an unscoped pick can land on another
+    # tenant's harness — whose workspace then supplies the provider keys and
+    # policy the child runs under.
+    parent = await ctx.db.get(Run, ctx.run_id)
+    parent_harness = await ctx.db.get(Harness, parent.harness_id) if parent else None
+    if parent_harness is None:
+        raise ToolError("Delegation requires a parent run bound to a harness")
+    workspace_id = parent_harness.workspace_id
+
     harnesses = (
-        (await ctx.db.execute(select(Harness).where(Harness.is_archived.is_(False))))
+        (
+            await ctx.db.execute(
+                select(Harness).where(
+                    Harness.is_archived.is_(False),
+                    Harness.workspace_id == workspace_id,
+                )
+            )
+        )
         .scalars()
         .all()
     )
-    packs = {p.id: p for p in (await ctx.db.execute(select(Pack))).scalars().all()}
+    packs = {
+        p.id: p
+        for p in (
+            (await ctx.db.execute(select(Pack).where(Pack.workspace_id == workspace_id)))
+            .scalars()
+            .all()
+        )
+    }
 
     def supports(h: Harness) -> bool:
         pack = packs.get(h.pack_id)
@@ -883,7 +908,6 @@ async def run_harness_task(
         )
     harness = candidates[0]
 
-    parent = await ctx.db.get(Run, ctx.run_id)
     child = Run(
         project_id=ctx.project_id,
         harness_id=harness.id,
