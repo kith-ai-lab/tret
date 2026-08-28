@@ -752,9 +752,26 @@ async def run_method(ctx: RunContext, method: str, params: dict | None = None) -
     if manifest:
         spec = next((m for m in manifest.get("methods", []) if m["slug"] == method), None)
     if spec is None:
-        from tret.db.models import Pack
+        from tret.db.models import Harness, Pack, Run
 
-        packs = (await ctx.db.execute(select(Pack))).scalars().all()
+        # Same boundary as run_harness_task's harness lookup: only this run's
+        # own workspace's packs are searchable — pack slugs repeat across
+        # workspaces, and each install pins its own content hash and source
+        # path, so a cross-workspace pick runs (or integrity-fails against)
+        # another tenant's copy.
+        parent = await ctx.db.get(Run, ctx.run_id)
+        parent_harness = await ctx.db.get(Harness, parent.harness_id) if parent else None
+        if parent_harness is None:
+            raise ToolError("run_method requires a run bound to a harness")
+        packs = (
+            (
+                await ctx.db.execute(
+                    select(Pack).where(Pack.workspace_id == parent_harness.workspace_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
         for p in packs:
             candidate = next(
                 (m for m in p.manifest.get("methods", []) if m["slug"] == method), None
