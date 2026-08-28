@@ -80,6 +80,7 @@ from tret.services.emissions import (
 from tret.services.outcomes import record_outcome
 from tret.services.transcript import (
     ENGINE_NUDGE_KEY,
+    NUDGE_EMPTY_REPLY,
     NUDGE_OUTPUT_BUDGET,
     NUDGE_TERMINAL,
     REPEATED_CALL_KEY,
@@ -713,7 +714,26 @@ class HarnessEngine:
                         )
                     )
                     continue
-                run.status = self._completion_status(ctx)
+                final_text = "".join(assistant_text)
+                if not ctx.terminal_tool and not final_text.strip() and not nudged:
+                    # A chat/freeform turn's answer *is* its text, and some
+                    # models end a tool exchange with an empty completion. One
+                    # structural nudge, same budget as the terminal nudge; a
+                    # second empty turn ends `completed_without_output` (see
+                    # `_final_status`) rather than presenting silence as success.
+                    nudged = True
+                    messages.append(
+                        Msg(
+                            role="user",
+                            content=(
+                                "You returned no text. Write your reply now; if the "
+                                "request cannot be answered, say so and name what is missing."
+                            ),
+                            meta={ENGINE_NUDGE_KEY: NUDGE_EMPTY_REPLY},
+                        )
+                    )
+                    continue
+                run.status = self._final_status(ctx, final_text)
                 break
 
             if run.cost_usd >= max_cost:
@@ -1130,14 +1150,28 @@ class HarnessEngine:
     def _completion_status(ctx: RunContext) -> str:
         """`completed`, or `completed_without_output` if the verdict never landed.
 
-        Only tasks that declare a `terminal_tool` can end without output: a
-        freeform or chat turn's answer *is* its text, so there is nothing to
-        detect. Callers of a run should treat this as "no result to consume",
-        not as an error.
+        Covers the declared-`terminal_tool` contract only; the natural end of
+        the loop goes through `_final_status`, which also catches the no-text
+        case for tasks without one. Callers of a run should treat
+        `completed_without_output` as "no result to consume", not as an error.
         """
         if ctx.terminal_tool and not ctx.terminal_recorded:
             return STATUS_COMPLETED_WITHOUT_OUTPUT
         return STATUS_COMPLETED
+
+    @staticmethod
+    def _final_status(ctx: RunContext, final_text: str) -> str:
+        """Status for the loop's natural end (an assistant turn with no tool calls).
+
+        A chat/freeform turn's answer *is* its text, so a run whose final turn
+        carries no text has produced nothing to consume — `completed` here would
+        present silence as success, render an empty chat bubble, and score the
+        model a clean delivery in the routing track record.
+        """
+        status = HarnessEngine._completion_status(ctx)
+        if status == STATUS_COMPLETED and not ctx.terminal_tool and not final_text.strip():
+            return STATUS_COMPLETED_WITHOUT_OUTPUT
+        return status
 
     @staticmethod
     def _spec_for(tool_specs, name):

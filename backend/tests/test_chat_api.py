@@ -189,6 +189,18 @@ def test_assistant_message_carries_scopes_baseline_and_routing():
     assert message["routing"] == ROUTING
 
 
+def test_assistant_message_names_the_empty_reply_case_in_plain_terms():
+    # The engine's empty-reply guard ends the run `completed_without_output`;
+    # the chat view says what happened in the person's terms, not the enum's.
+    run = _run(
+        status="completed_without_output",
+        messages=[{"role": "assistant", "content": "", "tool_calls": [{"name": "lookup_dataset", "arguments": {}}]}],
+    )
+    message = _assistant_message(run)
+    assert "no reply" in message["content"]
+    assert "completed_without_output" not in message["content"]
+
+
 def test_assistant_message_preserves_null_not_zero_when_unestimated():
     run = _run(cost_usd=Decimal("0.10"))
     message = _assistant_message(run)

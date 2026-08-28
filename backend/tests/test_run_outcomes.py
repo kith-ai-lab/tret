@@ -22,6 +22,7 @@ from tret.router_llm.outcomes import (
 )
 from tret.services.transcript import (
     ENGINE_NUDGE_KEY,
+    NUDGE_EMPTY_REPLY,
     NUDGE_OUTPUT_BUDGET,
     NUDGE_TERMINAL,
     REPEATED_CALL_KEY,
@@ -69,6 +70,14 @@ def test_nudges_are_read_from_meta_not_from_the_wording():
     ]
     signals = read_signals(messages)
     assert signals.terminal_nudged and signals.output_budget_nudged
+
+
+def test_the_empty_reply_nudge_is_read_from_meta_and_penalized():
+    messages = [{"role": "user", "content": "reworded freely", "meta": {ENGINE_NUDGE_KEY: NUDGE_EMPTY_REPLY}}]
+    assert read_signals(messages).empty_reply_nudged
+    # Same failure class as the terminal nudge: the run recovered, but the
+    # model had to be told to finish properly, and the score remembers.
+    assert _clean(messages=messages).quality_score < _clean().quality_score
 
 
 def test_a_repeated_call_counts_once_per_message_not_once_per_repetition():

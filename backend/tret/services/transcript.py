@@ -33,10 +33,11 @@ VALIDATION_MARKER = "Validation failed"
 EXHAUSTED_MARKER = "repair attempts are exhausted"
 
 # Stamped by engine/harness.py onto messages the engine itself appends.
-ENGINE_NUDGE_KEY = "engine_nudge"  # "terminal_tool" | "output_budget"
+ENGINE_NUDGE_KEY = "engine_nudge"  # "terminal_tool" | "output_budget" | "empty_reply"
 REPEATED_CALL_KEY = "repeated_call"  # int: how many times this exact call was made
 NUDGE_TERMINAL = "terminal_tool"
 NUDGE_OUTPUT_BUDGET = "output_budget"
+NUDGE_EMPTY_REPLY = "empty_reply"
 
 
 def validation_errors_in(messages: list) -> tuple[int, int]:
@@ -71,6 +72,7 @@ class TranscriptSignals:
     unrecovered_validation_errors: int = 0
     terminal_nudged: bool = False
     output_budget_nudged: bool = False
+    empty_reply_nudged: bool = False
     repeated_call_trips: int = 0
 
     @property
@@ -81,7 +83,7 @@ class TranscriptSignals:
 def read_signals(messages: list) -> TranscriptSignals:
     """Every signal this module knows how to read, in one pass."""
     tool_calls = tool_errors = repeated = 0
-    terminal_nudged = budget_nudged = False
+    terminal_nudged = budget_nudged = empty_nudged = False
     validation, unrecovered = validation_errors_in(messages)
 
     for msg in messages or []:
@@ -104,6 +106,8 @@ def read_signals(messages: list) -> TranscriptSignals:
             terminal_nudged = True
         elif nudge == NUDGE_OUTPUT_BUDGET:
             budget_nudged = True
+        elif nudge == NUDGE_EMPTY_REPLY:
+            empty_nudged = True
 
     return TranscriptSignals(
         tool_calls=tool_calls,
@@ -112,5 +116,6 @@ def read_signals(messages: list) -> TranscriptSignals:
         unrecovered_validation_errors=unrecovered,
         terminal_nudged=terminal_nudged,
         output_budget_nudged=budget_nudged,
+        empty_reply_nudged=empty_nudged,
         repeated_call_trips=repeated,
     )

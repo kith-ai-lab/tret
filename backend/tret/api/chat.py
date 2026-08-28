@@ -336,7 +336,12 @@ def _assistant_message(run: Run) -> dict:
                     args = tc.get("arguments") or {}
                     entry["summary"] = f"delegated {args.get('task_type', '?')}"
                 activity.append(entry)
-    if run.status != "completed" and not assistant_text:
+    if run.status == "completed_without_output" and not assistant_text:
+        # The engine's empty-reply guard: the model finished its tool calls and
+        # never wrote a reply, even after a nudge. Say that in the person's
+        # terms, not the status enum's.
+        assistant_text = "(The model returned no reply. Try sending the message again.)"
+    elif run.status != "completed" and not assistant_text:
         assistant_text = f"(run {run.status}: {run.error or 'no output'})"
     return {
         "role": "assistant",

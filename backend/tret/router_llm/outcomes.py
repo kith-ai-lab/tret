@@ -168,6 +168,9 @@ def _automatic_score(base: float, signals: TranscriptSignals, iterations: int, m
         "tool_errors": _capped(signals.non_validation_tool_errors, *PENALTY_TOOL_ERROR),
         "repeated_calls": _capped(signals.repeated_call_trips, *PENALTY_REPEATED_CALL),
         "terminal_nudge": PENALTY_TERMINAL_NUDGE if signals.terminal_nudged else 0.0,
+        # Same failure class as the terminal nudge: had to be told to finish
+        # properly — here, to say anything at all.
+        "empty_reply_nudge": PENALTY_TERMINAL_NUDGE if signals.empty_reply_nudged else 0.0,
         "output_budget_nudge": PENALTY_BUDGET_NUDGE if signals.output_budget_nudged else 0.0,
         "iteration_pressure": _iteration_penalty(iterations, max_iterations),
     }
