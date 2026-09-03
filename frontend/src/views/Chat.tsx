@@ -77,6 +77,10 @@ export function Chat() {
   })
   const conversations = conversationsQuery.data ?? []
   const modelsQuery = useQuery({ queryKey: ['models'], queryFn: api.listModels })
+  // Same ['me'] query App.tsx already keeps warm (staleTime: Infinity), read
+  // here only to notice a workspace switch — see the reset effect below.
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const workspaceId = meQuery.data?.current_workspace_id ?? null
   // Read for the composer's model picker only: a per-turn `model_override` is
   // confined to the chat harness's own policy (router.py's
   // `_assert_override_within_policy`), so the picker has to know that policy or
@@ -123,6 +127,26 @@ export function Chat() {
     initializedRef.current = true
     setSelectedId(conversationsQuery.data[0]?.id ?? null)
   }, [conversationsQuery.data])
+
+  // `selectedId` and the "already defaulted" flag above are per-workspace:
+  // App.tsx's workspace switcher clears every query cache but never touches
+  // this view's local state, so without this the picker keeps pointing at a
+  // conversation id from the workspace just left, and the thread renders
+  // "Conversation not found" instead of the new workspace's most recent chat.
+  // `undefined` means "haven't learned the workspace yet" — that first
+  // resolution just records a baseline (it must not clobber the selection the
+  // effect above already made from the initial conversation list); only an
+  // actual change away from a known workspace resets state, re-arming the
+  // effect above to re-pick a default for the new workspace.
+  const workspaceRef = useRef<string | null | undefined>(undefined)
+  useEffect(() => {
+    if (workspaceRef.current !== undefined && workspaceRef.current !== workspaceId) {
+      setSelectedId(null)
+      setPending(null)
+      initializedRef.current = false
+    }
+    workspaceRef.current = workspaceId
+  }, [workspaceId])
 
   const conversationQuery = useQuery({
     queryKey: ['conversation', selectedId],

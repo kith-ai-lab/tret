@@ -8,7 +8,12 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "httpx>=0.27",
-    "anthropic>=0.40",
+    # <1: anthropic 1.x is a new client generation (httpx2 transport, a
+    # reworked call surface) that this codebase has not been ported to —
+    # letting the floor drift past 0.x silently pulls in a client our provider
+    # code does not speak. Pin the exact version in constraints.txt; widen
+    # this floor only alongside an actual 1.x migration.
+    "anthropic>=0.117,<1",
     "pyyaml>=6.0",
     "jsonschema>=4.22",
     # Kept in core deliberately: the headless CLI (tret run) reads local PDFs/docx.

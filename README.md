@@ -49,7 +49,14 @@ Re-run it later to update in place (it won't touch a checkout you've edited).
 That URL serves [install.sh](install.sh) from this repo verbatim, so
 `https://raw.githubusercontent.com/voiz-academy/tret/main/install.sh` is the
 same script — read it before piping it to bash if you'd rather not do that
-blind.
+blind. To verify it before running instead of trusting the pipe, clone the
+repo and run the same script from your own checkout:
+
+```bash
+git clone https://github.com/voiz-academy/tret.git && cd tret
+less install.sh          # read it
+./install.sh             # then run it
+```
 
 **Not a terminal person?** Double-click `start-tret.command` (macOS) or
 `start-tret.bat` (Windows) and tret sets itself up — Docker check, first-run

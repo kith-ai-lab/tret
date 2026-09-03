@@ -12,13 +12,18 @@ docker run -d --name tret-pg -e POSTGRES_USER=tret -e POSTGRES_PASSWORD=tret \
 
 # Backend
 cd backend
-python3.12 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+python3.12 -m venv .venv
+# Always install with -c constraints.txt — it pins every dependency (direct
+# and transitive) to the versions CI is known to pass against. A loose
+# `pyproject.toml` floor (e.g. some `package>=X`) is free to resolve to a
+# much newer release without it, and that drift is exactly what breaks tests
+# locally while CI stays green (or the reverse) — `pip install -e ".[dev]"`
+# on its own is the mistake this exists to prevent, not a fine shortcut:
+.venv/bin/pip install -e ".[dev]" -c constraints.txt
 TRET_PACKS_DIR=../packs .venv/bin/uvicorn tret.main:app --reload
-# CI installs the same way but adds `-c constraints.txt`, pinning every
-# dependency (direct and transitive) to the versions CI is known to pass
-# against. If lint/tests are green for you but red in CI (or vice versa), a
-# dependency drift is the first thing to rule out:
-#   .venv/bin/pip install -e ".[dev]" -c constraints.txt
+# There is no `make install` — the Makefile only runs an already-set-up venv
+# (`make backend`/`test`/`lint`), so this pip install is the one place the
+# constraint file has to be named explicitly.
 
 # Frontend (proxies /api to :8000)
 cd frontend && npm install && npm run dev

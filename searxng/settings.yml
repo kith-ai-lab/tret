@@ -12,11 +12,17 @@
 use_default_settings: true
 
 server:
-  # Change this for anything longer-lived than a local demo — it signs
-  # SearXNG's own session data. ${SEARXNG_SECRET:-...} mirrors this repo's
-  # .env.example convention for documenting a default; SearXNG does not expand
-  # it itself, so replace the literal string if you deploy this for real.
-  secret_key: "${SEARXNG_SECRET:-change-me-searxng}"
+  # Signs SearXNG's own session data. Neither SearXNG nor Compose expands a
+  # `${VAR:-default}` form written *inside* this file — Compose only
+  # interpolates docker-compose.yml itself, and the searxng/searxng image's
+  # entrypoint has no SEARXNG_SECRET env var at all (verified against its
+  # actual container/entrypoint.sh: it only ever writes a random secret when
+  # no settings.yml exists yet at the mount, which is never true here since
+  # this file is that mount). So the plain string below is what SearXNG
+  # actually uses — change it before running the `search` compose profile
+  # beyond a local demo. See the searxng service in docker-compose.yml for
+  # the one-line command to generate and substitute a real one.
+  secret_key: "change-me-searxng"
   # Deliberately off: SearXNG's limiter is aimed at a metasearch instance
   # exposed to the public internet (bot/scrape throttling). This instance has
   # no exposed port and no client but tret's backend, so the limiter would only

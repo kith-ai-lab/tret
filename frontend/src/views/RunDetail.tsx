@@ -200,6 +200,11 @@ export function RunDetailView() {
           <div className="mono-label" style={{ marginBottom: 6 }}>
             Tool activity ({items.length})
           </div>
+          {isLive && stream.truncatedItems > 0 && (
+            <div style={{ marginBottom: 6, color: 'var(--text-muted)' }}>
+              {stream.truncatedItems} earlier items not shown
+            </div>
+          )}
           <div className="stack" style={{ gap: 4 }}>
             {items.map((item, i) => (
               <ToolItemRow key={i} item={item} />

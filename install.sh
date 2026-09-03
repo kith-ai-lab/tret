@@ -9,6 +9,12 @@
 #   curl -fsSL https://raw.githubusercontent.com/voiz-academy/tret/main/install.sh | bash
 # are the same script. Edit it here, nowhere else.
 #
+# curl|bash runs this without you ever seeing it. If you'd rather read it
+# first — reasonable, for anything that's about to touch your filesystem and
+# start Docker containers — see README.md's "Install" section for the
+# clone-then-run alternative: `git clone`, read this file, then `./install.sh`
+# from the checkout. Same script either way.
+#
 # What it does, in order: checks for Docker and git, clones (or updates)
 # github.com/voiz-academy/tret into ~/kith-tret, creates a .env from the
 # shipped example, builds and starts the containers, waits until tret answers,

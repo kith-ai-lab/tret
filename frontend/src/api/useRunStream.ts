@@ -108,6 +108,10 @@ export interface UsageInfo {
 export interface RunStreamState {
   text: string
   items: StreamItem[]
+  /** How many tool_call/tool_result/finding_recorded items have been dropped
+   *  from the front of `items` to hold it at MAX_ITEMS. Zero for the common
+   *  case of a run that never grows past the cap. */
+  truncatedItems: number
   routing: RoutingDecision | null
   /** Where the prompt tokens went, as published right after routing — so the
    *  breakdown is available at second one of the run rather than only after it
@@ -131,6 +135,7 @@ export interface RunStreamState {
 const initialState: RunStreamState = {
   text: '',
   items: [],
+  truncatedItems: 0,
   routing: null,
   composition: null,
   budget: null,
@@ -148,6 +153,26 @@ const initialState: RunStreamState = {
  *  is over and the event bus has already released its backlog), so every
  *  reconnect is answered with another immediate close. */
 const MAX_SILENT_RECONNECTS = 5
+
+/** Cap on `RunStreamState.items`. A long-running run can emit thousands of
+ *  tool calls/results; keeping every one of them alive as a growing spread
+ *  copy on each event is an unbounded-memory footgun for a tab left open. The
+ *  most recent entries matter far more than the earliest ones, so once the
+ *  cap is hit the oldest are dropped and counted in `truncatedItems`. */
+const MAX_ITEMS = 500
+
+/** Appends one item to `items`, holding the array at MAX_ITEMS by dropping
+ *  from the front and folding the drop into `truncatedItems`. */
+function appendItem(
+  items: StreamItem[],
+  truncatedItems: number,
+  item: StreamItem,
+): { items: StreamItem[]; truncatedItems: number } {
+  const next = [...items, item]
+  if (next.length <= MAX_ITEMS) return { items: next, truncatedItems }
+  const overflow = next.length - MAX_ITEMS
+  return { items: next.slice(overflow), truncatedItems: truncatedItems + overflow }
+}
 
 /** Is this `error` event a frame the server sent, or EventSource's own transport
  *  failure? The engine's frames always carry a JSON `data` string; a transport
@@ -240,31 +265,33 @@ export function useRunStream(runId: string | null): RunStreamState {
     on('tool_call', (d) =>
       setState((s) => ({
         ...s,
-        items: [
-          ...s.items,
-          { kind: 'tool_call', id: String(d.id ?? ''), tool: String(d.tool ?? '?'), arguments: d.arguments ?? {} },
-        ],
+        ...appendItem(s.items, s.truncatedItems, {
+          kind: 'tool_call',
+          id: String(d.id ?? ''),
+          tool: String(d.tool ?? '?'),
+          arguments: d.arguments ?? {},
+        }),
       })),
     )
     on('tool_result', (d) =>
       setState((s) => ({
         ...s,
-        items: [
-          ...s.items,
-          {
-            kind: 'tool_result',
-            id: String(d.id ?? ''),
-            tool: String(d.tool ?? '?'),
-            error: Boolean(d.error),
-            result: String(d.result ?? ''),
-          },
-        ],
+        ...appendItem(s.items, s.truncatedItems, {
+          kind: 'tool_result',
+          id: String(d.id ?? ''),
+          tool: String(d.tool ?? '?'),
+          error: Boolean(d.error),
+          result: String(d.result ?? ''),
+        }),
       })),
     )
     on('finding_recorded', (d) =>
       setState((s) => ({
         ...s,
-        items: [...s.items, { kind: 'finding_recorded', finding_id: String(d.finding_id ?? '') }],
+        ...appendItem(s.items, s.truncatedItems, {
+          kind: 'finding_recorded',
+          finding_id: String(d.finding_id ?? ''),
+        }),
       })),
     )
     on('usage', (d) =>
