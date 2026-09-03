@@ -157,6 +157,23 @@ def _discovery_url(issuer: str) -> str:
     return issuer.rstrip("/") + "/.well-known/openid-configuration"
 
 
+def _normalized_issuer(issuer: str) -> tuple[str, str, str]:
+    """(scheme, host, path) for comparing two issuer strings per OIDC Core
+    4.3: the discovery document's `issuer` must equal the issuer URL it was
+    fetched from. A bare trailing slash is not a real difference (`_discovery_url`
+    strips one to build the fetch URL in the first place), so it is stripped
+    here too, on both sides, before anything else. Scheme and path compare
+    case-sensitively, as the spec's URL-equality rule does; the host does not,
+    since DNS names are case-insensitive."""
+    issuer = issuer.strip()
+    if not issuer.startswith(("http://", "https://")):
+        issuer = f"https://{issuer}"
+    if issuer.endswith("/"):
+        issuer = issuer[:-1]
+    parsed = urlsplit(issuer)
+    return (parsed.scheme, parsed.netloc.lower(), parsed.path)
+
+
 def _oidc_policy(url: str) -> ClassPolicy:
     """A one-URL allowlist scoped to whatever host this particular call is
     reaching — see the module docstring's Egress section for why this is not
@@ -199,10 +216,31 @@ async def _discovery(issuer: str) -> dict:
         return cached[1]
     metadata = await _get_json(_discovery_url(issuer))
     for required in ("authorization_endpoint", "token_endpoint", "jwks_uri", "issuer"):
-        if not metadata.get(required):
+        # Not just truthiness: a discovery document is attacker- or
+        # misconfiguration-controlled JSON, and `_normalized_issuer` below
+        # calls `.strip()` on this value unconditionally. A non-string here
+        # (e.g. an IdP that serves `"issuer": 12345`) must fail the same way
+        # a missing field does (502), not blow up as an unhandled 500.
+        value = metadata.get(required)
+        if not isinstance(value, str) or not value:
             raise HTTPException(
                 502, f"The identity provider's discovery document is missing '{required}'"
             )
+    # OIDC Core 4.3: the discovery document's `issuer` MUST equal the issuer
+    # URL it was fetched from — presence alone (checked above) is not enough,
+    # because the `iss` claim value this module trusts at id_token-verification
+    # time (below, in `_callback`) comes straight from this field. Without this
+    # check, an IdP (or a document served from an unexpected host on the way
+    # to it) could claim to be a different issuer than the one an operator
+    # configured, and that claim would be trusted uncritically. Not cached on
+    # mismatch: caching a bad document would keep serving the mismatch for the
+    # full TTL even after the underlying problem is fixed.
+    if _normalized_issuer(metadata["issuer"]) != _normalized_issuer(issuer):
+        raise HTTPException(
+            502,
+            "The identity provider's discovery document issuer does not match "
+            "TRET_OIDC_ISSUER",
+        )
     _discovery_cache[issuer] = (now, metadata)
     return metadata
 

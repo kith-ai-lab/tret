@@ -30,6 +30,36 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## Harness authoring now requires the admin or owner workspace role (2026-09-03)
+
+Creating, updating or archiving a harness (`POST`/`PATCH`/`DELETE` under
+`/api/harnesses`) now requires the `admin` or `owner` workspace role — the
+same gate `pack_builder.py` already applied to packs. Reading harnesses
+(`list`/`get`) is unaffected; every member can still see and run one.
+
+This only changes behavior for a **self-host install running with
+`TRET_MULTI_TENANT=false`** (the single shared-workspace mode). In that mode
+a user's workspace role has always been their account role, so an `analyst`
+or `approver` account that used to be able to create or edit harnesses will
+now get `403 Forbidden` on those three endpoints. Multi-tenant deployments
+are unaffected: every user is already `owner` of their own personal
+workspace there.
+
+If you run self-host with non-admin accounts that author harnesses, promote
+them to `admin` (or `owner`) in that workspace:
+
+```bash
+curl -X PATCH "$TRET_URL/api/workspaces/<workspace_id>/members/<user_id>" \
+  -H "Content-Type: application/json" \
+  -H "Cookie: <your admin/owner session cookie>" \
+  -d '{"role": "admin"}'
+```
+
+(the same `PATCH .../members/{user_id}` endpoint the frontend's member-role
+picker uses) — or promote the account's global role at creation time via
+`POST /api/auth/users`. No migration or restart is needed; the new gate takes
+effect on the next request.
+
 ## Upgrading from bench (the rename to tret)
 
 bench was renamed to **tret**. The schema is untouched — the rename runs no

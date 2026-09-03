@@ -636,6 +636,62 @@ def test_authlib_supported_algs_pin_matches_installed_authlib():
     assert oidc._AUTHLIB_SUPPORTED_ALGS == frozenset(installed_default_jwt._jws._algorithms)
 
 
+# ── discovery document issuer must match TRET_OIDC_ISSUER (OIDC Core 4.3) ────
+
+
+def test_discovery_issuer_mismatch_is_refused_at_login(client, db):
+    """The discovery document's `issuer` naming a different host than the
+    configured TRET_OIDC_ISSUER must refuse login up front (502), not be
+    trusted as the `iss` an id_token is later checked against."""
+    db.add(_workspace("Default"))
+    discovery = _discovery_doc(issuer="https://attacker.example.test/")
+
+    with respx.mock(assert_all_called=False) as respx_mock:
+        respx_mock.get(f"{ISSUER_URL}/.well-known/openid-configuration").mock(
+            return_value=httpx.Response(200, json=discovery)
+        )
+        resp = client.get("/api/auth/oidc/login", params={"next": "/"}, follow_redirects=False)
+    assert resp.status_code == 502
+    assert "issuer" in resp.text.lower()
+    # Not cached: a bad document must not keep being served for the TTL after
+    # the underlying mismatch is fixed.
+    assert ISSUER_HOST not in oidc._discovery_cache
+
+
+def test_discovery_non_string_issuer_is_refused_with_502(client, db):
+    """A discovery document is attacker- or misconfiguration-controlled JSON;
+    the required-fields check must not just check truthiness (`12345` is
+    truthy) but also type, because `_normalized_issuer` unconditionally calls
+    `.strip()` on this value. Before the fix this raised an unhandled
+    AttributeError (500); it must instead be refused the same way a missing
+    field is (502)."""
+    db.add(_workspace("Default"))
+    discovery = _discovery_doc(issuer=12345)
+
+    with respx.mock(assert_all_called=False) as respx_mock:
+        respx_mock.get(f"{ISSUER_URL}/.well-known/openid-configuration").mock(
+            return_value=httpx.Response(200, json=discovery)
+        )
+        resp = client.get("/api/auth/oidc/login", params={"next": "/"}, follow_redirects=False)
+    assert resp.status_code == 502
+    assert "issuer" in resp.text.lower()
+    assert ISSUER_HOST not in oidc._discovery_cache
+
+
+def test_discovery_issuer_differing_only_by_trailing_slash_is_accepted(client, db):
+    """OIDC Core's URL-equality rule tolerates a single trailing slash — the
+    configured issuer (bare host, no scheme) normalizes to
+    `https://issuer.example.test`, and the fixture's default discovery
+    document already advertises `https://issuer.example.test/`, so the round
+    trip must keep working exactly as it did before this check existed."""
+    db.add(_workspace("Default"))
+    discovery = _discovery_doc(issuer=f"{ISSUER_URL}/")
+
+    response = _round_trip(client, discovery=discovery)
+    assert response.status_code == 302
+    assert ISSUER_HOST in oidc._discovery_cache
+
+
 # ── verified-email link / collisions ─────────────────────────────────────────
 def test_verified_email_auto_links_and_keeps_the_password(client, db):
     sole = _workspace("Default")

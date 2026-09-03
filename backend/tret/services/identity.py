@@ -40,8 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.config import get_settings
 from tret.db.models import Invite, User, Workspace, WorkspaceMember
-from tret.engine.extensions import get_extension_registry
-from tret.services.workspace import create_workspace
+from tret.services.workspace import create_workspace, redeem_workspace_seat
 
 
 def _as_utc(dt: datetime) -> datetime:
@@ -85,12 +84,21 @@ async def _redeem_invites_and_resolve_workspace(
     insensitively in Python (`.lower()`), and the pending set is small — an
     operator's whole outstanding-invite backlog, not a table this filters
     into a slice worth pushing into SQL.
+
+    Ordered by `workspace_id`: the loop below takes a `SELECT ... FOR UPDATE`
+    on each invite's Workspace (inside `redeem_workspace_seat`) within this
+    one transaction. Two concurrent logins each redeeming invites to the same
+    two workspaces in opposite orders would otherwise lock them in opposite
+    orders too and deadlock on Postgres; a fixed, shared order across every
+    caller rules that out.
     """
     redeemed_workspace_id: uuid.UUID | None = None
     if email_verified:
         now = datetime.now(timezone.utc)
         pending = (
-            await db.execute(select(Invite).where(Invite.status == "pending"))
+            await db.execute(
+                select(Invite).where(Invite.status == "pending").order_by(Invite.workspace_id)
+            )
         ).scalars().all()
         matching = [
             inv for inv in pending
@@ -105,15 +113,12 @@ async def _redeem_invites_and_resolve_workspace(
                 # rather than failing the login. The invite link still works
                 # later if a seat frees up; the sign-in that happened to
                 # arrive while the workspace was full just doesn't jump the
-                # queue.
-                gate = await get_extension_registry().check_workspace_gate(
-                    db, invite.workspace_id, "invite_redeem"
-                )
+                # queue. Same lock-then-gate-then-insert helper
+                # `api/workspaces.py::accept_invite` uses, so the two
+                # redemption paths cannot drift apart on this sequence.
+                gate = await redeem_workspace_seat(db, invite.workspace_id, user.id, invite.role)
                 if not gate.allowed:
                     continue
-                db.add(
-                    WorkspaceMember(user_id=user.id, workspace_id=invite.workspace_id, role=invite.role)
-                )
             invite.status = "accepted"
             redeemed_workspace_id = invite.workspace_id
         if matching:

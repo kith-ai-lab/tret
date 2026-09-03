@@ -32,7 +32,11 @@ from tret.db.engine import get_db
 from tret.db.models import WORKSPACE_ROLES, Invite, User, Workspace, WorkspaceMember
 from tret.engine.extensions import get_extension_registry
 from tret.services.mailer import send_invite_email
-from tret.services.workspace import create_workspace
+from tret.services.workspace import (
+    create_workspace,
+    lock_workspace_for_seat_gate,
+    redeem_workspace_seat,
+)
 
 router = APIRouter(prefix="/api/workspaces", tags=["workspaces"])
 invite_accept_router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -294,6 +298,11 @@ async def create_invite(
     if not email or "@" not in email:
         raise HTTPException(422, "a valid email is required")
 
+    # Same lock as seat redemption (services/workspace.py::redeem_workspace_seat)
+    # ahead of its own gate, for the same reason: without it, two concurrent
+    # invite creations at seats-minus-one could each see one seat "free" from
+    # their own fresh gate session and both be allowed.
+    await lock_workspace_for_seat_gate(db, ctx.id)
     gate = await get_extension_registry().check_workspace_gate(db, ctx.id, "invite")
     if not gate.allowed:
         raise HTTPException(403, detail={"reason": gate.reason, "detail": gate.detail})
@@ -384,15 +393,15 @@ async def accept_invite(
 
     member = await db.get(WorkspaceMember, (user.id, invite.workspace_id))
     if member is None:
-        # Same seat-limit checkpoint services/identity.py's OIDC-login
-        # redemption asks — a link visited by an already-logged-in user is
-        # otherwise a second, ungated door into a seat-limited team. The
-        # invite is left pending (not consumed): a freed-up seat later, or a
-        # different account, can still use it.
-        gate = await get_extension_registry().check_workspace_gate(db, invite.workspace_id, "invite_redeem")
+        # Same seat-limit checkpoint (now the same helper, too — see
+        # services/workspace.py::redeem_workspace_seat) services/identity.py's
+        # OIDC-login redemption asks — a link visited by an already-logged-in
+        # user is otherwise a second, ungated door into a seat-limited team.
+        # The invite is left pending (not consumed): a freed-up seat later,
+        # or a different account, can still use it.
+        gate = await redeem_workspace_seat(db, invite.workspace_id, user.id, invite.role)
         if not gate.allowed:
             raise HTTPException(403, detail={"reason": gate.reason, "detail": gate.detail})
-        db.add(WorkspaceMember(user_id=user.id, workspace_id=invite.workspace_id, role=invite.role))
     invite.status = "accepted"
     await db.commit()
 

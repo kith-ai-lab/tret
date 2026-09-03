@@ -684,6 +684,180 @@ async def test_invite_creation_is_blocked_by_a_registered_workspace_gate(client,
     assert response.json()["detail"]["reason"] == "seat_limit"
 
 
+# ── seat-gate race: lock -> gate -> write is one shared helper ─────────────
+#
+# `check_workspace_gate` counts seats against its own fresh session, isolated
+# from the caller's transaction — two concurrent redemptions at
+# seats-minus-one could otherwise both see "one seat free" and both be
+# allowed. The fix (services/workspace.py::lock_workspace_for_seat_gate /
+# redeem_workspace_seat) needs two live transactions to actually race, which
+# sqlite/httpx-in-one-process cannot reproduce — same limitation
+# `test_owner_count_query_requests_row_locking` above already accepts for the
+# sibling TOCTOU on owner counts. What these tests check instead: the lock is
+# actually requested (`with_for_update`), and both invite-redemption call
+# sites — `api/workspaces.py::accept_invite` and
+# `services/identity.py::_redeem_invites_and_resolve_workspace` — go through
+# the exact same helper rather than each rolling their own version of it.
+
+
+async def test_lock_workspace_for_seat_gate_requests_row_locking():
+    """`with_for_update`, same defense `test_owner_count_query_requests_row_
+    locking` above gives `_owner_count`'s query: without it, two concurrent
+    seat redemptions for one workspace could both read the same "seats
+    remaining" snapshot from the gate's own fresh session and both proceed."""
+    from tret.services import workspace as workspace_service
+
+    captured = {}
+
+    class RecordingSession:
+        async def execute(self, stmt):
+            captured["stmt"] = stmt
+
+            class _Result:
+                def scalars(self):
+                    return self
+
+                def all(self):
+                    return []
+
+            return _Result()
+
+    await workspace_service.lock_workspace_for_seat_gate(RecordingSession(), uuid.uuid4())
+    assert captured["stmt"]._for_update_arg is not None
+
+
+async def test_accept_invite_uses_the_shared_seat_redemption_helper(client, seed, monkeypatch):
+    """API-side invite redemption (accept_invite) must go through
+    `redeem_workspace_seat` — not a copy of its lock/gate/insert sequence —
+    so the two redemption paths cannot drift apart. The real implementation
+    still runs underneath (this only records the call), so this also proves
+    behaviour is unchanged on sqlite: the accept still succeeds normally."""
+    team = make_workspace("Climate Co")
+    owner = make_user("owner-helper@example.com")
+    invitee = make_user("invitee-helper@example.com")
+    invite = make_invite(team, email=invitee.email, role="approver")
+    await seed(team, owner, invitee, make_member(owner, team, role="owner"), invite)
+    await login(client, invitee.email)
+
+    calls = []
+    original = workspaces_api.redeem_workspace_seat
+
+    async def recording(db, workspace_id, user_id, role):
+        calls.append((workspace_id, user_id, role))
+        return await original(db, workspace_id, user_id, role)
+
+    monkeypatch.setattr(workspaces_api, "redeem_workspace_seat", recording)
+
+    response = await client.post(f"/api/auth/invites/{invite.token}/accept")
+    assert response.status_code == 200, response.text
+    assert calls == [(team.id, invitee.id, "approver")]
+
+
+async def test_create_invite_locks_the_workspace_before_the_gate(client, seed, monkeypatch):
+    """Invite *creation* (create_invite) takes the same row lock ahead of
+    its own "invite" gate, for the identical reason — two concurrent invite
+    creations at seats-minus-one must not both pass."""
+    team = make_workspace("Climate Co")
+    owner = make_user("owner-lock@example.com")
+    await seed(team, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    calls = []
+    original = workspaces_api.lock_workspace_for_seat_gate
+
+    async def recording(db, workspace_id):
+        calls.append(workspace_id)
+        return await original(db, workspace_id)
+
+    monkeypatch.setattr(workspaces_api, "lock_workspace_for_seat_gate", recording)
+
+    response = await client.post(
+        f"/api/workspaces/{team.id}/invites", json={"email": "x@example.com"}
+    )
+    assert response.status_code == 200, response.text
+    assert calls == [team.id]
+
+
+async def test_oidc_login_redemption_uses_the_shared_seat_redemption_helper(session_factory, seed, monkeypatch):
+    """The OIDC-login redemption path (services/identity.py::_redeem_invites_
+    and_resolve_workspace) must go through the exact same
+    `redeem_workspace_seat` helper as the API path above — not its own
+    hand-rolled lock/gate/insert — so the two cannot drift apart. Driven
+    directly against the real function (rather than through a full OIDC
+    round trip) since this file has no OIDC router mounted; the real
+    implementation still runs underneath, so a normal (unblocked) redemption
+    on sqlite is still proven to work exactly as before."""
+    from tret.services import identity as identity_module
+
+    team = make_workspace("Climate Co")
+    invitee = make_user("invitee-oidc-helper@example.com")
+    invite = make_invite(team, email=invitee.email, role="approver")
+    await seed(team, invitee, invite)
+
+    calls = []
+    original = identity_module.redeem_workspace_seat
+
+    async def recording(db, workspace_id, user_id, role):
+        calls.append((workspace_id, user_id, role))
+        return await original(db, workspace_id, user_id, role)
+
+    monkeypatch.setattr(identity_module, "redeem_workspace_seat", recording)
+
+    async with session_factory() as db:
+        user = await db.get(User, invitee.id)
+        resolved = await identity_module._redeem_invites_and_resolve_workspace(
+            db, user, invitee.email.strip().lower(), True, fallback_workspace_id=None
+        )
+
+    assert calls == [(team.id, invitee.id, "approver")]
+    assert resolved == team.id
+
+
+async def test_oidc_login_redemption_locks_workspaces_in_workspace_id_order(
+    session_factory, seed, monkeypatch
+):
+    """Each invite redeemed here takes a `SELECT ... FOR UPDATE` on its
+    Workspace (via `redeem_workspace_seat`), all inside one transaction. Two
+    concurrent OIDC logins each redeeming invites to the same two workspaces
+    in opposite orders could lock them in opposite orders too and deadlock
+    on Postgres — the pending-invite query is ordered by `Invite.workspace_id`
+    so every caller locks in the same sequence, not creation order.
+
+    The invite to the higher-id workspace is seeded first on purpose: if
+    redemption followed insertion order instead of `workspace_id`, it would
+    be redeemed (and land the session) first too."""
+    from tret.services import identity as identity_module
+
+    ws_low, ws_high = make_workspace("Low"), make_workspace("High")
+    if ws_low.id > ws_high.id:
+        ws_low, ws_high = ws_high, ws_low
+    assert ws_low.id < ws_high.id
+
+    invitee = make_user("invitee-order@example.com")
+    invite_high = make_invite(ws_high, email=invitee.email, role="approver")
+    invite_low = make_invite(ws_low, email=invitee.email, role="approver")
+    await seed(ws_low, ws_high, invitee, invite_high, invite_low)
+
+    locked_order = []
+    original = identity_module.redeem_workspace_seat
+
+    async def recording(db, workspace_id, user_id, role):
+        locked_order.append(workspace_id)
+        return await original(db, workspace_id, user_id, role)
+
+    monkeypatch.setattr(identity_module, "redeem_workspace_seat", recording)
+
+    async with session_factory() as db:
+        user = await db.get(User, invitee.id)
+        resolved = await identity_module._redeem_invites_and_resolve_workspace(
+            db, user, invitee.email.strip().lower(), True, fallback_workspace_id=None
+        )
+
+    assert locked_order == [ws_low.id, ws_high.id]
+    # Lands on the last-redeemed workspace, i.e. the higher id, given this order.
+    assert resolved == ws_high.id
+
+
 # ── personal workspaces: permanently single-member ──────────────────────────
 async def test_a_personal_workspace_can_never_be_invited_to(client, seed):
     user = make_user("me18@example.com")

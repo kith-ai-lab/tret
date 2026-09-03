@@ -24,6 +24,7 @@ the pack-agnostic General Assistant harness.
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 
 from sqlalchemy import select
@@ -31,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.config import get_settings
 from tret.db.models import Harness, Project, User, Workspace, WorkspaceMember
+from tret.engine.extensions import GateResult, get_extension_registry
 from tret.packs.loader import PackValidationError, install_pack
 
 log = logging.getLogger("tret.workspace")
@@ -271,3 +273,62 @@ async def _seed_default_harnesses(db: AsyncSession, workspace_id) -> None:
             tool_names=["read_document", "search_documents", "lookup_dataset", "list_prior_findings"],
         )
     )
+
+
+# ── seat-limit gates: lock -> gate -> write, as one unit ─────────────────────
+#
+# `check_workspace_gate` (engine/extensions.py) counts seats against a *fresh*
+# session, isolated from the caller's own transaction by design — necessary
+# so a broken extension gate can never poison the caller's transaction on
+# Postgres, but it means the count and the caller's own write (a new
+# WorkspaceMember, or a new Invite) are not one atomic read-then-write: two
+# concurrent callers at seats-minus-one can each see "one seat free" from
+# their own fresh gate session, both get `allowed=True`, and both insert —
+# one seat over the limit, seen only under real concurrency (SQLite/test
+# concurrency never reproduces it; two callers there run in the same
+# process, never truly overlapping).
+#
+# The fix does not touch the gate's session isolation (that guarantee is
+# worth keeping). Instead, `lock_workspace_for_seat_gate` takes a `SELECT ...
+# FOR UPDATE` on the target Workspace row in the *caller's* transaction,
+# before the gate is asked anything. On Postgres this makes the whole
+# "lock -> gate -> write -> commit" span for one workspace serialize across
+# concurrent callers: a second caller's own lock acquisition blocks until
+# the first commits (releasing it), so by the time the second reaches the
+# gate, the first's write is already visible to the gate's fresh-session
+# count. On SQLite, `.with_for_update()` compiles to no row locking at all
+# (the dialect has none) — a no-op, which is fine: every SQLite deployment
+# here is self-host's single-worker process (docs/hardening.md), so there is
+# no second concurrent request to race against in the first place.
+#
+# Both invite-redemption call sites (`api/workspaces.py::accept_invite` and
+# `services/identity.py::_redeem_invites_and_resolve_workspace`) go through
+# `redeem_workspace_seat` so this exact sequence cannot drift between them;
+# `create_invite`'s own "invite" gate (api/workspaces.py) takes the same lock
+# directly, since it writes an Invite, not a WorkspaceMember.
+async def lock_workspace_for_seat_gate(db: AsyncSession, workspace_id: uuid.UUID) -> None:
+    """Row-lock the target workspace in the caller's own transaction, ahead
+    of asking a seat-limit workspace gate about it. Must be called (and the
+    lock held, i.e. the transaction kept open) until whatever the gate
+    permitted is committed — see the section docstring above."""
+    await db.execute(select(Workspace.id).where(Workspace.id == workspace_id).with_for_update())
+
+
+async def redeem_workspace_seat(
+    db: AsyncSession, workspace_id: uuid.UUID, user_id: uuid.UUID, role: str
+) -> GateResult:
+    """Lock the workspace, ask the `invite_redeem` seat gate, and — only if
+    it allows — `db.add()` the new WorkspaceMember. The caller still commits
+    (this never commits itself, matching every other write helper in this
+    module): both invite-acceptance call sites have their own surrounding
+    transaction and their own "what to do on refusal" behavior (leave the
+    invite pending; try the next one; etc).
+
+    Returns the `GateResult` either way so the caller can react to a refusal
+    exactly as it did before this helper existed.
+    """
+    await lock_workspace_for_seat_gate(db, workspace_id)
+    gate = await get_extension_registry().check_workspace_gate(db, workspace_id, "invite_redeem")
+    if gate.allowed:
+        db.add(WorkspaceMember(user_id=user_id, workspace_id=workspace_id, role=role))
+    return gate

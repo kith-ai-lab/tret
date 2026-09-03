@@ -66,6 +66,14 @@ const emptyForm: HarnessBody = {
 
 export function Harnesses() {
   const harnessesQuery = useQuery({ queryKey: ['harnesses'], queryFn: api.listHarnesses })
+  // Authoring (create/update/archive) needs workspace-admin or higher — the
+  // server enforces this (require_workspace_admin in api/harnesses.py); this
+  // is purely so an analyst isn't shown controls that would just 403. Same
+  // ['owner', 'admin'].includes(me.role) check SettingsView uses for its own
+  // admin-only member-management controls. Defaults to false (hidden) while
+  // `me` is still loading, rather than flashing enabled controls first.
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const canAuthor = ['owner', 'admin'].includes(meQuery.data?.role ?? '')
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   const harnesses = harnessesQuery.data ?? []
@@ -98,13 +106,15 @@ export function Harnesses() {
           listWidth={230}
           list={
             <>
-              <button
-                className="btn btn-primary btn-sm"
-                style={{ marginBottom: 10 }}
-                onClick={() => setSelectedId(NEW_ID)}
-              >
-                + New harness
-              </button>
+              {canAuthor && (
+                <button
+                  className="btn btn-primary btn-sm"
+                  style={{ marginBottom: 10 }}
+                  onClick={() => setSelectedId(NEW_ID)}
+                >
+                  + New harness
+                </button>
+              )}
               {harnesses.length === 0 && (
                 <div className="empty" style={{ padding: '8px 0' }}>
                   No harnesses yet.
@@ -123,9 +133,14 @@ export function Harnesses() {
           }
           detail={
             selectedId === NEW_ID ? (
-              <HarnessEditor key={NEW_ID} harness={null} onSaved={(h) => setSelectedId(h.id)} />
+              <HarnessEditor
+                key={NEW_ID}
+                harness={null}
+                canAuthor={canAuthor}
+                onSaved={(h) => setSelectedId(h.id)}
+              />
             ) : selectedId ? (
-              <HarnessEditorLoader key={selectedId} harnessId={selectedId} />
+              <HarnessEditorLoader key={selectedId} harnessId={selectedId} canAuthor={canAuthor} />
             ) : null
           }
         />
@@ -134,7 +149,13 @@ export function Harnesses() {
   )
 }
 
-function HarnessEditorLoader({ harnessId }: { harnessId: string }) {
+function HarnessEditorLoader({
+  harnessId,
+  canAuthor,
+}: {
+  harnessId: string
+  canAuthor: boolean
+}) {
   const detailQuery = useQuery({
     queryKey: ['harness', harnessId],
     queryFn: () => api.getHarness(harnessId),
@@ -147,6 +168,7 @@ function HarnessEditorLoader({ harnessId }: { harnessId: string }) {
     <HarnessEditor
       harness={detailQuery.data}
       assembledPrompt={detailQuery.data.assembled_system_prompt}
+      canAuthor={canAuthor}
     />
   )
 }
@@ -154,10 +176,12 @@ function HarnessEditorLoader({ harnessId }: { harnessId: string }) {
 function HarnessEditor({
   harness,
   assembledPrompt,
+  canAuthor,
   onSaved,
 }: {
   harness: Harness | null
   assembledPrompt?: string
+  canAuthor: boolean
   onSaved?: (h: Harness) => void
 }) {
   const queryClient = useQueryClient()
@@ -272,12 +296,20 @@ function HarnessEditor({
             type="button"
             className="btn btn-danger btn-sm"
             onClick={() => archiveMutation.mutate()}
-            disabled={archiveMutation.isPending}
+            disabled={!canAuthor || archiveMutation.isPending}
+            title={canAuthor ? undefined : 'Only workspace admins and owners can archive harnesses.'}
           >
             Archive
           </button>
         )}
       </div>
+
+      {!canAuthor && (
+        <div className="empty" style={{ padding: '4px 0' }}>
+          Only workspace admins and owners can create or edit harnesses — the server enforces this
+          too, so changes below won&rsquo;t save.
+        </div>
+      )}
 
       <div className="panel">
         <div className="field">
@@ -693,7 +725,12 @@ function HarnessEditor({
       )}
 
       <div className="row">
-        <button className="btn btn-primary" type="submit" disabled={saveMutation.isPending || !form.name.trim()}>
+        <button
+          className="btn btn-primary"
+          type="submit"
+          disabled={!canAuthor || saveMutation.isPending || !form.name.trim()}
+          title={canAuthor ? undefined : 'Only workspace admins and owners can create or edit harnesses.'}
+        >
           {saveMutation.isPending ? 'Saving…' : harness ? 'Save changes' : 'Create harness'}
         </button>
         {saveMutation.isSuccess && <span className="mono-label" style={{ color: 'var(--green)' }}>saved</span>}

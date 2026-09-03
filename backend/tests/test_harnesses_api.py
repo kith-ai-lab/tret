@@ -299,3 +299,124 @@ async def test_get_detail_unions_task_types_across_linked_packs(client, seed):
         ("task_a", "pack-a", str(pack_a.id)),
         ("task_b", "pack-b", str(pack_b.id)),
     ]
+
+
+# ── authoring requires workspace-admin ──────────────────────────────────────
+
+
+async def test_analyst_cannot_create_harness(client, seed):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    analyst = make_user("analyst@example.com")
+    await seed(team, project, analyst, make_member(analyst, team, role="analyst"))
+    await login(client, analyst.email)
+
+    response = await client.post(
+        "/api/harnesses",
+        json={"name": "Should Not Exist", "tool_names": []},
+    )
+    assert response.status_code == 403
+
+
+async def test_analyst_cannot_update_harness(client, seed):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    analyst = make_user("analyst@example.com")
+    await seed(
+        team,
+        project,
+        admin,
+        analyst,
+        make_member(admin, team, role="admin"),
+        make_member(analyst, team, role="analyst"),
+    )
+    await login(client, admin.email)
+    created = await client.post(
+        "/api/harnesses", json={"name": "Existing", "tool_names": []}
+    )
+    harness_id = created.json()["id"]
+
+    await login(client, analyst.email)
+    response = await client.put(
+        f"/api/harnesses/{harness_id}",
+        json={"name": "Renamed By Analyst", "tool_names": []},
+    )
+    assert response.status_code == 403
+
+
+async def test_analyst_cannot_archive_harness(client, seed):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    analyst = make_user("analyst@example.com")
+    await seed(
+        team,
+        project,
+        admin,
+        analyst,
+        make_member(admin, team, role="admin"),
+        make_member(analyst, team, role="analyst"),
+    )
+    await login(client, admin.email)
+    created = await client.post(
+        "/api/harnesses", json={"name": "Existing", "tool_names": []}
+    )
+    harness_id = created.json()["id"]
+
+    await login(client, analyst.email)
+    response = await client.delete(f"/api/harnesses/{harness_id}")
+    assert response.status_code == 403
+
+
+async def test_owner_can_create_update_and_archive_harness(client, seed):
+    """A personal workspace's sole member is `owner`, above `admin` in
+    ROLE_RANK, so self-host/single-user authoring is unaffected."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    owner = make_user("owner@example.com")
+    await seed(team, project, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    created = await client.post(
+        "/api/harnesses", json={"name": "Owned", "tool_names": []}
+    )
+    assert created.status_code == 200, created.text
+    harness_id = created.json()["id"]
+
+    updated = await client.put(
+        f"/api/harnesses/{harness_id}",
+        json={"name": "Owned Renamed", "tool_names": []},
+    )
+    assert updated.status_code == 200, updated.text
+
+    archived = await client.delete(f"/api/harnesses/{harness_id}")
+    assert archived.status_code == 200, archived.text
+
+
+async def test_analyst_can_still_list_and_get_harnesses(client, seed):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    analyst = make_user("analyst@example.com")
+    await seed(
+        team,
+        project,
+        admin,
+        analyst,
+        make_member(admin, team, role="admin"),
+        make_member(analyst, team, role="analyst"),
+    )
+    await login(client, admin.email)
+    created = await client.post(
+        "/api/harnesses", json={"name": "Readable", "tool_names": []}
+    )
+    harness_id = created.json()["id"]
+
+    await login(client, analyst.email)
+    listed = await client.get("/api/harnesses")
+    assert listed.status_code == 200
+    assert any(h["id"] == harness_id for h in listed.json())
+
+    detail = await client.get(f"/api/harnesses/{harness_id}")
+    assert detail.status_code == 200

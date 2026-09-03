@@ -1,3 +1,21 @@
+"""`tret/api/harnesses.py`: workspace-scoped CRUD for harnesses, the named
+model/tool/pack configurations a run is launched from.
+
+**Who can create**: gating is the workspace-admin role
+(`require_workspace_admin`) on the three write endpoints — a harness pins
+models, tool lists and packs, the same authoring surface pack_builder.py
+already gates the same way. Reads (`list`/`get`) stay open to every member:
+an analyst can see and run a harness, just not author one.
+
+Self-host behavior depends on `TRET_MULTI_TENANT`, same as everywhere else
+this flag matters (see `services/bootstrap.py`, `services/workspace.py`):
+with it on, every user is `owner` of their own personal workspace and this
+gate never binds them. With it off (the single shared-workspace case), a
+user's workspace role is their account role, so an `analyst`/`approver`
+account is genuinely blocked from harness create/update/archive by this same
+`admin`-or-higher gate — see `docs/upgrading.md` for the operator-facing note
+on this.
+"""
 from __future__ import annotations
 
 import uuid
@@ -9,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.adaptive import validation_error as adaptive_validation_error
 from tret.api.auth import current_user
-from tret.api.workspace import WorkspaceContext, current_workspace
+from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_admin
 from tret.db.engine import get_db
 from tret.db.models import Harness, Pack, User
 from tret.engine.context import assemble_system_prompt, task_config
@@ -239,7 +257,7 @@ async def get_harness(
 async def create_harness(
     body: HarnessBody,
     user: User = Depends(current_user),
-    ctx: WorkspaceContext = Depends(current_workspace),
+    ctx: WorkspaceContext = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
     _validate_policy(body.model_policy)
@@ -276,7 +294,7 @@ async def update_harness(
     harness_id: uuid.UUID,
     body: HarnessBody,
     user: User = Depends(current_user),
-    ctx: WorkspaceContext = Depends(current_workspace),
+    ctx: WorkspaceContext = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
     h = await db.get(Harness, harness_id)
@@ -297,7 +315,7 @@ async def update_harness(
 async def archive_harness(
     harness_id: uuid.UUID,
     user: User = Depends(current_user),
-    ctx: WorkspaceContext = Depends(current_workspace),
+    ctx: WorkspaceContext = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
     h = await db.get(Harness, harness_id)
