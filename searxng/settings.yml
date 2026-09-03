@@ -1,7 +1,8 @@
 # Minimal SearXNG config for the bundled `search` compose profile
-# (docker-compose.yml, service `searxng`). Mounted read-write at
-# /etc/searxng/settings.yml — SearXNG writes a few derived files next to it on
-# first boot, which is why the volume isn't :ro.
+# (docker-compose.yml, service `searxng`). Bind-mounted read-only as the
+# *source* for that service's entrypoint wrapper (./inject-secret-entrypoint.sh),
+# which copies it to /etc/searxng/settings.yml with a real secret_key
+# substituted for the placeholder below — never edited or used in place.
 #
 # This instance is internal-only (docs/hardening.md §9, tret/net/policy.py
 # CLASS_SEARCH): the backend reaches it at http://searxng:8080 on the compose
@@ -13,15 +14,16 @@ use_default_settings: true
 
 server:
   # Signs SearXNG's own session data. Neither SearXNG nor Compose expands a
-  # `${VAR:-default}` form written *inside* this file — Compose only
-  # interpolates docker-compose.yml itself, and the searxng/searxng image's
-  # entrypoint has no SEARXNG_SECRET env var at all (verified against its
-  # actual container/entrypoint.sh: it only ever writes a random secret when
-  # no settings.yml exists yet at the mount, which is never true here since
-  # this file is that mount). So the plain string below is what SearXNG
-  # actually uses — change it before running the `search` compose profile
-  # beyond a local demo. See the searxng service in docker-compose.yml for
-  # the one-line command to generate and substitute a real one.
+  # `${VAR:-default}` form written *inside* this file, and the searxng/searxng
+  # image's own entrypoint has no SEARXNG_SECRET env var at all (verified
+  # against its actual entrypoint.sh: it only ever writes a random secret when
+  # no settings.yml exists yet at the mount, which is never true once this
+  # file is copied in). So this placeholder is never what SearXNG actually
+  # runs with: the `searxng` service's entrypoint wrapper
+  # (./inject-secret-entrypoint.sh) substitutes a real secret in on every
+  # boot before SearXNG ever reads this file — generated once and persisted
+  # (or set explicitly via SEARXNG_SECRET), never this literal string. See
+  # the searxng service in docker-compose.yml.
   secret_key: "change-me-searxng"
   # Deliberately off: SearXNG's limiter is aimed at a metasearch instance
   # exposed to the public internet (bot/scrape throttling). This instance has

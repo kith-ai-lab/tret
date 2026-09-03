@@ -146,12 +146,15 @@ services:
       TRET_SKIP_MIGRATIONS: ${TRET_SKIP_MIGRATIONS:-false}
       # Single-instance enforcement (docs/hardening.md): a Postgres advisory
       # lock at boot, held for the process lifetime, since the run event bus
-      # is in-process. warn (default) logs and keeps booting if another
-      # instance holds it; strict refuses to boot; off skips the check.
+      # is in-process. The lock connection also gets aggressive TCP keepalive
+      # tuning so a crashed prior holder is reaped in well under a minute.
+      # warn (default) logs and keeps booting if another instance holds it;
+      # strict refuses to boot; off skips the check.
       TRET_INSTANCE_LOCK: ${TRET_INSTANCE_LOCK:-warn}
       # How long a losing process retries before deciding the lock is
-      # genuinely held rather than a deploy handover's old machine finishing up.
-      TRET_INSTANCE_LOCK_WAIT_SECONDS: ${TRET_INSTANCE_LOCK_WAIT_SECONDS:-30.0}
+      # genuinely held rather than a deploy handover's old machine finishing
+      # up. 90s covers a normal handover plus the keepalive reaping above.
+      TRET_INSTANCE_LOCK_WAIT_SECONDS: ${TRET_INSTANCE_LOCK_WAIT_SECONDS:-90.0}
       # Multi-tenant SaaS mode (tret_cloud). false is every self-hosted
       # deployment: one workspace, no personal-workspace-per-user seeding.
       TRET_MULTI_TENANT: ${TRET_MULTI_TENANT:-false}
@@ -286,25 +289,36 @@ services:
   # this one work at all.
   #
   # secret_key (signs SearXNG's own session data, ./searxng/settings.yml):
-  # the searxng/searxng image has no env var for this. Checked its actual
-  # entrypoint (container/entrypoint.sh in searxng/searxng@master) — it only
-  # ever writes a random secret when NO settings.yml exists yet at the mount
-  # path, by templating one out and substituting its placeholder string.
-  # Because this repo bind-mounts its own settings.yml below, that path
-  # always exists and the image's generator never runs; whatever is in the
-  # file is used byte-for-byte. So there is nothing to pass through here —
-  # a `SEARXNG_SECRET` env var would sit unread. Before running this profile
-  # beyond a local demo, generate a real secret and edit the file in place:
-  #   sed -i '' "s/change-me-searxng/$(openssl rand -hex 32)/" searxng/settings.yml   # macOS/BSD sed
-  #   sed -i "s/change-me-searxng/$(openssl rand -hex 32)/" searxng/settings.yml      # GNU sed (Linux)
+  # the searxng/searxng image has no env var for this, and only ever writes a
+  # random secret itself when NO settings.yml exists yet at its config path —
+  # checked against its actual entrypoint.sh, which this repo's own
+  # settings.yml (needed for the JSON API and limiter=false) would otherwise
+  # permanently short-circuit, shipping the placeholder in that file
+  # byte-for-byte. `entrypoint:` below overrides the image's own entrypoint
+  # with a small wrapper (./searxng/inject-secret-entrypoint.sh) that
+  # resolves a real secret — SEARXNG_SECRET if set, else one generated on
+  # first boot and persisted in the bind-mounted `.secret` dir so it survives
+  # restarts — substitutes it into a copy of settings.yml at the image's real
+  # config path, and only then hands off to the image's own entrypoint.
   searxng:
     # Pinned rather than `latest` for the same reason as `ollama` above.
     # 2026.9.3-a1144dda3 was current stable (== `latest`'s own digest,
     # checked against Docker Hub) as of this pin.
     image: searxng/searxng:2026.9.3-a1144dda3
     profiles: ["search"]
+    entrypoint: ["/searxng-src/inject-secret-entrypoint.sh"]
+    environment:
+      # Set your own to pin the secret explicitly (e.g. shared across a
+      # multi-environment setup); leave unset and the wrapper above generates
+      # and persists one on first boot. See .env.example.
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-}
     volumes:
-      - ./searxng:/etc/searxng
+      # Read-only source for the wrapper to copy from — never SearXNG's own
+      # config path, so the secret it substitutes never gets written back
+      # into this repo's checked-in settings.yml.
+      - ./searxng:/searxng-src:ro
+      # Where the wrapper persists a generated secret across restarts/recreates.
+      - ./searxng/.secret:/run/searxng-secret
     # No published port: internal network only. The backend reaches it as
     # http://searxng:8080 over the compose network — nothing else needs to,
     # and this service must never be exposed to a network beyond that (it runs

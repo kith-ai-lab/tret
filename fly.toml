@@ -17,6 +17,14 @@ primary_region = "iad"
   # force_https is on above, so the session cookie can be TLS-only.
   TRET_COOKIE_SECURE = "true"
   TRET_ROUTER_MODEL = "openrouter/openai/gpt-5.6-luna"
+  # min_machines_running = 1 below means an accidental `fly scale count 2`
+  # (or a bug in a future deploy config) is the only way this app ever runs
+  # two live instances — strict is right here because that would silently
+  # corrupt the in-process run event bus rather than just degrade it. A normal
+  # deploy handover is NOT a false positive: the new machine's boot retries
+  # for TRET_INSTANCE_LOCK_WAIT_SECONDS (90s default) before failing, which
+  # comfortably outlasts the old machine's shutdown. See docs/hardening.md §8.
+  TRET_INSTANCE_LOCK = "strict"
 
 [http_service]
   internal_port = 8000

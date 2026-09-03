@@ -6,7 +6,7 @@
 #
 # This file is the canonical copy. tret.kithailab.com serves it verbatim (the
 # site's deploy fetches it from this repo), so the pretty URL above and
-#   curl -fsSL https://raw.githubusercontent.com/voiz-academy/tret/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/kith-ai-lab/tret/main/install.sh | bash
 # are the same script. Edit it here, nowhere else.
 #
 # curl|bash runs this without you ever seeing it. If you'd rather read it
@@ -15,8 +15,18 @@
 # clone-then-run alternative: `git clone`, read this file, then `./install.sh`
 # from the checkout. Same script either way.
 #
+# Or verify the piped download itself, without cloning: README.md's "Install"
+# section also has a "verify before running" block that checks this exact
+# file against install.sh.sha256 (also in this repo's root, and CI-checked
+# against this file by backend/tests/test_install_checksum.py, so it can
+# never silently drift) before you pipe it into bash. That CI check only
+# guarantees the two files agree *in this repo* — install.sh.sha256 and the
+# install.sh copy tret.kithailab.com serves must still be deployed together,
+# in the same release, or the checksum published there would verify against
+# a script version that isn't the one actually being served.
+#
 # What it does, in order: checks for Docker and git, clones (or updates)
-# github.com/voiz-academy/tret into ~/kith-tret, creates a .env from the
+# github.com/kith-ai-lab/tret into ~/kith-tret, creates a .env from the
 # shipped example, builds and starts the containers, waits until tret answers,
 # and opens it in your browser. Nothing is installed outside that one folder and
 # Docker's own storage; `stop-tret.sh` in that folder shuts it all down again.
@@ -30,7 +40,7 @@
 #
 set -euo pipefail
 
-REPO_URL="${TRET_REPO_URL:-https://github.com/voiz-academy/tret.git}"
+REPO_URL="${TRET_REPO_URL:-https://github.com/kith-ai-lab/tret.git}"
 BRANCH="${TRET_BRANCH:-main}"
 INSTALL_DIR="${TRET_DIR:-$HOME/kith-tret}"
 FRONTEND_URL="http://localhost:5180"

@@ -114,6 +114,50 @@ def test_blank_optional_float_is_read_as_unset():
     assert Settings(local_grid_co2e_g_per_kwh="30").local_grid_co2e_g_per_kwh == 30.0
 
 
+def _searxng_service() -> dict:
+    compose = yaml.safe_load(COMPOSE.read_text())
+    return compose["services"]["searxng"]
+
+
+def test_searxng_entrypoint_is_the_secret_injecting_wrapper():
+    """The searxng/searxng image's own entrypoint writes its own settings.yml
+    only when none exists yet — this repo ships its own (for the JSON API and
+    limiter=false settings), so the wrapper at ./searxng/inject-secret-
+    entrypoint.sh must run in its place to substitute a real secret_key
+    before handing off. Losing this override would silently ship the
+    checked-in settings.yml's placeholder secret verbatim."""
+    entrypoint = _searxng_service()["entrypoint"]
+    assert entrypoint == ["/searxng-src/inject-secret-entrypoint.sh"]
+
+
+def test_searxng_source_mount_is_read_only():
+    """The wrapper copies from this mount rather than writing SearXNG's own
+    config path directly — read-only enforces that at the compose level too,
+    so the substituted secret can never end up written back into this repo's
+    checked-in settings.yml."""
+    volumes = _searxng_service()["volumes"]
+    assert any(v.startswith("./searxng:") and v.endswith(":ro") for v in volumes), (
+        f"expected a read-only ./searxng source mount, found: {volumes}"
+    )
+
+
+def test_searxng_secret_env_passthrough_is_present():
+    """Without this, an operator's SEARXNG_SECRET in .env would never reach
+    the container, and the wrapper would always fall back to a generated
+    secret regardless of what the operator set."""
+    env = _searxng_service()["environment"]
+    assert "SEARXNG_SECRET" in env
+
+
+def test_searxng_image_tag_is_pinned():
+    """`:latest` (or no tag at all) would let the image drift under an
+    operator's feet on a routine `docker compose pull`."""
+    image = _searxng_service()["image"]
+    assert ":" in image, f"searxng image has no tag at all: {image!r}"
+    tag = image.rsplit(":", 1)[1]
+    assert tag != "latest", f"searxng image must be pinned to a real tag, found {image!r}"
+
+
 def test_every_numeric_or_bool_default_in_compose_parses():
     """The empty-string trap: compose passing "" for an int/float/bool knob would
     stop the backend booting. Every default written above must be parseable."""

@@ -244,15 +244,36 @@ see [eco-accounting.md](eco-accounting.md).
   (`fly.toml`'s "Do NOT scale horizontally" comment; `docs/architecture.md`),
   so tret takes a session-level `pg_try_advisory_lock` on Postgres at boot and
   holds it on a dedicated connection for the life of the process
-  (`tret/services/instance_lock.py`). A second process retries for
-  `TRET_INSTANCE_LOCK_WAIT_SECONDS` (default 30s — sized to outlast a Fly
-  deploy handover, where the new machine starts before the old one stops)
-  before deciding the lock is genuinely held elsewhere. `TRET_INSTANCE_LOCK`
-  then decides what that means: `warn` (default) logs at `ERROR` and boots
-  anyway — a false positive must never take a deployment down; `strict`
-  refuses to boot instead, for an operator who wants that guaranteed; `off`
-  skips the check. No-op on SQLite, which has no advisory locks and is never
-  the deployment this guards against.
+  (`tret/services/instance_lock.py`). Right after opening that connection,
+  before even trying the lock, it sets aggressive TCP keepalive timing on the
+  session itself (`tcp_keepalives_idle=15`, `_interval=5`, `_count=3`) — best
+  effort, tolerated if the server refuses. That matters for the case a Fly
+  deploy handover doesn't cover: the *previous* VM crashing outright (host
+  failure, OOM kill) rather than shutting down cleanly, which leaves its lock
+  connection dangling on the Postgres side with nothing to close it. Without
+  the keepalive tuning, Postgres only notices via its own default TCP
+  keepalive probing — on the order of two hours — during which a `strict`
+  boot fails for no real reason. With it, Postgres starts probing after 15s
+  of silence and gives up after 3 failed probes 5s apart, so the dead
+  session's advisory lock is reaped in well under a minute. A second process
+  retries for `TRET_INSTANCE_LOCK_WAIT_SECONDS` (default 90s — sized to
+  outlast a normal Fly deploy handover, where the new machine starts before
+  the old one stops, *plus* that reaping window) before deciding the lock is
+  genuinely held elsewhere. `TRET_INSTANCE_LOCK` then decides what that
+  means: `warn` (default) logs at `ERROR` and boots anyway — a false
+  positive must never take a deployment down; `strict` refuses to boot
+  instead, for an operator who wants that guaranteed (this is what
+  `fly.toml` ships, since a single always-on machine makes a second live
+  instance always a bug, never an intentional scale-out); `off` skips the
+  check. No-op on SQLite, which has no advisory locks and is never the
+  deployment this guards against. The keepalive tuning only ever applies to
+  the *holder's own* lock connection, set when that connection is opened —
+  a machine already running the previous release, holding the lock under
+  the old (much slower) default timing, is unaffected by upgrading to a
+  release with this tuning until it itself restarts. Treat the first cutover
+  to this behavior as a normal rolling deploy: the old machine's handover
+  shutdown closes its lock connection cleanly regardless, so there is
+  nothing extra to do.
 
 ## 9. Outbound network: what tret may talk to
 

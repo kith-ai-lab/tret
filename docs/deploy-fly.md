@@ -8,10 +8,16 @@ so do **not** scale horizontally (see docs/architecture.md).
 `min_machines_running = 1` in `fly.toml` keeps that true in the ordinary case,
 but nothing stops a second machine existing briefly (a deploy handover) or by
 mistake (`fly scale count 2`). tret backstops this itself at boot with a
-Postgres advisory lock (`TRET_INSTANCE_LOCK`, docs/hardening.md §8) — the
-default `warn` logs loudly rather than failing a deploy over the normal
-handover overlap; set it to `strict` if you want an accidental second machine
-to fail its own boot instead.
+Postgres advisory lock (`TRET_INSTANCE_LOCK`, docs/hardening.md §8), and
+`fly.toml` ships `TRET_INSTANCE_LOCK = "strict"` — a single always-on machine
+means a second live instance is always a bug here, never an intentional
+scale-out, so a strict boot failure is the right outcome. That's safe for the
+normal handover case (`TRET_INSTANCE_LOCK_WAIT_SECONDS` defaults to 90s,
+comfortably outlasting it) and for the harder case of the *previous* machine
+crashing outright instead of shutting down cleanly: the lock connection tunes
+its own TCP keepalives at boot so Postgres reaps a dangling dead session in
+well under a minute rather than its own multi-hour default. See
+docs/hardening.md §8 for the mechanism.
 
 ## One-time setup
 

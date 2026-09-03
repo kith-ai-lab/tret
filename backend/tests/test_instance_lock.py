@@ -19,6 +19,12 @@ from tret.config import Settings, get_settings
 from tret.services import instance_lock as il
 
 
+def test_default_wait_is_ninety_seconds():
+    """90s = a normal Fly handover plus the ~30s the keepalive tuning below
+    takes to reap a crashed prior holder's dangling connection."""
+    assert Settings().instance_lock_wait_seconds == 90.0
+
+
 @pytest.fixture(autouse=True)
 def _fast_retries(monkeypatch):
     """No test here should spend real wall-clock time on the poll interval —
@@ -166,26 +172,67 @@ async def test_instance_lock_off_skips_even_on_postgres_dialect(monkeypatch):
 
 
 # ── acquire_instance_lock on Postgres: "held" vs "lost" ────────────────────────
+class _FakeResult:
+    """Stands in for the `CursorResult` `conn.execute()` returns — only
+    `.scalar()` is ever read, by `_try_lock`."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def scalar(self):
+        return self._value
+
+
 class _FakeConn:
     """Stands in for the dedicated AsyncConnection `acquire_instance_lock`
-    keeps for the process lifetime. `_try_lock` is monkeypatched in every test
-    that uses this, so `execute` is never asked to actually answer
+    keeps for the process lifetime. `_try_lock` is monkeypatched in most
+    tests that use this, so `execute` is never asked to actually answer
     `pg_try_advisory_lock` — only `release()`'s own unlock statement reaches
-    it for real.
+    it for real. A couple of tests below exercise the real (unpatched)
+    `_try_lock` instead, so `execute` answers `pg_try_advisory_lock` with a
+    real-shaped `_FakeResult(True)`.
+
+    Models real Postgres transaction semantics closely enough to catch the
+    bug `_set_session_keepalives`'s rollback fixes: once a statement raises,
+    the (implicit) transaction is left aborted, and every further statement
+    on this same connection also raises — with the same
+    "InFailedSqlTransaction"-shaped message a real refusal leaves behind —
+    until something calls `rollback()`. `raise_on={"execute"}` fails every
+    execute unconditionally (for tests that only ever issue one and don't
+    care about this distinction); `raise_on={"keepalive_set"}` fails only a
+    statement whose text names a keepalive GUC, letting a later, different
+    statement on the same (rolled-back) connection succeed — the shape the
+    real refusal takes.
     """
 
     def __init__(self, *, raise_on: set[str] | None = None):
         self.calls: list[str] = []
+        self.executed_sql: list[str] = []
         self._raise_on = raise_on or set()
+        self._failed = False
 
     async def execute(self, stmt, params=None):
         self.calls.append("execute")
-        if "execute" in self._raise_on:
+        sql = str(stmt)
+        self.executed_sql.append(sql)
+        if self._failed:
+            raise RuntimeError("current transaction is aborted, commands ignored until end of transaction block")
+        if "execute" in self._raise_on or ("keepalive_set" in self._raise_on and "tcp_keepalives" in sql):
+            self._failed = True
             raise RuntimeError("server closed the connection unexpectedly")
+        if "pg_try_advisory_lock" in sql:
+            return _FakeResult(True)
+        return _FakeResult(None)
 
     async def commit(self):
         self.calls.append("commit")
         if "commit" in self._raise_on:
+            raise RuntimeError("server closed the connection unexpectedly")
+
+    async def rollback(self):
+        self.calls.append("rollback")
+        self._failed = False
+        if "rollback" in self._raise_on:
             raise RuntimeError("server closed the connection unexpectedly")
 
     async def close(self):
@@ -217,6 +264,59 @@ class _FakePostgresEngine:
         return _FakeConnectable(self._conn)
 
 
+# ── session keepalive tuning ────────────────────────────────────────────────
+async def test_set_session_keepalives_issues_all_three_statements():
+    """The exact SQL text `_set_session_keepalives` sends, in order — this is
+    what makes a crashed prior holder's dangling connection get reaped by
+    Postgres in well under a minute instead of its own ~2 hour default. On
+    success it must also commit, closing out the implicit transaction those
+    SETs opened (see test_a_held_lock_commits_to_end_the_implicit_transaction
+    for why leaving it open is a problem)."""
+    conn = _FakeConn()
+    await il._set_session_keepalives(conn)
+    assert conn.executed_sql == list(il.KEEPALIVE_STATEMENTS)
+    assert conn.calls == ["execute", "execute", "execute", "commit"]
+
+
+async def test_a_refused_keepalive_set_is_tolerated(caplog):
+    """Some Postgres (a managed provider fronting its own pooler, say) may
+    reject a session-level keepalive SET. That must never fail boot — it
+    just falls back to the server's own, much slower, default reaping."""
+    conn = _FakeConn(raise_on={"execute"})
+    with caplog.at_level(logging.WARNING, logger="tret.instance_lock"):
+        await il._set_session_keepalives(conn)  # must not raise
+    assert "refused session-level TCP keepalive" in caplog.text
+    # The refused SET is the connection's first statement, so it opens (and,
+    # left alone, would leave aborted) an implicit transaction — this rolls
+    # it back rather than just logging and moving on.
+    assert conn.calls == ["execute", "rollback"]
+
+
+async def test_a_refused_keepalive_set_does_not_poison_the_lock_attempt(monkeypatch):
+    """The bug this fixes: `_set_session_keepalives`'s SETs are the first
+    statements on a freshly started connection, so a refusal aborts the
+    implicit transaction they opened. Without the rollback above, every
+    further statement on this exact connection — including the very next
+    `pg_try_advisory_lock` attempt — would fail with
+    `InFailedSqlTransactionError`, killing boot in every TRET_INSTANCE_LOCK
+    mode, including `warn` and `off`. With the rollback, `_acquire_with_retry`
+    on this same (rolled-back) connection still acquires normally.
+    """
+    conn = _FakeConn(raise_on={"keepalive_set"})
+
+    await il._set_session_keepalives(conn)
+    assert "rollback" in conn.calls  # refusal was rolled back...
+
+    held = await il._acquire_with_retry(conn, wait_seconds=0.0)  # ...real _try_lock, not monkeypatched
+    assert held is True
+    assert conn.calls[-1] == "execute"  # the (successful) pg_try_advisory_lock select
+
+    # Mirrors what acquire_instance_lock() itself does right after a held
+    # lock: commit to end the implicit transaction the select above opened.
+    await conn.commit()
+    assert conn.calls[-1] == "commit"
+
+
 async def test_a_held_lock_commits_to_end_the_implicit_transaction(monkeypatch):
     """SQLAlchemy 2.0's begin-once behavior opens an implicit transaction on
     this connection's first statement (the pg_try_advisory_lock SELECT) and
@@ -238,7 +338,15 @@ async def test_a_held_lock_commits_to_end_the_implicit_transaction(monkeypatch):
     assert lock.state == "held"
     assert lock.held is True
     assert lock._conn is conn
-    assert conn.calls == ["commit"]  # nothing else touched this connection yet
+    # The three keepalive SETs (issued before the lock is even attempted,
+    # since `_try_lock` is monkeypatched here and never touches `conn`
+    # itself), then `_set_session_keepalives`'s own commit ending that
+    # implicit transaction, then the lock's own commit — which would
+    # otherwise be ending the implicit transaction the (monkeypatched, so
+    # invisible to `conn`) advisory-lock select opened, but here is really
+    # just a second consecutive commit on an already-clean connection.
+    assert conn.calls == ["execute", "execute", "execute", "commit", "commit"]
+    assert conn.executed_sql == list(il.KEEPALIVE_STATEMENTS)
 
 
 async def test_a_lost_lock_in_warn_mode_is_state_lost_not_not_applicable(monkeypatch):

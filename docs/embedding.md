@@ -18,7 +18,7 @@ cost," that's this page.
 Until then, install from a checkout:
 
 ```bash
-git clone https://github.com/voiz-academy/tret
+git clone https://github.com/kith-ai-lab/tret
 pip install -e tret/backend              # core: SDK + CLI, no server deps
 pip install -e "tret/backend[server]"    # + FastAPI/Postgres/the full workbench
 ```

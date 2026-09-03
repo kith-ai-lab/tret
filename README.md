@@ -47,13 +47,32 @@ curl -fsSL https://tret.kithailab.com/install.sh | bash
 
 Re-run it later to update in place (it won't touch a checkout you've edited).
 That URL serves [install.sh](install.sh) from this repo verbatim, so
-`https://raw.githubusercontent.com/voiz-academy/tret/main/install.sh` is the
+`https://raw.githubusercontent.com/kith-ai-lab/tret/main/install.sh` is the
 same script — read it before piping it to bash if you'd rather not do that
-blind. To verify it before running instead of trusting the pipe, clone the
-repo and run the same script from your own checkout:
+blind.
+
+**Verify before running.** Checking the download against `tret.kithailab.com`
+itself proves nothing — that's the same host that could serve you a bad file.
+[install.sh.sha256](install.sh.sha256) is committed in this repo instead, so
+fetch it from GitHub's raw content host and verify against that:
 
 ```bash
-git clone https://github.com/voiz-academy/tret.git && cd tret
+curl -fsSLO https://tret.kithailab.com/install.sh
+curl -fsSLO https://raw.githubusercontent.com/kith-ai-lab/tret/main/install.sh.sha256
+shasum -a 256 -c install.sh.sha256   # must print: install.sh: OK
+bash install.sh
+```
+
+That `raw.githubusercontent.com` fetch only works once this repo is public —
+today it's private, so the URL 404s. Until then, the clone path just below is
+the way to actually inspect the script before running it; `install.sh.sha256`
+still verifies once the repo goes public.
+
+Or clone the repo and run the same script from your own checkout — git's own
+integrity checking stands in for the checksum here:
+
+```bash
+git clone https://github.com/kith-ai-lab/tret.git && cd tret
 less install.sh          # read it
 ./install.sh             # then run it
 ```
@@ -306,7 +325,7 @@ isolated.
 
 The fastest path to a real instance is one click:
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/voiz-academy/tret)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kith-ai-lab/tret)
 
 [render.yaml](render.yaml) provisions the app, a managed Postgres, and a
 persistent disk, with production secrets generated at deploy time —

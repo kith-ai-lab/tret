@@ -17,7 +17,7 @@ docs/architecture.md).
 <!-- README-SNIPPET: copy the block below into README.md verbatim -->
 
 ```markdown
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/voiz-academy/tret)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/kith-ai-lab/tret)
 ```
 
 <!-- /README-SNIPPET -->

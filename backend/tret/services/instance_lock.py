@@ -18,9 +18,33 @@ timeout instead of hanging on the database.
 A brief overlap is normal and must not be an error: a Fly deploy starts the
 new machine before stopping the old one (a "handover"), so the new process's
 first attempt is *expected* to lose to the still-running old one. It retries
-for `TRET_INSTANCE_LOCK_WAIT_SECONDS` (default 30s, sized to outlast a normal
-handover) before deciding the lock is genuinely held by something else, not a
-machine mid-swap.
+for `TRET_INSTANCE_LOCK_WAIT_SECONDS` (default 90s, sized to outlast a normal
+handover plus the keepalive reaping below) before deciding the lock is
+genuinely held by something else, not a machine mid-swap.
+
+A harder case than a graceful handover: the previous VM crashes outright
+(host failure, OOM kill) with its lock connection never closed. Postgres has
+no way to know that socket is dead until its own TCP keepalive probing gives
+up — which defaults to roughly two hours, far longer than any wait budget an
+operator would accept for `TRET_INSTANCE_LOCK=strict`. `acquire_instance_lock`
+fixes this by setting aggressive keepalive timing on the lock session itself
+right after opening the connection (`tcp_keepalives_idle=15`,
+`_interval=5`, `_count=3`): Postgres starts probing after 15s of silence and
+gives up after 3 failed probes 5s apart, so a genuinely dead holder's
+advisory lock is reaped within about half a minute — comfortably inside the
+90s default wait. Not every Postgres accepts session-level keepalive
+`SET`s (a managed provider may reject or ignore them), so this is
+best-effort: refused entirely, it just falls back to the server's own
+(much slower) default.
+
+This tunes the *holder's own* lock connection, at the moment it opens it —
+not the server globally. A machine already running a prior release, holding
+the lock under the old (much slower) default timing, keeps that timing
+until it itself restarts; only the process that opens the connection after
+this code ships gets the faster reaping. Practically, the first cutover to
+this behavior needs no special handling: a normal rolling deploy's handover
+closes the old machine's lock connection cleanly anyway, so there is no
+window where a crash actually needs the old default's ~2 hour probing.
 
 SQLite (every test, `tret run`) has no advisory locks and is never the
 horizontally-scaled deployment this guards against, so the check is a
@@ -59,10 +83,52 @@ WARN_MESSAGE = (
     "bus cannot be shared across machines — live run updates will be unreliable"
 )
 
+# Session-level (not postgresql.conf-level) keepalive tuning for the lock
+# connection specifically — see the module docstring for why. Applied before
+# the lock is even attempted, so a crashed prior holder is already on the
+# clock by the time this process starts retrying.
+KEEPALIVE_STATEMENTS = (
+    "SET tcp_keepalives_idle = 15",
+    "SET tcp_keepalives_interval = 5",
+    "SET tcp_keepalives_count = 3",
+)
+
 
 class InstanceLockError(RuntimeError):
     """Raised at boot (TRET_INSTANCE_LOCK=strict) when another process holds
     the lock and the wait budget has run out."""
+
+
+async def _set_session_keepalives(conn: AsyncConnection) -> None:
+    """Best-effort: not every Postgres (a managed provider fronting its own
+    pooler, say) accepts session-level keepalive `SET`s. A refusal must never
+    fail boot over what is purely a faster-reaping optimization — the lock
+    still works, it just falls back to the server's own (much slower)
+    default keepalive timing for a crashed holder.
+
+    These `SET`s are the first statements on a freshly started connection,
+    so they open SQLAlchemy's implicit transaction; a refusal aborts that
+    transaction server-side (Postgres will bounce every further statement
+    with `InFailedSqlTransaction` until it is rolled back), so a refusal
+    must roll back before returning — otherwise the `pg_try_advisory_lock`
+    attempt right after this call would itself fail, in every
+    TRET_INSTANCE_LOCK mode including `warn`. On success, committing closes
+    out that same implicit transaction so the advisory lock attempt after it
+    starts clean (mirrors the post-lock commit in `acquire_instance_lock`
+    below, for the same reason).
+    """
+    try:
+        for statement in KEEPALIVE_STATEMENTS:
+            await conn.execute(text(statement))
+        await conn.commit()
+    except Exception:
+        await conn.rollback()
+        log.warning(
+            "instance lock connection: server refused session-level TCP keepalive "
+            "tuning; a crashed prior holder will take the server's own (much slower) "
+            "keepalive timeout to be reaped instead of ~30s",
+            exc_info=True,
+        )
 
 
 async def _try_lock(conn: AsyncConnection) -> bool:
@@ -175,6 +241,7 @@ async def acquire_instance_lock() -> InstanceLock:
     # (it is held for the process lifetime), so it is started explicitly.
     conn = await engine.connect().start()
     try:
+        await _set_session_keepalives(conn)
         held = await _acquire_with_retry(conn, settings.instance_lock_wait_seconds)
     except Exception:
         await conn.close()

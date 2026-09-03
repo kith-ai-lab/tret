@@ -7,6 +7,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 storage/
+# Generated on first boot of the `search` compose profile and persisted
+# across restarts — see searxng/inject-secret-entrypoint.sh.
+searxng/.secret/
 node_modules/
 dist/
 *.log

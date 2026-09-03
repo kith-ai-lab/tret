@@ -154,7 +154,10 @@ class Settings(BaseSettings):
     instance_lock: str = "warn"  # warn | strict | off
     # How long a losing process retries before deciding the lock is genuinely
     # held rather than a Fly deploy handover's old machine still finishing up.
-    instance_lock_wait_seconds: float = 30.0
+    # 90s covers a normal handover plus the ~30s the lock connection's own
+    # keepalive tuning takes to reap a crashed prior holder's dangling
+    # connection (see instance_lock.py's module docstring).
+    instance_lock_wait_seconds: float = 90.0
 
     @field_validator("instance_lock", mode="before")
     @classmethod
