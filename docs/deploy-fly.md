@@ -5,6 +5,14 @@ tret runs as a **single Fly app**: the backend serves the built frontend
 uploaded documents. One always-on machine — the run event bus is in-process,
 so do **not** scale horizontally (see docs/architecture.md).
 
+`min_machines_running = 1` in `fly.toml` keeps that true in the ordinary case,
+but nothing stops a second machine existing briefly (a deploy handover) or by
+mistake (`fly scale count 2`). tret backstops this itself at boot with a
+Postgres advisory lock (`TRET_INSTANCE_LOCK`, docs/hardening.md §8) — the
+default `warn` logs loudly rather than failing a deploy over the normal
+handover overlap; set it to `strict` if you want an accidental second machine
+to fail its own boot instead.
+
 ## One-time setup
 
 ```bash

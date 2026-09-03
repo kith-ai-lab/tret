@@ -141,6 +141,29 @@ class Settings(BaseSettings):
     # query that needs a missing column — docs/upgrading.md, docs/hardening.md §8.
     skip_migrations: bool = False
 
+    # ── single-instance enforcement (tret/services/instance_lock.py) ──────────
+    # fly.toml says "Do NOT scale horizontally" in a comment; this is what
+    # actually checks it. Postgres-only: a session-level pg_try_advisory_lock
+    # taken at boot and held for the process lifetime, since the run event bus
+    # is in-process and a second live instance cannot share it. warn (default)
+    # logs at ERROR and keeps booting — self-hosted operators are not all
+    # running Postgres in a way that makes this actionable, and a false
+    # positive must never take a deployment down. strict refuses to boot
+    # instead, for an operator who wants that guaranteed. off skips the check
+    # (and the lock query) entirely. See docs/hardening.md.
+    instance_lock: str = "warn"  # warn | strict | off
+    # How long a losing process retries before deciding the lock is genuinely
+    # held rather than a Fly deploy handover's old machine still finishing up.
+    instance_lock_wait_seconds: float = 30.0
+
+    @field_validator("instance_lock", mode="before")
+    @classmethod
+    def _known_instance_lock_mode(cls, value):
+        candidate = str(value if value is not None else "").strip().lower()
+        if candidate not in ("warn", "strict", "off"):
+            raise ValueError(f"instance_lock must be one of warn|strict|off, got {value!r}")
+        return candidate
+
     # Multi-tenant SaaS mode (tret_cloud; OIDC login lands in a later phase).
     # False is every open-source/self-hosted deployment: bootstrap seeds one
     # workspace, every user is a member of it, and the demo content (climate

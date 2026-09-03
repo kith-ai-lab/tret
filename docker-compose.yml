@@ -144,6 +144,14 @@ services:
       # migrations as a separate deploy step — tret then assumes the database
       # is already at head (docs/upgrading.md).
       TRET_SKIP_MIGRATIONS: ${TRET_SKIP_MIGRATIONS:-false}
+      # Single-instance enforcement (docs/hardening.md): a Postgres advisory
+      # lock at boot, held for the process lifetime, since the run event bus
+      # is in-process. warn (default) logs and keeps booting if another
+      # instance holds it; strict refuses to boot; off skips the check.
+      TRET_INSTANCE_LOCK: ${TRET_INSTANCE_LOCK:-warn}
+      # How long a losing process retries before deciding the lock is
+      # genuinely held rather than a deploy handover's old machine finishing up.
+      TRET_INSTANCE_LOCK_WAIT_SECONDS: ${TRET_INSTANCE_LOCK_WAIT_SECONDS:-30.0}
       # Multi-tenant SaaS mode (tret_cloud). false is every self-hosted
       # deployment: one workspace, no personal-workspace-per-user seeding.
       TRET_MULTI_TENANT: ${TRET_MULTI_TENANT:-false}
@@ -225,7 +233,11 @@ services:
   #     times faster and is the recommended path (docs/local-models.md);
   #   - this profile is the zero-manual-steps path, not the fastest one.
   ollama:
-    image: ollama/ollama
+    # Pinned rather than `latest` so a fleet upgrade is a deliberate diff, not
+    # whatever shipped the day someone next pulls. 0.33.2 was current stable
+    # (== `latest`'s own digest, checked against Docker Hub) as of this pin;
+    # bump deliberately, not by dropping back to `latest`.
+    image: ollama/ollama:0.33.2
     profiles: ["local"]
     volumes:
       # Named volume: pulled weights survive `docker compose down`.
@@ -240,7 +252,9 @@ services:
   # a model already in the volume re-downloads nothing, so re-running the profile
   # is cheap. Pick a different model with TRET_LOCAL_PULL_MODEL in .env.
   ollama-init:
-    image: ollama/ollama
+    # Same pin as the `ollama` service above — this just needs the `ollama`
+    # CLI, but a mismatched version here would still be its own drift.
+    image: ollama/ollama:0.33.2
     profiles: ["local"]
     depends_on:
       - ollama
@@ -270,8 +284,24 @@ services:
   # class's allow-one-host trust instead of research's SSRF checks — which is
   # exactly what lets an internal, unauthenticated, plain-http address like
   # this one work at all.
+  #
+  # secret_key (signs SearXNG's own session data, ./searxng/settings.yml):
+  # the searxng/searxng image has no env var for this. Checked its actual
+  # entrypoint (container/entrypoint.sh in searxng/searxng@master) — it only
+  # ever writes a random secret when NO settings.yml exists yet at the mount
+  # path, by templating one out and substituting its placeholder string.
+  # Because this repo bind-mounts its own settings.yml below, that path
+  # always exists and the image's generator never runs; whatever is in the
+  # file is used byte-for-byte. So there is nothing to pass through here —
+  # a `SEARXNG_SECRET` env var would sit unread. Before running this profile
+  # beyond a local demo, generate a real secret and edit the file in place:
+  #   sed -i '' "s/change-me-searxng/$(openssl rand -hex 32)/" searxng/settings.yml   # macOS/BSD sed
+  #   sed -i "s/change-me-searxng/$(openssl rand -hex 32)/" searxng/settings.yml      # GNU sed (Linux)
   searxng:
-    image: searxng/searxng:latest
+    # Pinned rather than `latest` for the same reason as `ollama` above.
+    # 2026.9.3-a1144dda3 was current stable (== `latest`'s own digest,
+    # checked against Docker Hub) as of this pin.
+    image: searxng/searxng:2026.9.3-a1144dda3
     profiles: ["search"]
     volumes:
       - ./searxng:/etc/searxng

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
+from starlette.datastructures import MutableHeaders
 
 from tret.api import (
     analytics,
@@ -32,9 +33,100 @@ from tret.providers.catalog import get_catalog
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tret")
 
+# ── security response headers ─────────────────────────────────────────────────
+# tret sets no CORS middleware and the session cookie is already `SameSite=lax`
+# (tret/api/auth.py), which is the actual CSRF defense — these four headers are
+# a different concern: clickjacking (X-Frame-Options), MIME-sniffing
+# (X-Content-Type-Options), referrer leakage across origins, and a CSP as a
+# backstop against script injection reaching anywhere it could act on the
+# session. Mirrored verbatim in frontend/nginx.conf for the docker-compose
+# deployment path, which serves the same built SPA without ever going through
+# this backend.
+#
+# script-src carries one hash rather than 'unsafe-inline': frontend/index.html
+# has exactly one inline script (the dark-mode pre-paint check, so a stored
+# preference never flashes light) and nothing else needs inline script.
+# 'unsafe-inline' would have covered it too, but would also have covered any
+# script an XSS bug ever manages to inject — the one thing this header exists
+# to rule out. If that inline script's contents change, recompute the hash
+# (`sha256(content)`, base64) and update it here **and** in nginx.conf, or the
+# built SPA's dark-mode preload is silently blocked (degraded, not broken: the
+# app still renders, just with an occasional light-mode flash before React's
+# own theme state takes over).
+#
+# style-src keeps 'unsafe-inline': React's `style={{...}}` becomes inline
+# `style="..."` attributes, which CSP's style-src (not script-src) governs, and
+# there is no equivalent hash-per-element scheme worth the churn for those.
+# connect-src 'self' covers /api/runs/{id}/events (same-origin SSE) — nothing
+# in the bundle calls a different origin (fonts are self-hosted @fontsource
+# packages, not Google Fonts; no other external host appears in frontend/src).
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self' 'sha256-2uazwxIKVNaSPni5VjTyuSxTIMSS7feaMo3K0rfV0Hg='; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+
+SECURITY_HEADERS: dict[str, str] = {
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Content-Security-Policy": CONTENT_SECURITY_POLICY,
+}
+
+
+class SecurityHeadersMiddleware:
+    """Adds the headers above to every response that doesn't already set them.
+
+    Pure ASGI rather than `BaseHTTPMiddleware`: the latter buffers a response
+    to let middleware read/rewrite it, which does not play well with the
+    long-lived SSE stream `GET /api/runs/{id}/events` depends on. This instead
+    wraps `send` and only ever touches the single `http.response.start`
+    message, so a streaming response's later `http.response.body` messages
+    pass through untouched.
+
+    "Doesn't already set them" matters for one route today:
+    `api/findings.py`'s deliverable HTML export sets its own much stricter,
+    sandboxed CSP (and its own X-Content-Type-Options / Referrer-Policy) for a
+    document rendered from model-authored markdown — this middleware must
+    never widen that back out.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in SECURITY_HEADERS.items():
+                    if name not in headers:
+                        headers[name] = value
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Enforce the single-instance assumption the run event bus depends on,
+    # before anything else touches the database: a deploy handover's brief
+    # overlap is retried out (services/instance_lock.py), and only once that
+    # is settled does it make sense to ask "what did the prior instance leave
+    # behind" below — sweeping orphaned runs while an old machine might still
+    # legitimately be finishing them would be exactly backwards.
+    from tret.services.instance_lock import acquire_instance_lock
+
+    instance_lock = await acquire_instance_lock()
     # Bring the schema to the Alembic head — including adopting a legacy
     # create_all database created by an older release — then run the idempotent
     # seed. tret/db/migrate.py explains the three states this handles; a
@@ -45,6 +137,36 @@ async def lifespan(app: FastAPI):
 
     async with get_session_factory()() as db:
         await bootstrap(db)
+    # A prior process's runs stuck at queued/running are, on this single-
+    # instance deployment, orphaned by definition — nothing else could still
+    # be executing them. Swept and their post-run hooks fired here: after
+    # extension registration (`load_extensions`, above, in create_app — a
+    # hook needs a loaded billing extension to reach), and before the
+    # extension startup tasks below, so nothing an extension warms at boot
+    # (a credit balance cache, say) is built against runs still wrongly
+    # showing as in-flight.
+    #
+    # Skipped when `instance_lock.state == "lost"`: Postgres,
+    # TRET_INSTANCE_LOCK=warn (the default), and another process already held
+    # the key when this one's retry budget ran out. `InstanceLock(None, ...)`
+    # looks identical for "lost" and "not_applicable" (SQLite, or the check
+    # off entirely) if this only inspected `._conn` — that ambiguity is
+    # exactly the bug: a machine that lost the race is not "the only instance,
+    # nothing else could still be executing these runs", it is a *second*
+    # instance next to one that may well still be executing them, and sweeping
+    # here would fail every run the live machine has not finished yet and
+    # double-meter it when it does.
+    from tret.services.reconcile import sweep_orphaned_runs
+
+    if instance_lock.state == "lost":
+        log.error(
+            "skipping the orphaned-run sweep: this process lost the instance lock "
+            "(TRET_INSTANCE_LOCK=warn) — another instance may still be running and "
+            "legitimately finishing runs this process would otherwise wrongly fail"
+        )
+    else:
+        async with get_session_factory()() as db:
+            await sweep_orphaned_runs(db)
     # Extension seam: awaited, so an extension whose startup work (warming a
     # cache, checking its own schema) must finish before the app is reachable
     # gets to block boot on it. No-op with no extensions loaded.
@@ -69,6 +191,10 @@ async def lifespan(app: FastAPI):
         warm_task.cancel()
         with suppress(asyncio.CancelledError):
             await warm_task
+        # Release last: a process that never actually held the lock (SQLite,
+        # TRET_INSTANCE_LOCK=off, or a `warn` that lost the race) closes
+        # nothing here — see InstanceLock.release.
+        await instance_lock.release()
 
 
 def _safe_static_file(root: Path, request_path: str) -> Path | None:
@@ -98,6 +224,7 @@ def create_app() -> FastAPI:
     enforce_production_safety(log=log)
 
     app = FastAPI(title="tret", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(SecurityHeadersMiddleware)
     app.include_router(auth.router)
     # Teams, members and invites (api/workspaces.py) — always mounted, like
     # api/workspace.py's context resolution: tenancy primitives are core, not

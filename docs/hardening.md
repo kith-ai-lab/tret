@@ -101,6 +101,11 @@ anything the client controls except the email already being attacked, so a
 lockout can only ever affect one account. For anything internet-facing, put a
 proxy/WAF limit in front as well.
 
+This is one of several places in tret that assume exactly one process is
+running — the run event bus (`docs/architecture.md`) is another, and a bigger
+one. `TRET_INSTANCE_LOCK` (§8) is what actually checks that assumption instead
+of just documenting it.
+
 ## 4. Deterministic methods: the actual sandbox
 
 Pack methods (`tret/services/methods.py`) run as short-lived subprocesses:
@@ -235,6 +240,19 @@ see [eco-accounting.md](eco-accounting.md).
 - tret makes no outbound calls except to the LLM providers you configure (plus
   the optional OpenRouter catalog fetch, `TRET_OPENROUTER_CATALOG=false` to
   disable). No telemetry.
+- **Single-instance enforcement.** The run event bus is in-process
+  (`fly.toml`'s "Do NOT scale horizontally" comment; `docs/architecture.md`),
+  so tret takes a session-level `pg_try_advisory_lock` on Postgres at boot and
+  holds it on a dedicated connection for the life of the process
+  (`tret/services/instance_lock.py`). A second process retries for
+  `TRET_INSTANCE_LOCK_WAIT_SECONDS` (default 30s — sized to outlast a Fly
+  deploy handover, where the new machine starts before the old one stops)
+  before deciding the lock is genuinely held elsewhere. `TRET_INSTANCE_LOCK`
+  then decides what that means: `warn` (default) logs at `ERROR` and boots
+  anyway — a false positive must never take a deployment down; `strict`
+  refuses to boot instead, for an operator who wants that guaranteed; `off`
+  skips the check. No-op on SQLite, which has no advisory locks and is never
+  the deployment this guards against.
 
 ## 9. Outbound network: what tret may talk to
 
