@@ -14,17 +14,23 @@ Each drives the real engine through the real world fixture; only the model and
 """
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
-from golden_world import build_world
+from golden_world import _replay_registry, build_world
 from replay_provider import ProviderCall, ReplayProvider, ScriptedCall, ScriptedTurn
 from sqlalchemy import select
 from test_golden_runs import PERIL, SITE, divergence_happy_script
 
+import tret.engine.harness as harness_module
 from tret.db.models import Harness, Run
+from tret.engine.harness import HarnessEngine
 from tret.engine.tools import MAX_DELEGATION_DEPTH
 from tret.packs.links import set_harness_packs
 from tret.packs.loader import install_pack
 from tret.providers.base import TextDelta, ToolCall, ToolCallComplete, TurnComplete, Usage
+from tret.providers.catalog import ModelCatalog
+from tret.router_llm.priors import NoPriors
 
 
 def _lookup(dataset: str, **filters) -> ScriptedCall:
@@ -79,6 +85,114 @@ async def test_a_midstream_provider_failure_keeps_the_streamed_text(world):
     # Everything committed before the failure is still there, unchanged.
     assert [e.data["tool"] for e in result.events_of("tool_call")] == ["lookup_dataset"]
     assert result.findings == []
+
+
+async def test_a_midstream_failure_books_an_estimated_cost_for_the_streamed_tokens(world):
+    """The provider was paid for PARTIAL_TEXT even though the turn never finished.
+
+    The ProviderError branch used to skip the accounting block entirely — a
+    run could stream a full page of text, die, and post `cost_usd == 0`, with
+    every one of those tokens paid to the provider and never metered. This
+    books an ESTIMATE for exactly the turn that died, priced through the same
+    catalog path a normal turn uses, and flagged so it is never mistaken for a
+    confidently metered figure.
+    """
+    provider = ReplayProvider(
+        [ScriptedTurn(text=PARTIAL_TEXT, provider_error="503 upstream connection reset")]
+    )
+    result = await world.run(
+        provider=provider,
+        task_type="freeform",
+        task_input={"message": "Summarise the flood risk for this site."},
+    )
+
+    assert result.run.status == "failed"
+    assert result.run.cost_usd > 0
+    assert result.run.reported_cost_usd is not None
+    assert result.run.reported_cost_usd > 0
+
+    # Legible, not silently folded in as if it were metered: the one segment
+    # this run used is on the record, and it says it is an estimate.
+    timeline = result.run.model_timeline
+    assert timeline and timeline[0]["estimated"] is True
+    assert timeline[0]["output_tokens"] > 0  # PARTIAL_TEXT's own estimated size
+    assert timeline[0]["cost_usd"] == float(result.run.cost_usd)
+
+    last = result.run.messages[-1]
+    assert last["content"] == PARTIAL_TEXT
+    assert last["meta"]["estimated_usage"]["output_tokens"] > 0
+
+
+async def test_a_midstream_failure_with_nothing_streamed_books_nothing_extra(world):
+    """The other side of it: nothing streamed before the crash, nothing to book.
+
+    A `ProviderError` on the very first byte (a connection refused, say) has no
+    partial text and no tool calls to estimate from — booking a nonzero cost
+    here would be inventing a number, not reading one off what happened.
+    """
+    provider = ReplayProvider([ScriptedTurn(text="", provider_error="connection refused")])
+    result = await world.run(
+        provider=provider,
+        task_type="freeform",
+        task_input={"message": "Anything at all."},
+    )
+
+    assert result.run.status == "failed"
+    assert result.run.cost_usd == 0
+    assert result.run.reported_cost_usd is None
+    assert not result.run.model_timeline
+    # Only the user's own opening message is on the record — no assistant turn
+    # to even consider partial, since nothing ever streamed back.
+    assert len(result.run.messages) == 1
+    assert result.run.messages[0]["role"] == "user"
+
+
+async def test_a_midstream_failure_after_a_metered_turn_carries_forward_cache_read_tokens(world):
+    """The wire prefix a dying turn sent is the same prefix its predecessor
+    turn sent (nothing about the conversation-so-far changes except what got
+    appended at the very end) — so the predecessor's own *metered*
+    cache_read_tokens is the best proxy available for how much of the dying
+    turn's prompt the provider actually served from cache too.
+
+    Booking the whole wire as fresh `input_tokens` (cache_read_tokens=0, the
+    old behavior) prices a cached prefix at CACHE_READ_MULTIPLIER's 10x markup
+    for nothing, and that flows straight into `reported_cost_usd` — the
+    billing column. This locks in that the carried-forward figure is used,
+    and that it actually lowers the estimated turn's cost against what the
+    naive (no-carry) estimate would have booked.
+    """
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Reading the vendor score.",
+                tool_calls=[_lookup("hazard_scores", site_id=SITE, peril=PERIL)],
+                cache_read_tokens=900,
+            ),
+            ScriptedTurn(text=PARTIAL_TEXT, provider_error="503 upstream connection reset"),
+        ]
+    )
+    result = await world.run(
+        provider=provider,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+
+    assert result.run.status == "failed"
+
+    # The dying (second) turn's own estimate, as recorded on the transcript.
+    last = result.run.messages[-1]
+    est = last["meta"]["estimated_usage"]
+    assert est["cache_read_tokens"] > 0, "the prior turn's metered cache reads must carry forward"
+
+    # Same total wire estimate either way — only the split between
+    # `input_tokens` and `cache_read_tokens` changes — so pricing the naive
+    # split (all of it fresh) against the actual split isolates exactly what
+    # the carry-forward buys.
+    model = ModelCatalog().get(result.run.model_used)
+    naive_input_tokens = est["input_tokens"] + est["cache_read_tokens"]
+    naive_cost = model.cost_usd(naive_input_tokens, est["output_tokens"], 0)
+    actual_cost = model.cost_usd(est["input_tokens"], est["output_tokens"], est["cache_read_tokens"])
+    assert actual_cost < naive_cost
 
 
 # ── (b) the iteration ceiling does not discard a recorded verdict ─────────────
@@ -336,6 +450,65 @@ async def test_delegation_cannot_recurse_without_end(tmp_path):
         await world.aclose()
 
 
+async def test_delegation_finished_always_pairs_with_delegation_started(tmp_path, monkeypatch):
+    """`run_harness_task` publishes `delegation_started` right after creating
+    the child run, then hands it to `engine.execute()`. That call is not
+    expected to raise — every ordinary run failure becomes a `failed` Run row
+    instead — but the one path outside that (this forces `load_db_keys`,
+    called at the very top of `execute()`, to blow up on the child's own call)
+    must still leave a matching `delegation_finished` on the record, with
+    "unknown" standing in for a status nothing was ever computed for. Before
+    this fix, that publish sat after the result-building block, so an
+    exception there left `delegation_started` with no finish at all.
+    """
+    world = await _delegating_world(tmp_path)
+    try:
+        engine = HarnessEngine(catalog=ModelCatalog(), priors=NoPriors())
+        monkeypatch.setattr(harness_module, "_engine", engine)
+
+        provider = SelfDelegatingProvider()
+        harness_id = await world.create_harness(tool_names=["run_harness_task"])
+        run_id = await world.create_run(
+            harness_id=harness_id,
+            task_type="recursive_task",
+            task_input={"subject_id": "anything"},
+        )
+
+        import tret.services.credentials as credentials_module
+
+        real_load_db_keys = credentials_module.load_db_keys
+        calls = 0
+
+        async def flaky_load_db_keys(db, workspace_id=None):
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # the parent's own call is first; this is the child's
+                raise RuntimeError("boom: simulated credential store outage")
+            return await real_load_db_keys(db, workspace_id)
+
+        monkeypatch.setattr(credentials_module, "load_db_keys", flaky_load_db_keys)
+
+        with patch("tret.engine.harness.ProviderRegistry", _replay_registry(provider)):
+            # `execute_tool` (engine/tools.py) catches any tool bug, including
+            # `run_harness_task` re-raising this, as an ordinary tool error —
+            # so the *parent's* own `execute()` still returns normally.
+            await engine.execute(run_id)
+
+        result = await world.read_back(run_id, provider=provider)
+        started = [e.data for e in result.events_of("delegation_started")]
+        finished = [e.data for e in result.events_of("delegation_finished")]
+
+        assert len(started) == 1
+        assert len(finished) == 1
+        assert finished[0]["child_run_id"] == started[0]["child_run_id"]
+        assert finished[0]["status"] == "unknown"
+        # No lineage left dangling despite the raise: `unregister_delegation`
+        # runs in the same `finally` as the publish.
+        assert not engine._parent_of
+    finally:
+        await world.aclose()
+
+
 @pytest.mark.parametrize("task_type", ["chat", "freeform"])
 async def test_delegation_still_refuses_the_generic_task_types(world, task_type):
     provider = ReplayProvider(
@@ -433,3 +606,41 @@ async def test_delegation_finds_a_harness_whose_second_linked_pack_declares_the_
     assert child.harness_id == harness_id
     assert child.pack_id == second_pack.id  # the declaring pack, not the primary
     assert child.status == "completed"
+
+
+# ── (f) `_cancelled` does not grow without bound ───────────────────────────────
+async def test_cancelling_a_run_that_fails_before_start_still_clears_cancelled(world):
+    """Before this fix, `_cancelled` was only ever discarded on the loop's
+    *normal* finish (`_execute_inner`'s own happy path) — a run cancelled
+    while it was still failing a pre-flight check (`_fail_before_start`: an
+    unknown task type here) never reached that line, so its id sat in
+    `_cancelled` forever. `POST /api/runs/{id}/cancel` (api/runs.py) never
+    checks a run's status before calling `cancel()`, so nothing stops an
+    operator's cancel click from racing a run that is about to fail this way.
+
+    `world.run()` builds its own private engine per call and never hands it
+    back, so this drives `HarnessEngine.execute` directly — same reason
+    `test_delegation_cancel.py` does.
+    """
+    provider = ReplayProvider([ScriptedTurn(text="Should never be asked anything.")])
+    engine = HarnessEngine(catalog=ModelCatalog(), priors=NoPriors())
+    harness_id = await world.create_harness()
+    run_id = await world.create_run(
+        harness_id=harness_id,
+        task_type="divergence_assesment",  # one letter short of the real slug
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+
+    engine.cancel(run_id)  # races the run, before it ever reaches the loop
+    assert engine._cancelled == {run_id}
+
+    with patch("tret.engine.harness.ProviderRegistry", _replay_registry(provider)):
+        await engine.execute(run_id)
+
+    async with world.session_factory() as db:
+        run = await db.get(Run, run_id)
+    assert run.status == "failed"
+    assert "unknown_task_type" in run.error
+    assert provider.calls == []  # refused before the first token, as ever
+
+    assert engine._cancelled == set()

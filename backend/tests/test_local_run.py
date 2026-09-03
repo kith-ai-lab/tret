@@ -358,6 +358,9 @@ async def test_ledger_entry_has_correct_fields(tmp_path, monkeypatch):
     # to meter — the field stays null, not a fabricated 0.
     assert entry["overhead_usd"] is None
     assert result.receipt.overhead is None
+    # A confidently metered turn, not a guess.
+    assert entry["estimated"] is False
+    assert result.receipt.estimated is False
 
 
 async def test_ledger_entry_records_no_run_when_no_out_given(tmp_path, monkeypatch):
@@ -747,6 +750,99 @@ async def test_provider_error_mid_loop_still_receipts_and_ledgers(tmp_path, monk
     entry = json.loads(ledger_file.read_text().splitlines()[-1])
     assert entry["status"] == "failed"
     assert entry["usd"] == result.receipt.usd
+
+
+@pytest.mark.asyncio
+async def test_provider_error_with_streamed_text_books_an_estimated_cost(tmp_path, monkeypatch):
+    """The provider was paid for the streamed text even though no TurnComplete
+    ever arrived to meter it. Before this fix that turn cost nothing in the
+    receipt at all — now it is priced from an ESTIMATE of what was on the wire
+    and what streamed back, flagged so it is never read as a metered figure.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
+    provider = FailingProvider(
+        fail_on_call=1,
+        fail_after_chunks=("Some partial analysis before the connection died",),
+    )
+    _wire(monkeypatch, provider)
+
+    result = await local_run.arun("summarize", path=str(root), model=TARGET_MODEL.id)
+
+    assert result.status == "failed"
+    assert "529" in (result.error or "")
+    assert result.receipt.usd is not None
+    assert result.receipt.usd > 0
+    assert result.receipt.estimated is True
+    assert result.receipt.usage["output_tokens"] > 0
+    entry = json.loads(ledger_file.read_text().splitlines()[-1])
+    assert entry["status"] == "failed"
+    assert entry["usd"] == result.receipt.usd
+    # The one field a ledger reader needs to tell this guessed-but-priced line
+    # apart from an ordinary metered one.
+    assert entry["estimated"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_dying_second_turn_does_not_paper_over_a_first_turns_unreported_usage(
+    tmp_path, monkeypatch
+):
+    """A local model whose first turn reports no usage at all (some OpenAI-
+    compat servers ignore `stream_options.include_usage` entirely) is already
+    an undercount before anything goes wrong. If the *second* turn then dies
+    mid-stream, its estimate must not paper over that: `usage_reported` used
+    to `or` in `usage_estimated` unconditionally, so a confidently-priced
+    receipt came out the other side of a run that had already admitted (via
+    the empty first turn) that its numbers were incomplete.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.txt").write_text("alpha\n")
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
+    provider = FailingProvider(
+        turns=[
+            ScriptedTurn(
+                tool_calls=(ToolCall(id="t1", name="read_file", arguments={"path": "a.txt"}),),
+                usage=Usage(),  # the local model reported nothing for turn 1
+            ),
+        ],
+        fail_on_call=2,
+        fail_after_chunks=("Some partial analysis before the connection died",),
+    )
+    _wire(monkeypatch, provider)
+
+    result = await local_run.arun("summarize", path=str(root), model=TARGET_MODEL.id)
+
+    assert result.status == "failed"
+    # Turn 2's estimate is real (tokens were genuinely spent) — see the
+    # sibling estimated-cost test — but turn 1's silence means the receipt as
+    # a whole is not a reliable count, and `usd` must say so honestly rather
+    # than presenting an undercount as a priced figure.
+    assert result.receipt.usd is None
+    entry = json.loads(ledger_file.read_text().splitlines()[-1])
+    assert entry["usd"] is None
+
+
+@pytest.mark.asyncio
+async def test_provider_error_with_nothing_streamed_books_no_estimate(tmp_path, monkeypatch):
+    """The other side of it: a `ProviderError` before a single byte streams
+    back has nothing to estimate from — pricing it would fabricate a number,
+    not read one off what happened (see the `Receipt` docstring)."""
+    root = tmp_path / "root"
+    root.mkdir()
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
+    provider = FailingProvider(fail_on_call=1)
+    _wire(monkeypatch, provider)
+
+    result = await local_run.arun("summarize", path=str(root), model=TARGET_MODEL.id)
+
+    assert result.status == "failed"
+    assert result.receipt.usd is None
+    assert result.receipt.estimated is False
 
 
 def test_cli_hit_iteration_cap_preserves_out_file_and_exits_nonzero(

@@ -107,13 +107,22 @@ class Receipt:
     #  cache_write_tokens, cost_usd, energy_wh, energy_accounting}.
     overhead: dict | None
     raw: dict  # the full energy_accounting() dict, untouched
+    # True when `usage` above was not reported by the provider but guessed —
+    # from what was actually sent and what streamed back before a mid-turn
+    # `ProviderError` (see `local_run._run_agentic_loop`). Priced the same way
+    # a metered turn is (same `raw`/`usd` derivation), so a run that failed
+    # mid-stream still gets a receipt for what it burned rather than a silent
+    # $0.0000 — this is the flag that keeps that receipt from being mistaken
+    # for a confidently metered one. Defaults False so every existing caller
+    # (`Router.arun`, which has no partial-turn case to estimate) is unaffected.
+    estimated: bool = False
 
     def __str__(self) -> str:
         short_model = self.model.rsplit("/", 1)[-1]  # display form, not the full tret id
         if self.usd is None:
             # No reliable usage to price at all — see the class docstring.
             return f"receipt · estimate unavailable · {short_model}"
-        usd_segment = f"${self.usd:.4f}"
+        usd_segment = f"${self.usd:.4f}" + (" (estimated)" if self.estimated else "")
         if self.overhead is not None and self.overhead.get("cost_usd") is not None:
             usd_segment += f" (+${self.overhead['cost_usd']:.4f} routing)"
         segments = ["receipt", usd_segment]
@@ -306,6 +315,8 @@ def _build_receipt(
     decision: RoutingDecision,
     catalog: ModelCatalog,
     usage_reported: bool,
+    *,
+    estimated: bool = False,
 ) -> Receipt:
     # `raw` is computed either way — even on a zero/unreported usage it is a
     # faithful account of exactly the tokens the provider gave us, and stays
@@ -374,4 +385,5 @@ def _build_receipt(
         # caller does not own.
         overhead=copy.deepcopy(decision.spend),
         raw=copy.deepcopy(accounting),
+        estimated=estimated,
     )

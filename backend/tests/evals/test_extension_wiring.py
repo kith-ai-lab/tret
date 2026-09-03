@@ -75,6 +75,54 @@ async def test_a_gate_veto_with_no_detail_uses_the_reason_alone(world):
     assert result.provider.turns_played == 0
 
 
+async def test_a_gate_veto_never_fires_the_post_run_hook(world):
+    """A run the gate itself refused never got a hold placed on it, so there is
+    nothing for a post-run hook to release — firing it here would be a
+    spurious call recording a run that never actually started, not a safety
+    net for one that did."""
+    load_extensions(None, ["fake_extension"])
+    fake_extension.state.update(
+        veto=True, reason="insufficient_credits", detail="workspace balance is $0.00"
+    )
+
+    provider = ReplayProvider([ScriptedTurn(text="Should never be asked anything.")])
+    result = await world.run(
+        provider=provider,
+        task_type="freeform",
+        task_input={"message": "Anything at all."},
+    )
+
+    assert result.run.status == "failed"
+    assert fake_extension.state["seen_runs"] == []
+
+
+# ── a fail-before-start reached AFTER the gate still fires the hook ───────────
+async def test_a_fail_before_start_after_the_gate_still_fires_the_post_run_hook(world):
+    """Unlike the gate's own veto above, every OTHER fail-before-start path
+    (unknown task type, unknown tool, no route) is only reached once
+    `check_pre_run` has already allowed the run — a billing extension's gate
+    may have placed a hold by then, and its post-run hook is the only thing
+    that releases it. Refusing an undeclared task type is the cheapest way to
+    reach one of these paths without a live route.
+    """
+    load_extensions(None, ["fake_extension"])
+
+    provider = ReplayProvider([ScriptedTurn(text="Should never be asked anything.")])
+    result = await world.run(
+        provider=provider,
+        task_type="a_task_type_this_pack_never_declared",
+        task_input={"message": "Anything at all."},
+    )
+
+    assert result.run.status == "failed"
+    assert "unknown_task_type" in result.run.error
+    assert result.provider.turns_played == 0  # refused before the first token
+    assert len(fake_extension.state["seen_runs"]) == 1
+    seen_id, seen_status, _seen_cost = fake_extension.state["seen_runs"][0]
+    assert seen_id == result.run.id
+    assert seen_status == "failed"
+
+
 # ── (b) a post-run hook sees the run with its final cost ──────────────────────
 async def test_a_post_run_hook_sees_the_completed_run_with_its_final_cost(world):
     load_extensions(None, ["fake_extension"])

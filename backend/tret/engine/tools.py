@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.config import get_settings
 from tret.db.models import DataRequest, Dataset, DatasetRow, Document, Finding
+from tret.engine.events import RunEvent, get_event_bus
 from tret.engine.validation import validate_cited_values, validate_payload
 from tret.net import CLASS_RESEARCH, MODE_OFF, MODE_REPLAY, EgressDenied, effective_mode
 from tret.net import audit as egress_audit
@@ -939,40 +940,78 @@ async def run_harness_task(
     ctx.db.add(child)
     await ctx.db.commit()
 
-    await get_harness_engine().execute(child.id)
-
+    engine = get_harness_engine()
+    # Registered before `execute()` and cleared in `finally` regardless of how
+    # the child finishes, so the window in which the engine knows this run is a
+    # child of `ctx.run_id` covers exactly the child's own lifetime — no wider.
+    # This is what lets `engine.cancel(ctx.run_id)` (or an ancestor's own
+    # cancellation) reach a run that has no `parent_run_id` column of its own
+    # (see `HarnessEngine._is_cancelled` / `.cancel`).
+    engine.register_delegation(child_id=child.id, parent_id=ctx.run_id)
+    await get_event_bus().publish(
+        ctx.run_id,
+        RunEvent(
+            "delegation_started",
+            {"child_run_id": str(child.id), "harness": harness.name, "task_type": task_type},
+        ),
+    )
     # Read results through a fresh session — the engine ran in its own.
     from tret.db.engine import get_session_factory
 
-    async with get_session_factory()() as read_db:
-        done = await read_db.get(Run, child.id)
-        findings = (
-            (await read_db.execute(select(Finding).where(Finding.run_id == child.id)))
-            .scalars()
-            .all()
-        )
-        result = {
-            "child_run_id": str(child.id),
-            "status": done.status,
-            "model_used": done.model_used,
-            "cost_usd": float(done.cost_usd or 0),
-            # The delegated run's own ecological line, so a chat turn that
-            # delegates can report the full cost of the work it caused rather
-            # than only the dollars. Estimated — docs/eco-accounting.md.
-            "energy_wh": energy_wh_field(done.energy_wh),
-            "co2e_g": (done.energy_accounting or {}).get("co2e_g"),
-            "error": done.error,
-            "findings": [
+    done: Run | None = None
+    findings: list = []
+    try:
+        await engine.execute(child.id)
+        async with get_session_factory()() as read_db:
+            done = await read_db.get(Run, child.id)
+            findings = (
+                (await read_db.execute(select(Finding).where(Finding.run_id == child.id)))
+                .scalars()
+                .all()
+            )
+    finally:
+        engine.unregister_delegation(child.id)
+        # Published from the same `finally` as unregistration — not after the
+        # result dict below is built — so a `delegation_started` always gets a
+        # matching finish, even on a path `engine.execute()` does not normally
+        # take (it converts every run failure into a `failed` Run row and
+        # returns; this only matters if something outside that raises first,
+        # e.g. opening the read session above). "unknown" is the honest word
+        # when there is no `done` to report a real status from.
+        await get_event_bus().publish(
+            ctx.run_id,
+            RunEvent(
+                "delegation_finished",
                 {
-                    "finding_id": str(f.id),
-                    "schema": f.schema_slug,
-                    "subject": f.subject,
-                    "status": f.status,
-                    "payload": f.payload,
-                }
-                for f in findings
-            ],
-        }
+                    "child_run_id": str(child.id),
+                    "harness": harness.name,
+                    "status": done.status if done is not None else "unknown",
+                },
+            ),
+        )
+
+    result = {
+        "child_run_id": str(child.id),
+        "status": done.status,
+        "model_used": done.model_used,
+        "cost_usd": float(done.cost_usd or 0),
+        # The delegated run's own ecological line, so a chat turn that
+        # delegates can report the full cost of the work it caused rather
+        # than only the dollars. Estimated — docs/eco-accounting.md.
+        "energy_wh": energy_wh_field(done.energy_wh),
+        "co2e_g": (done.energy_accounting or {}).get("co2e_g"),
+        "error": done.error,
+        "findings": [
+            {
+                "finding_id": str(f.id),
+                "schema": f.schema_slug,
+                "subject": f.subject,
+                "status": f.status,
+                "payload": f.payload,
+            }
+            for f in findings
+        ],
+    }
     # Status literals, not the engine constants: harness.py imports this module,
     # so tools.py can only reach it lazily (see the local import above).
     if done.status == "completed_without_output":

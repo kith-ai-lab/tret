@@ -357,6 +357,41 @@ async def _execute_tool(ctx: _ToolCtx, spec: ToolSpec, arguments: dict) -> tuple
         return f"Tool error: unexpected failure — {type(e).__name__}: {e}", True
 
 
+# ── mid-stream failure accounting ──────────────────────────────────────────────
+def _estimate_tokens(text: str) -> int:
+    """chars/4 — the same dependency-free estimator `engine/context.py` uses
+    (`TOKEN_ESTIMATOR = "chars/4"`), duplicated rather than imported so this
+    module stays off the server-only path (see the module docstring and
+    test_sdk_import_hygiene.py)."""
+    return (len(text) + 3) // 4
+
+
+def _estimate_dying_turn_usage(
+    system: str, messages: list[Msg], tool_specs: list[ToolSpec], partial: str, tool_calls: list[ToolCall]
+) -> Usage:
+    """Guess what a turn that streamed some output and then died actually cost.
+
+    The provider is paid for every token it streamed regardless of whether the
+    turn ever finished, so counting a dying turn as zero tokens understates the
+    run's real cost. Mirrors `engine.compaction.estimate_wire_tokens` /
+    `estimate_message_tokens`: input tokens from everything that was on the
+    wire this turn (system + prior messages + tool specs), output tokens from
+    the partial text plus any tool-call arguments that arrived before the
+    provider raised.
+    """
+    input_tokens = _estimate_tokens(system)
+    for m in messages:
+        input_tokens += _estimate_tokens(m.content or "")
+        for call in m.tool_calls:
+            input_tokens += _estimate_tokens(call.name) + _estimate_tokens(str(call.arguments))
+    for spec in tool_specs:
+        input_tokens += _estimate_tokens(spec.name + spec.description + str(spec.parameters))
+    output_tokens = _estimate_tokens(partial)
+    for tc in tool_calls:
+        output_tokens += _estimate_tokens(tc.name) + _estimate_tokens(str(tc.arguments))
+    return Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+
+
 # ── the loop ──────────────────────────────────────────────────────────────────
 async def _run_agentic_loop(
     provider: Provider,
@@ -370,7 +405,7 @@ async def _run_agentic_loop(
     temperature: float,
     max_iterations: int,
     on_tool_call: Callable[[ToolCall], None] | None = None,
-) -> tuple[str, str, Usage, str, int, bool, str | None]:
+) -> tuple[str, str, Usage, str, int, bool, bool, str | None]:
     """route → stream → execute tool calls → append messages → repeat.
 
     The message protocol below is copied from engine/harness.py's loop, not
@@ -387,7 +422,7 @@ async def _run_agentic_loop(
       pack-task concept this freeform loop has no equivalent of).
 
     Returns (text, stop_reason, total_usage, status, iterations_used,
-    usage_reported, error).
+    usage_reported, usage_estimated, error).
     """
     messages: list[Msg] = [Msg(role="user", content=task)]
     total_usage = Usage()
@@ -403,6 +438,10 @@ async def _run_agentic_loop(
     # tokens — the exact claim Receipt's docstring forbids.
     turns_completed = 0
     all_turns_reported = True
+    # Set when a dying turn's usage had to be guessed (see the ProviderError
+    # handler below) — the receipt is still priced (real tokens were spent),
+    # but flagged `estimated` so it is never mistaken for a metered figure.
+    usage_estimated = False
 
     for iteration in range(1, max_iterations + 1):
         assistant_text: list[str] = []
@@ -439,6 +478,17 @@ async def _run_agentic_loop(
             partial = "".join(assistant_text)
             if partial:
                 text_so_far = partial
+            if partial or tool_calls:
+                # This turn streamed real tokens before the provider raised, so
+                # no TurnComplete ever arrived to meter them — without this,
+                # they would be billed to the operator but invisible in the
+                # receipt and the ledger. Estimated, not metered: folded into
+                # `total_usage` anyway (a run that dies on turn 2 after a clean
+                # turn 1 should still price both), and `usage_estimated` says so.
+                est = _estimate_dying_turn_usage(system, messages, tool_specs, partial, tool_calls)
+                total_usage.input_tokens += est.input_tokens
+                total_usage.output_tokens += est.output_tokens
+                usage_estimated = True
             break
 
         usage = turn.usage if turn else Usage()
@@ -479,8 +529,33 @@ async def _run_agentic_loop(
         # fabricated answer.
         status = "hit_iteration_cap"
 
-    usage_reported = turns_completed > 0 and all_turns_reported
-    return text_so_far, stop_reason, total_usage, status, iteration, usage_reported, error
+    # An estimated dying-turn usage prices the receipt too — real tokens were
+    # spent, only their exact count is a guess — so it counts as "reported"
+    # here even though it never came from a TurnComplete; `usage_estimated`
+    # is what keeps that distinction visible to the caller.
+    #
+    # `usage_estimated` only stands in for `usage_reported` when the dying
+    # turn was the FIRST one (turns_completed == 0): that is the only case
+    # with nothing else to lose track of. Once at least one turn has already
+    # completed, `all_turns_reported` is the one true answer — a local model
+    # whose first turn reported empty usage and whose second then dies mid-
+    # stream must not have that second turn's estimate paper over the first
+    # turn's real undercount; `or`-ing `usage_estimated` in unconditionally
+    # used to do exactly that, presenting a receipt that already admits it is
+    # incomplete (`all_turns_reported is False`) as though it were priced.
+    usage_reported = (turns_completed > 0 and all_turns_reported) or (
+        turns_completed == 0 and usage_estimated
+    )
+    return (
+        text_so_far,
+        stop_reason,
+        total_usage,
+        status,
+        iteration,
+        usage_reported,
+        usage_estimated,
+        error,
+    )
 
 
 # ── routing wiring (same seam as tret.sdk: get_catalog / ProviderRegistry /
@@ -518,6 +593,12 @@ def _ledger_entry(
         "avoided_usd_pct": receipt.avoided_usd_pct,
         "avoided_co2e_pct": receipt.avoided_co2e_pct,
         "overhead_usd": overhead_usd,
+        # Whether `usd`/`co2e_g`/`energy_wh` above came from a guess at a
+        # dying turn's tokens rather than a metered `TurnComplete` — see
+        # `Receipt.estimated`'s own docstring. Without this, a ledger reader
+        # cannot tell a confidently priced line from one that is a
+        # best-effort guess for a run that failed mid-stream.
+        "estimated": receipt.estimated,
         "out": out,
     }
 
@@ -619,7 +700,16 @@ async def arun(
     tool_ctx = _ToolCtx(root=root) if root is not None else None
     tool_specs = _tool_specs() if root is not None else []
 
-    text, stop_reason, usage, status, iterations, usage_reported, error = await _run_agentic_loop(
+    (
+        text,
+        stop_reason,
+        usage,
+        status,
+        iterations,
+        usage_reported,
+        usage_estimated,
+        error,
+    ) = await _run_agentic_loop(
         provider,
         model_info,
         system=_system_prompt(has_tools=root is not None),
@@ -636,7 +726,9 @@ async def arun(
     # equals pricing per turn and summing — both cost_usd and the
     # weighted-token energy estimate are linear in tokens (see
     # tret.services.emissions and ModelInfo.cost_usd).
-    receipt = _build_receipt(model_info, usage, decision, catalog, usage_reported)
+    receipt = _build_receipt(
+        model_info, usage, decision, catalog, usage_reported, estimated=usage_estimated
+    )
 
     entry = _ledger_entry(
         task=task, model=model_info.id, status=status, iterations=iterations, receipt=receipt, out=out

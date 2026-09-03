@@ -20,6 +20,7 @@ from tret.engine.compaction import (
     CompactionState,
     apply_plan,
     elided_source_text,
+    estimate_message_tokens,
     estimate_wire_tokens,
     over_budget,
     plan_compaction,
@@ -155,8 +156,26 @@ class ModelSegment:
     to_iteration: int = 0
     usage: Usage = field(default_factory=Usage)
     cost_usd: Decimal = Decimal(0)
+    # True once any turn folded into this segment was an ESTIMATE rather than a
+    # provider-reported figure — a turn whose stream died mid-way (see
+    # `HarnessEngine._book_usage`). The segment's totals stay one running sum
+    # either way (an estimate is still real tokens the provider was paid for),
+    # but this says so, so analytics can tell a metered receipt from a guessed
+    # one instead of reading both as equally certain.
+    estimated_usage: bool = False
+    # The most recent *metered* (non-estimated) turn's cache_read_tokens for
+    # this model in this run, or None if this model has not yet completed a
+    # metered turn. A mid-stream death's estimate (see the `ProviderError`
+    # handler in `_execute_inner`) has no wire-level way to tell how much of
+    # its prompt the provider actually served from cache — the wire prefix is
+    # unchanged from one turn to the next, so this is the best proxy available,
+    # and carrying it forward keeps the estimate from booking a cached prefix
+    # as if it were all fresh (see `CACHE_READ_MULTIPLIER` in
+    # providers/catalog.py: pricing that 10x too high, straight into
+    # `reported_cost_usd`, the billing column).
+    last_reported_cache_read_tokens: int | None = None
 
-    def add(self, usage: Usage, iteration: int) -> None:
+    def add(self, usage: Usage, iteration: int, *, estimated: bool = False) -> None:
         if not self.from_iteration:
             self.from_iteration = iteration
         self.to_iteration = iteration
@@ -170,6 +189,9 @@ class ModelSegment:
             usage.cache_read_tokens,
             usage.cache_write_tokens,
         )
+        self.estimated_usage = self.estimated_usage or estimated
+        if not estimated:
+            self.last_reported_cache_read_tokens = usage.cache_read_tokens
 
     def accounting(self) -> dict:
         return energy_accounting(
@@ -198,6 +220,10 @@ class ModelSegment:
             # run-level roll-up nulls whatever the segments disagreed on, so this
             # is where the un-nulled detail survives.
             "energy_accounting": accounting,
+            # See `estimated_usage`'s docstring: True if any turn folded into
+            # this segment was priced from an estimate rather than a metered
+            # figure.
+            "estimated": self.estimated_usage,
         }
 
 
@@ -217,9 +243,63 @@ class HarnessEngine:
         self.router = ModelRouter(self.catalog, self.registry, self.priors)
         self.bus = get_event_bus()
         self._cancelled: set[uuid.UUID] = set()
+        # In-process delegation lineage: child run id -> parent run id.
+        # `run_harness_task` (engine/tools.py) registers a child here before
+        # awaiting its `execute()` and unregisters it after, so a run created by
+        # delegation is never a mystery to the engine that has to cancel it —
+        # even though a child has no `parent_run_id` column (see the module this
+        # dict is read from: `_is_cancelled` and `cancel` below). Bounded by
+        # construction: a run appears here for exactly the lifetime of the
+        # `run_harness_task` call that created it.
+        self._parent_of: dict[uuid.UUID, uuid.UUID] = {}
+
+    def register_delegation(self, *, child_id: uuid.UUID, parent_id: uuid.UUID) -> None:
+        self._parent_of[child_id] = parent_id
+
+    def unregister_delegation(self, child_id: uuid.UUID) -> None:
+        self._parent_of.pop(child_id, None)
+
+    def _is_cancelled(self, run_id: uuid.UUID) -> bool:
+        """True if `run_id`, or any run it was delegated from, is cancelled.
+
+        Checked at the top of every loop iteration instead of a bare membership
+        test in `self._cancelled`, so cancelling a parent stops a run several
+        delegation hops down even when `cancel()` could not have marked it
+        directly yet — e.g. a grandchild registered *after* its ancestor was
+        already cancelled, because the ancestor's own loop had not reached its
+        `run_harness_task` call at cancel-time. `seen` guards against a cycle in
+        `_parent_of` turning a bug elsewhere into an infinite loop here.
+        """
+        current: uuid.UUID | None = run_id
+        seen: set[uuid.UUID] = set()
+        while current is not None and current not in seen:
+            if current in self._cancelled:
+                return True
+            seen.add(current)
+            current = self._parent_of.get(current)
+        return False
+
+    def _descendants_of(self, run_id: uuid.UUID) -> set[uuid.UUID]:
+        children = {child for child, parent in self._parent_of.items() if parent == run_id}
+        descendants = set(children)
+        for child in children:
+            descendants |= self._descendants_of(child)
+        return descendants
 
     def cancel(self, run_id: uuid.UUID) -> None:
+        """Cancel `run_id` and every run currently delegated from it.
+
+        Delegation runs a child's whole agent loop inline, inside the parent's
+        own tool-call step (`run_harness_task`), so a parent a user cancels
+        mid-delegation must not leave its child looping to completion unattended
+        — that child's cost and side effects belong to the operator who just
+        asked for this run to stop, whether or not they know the child's run id.
+        Marking every *currently registered* descendant here is the proactive
+        half of the contract; `_is_cancelled` above is the half that still
+        catches a descendant registered a moment later.
+        """
         self._cancelled.add(run_id)
+        self._cancelled |= self._descendants_of(run_id)
 
     async def execute(self, run_id: uuid.UUID) -> None:
         async with get_session_factory()() as db:
@@ -266,6 +346,17 @@ class HarnessEngine:
                 # tracking spend needs to see it even though the run never
                 # reached the normal finish path.
                 await get_extension_registry().run_post_run_hooks(db, run, workspace_id)
+            finally:
+                # Every path out of this method — the normal finish inside
+                # `_execute_inner`, `_fail_before_start`'s early return from it
+                # (still inside the `try` above, since it never raises), and
+                # the crash handler just above — reaches this exactly once.
+                # Before this `finally` existed, only the normal finish path
+                # discarded `run.id` (see `_execute_inner`'s own comment further
+                # down): a run cancelled while it was, say, failing a pre-flight
+                # check would leave its id sitting in `_cancelled` forever, with
+                # no later code path ever reaching back to clean it up.
+                self._cancelled.discard(run_id)
 
     async def _execute_inner(self, db, run: Run) -> None:
         harness = await db.get(Harness, run.harness_id)
@@ -278,6 +369,9 @@ class HarnessEngine:
         # unknown-task-type and unknown-tool refusals below.
         gate = await get_extension_registry().check_pre_run(db, run, harness.workspace_id)
         if not gate.allowed:
+            # No `workspace_id` here, deliberately: the gate itself is what
+            # would place a hold, and a run it refuses never got one — there is
+            # nothing for a post-run hook to release. See `_fail_before_start`.
             await self._fail_before_start(
                 db, run, f"{gate.reason}: {gate.detail}" if gate.detail else gate.reason
             )
@@ -309,6 +403,7 @@ class HarnessEngine:
                     f"unknown_task_type: '{run.task_type}' is not declared by this run's pack "
                     f"(declared: {declared or 'none'}; the engine's own task types are "
                     f"{list(GENERIC_TASK_TYPES)})",
+                    workspace_id=harness.workspace_id,
                 )
                 return
             task = {}
@@ -350,6 +445,7 @@ class HarnessEngine:
                 f"tool(s) the engine has no builtin for (available: {sorted(builtins)}). "
                 "Fix the harness's tool_names (or the pack task's `tools`) rather than "
                 "running without them.",
+                workspace_id=harness.workspace_id,
             )
             return
         # Registered, but withheld. `web_search`/`fetch_url` are always in the
@@ -421,7 +517,7 @@ class HarnessEngine:
                 run_override=run.task_input.get("_model_override"),
             )
         except RoutingUnavailable as e:
-            await self._fail_before_start(db, run, str(e))
+            await self._fail_before_start(db, run, str(e), workspace_id=harness.workspace_id)
             return
 
         model_info = self.catalog.get(decision.chosen_model)
@@ -523,7 +619,7 @@ class HarnessEngine:
 
         # ── loop ─────────────────────────────────────────────────────────────
         for iteration in range(1, max_iterations + 1):
-            if run.id in self._cancelled:
+            if self._is_cancelled(run.id):
                 run.status = "cancelled"
                 break
 
@@ -600,6 +696,44 @@ class HarnessEngine:
                 # would make the transcript unreplayable.
                 partial = "".join(assistant_text)
                 if partial or tool_calls:
+                    # Providers only yield TurnComplete (the usage carrier) after
+                    # a clean stream, so every token already streamed here was
+                    # paid to the provider and would otherwise go unmetered —
+                    # this run's receipt would understate what it actually cost.
+                    # Estimate what was on the wire and what came back (chars/4,
+                    # the same dependency-free estimator context/compaction use
+                    # for budgeting) and book it through the ordinary catalog
+                    # path, flagged `estimated` rather than folded in as a
+                    # confident figure. See `_book_usage`.
+                    partial_msg = Msg(role="assistant", content=partial or None, tool_calls=tool_calls)
+                    est_input_tokens = estimate_wire_tokens(system, wire, tool_specs)
+                    # The wire prefix a dying turn sent is the same prefix the
+                    # prior turn of this model sent (nothing about the
+                    # conversation-so-far changes between consecutive turns
+                    # except what got appended at the end) — so the last
+                    # *metered* turn's cache_read_tokens is the best available
+                    # proxy for how much of this one was served from cache too.
+                    # With no prior metered turn (segment.last_reported_cache_
+                    # read_tokens is None), there is no proxy and the estimate
+                    # stays the plain chars/4 figure it always was.
+                    carried_cache_read_tokens = min(
+                        segment.last_reported_cache_read_tokens or 0, est_input_tokens
+                    )
+                    est_usage = Usage(
+                        input_tokens=est_input_tokens - carried_cache_read_tokens,
+                        output_tokens=estimate_message_tokens(partial_msg),
+                        cache_read_tokens=carried_cache_read_tokens,
+                    )
+                    self._book_usage(
+                        run=run,
+                        total_usage=total_usage,
+                        segment=segment,
+                        segments=segments,
+                        model_info=model_info,
+                        usage=est_usage,
+                        iteration=iteration,
+                        estimated=True,
+                    )
                     messages.append(
                         Msg(
                             role="assistant",
@@ -609,6 +743,11 @@ class HarnessEngine:
                                 "partial": True,
                                 "provider_error": str(e),
                                 "unexecuted_tool_calls": [tc.name for tc in tool_calls],
+                                "estimated_usage": {
+                                    "input_tokens": est_usage.input_tokens,
+                                    "output_tokens": est_usage.output_tokens,
+                                    "cache_read_tokens": est_usage.cache_read_tokens,
+                                },
                             },
                         )
                     )
@@ -617,20 +756,14 @@ class HarnessEngine:
                 break
 
             usage = turn.usage if turn else Usage()
-            total_usage.input_tokens += usage.input_tokens
-            total_usage.output_tokens += usage.output_tokens
-            total_usage.cache_read_tokens += usage.cache_read_tokens
-            total_usage.cache_write_tokens += usage.cache_write_tokens
-            # Booked against the model that actually ran the turn. A run may
-            # change model part-way (see the supervisor below), and every figure
-            # downstream — price, energy class, PUE, grid factor — is a property
-            # of *which* model spent the tokens, not of the run as a whole.
-            segment.add(usage, iteration)
-            turn_cost = model_info.cost_usd(
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_read_tokens,
-                usage.cache_write_tokens,
+            self._book_usage(
+                run=run,
+                total_usage=total_usage,
+                segment=segment,
+                segments=segments,
+                model_info=model_info,
+                usage=usage,
+                iteration=iteration,
             )
 
             messages.append(
@@ -642,32 +775,6 @@ class HarnessEngine:
                 )
             )
 
-            run.iterations = iteration
-            run.input_tokens = total_usage.input_tokens
-            run.output_tokens = total_usage.output_tokens
-            run.cache_read_tokens = total_usage.cache_read_tokens
-            run.cache_write_tokens = total_usage.cache_write_tokens
-            run.cost_usd = (run.cost_usd or Decimal(0)) + turn_cost
-            # Best-known actual cost, alongside the pure catalog-priced figure
-            # above. Per turn: the provider-reported actual when there is one
-            # (only OpenRouter reports today, including a genuine 0 for :free
-            # models), otherwise that turn's catalog price. This keeps a run
-            # that switches providers mid-run (e.g. OpenRouter -> Anthropic)
-            # from under-billing on the turns the provider stayed silent on.
-            run.reported_cost_usd = (run.reported_cost_usd or Decimal(0)) + (
-                usage.reported_cost_usd if usage.reported_cost_usd is not None else turn_cost
-            )
-            # Estimated energy/carbon, recomputed per segment from that segment's
-            # running totals rather than accumulated per turn: the estimate is
-            # linear in tokens, so a segment's total cannot drift from the sum of
-            # its turns. The run-level block is the roll-up across segments,
-            # which for the ordinary single-model run is byte-identical to the
-            # single segment's own block (services/emissions.combine_accountings).
-            accounting = combine_accountings([seg.accounting() for seg in segments])
-            run.energy_wh = Decimal(str(accounting["energy_wh"]))
-            run.energy_accounting = accounting
-            if len(segments) > 1:
-                run.model_timeline = [seg.to_json() for seg in segments]
             run.messages = [m.to_json() for m in messages]
             await db.commit()
             await self.bus.publish(
@@ -687,8 +794,8 @@ class HarnessEngine:
                         # the same-token money figure (avoided_usd) and the
                         # judgment band (co2e_g_low/high) come straight from the
                         # accounting block.
-                        "energy_wh": accounting["energy_wh"],
-                        **emission_event_fields(accounting),
+                        "energy_wh": run.energy_accounting["energy_wh"],
+                        **emission_event_fields(run.energy_accounting),
                     },
                 ),
             )
@@ -992,7 +1099,10 @@ class HarnessEngine:
         # to drop and the alternative is a bad look: a run finishing badly, and
         # the very next run of the same shape routing as though it had not.
         self.priors.invalidate()
-        self._cancelled.discard(run.id)
+        # `_cancelled` itself is discarded in `execute()`'s `finally`, not here:
+        # that one place covers this normal finish *and* `_fail_before_start`'s
+        # early return *and* the crash handler, so a terminal run's id is never
+        # left behind regardless of which of those three ways it got here.
         if run.status in SUCCESS_STATUSES:
             await self.bus.publish(
                 run.id,
@@ -1014,6 +1124,81 @@ class HarnessEngine:
             await self.bus.publish(
                 run.id, RunEvent("error", {"message": run.error or run.status, "status": run.status})
             )
+
+    def _book_usage(
+        self,
+        *,
+        run: Run,
+        total_usage: Usage,
+        segment: ModelSegment,
+        segments: list[ModelSegment],
+        model_info: ModelInfo,
+        usage: Usage,
+        iteration: int,
+        estimated: bool = False,
+    ) -> Decimal:
+        """Fold one turn's usage into the run's running totals, cost and energy.
+
+        Shared by the ordinary per-turn accounting above and by the
+        `ProviderError` handler's estimated-usage booking for a turn that died
+        mid-stream, so the two paths can never compute a run's cost differently.
+        `estimated` marks a turn whose usage was guessed (chars/4, from what was
+        actually on the wire and what streamed back before the failure) rather
+        than reported by the provider — the catalog pricing and energy
+        accounting below are identical either way; only the provenance recorded
+        on the model segment (`ModelSegment.estimated_usage`) differs. Returns
+        the turn's own cost in USD.
+        """
+        total_usage.input_tokens += usage.input_tokens
+        total_usage.output_tokens += usage.output_tokens
+        total_usage.cache_read_tokens += usage.cache_read_tokens
+        total_usage.cache_write_tokens += usage.cache_write_tokens
+        # Booked against the model that actually ran the turn. A run may
+        # change model part-way (see the supervisor below), and every figure
+        # downstream — price, energy class, PUE, grid factor — is a property
+        # of *which* model spent the tokens, not of the run as a whole.
+        segment.add(usage, iteration, estimated=estimated)
+        turn_cost = model_info.cost_usd(
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+        )
+        run.iterations = iteration
+        run.input_tokens = total_usage.input_tokens
+        run.output_tokens = total_usage.output_tokens
+        run.cache_read_tokens = total_usage.cache_read_tokens
+        run.cache_write_tokens = total_usage.cache_write_tokens
+        run.cost_usd = (run.cost_usd or Decimal(0)) + turn_cost
+        # Best-known actual cost, alongside the pure catalog-priced figure
+        # above. Per turn: the provider-reported actual when there is one
+        # (only OpenRouter reports today, including a genuine 0 for :free
+        # models), otherwise that turn's catalog price — an estimated turn has
+        # no provider-reported figure either, so it falls into that same
+        # "otherwise". This keeps a run that switches providers mid-run (e.g.
+        # OpenRouter -> Anthropic) from under-billing on the turns the
+        # provider stayed silent on.
+        run.reported_cost_usd = (run.reported_cost_usd or Decimal(0)) + (
+            usage.reported_cost_usd if usage.reported_cost_usd is not None else turn_cost
+        )
+        # Estimated energy/carbon, recomputed per segment from that segment's
+        # running totals rather than accumulated per turn: the estimate is
+        # linear in tokens, so a segment's total cannot drift from the sum of
+        # its turns. The run-level block is the roll-up across segments, which
+        # for the ordinary single-model run is byte-identical to the single
+        # segment's own block (services/emissions.combine_accountings).
+        accounting = combine_accountings([seg.accounting() for seg in segments])
+        run.energy_wh = Decimal(str(accounting["energy_wh"]))
+        run.energy_accounting = accounting
+        # Normally kept only once a run has used more than one model (see
+        # ModelSegment's own docstring) — an estimated turn is the exception:
+        # `estimated_usage` lives nowhere else on the run, so the timeline is
+        # persisted even for an ordinary single-segment run rather than
+        # silently dropping the one signal analytics needs to tell a metered
+        # receipt from a guessed one.
+        if len(segments) > 1 or estimated:
+            run.model_timeline = [seg.to_json() for seg in segments]
+        return turn_cost
 
     def _switch_model(
         self,
@@ -1134,17 +1319,30 @@ class HarnessEngine:
             "estimator": TOKEN_ESTIMATOR,
         }
 
-    async def _fail_before_start(self, db, run: Run, message: str) -> None:
-        """Fail a run that never reached the loop (bad task type, no route).
+    async def _fail_before_start(
+        self, db, run: Run, message: str, *, workspace_id: uuid.UUID | None = None
+    ) -> None:
+        """Fail a run that never reached the loop (bad task type, no route, ...).
 
         Nothing has been spent and nothing partial is pending, so this is a plain
         terminal write plus the error event the client is waiting on.
+
+        `workspace_id`: pass this for every failure reached *after* the pre-run
+        gate allowed the run (unknown task type, unknown tool, no route) —
+        `check_pre_run` ran, an extension's gate may have placed a hold on this
+        workspace, and its post-run hook is the only thing that releases it.
+        Leave it `None` for the gate's own refusal: that run never got as far as
+        a hold to release, and every other terminal path already fires the hook
+        exactly once (the normal finish, and the crash handler in `execute()`),
+        so this is the one call site that must not fire it a second time.
         """
         run.status = "failed"
         run.error = message
         run.finished_at = _utcnow()
         await db.commit()
         await self.bus.publish(run.id, RunEvent("error", {"message": message}))
+        if workspace_id is not None:
+            await get_extension_registry().run_post_run_hooks(db, run, workspace_id)
 
     @staticmethod
     def _completion_status(ctx: RunContext) -> str:
