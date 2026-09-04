@@ -1495,6 +1495,105 @@ export interface LedgerEntry {
 
 export type CheckoutKind = 'credits_small' | 'credits_large' | 'solo' | 'team'
 
+// ── Connections (Google Drive / Microsoft 365 workspace integrations) ──────
+// backend: api/connections.py, mounted under /api/connections. Provider keys
+// are the two exact strings the backend and OAuth config use throughout:
+// 'gdrive' and 'm365' — never a display label.
+
+export type ConnectionProvider = 'gdrive' | 'm365'
+
+/** One workspace's connection to a provider, as GET /api/connections lists it.
+ *  Never carries a token — `status: 'error'` + `error_detail` is how a dead
+ *  refresh token (revoked access, an `invalid_grant` on refresh) surfaces here
+ *  rather than as a 401 the next time something tries to use it. */
+export interface WorkspaceConnection {
+  provider: ConnectionProvider
+  status: 'active' | 'error'
+  account_label: string | null
+  granted_scopes: string[]
+  connected_at: string | null
+  refreshed_at: string | null
+  error_detail: string | null
+}
+
+/** The Google Picker's own client-side credentials — present only for gdrive,
+ *  and only once `TRET_GDRIVE_PICKER_API_KEY`/`TRET_GDRIVE_APP_ID` are both
+ *  set. Absence (null) means the provider can still be connected, but Import
+ *  from Google Drive has nothing to build a Picker with. */
+export interface ConnectionPickerConfig {
+  api_key: string
+  app_id: string
+}
+
+/** One provider's availability, as GET /api/connections/providers lists it —
+ *  independent of whether *this* workspace has connected it (`connected`
+ *  mirrors WorkspaceConnection's existence; `configured` is whether the
+ *  deployment has OAuth client credentials for it at all, from env vars or
+ *  the extension hook). An unconfigured provider has no Connect flow to
+ *  offer — the UI shows the env var hint instead. */
+export interface ConnectionProviderInfo {
+  provider: ConnectionProvider
+  configured: boolean
+  connected: boolean
+  picker: ConnectionPickerConfig | null
+}
+
+export interface ConnectionAuthorizeResult {
+  authorize_url: string
+}
+
+/** GET /api/connections/{provider}/token — a short-lived provider access
+ *  token for client-side use (the Google Picker only, for now). Never stored;
+ *  fetched fresh immediately before opening the Picker. */
+export interface ConnectionTokenResult {
+  access_token: string
+  expires_in: number
+}
+
+/** One row in the m365 tree browser (GET /api/connections/m365/browse):
+ *  a SharePoint site, one of its drives (or the pseudo "OneDrive" entry at
+ *  the root), a folder, or a file. Only `kind: 'file'` is importable —
+ *  the other kinds are drilled into, never picked directly. `drive_id` is
+ *  present on drives, folders and files (what an import of a file needs
+ *  alongside its own `id`); `site_id` only on sites. */
+export interface M365BrowseItem {
+  id: string
+  name: string
+  kind: 'site' | 'drive' | 'folder' | 'file'
+  mime_type?: string | null
+  size?: number | null
+  modified_at?: string | null
+  site_id?: string | null
+  drive_id?: string | null
+}
+
+export interface M365BrowseResult {
+  items: M365BrowseItem[]
+}
+
+/** One file picked from either provider, exactly as
+ *  POST /api/projects/{project_id}/documents/import wants it. `drive_id` is
+ *  always null for gdrive (a Drive file id is self-sufficient); for m365 it
+ *  names which drive `id` lives in, same as the browse item it came from. */
+export interface ImportItem {
+  id: string
+  name: string
+  drive_id: string | null
+}
+
+/** One item the import endpoint could not bring in — shown per-item
+ *  alongside whichever items it did import, never in place of them. */
+export interface ImportError {
+  id: string
+  name: string
+  detail: string
+}
+
+export interface ImportDocumentsResult {
+  documents: TretDocument[]
+  errors: ImportError[]
+}
+
 // ── Marketplace: registry (Find / Install) ───────────────────────────────
 // Everything below proxies through the backend's own registry client
 // (api/packs.py's `/registry/*` routes -> `_registry_get`/`_download_pack_archive`),
@@ -2062,4 +2161,37 @@ export const api = {
       `/billing/usage?${qs.toString()}`,
     )
   },
+
+  // connections (Google Drive / Microsoft 365 workspace integrations)
+  listConnections: () => request<{ connections: WorkspaceConnection[] }>('/connections'),
+  connectionProviders: () =>
+    request<{ providers: ConnectionProviderInfo[] }>('/connections/providers'),
+  authorizeConnection: (provider: ConnectionProvider) =>
+    request<ConnectionAuthorizeResult>(`/connections/${provider}/authorize`, { method: 'POST' }),
+  disconnectConnection: (provider: ConnectionProvider) =>
+    request<{ ok: boolean }>(`/connections/${provider}`, { method: 'DELETE' }),
+  // gdrive only — a short-lived Picker token, fetched fresh right before the
+  // Picker opens. 404s for any provider without a client-side use.
+  gdriveToken: () => request<ConnectionTokenResult>('/connections/gdrive/token'),
+  browseM365: (
+    params: {
+      scope?: 'sites' | 'drive_children'
+      site_id?: string
+      drive_id?: string
+      item_id?: string
+    } = {},
+  ) => {
+    const qs = new URLSearchParams()
+    if (params.scope) qs.set('scope', params.scope)
+    if (params.site_id) qs.set('site_id', params.site_id)
+    if (params.drive_id) qs.set('drive_id', params.drive_id)
+    if (params.item_id) qs.set('item_id', params.item_id)
+    const suffix = qs.toString() ? `?${qs.toString()}` : ''
+    return request<M365BrowseResult>(`/connections/m365/browse${suffix}`)
+  },
+  importDocuments: (projectId: string, provider: ConnectionProvider, items: ImportItem[]) =>
+    request<ImportDocumentsResult>(`/projects/${projectId}/documents/import`, {
+      method: 'POST',
+      body: { provider, items },
+    }),
 }

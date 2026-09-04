@@ -3,10 +3,31 @@ import { type DragEvent, useRef, useState } from 'react'
 
 import { api, type TretDocument, type Dataset } from '../api/client'
 import { formatDateTime } from '../components/shared/format'
+import { ImportFromMenu } from '../components/shared/ImportFromMenu'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { StatusBadge } from '../components/shared/StatusBadge'
 
 const PREVIEW_CHARS = 4000
+
+/** The current workspace's one project id, for the import endpoint's
+ *  `/api/projects/{project_id}/documents/import` path — nothing in this app
+ *  otherwise surfaces a project id (there is no project picker anywhere; see
+ *  `current_project`'s own doc comment in the backend). Every already-loaded
+ *  `TretDocument` carries its `project_id`, so the common case is free; a
+ *  workspace with zero documents (exactly the moment Import is most useful)
+ *  falls back to a light analytics call, since every analytics endpoint
+ *  resolves and reports the workspace's project id unconditionally, even over
+ *  an empty window. */
+function useCurrentProjectId(documents: TretDocument[], documentsLoaded: boolean): string | null {
+  const fallbackQuery = useQuery({
+    queryKey: ['current-project-id'],
+    queryFn: async () => (await api.emissionsAnalytics(1)).project_id,
+    enabled: documentsLoaded && documents.length === 0,
+    staleTime: Infinity,
+    retry: false,
+  })
+  return documents[0]?.project_id ?? fallbackQuery.data ?? null
+}
 
 export function Documents() {
   const queryClient = useQueryClient()
@@ -22,6 +43,15 @@ export function Documents() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['documents'] }),
   })
 
+  const documents = documentsQuery.data ?? []
+  // Every workspace is single-project today (no picker anywhere in this app —
+  // see backend/tret/api/workspace.py::current_project's own doc comment), but
+  // nothing here fetches that project's id directly. The already-loaded
+  // documents list carries it on every row; a brand-new workspace with zero
+  // documents falls back to the one other already-fetched response shape that
+  // always resolves and reports it — see useCurrentProjectId below.
+  const projectId = useCurrentProjectId(documents, documentsQuery.isSuccess)
+
   const onDrop = (e: DragEvent) => {
     e.preventDefault()
     setDragging(false)
@@ -29,8 +59,6 @@ export function Documents() {
       uploadMutation.mutate(file)
     }
   }
-
-  const documents = documentsQuery.data ?? []
 
   const columns: Column<TretDocument>[] = [
     {
@@ -76,8 +104,13 @@ export function Documents() {
   return (
     <div className="stack" style={{ gap: 24 }}>
       <div>
-        <h1 className="view-title">Documents</h1>
-        <div className="view-sub">Evidence uploads and pack-seeded datasets.</div>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <h1 className="view-title">Documents</h1>
+            <div className="view-sub">Evidence uploads and pack-seeded datasets.</div>
+          </div>
+          <ImportFromMenu projectId={projectId} />
+        </div>
 
         <div
           className={`dropzone${dragging ? ' drag' : ''}`}

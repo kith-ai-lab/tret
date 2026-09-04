@@ -32,6 +32,7 @@ from tret.api.workspace import WorkspaceContext, current_workspace
 from tret.config import get_settings
 from tret.db.engine import get_db
 from tret.db.models import Document, Project, User, Workspace
+from tret.services import documents as documents_service
 
 PROJECT = Project(id=uuid.uuid4(), workspace_id=uuid.uuid4(), name="P")
 WORKSPACE = Workspace(id=PROJECT.workspace_id, name="W", kind="team")
@@ -326,7 +327,7 @@ def test_a_parser_that_throws_does_not_fail_the_upload(client, db, monkeypatch):
     def exploding(_filename, _data):
         raise RuntimeError("pypdf found something it did not like")
 
-    monkeypatch.setattr(documents, "extract_text", exploding)
+    monkeypatch.setattr(documents_service, "extract_text", exploding)
     response = upload(client, "hostile.pdf", b"%PDF-1.4 nonsense")
     assert response.status_code == 200
     assert db.document.extraction_status == "failed"
@@ -335,7 +336,7 @@ def test_a_parser_that_throws_does_not_fail_the_upload(client, db, monkeypatch):
 
 
 def test_extraction_output_is_truncated(client, db, monkeypatch):
-    monkeypatch.setattr(documents, "MAX_EXTRACTED_CHARS", 100)
+    monkeypatch.setattr(documents_service, "MAX_EXTRACTED_CHARS", 100)
     response = upload(client, "long.txt", b"y" * 5000)
     assert response.status_code == 200
     doc = db.document
@@ -349,13 +350,13 @@ def test_extraction_output_is_truncated(client, db, monkeypatch):
 def test_extraction_that_hangs_is_abandoned(client, db, monkeypatch):
     import time
 
-    monkeypatch.setattr(documents, "EXTRACTION_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(documents_service, "EXTRACTION_TIMEOUT_SECONDS", 0.05)
 
     def slow(_filename, _data):
         time.sleep(5)
         raise AssertionError("should have been abandoned")
 
-    monkeypatch.setattr(documents, "extract_text", slow)
+    monkeypatch.setattr(documents_service, "extract_text", slow)
     response = upload(client, "slow.txt", b"content")
     assert response.status_code == 200
     assert db.document.extraction_status == "failed"

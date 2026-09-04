@@ -355,6 +355,7 @@ See [docs/architecture.md](docs/architecture.md) and
 | [architecture.md](docs/architecture.md) | how the pieces fit |
 | [trust-doctrine.md](docs/trust-doctrine.md) | the rules, and why they are structural |
 | [pack-authoring.md](docs/pack-authoring.md) | write a domain pack |
+| [connections.md](docs/connections.md) | Google Drive / Microsoft 365 workspace connections |
 | [embedding.md](docs/embedding.md) | the SDK and the `tret run` CLI |
 | [eco-accounting.md](docs/eco-accounting.md) | routing objectives, energy and carbon |
 | [local-models.md](docs/local-models.md) | zero-cloud operation |

@@ -8,7 +8,10 @@ the `ExtensionAPI` it is handed. Nothing here knows what the billing package
 (or any other extension) does — it only knows the three seams an extension may
 use: an included router, a pre-run gate, and a post-run hook. A fourth,
 `add_startup_task`, lets an extension do async setup (e.g. warming a cache)
-once at boot rather than on every check.
+once at boot rather than on every check. A fifth, `add_oauth_client_provider`,
+lets an extension supply OAuth client credentials for a workspace-connections
+provider (`services/connections.py`) when the operator-facing env vars are
+unset — tret_cloud's own hosted OAuth app, for one.
 
 Fail-open by design: a pre-run gate is a business decision (insufficient
 credits, a suspended workspace), not an engine concern, so a gate that raises
@@ -55,11 +58,19 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.db.models import Run
+
+if TYPE_CHECKING:
+    # Type-only: services/connections.py imports this module (for the workspace
+    # gate and this hook), so importing OAuthClientConfig back here for real
+    # would cycle. TYPE_CHECKING + the string annotation below keep the
+    # reference for readers/type-checkers without paying for it at import time.
+    from tret.services.connections import OAuthClientConfig
 
 log = logging.getLogger("tret.extensions")
 
@@ -78,6 +89,15 @@ StartupTask = Callable[[], Awaitable[None]]
 # naming what is being asked, e.g. "invite" (workspaces.py creating one) or
 # "invite_redeem" (services/identity.py accepting one during OIDC login).
 WorkspaceGate = Callable[[AsyncSession, uuid.UUID, str], Awaitable[GateResult]]
+# (provider: "gdrive" | "m365") -> OAuthClientConfig | None. Deliberately
+# synchronous, unlike the gates/hooks above: this is a pure config lookup (an
+# extension reading its own Settings), not a decision that touches the
+# database, so there is no async session-isolation concern to give it. Asked
+# only when the env vars services/connections.py checks first
+# (TRET_GDRIVE_CLIENT_ID/SECRET, TRET_M365_CLIENT_ID/SECRET) are unset —
+# tret_cloud registers one of these to supply its own OAuth app credentials
+# without the open-source engine ever importing a proprietary package.
+OAuthClientProvider = Callable[[str], "OAuthClientConfig | None"]
 
 
 class ExtensionAPI:
@@ -93,6 +113,7 @@ class ExtensionAPI:
         self._post_run_hooks: list[PostRunHook] = []
         self._startup_tasks: list[StartupTask] = []
         self._workspace_gates: list[WorkspaceGate] = []
+        self._oauth_client_providers: list[OAuthClientProvider] = []
 
     def include_router(self, router: APIRouter) -> None:
         if self._app is not None:
@@ -109,6 +130,9 @@ class ExtensionAPI:
 
     def add_workspace_gate(self, fn: WorkspaceGate) -> None:
         self._workspace_gates.append(fn)
+
+    def add_oauth_client_provider(self, fn: OAuthClientProvider) -> None:
+        self._oauth_client_providers.append(fn)
 
     async def run_startup_tasks(self) -> None:
         """Await every registered startup task, in registration order."""
@@ -185,6 +209,31 @@ class ExtensionAPI:
                 if not result.allowed:
                     return result
         return GateResult(allowed=True)
+
+    def get_oauth_client_config(self, provider: str) -> "OAuthClientConfig | None":
+        """Ask every registered OAuth client provider in turn; the first
+        non-None result wins. Only reached by `services/connections.py::
+        get_oauth_client` once the env vars it checks first come up empty for
+        `provider`.
+
+        Fail-open like the gates above, but simpler: this is a synchronous
+        config lookup, not an async decision against a database, so there is
+        no session to isolate. A provider fn that raises is logged and
+        skipped rather than allowed to take the request down — same
+        "an extension bug must not be able to break core behaviour" contract
+        as everything else in this class.
+        """
+        for fn in self._oauth_client_providers:
+            try:
+                result = fn(provider)
+            except Exception:
+                log.exception(
+                    "oauth client provider %r raised for provider %r; skipping", fn, provider
+                )
+                continue
+            if result is not None:
+                return result
+        return None
 
     async def run_post_run_hooks(self, db: AsyncSession, run: Run, workspace_id: uuid.UUID) -> None:
         """Run every post-run hook; a hook's exception never propagates.

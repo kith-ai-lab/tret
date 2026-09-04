@@ -33,6 +33,12 @@ const STATUS_COLOR: Record<string, string> = {
   listed: 'badge-green',
   changes_requested: 'badge-amber',
   delisted: 'badge-gray',
+  // workspace connections (Google Drive / Microsoft 365): 'active' shares
+  // the same green as 'completed'/'approved'/'fulfilled'; 'error' shares the
+  // same red as 'failed'/'rejected' — a dead refresh token is a failure
+  // state, not a neutral one.
+  active: 'badge-green',
+  error: 'badge-red',
 }
 
 export function StatusBadge({ status }: { status: string }) {

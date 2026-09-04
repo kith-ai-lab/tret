@@ -44,7 +44,7 @@ log = logging.getLogger("tret.net")
 SOURCE_KIND_WEB = "web"
 SOURCE_KIND_UPLOAD = "upload"
 
-# Matches the upload path's ceiling (`api/documents.py::MAX_EXTRACTED_CHARS`), for
+# Matches the upload path's ceiling (`services/documents.py::MAX_EXTRACTED_CHARS`), for
 # the same reason: extracted text lands in a column and then in a prompt.
 MAX_EXTRACTED_CHARS = 2_000_000
 EXTRACTION_TIMEOUT_SECONDS = 30.0

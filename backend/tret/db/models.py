@@ -598,6 +598,40 @@ class ProviderCredential(Base):
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class WorkspaceConnection(Base):
+    """A workspace's OAuth link to an external file provider (Google Drive,
+    Microsoft 365) — one stored refresh token per (workspace, provider), used
+    by `services/connections.py::get_access_token` to mint short-lived access
+    tokens for the picker/browse/import surfaces layered on top of this.
+
+    `status='error'` freezes the connection the moment a refresh comes back
+    `invalid_grant` (the user revoked access at the provider, or the refresh
+    token expired) — `error_detail` carries why, and a workspace admin has to
+    reconnect via `POST /api/connections/{provider}/authorize` to clear it,
+    the same shape `ProviderCredential`-adjacent flows use elsewhere.
+    """
+
+    __tablename__ = "workspace_connections"
+    __table_args__ = (UniqueConstraint("workspace_id", "provider"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)  # gdrive | m365
+    account_label: Mapped[str | None] = mapped_column(Text)
+    encrypted_refresh_token: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    granted_scopes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # Reserved for the import/browse UI (Phase 1): folders/sites the user
+    # scoped this connection to. Always {} until that layer writes to it.
+    selected_resources: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")  # active | error
+    error_detail: Mapped[str | None] = mapped_column(Text)
+    connected_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at_col()
+    refreshed_at: Mapped[datetime | None] = mapped_column()
+
+
 class EgressCall(Base):
     """One outbound request in the `research` class: what a run reached for.
 

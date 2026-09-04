@@ -265,6 +265,83 @@ async def test_workspace_gate_receives_the_action_string():
     assert seen_actions == ["invite", "invite_redeem"]
 
 
+# ── OAuth client providers (workspace connections) ──────────────────────────────
+def test_with_no_oauth_client_providers_registered_returns_none():
+    ext = ExtensionAPI(None)
+    assert ext.get_oauth_client_config("gdrive") is None
+
+
+def test_the_first_non_none_provider_wins():
+    from tret.services.connections import OAuthClientConfig
+
+    ext = ExtensionAPI(None)
+
+    def declines(provider):
+        return None
+
+    def provides(provider):
+        return OAuthClientConfig(client_id="ext-id", client_secret="ext-secret")
+
+    ext.add_oauth_client_provider(declines)
+    ext.add_oauth_client_provider(provides)
+    assert ext.get_oauth_client_config("gdrive") == OAuthClientConfig(
+        client_id="ext-id", client_secret="ext-secret"
+    )
+
+
+def test_a_later_provider_is_never_asked_once_an_earlier_one_answers():
+    from tret.services.connections import OAuthClientConfig
+
+    ext = ExtensionAPI(None)
+    calls = []
+
+    def first(provider):
+        return OAuthClientConfig(client_id="first-id", client_secret="first-secret")
+
+    def second(provider):
+        calls.append(provider)
+        return OAuthClientConfig(client_id="second-id", client_secret="second-secret")
+
+    ext.add_oauth_client_provider(first)
+    ext.add_oauth_client_provider(second)
+    result = ext.get_oauth_client_config("m365")
+    assert result.client_id == "first-id"
+    assert calls == []
+
+
+def test_a_raising_oauth_client_provider_fails_open_and_later_providers_still_run(caplog):
+    from tret.services.connections import OAuthClientConfig
+
+    ext = ExtensionAPI(None)
+
+    def raises(provider):
+        raise RuntimeError("boom")
+
+    def provides_after(provider):
+        return OAuthClientConfig(client_id="after-id", client_secret="after-secret")
+
+    ext.add_oauth_client_provider(raises)
+    ext.add_oauth_client_provider(provides_after)
+    with caplog.at_level(logging.ERROR, logger="tret.extensions"):
+        result = ext.get_oauth_client_config("gdrive")
+    assert result.client_id == "after-id"
+    assert "raised" in caplog.text
+
+
+def test_oauth_client_provider_receives_the_provider_string():
+    ext = ExtensionAPI(None)
+    seen = []
+
+    def records(provider):
+        seen.append(provider)
+        return None
+
+    ext.add_oauth_client_provider(records)
+    ext.get_oauth_client_config("gdrive")
+    ext.get_oauth_client_config("m365")
+    assert seen == ["gdrive", "m365"]
+
+
 # ── startup tasks ──────────────────────────────────────────────────────────────
 async def test_startup_tasks_run_in_registration_order():
     ext = ExtensionAPI(None)

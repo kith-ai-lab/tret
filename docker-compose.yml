@@ -204,6 +204,20 @@ services:
       # Empty (the default here) is what this image ships: the extension seam
       # in tret/engine/extensions.py is entirely inert.
       TRET_EXTENSIONS: ${TRET_EXTENSIONS:-}
+      # Workspace connections (Google Drive / Microsoft 365 OAuth,
+      # tret/services/connections.py, tret/api/connections.py). All blank by
+      # default — every self-hosted deployment ships with connections
+      # unconfigured until an operator registers OAuth apps with Google/
+      # Microsoft and sets these.
+      TRET_GDRIVE_CLIENT_ID: ${TRET_GDRIVE_CLIENT_ID:-}
+      TRET_GDRIVE_CLIENT_SECRET: ${TRET_GDRIVE_CLIENT_SECRET:-}
+      TRET_M365_CLIENT_ID: ${TRET_M365_CLIENT_ID:-}
+      TRET_M365_CLIENT_SECRET: ${TRET_M365_CLIENT_SECRET:-}
+      # Google Picker developer key + Cloud project number, handed to the
+      # frontend picker verbatim. Blank hides the in-app picker even with a
+      # gdrive client configured.
+      TRET_GDRIVE_PICKER_API_KEY: ${TRET_GDRIVE_PICKER_API_KEY:-}
+      TRET_GDRIVE_APP_ID: ${TRET_GDRIVE_APP_ID:-}
     volumes:
       - ./packs:/packs:ro
       - storage:/data/storage

@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { Analytics } from './views/Analytics'
 import { Approvals } from './views/Approvals'
 import { Chat } from './views/Chat'
+import { ConnectionsView } from './views/Connections'
 import { Deliverables } from './views/Deliverables'
 import { Documents } from './views/Documents'
 import { Emissions } from './views/Emissions'
@@ -35,6 +36,7 @@ export function AppRoutes() {
       <Route path="/marketplace-review" element={<MarketplaceReview />} />
       <Route path="/harnesses" element={<Harnesses />} />
       <Route path="/settings" element={<SettingsView />} />
+      <Route path="/settings/connections" element={<ConnectionsView />} />
       <Route path="/invite/:token" element={<InviteAccept />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

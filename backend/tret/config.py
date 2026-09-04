@@ -501,6 +501,27 @@ class Settings(BaseSettings):
     # same-token efficiency indicator, never an offset or a reduction claim.
     emissions_baseline_model: str = ""
 
+    # ── workspace connections (tret/services/connections.py, tret/api/connections.py) ──
+    # OAuth client credentials for the two Phase 0 providers (services/connections.py's
+    # provider keys, exactly: "gdrive", "m365"). All optional, all blank by default —
+    # every self-hosted deployment ships with connections entirely unconfigured, and
+    # `GET /api/connections/providers` reports each as `configured: false` until either
+    # these are set or an extension supplies a client via `ext.add_oauth_client_provider`
+    # (tret_cloud does this for the hosted product; see engine/extensions.py). Env
+    # always wins over the extension hook, same precedence as the provider API keys
+    # above.
+    gdrive_client_id: str = ""
+    gdrive_client_secret: str = ""
+    m365_client_id: str = ""
+    m365_client_secret: str = ""
+    # Google Picker developer key + Cloud project number — handed to the frontend
+    # picker verbatim via `GET /api/connections/providers` (never proxied through
+    # this backend; the browser talks to Google's picker JS directly). Blank means
+    # the gdrive provider's `picker` field is omitted even if a client is configured,
+    # so "connect works" and "the in-app picker works" can be set up independently.
+    gdrive_picker_api_key: str = ""
+    gdrive_app_id: str = ""
+
     # Providers — keys may also be set per-workspace via the settings UI.
     # Env always wins over DB-stored credentials.
     anthropic_api_key: str = ""

@@ -13,6 +13,7 @@ from tret.api import (
     analytics,
     auth,
     chat,
+    connections as connections_api,
     docs,
     documents,
     findings,
@@ -57,16 +58,22 @@ log = logging.getLogger("tret")
 # style-src keeps 'unsafe-inline': React's `style={{...}}` becomes inline
 # `style="..."` attributes, which CSP's style-src (not script-src) governs, and
 # there is no equivalent hash-per-element scheme worth the churn for those.
-# connect-src 'self' covers /api/runs/{id}/events (same-origin SSE) — nothing
-# in the bundle calls a different origin (fonts are self-hosted @fontsource
-# packages, not Google Fonts; no other external host appears in frontend/src).
+# connect-src 'self' covers /api/runs/{id}/events (same-origin SSE). One
+# exception to "nothing in the bundle calls a different origin": the Google
+# Picker (frontend/src/components/shared/googleDrivePicker.ts) loads
+# `https://apis.google.com/js/api.js` (script-src), renders in a
+# `https://docs.google.com` iframe (frame-src) and makes XHRs to
+# `https://content.googleapis.com` and `https://docs.google.com` (connect-src)
+# — those three origins are the minimal widening needed for it, added to
+# script-src/frame-src/connect-src only, nothing else loosened.
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
-    "script-src 'self' 'sha256-2uazwxIKVNaSPni5VjTyuSxTIMSS7feaMo3K0rfV0Hg='; "
+    "script-src 'self' 'sha256-2uazwxIKVNaSPni5VjTyuSxTIMSS7feaMo3K0rfV0Hg=' https://apis.google.com; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob:; "
     "font-src 'self' data:; "
-    "connect-src 'self'; "
+    "connect-src 'self' https://content.googleapis.com https://docs.google.com; "
+    "frame-src 'self' https://docs.google.com; "
     "frame-ancestors 'none'; "
     "base-uri 'self'; "
     "form-action 'self'"
@@ -257,6 +264,11 @@ def create_app() -> FastAPI:
     app.include_router(pack_builder.router)
     app.include_router(packs.router)
     app.include_router(settings_api.router)
+    # Workspace connections (Google Drive / Microsoft 365 OAuth) — always
+    # mounted, like workspaces_api above: every provider simply reports
+    # `configured: false` (GET /api/connections/providers) until an operator
+    # sets its client id/secret or an extension supplies one.
+    app.include_router(connections_api.router)
     # After every core router: an extension's own router (if it adds one) is
     # additive to the open-source API surface, never a replacement for it.
     # No-op with TRET_EXTENSIONS unset — load_extensions still runs, and sets

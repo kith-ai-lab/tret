@@ -3,7 +3,7 @@
 Deliberately no new dependency. A readability-style extractor would produce
 prettier text, and it would also be a third parser running over hostile bytes
 inside the request path — tret already has two of those (pypdf, python-docx)
-and treats them as the risk they are (`api/documents.py::_extract_bounded`).
+and treats them as the risk they are (`services/documents.py::extract_bounded`).
 `html.parser` is the one that ships with Python.
 
 What it does: drop the elements whose text is never content (`script`, `style`,

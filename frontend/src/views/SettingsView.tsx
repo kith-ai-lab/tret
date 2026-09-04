@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type FormEvent, type ReactNode, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import {
   api,
@@ -30,10 +31,44 @@ export function SettingsView() {
       <WorkspaceMembersSection />
       <InstanceUsersSection />
       <ProviderKeys />
+      <ConnectionsTeaser />
       <BillingSection />
       <RouterInfo />
       <NetworkAccess />
       <DataRequests />
+    </div>
+  )
+}
+
+// ── Connections teaser ───────────────────────────────────────────────────
+// A one-line summary of what Google Drive / Microsoft 365 look like right
+// now, linking through to the full page at /settings/connections. A separate
+// route (rather than another inline section here, unlike everything else on
+// this page) because the OAuth round trip has to land somewhere after the
+// provider redirects back — see Connections.tsx's own CallbackNotice.
+
+function ConnectionsTeaser() {
+  const connectionsQuery = useQuery({ queryKey: ['connections'], queryFn: api.listConnections })
+  const connections = connectionsQuery.data?.connections ?? []
+  const activeCount = connections.filter((c) => c.status === 'active').length
+
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 8 }}>
+        Connections
+      </div>
+      <Link to="/settings/connections" className="panel" style={{ display: 'block' }}>
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <div className="mono-body">
+            {connectionsQuery.isLoading
+              ? 'Loading…'
+              : activeCount === 0
+                ? 'Google Drive and Microsoft 365 are not connected.'
+                : `${activeCount} provider${activeCount === 1 ? '' : 's'} connected.`}
+          </div>
+          <span className="mono-label">Manage →</span>
+        </div>
+      </Link>
     </div>
   )
 }

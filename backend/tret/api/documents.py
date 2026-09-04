@@ -7,15 +7,17 @@ sanitisation, and text extraction is bounded in output and in wall time.
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
@@ -23,7 +25,21 @@ from tret.api.workspace import WorkspaceContext, current_project, current_worksp
 from tret.config import get_settings
 from tret.db.engine import get_db
 from tret.db.models import Dataset, DatasetRow, Document, User
-from tret.services.documents import extract_text
+from tret.services.connections import (
+    GDRIVE,
+    M365,
+    ConnectionAuthError,
+    IMPORT_MAX_BYTES,
+    DownloadTooLargeError,
+    download_gdrive_file,
+    download_m365_file,
+    gdrive_download_content_type,
+    gdrive_export_filename,
+    gdrive_file_metadata,
+    get_access_token,
+    m365_item_metadata,
+)
+from tret.services.documents import ingest_document
 
 log = logging.getLogger("tret.documents")
 
@@ -38,11 +54,6 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 # write. The allowance covers the multipart envelope (boundaries and part
 # headers) so a file *at* the cap is not refused for its wrapper.
 MULTIPART_OVERHEAD_ALLOWANCE = 64 * 1024
-# Extraction bounds. A 25MB CSV of one-character rows, or a PDF crafted to
-# expand, must not turn into an unbounded string in a JSONB column or an
-# unbounded stretch of CPU inside a request.
-MAX_EXTRACTED_CHARS = 2_000_000
-EXTRACTION_TIMEOUT_SECONDS = 30.0
 
 DEFAULT_CONTENT_TYPE = "application/octet-stream"
 # Deliberately narrow: word characters in any script (so a German or Japanese
@@ -131,36 +142,6 @@ async def _spool_upload(file: UploadFile, storage_dir: Path) -> tuple[Path, str,
     return temp_path, digest.hexdigest(), total
 
 
-async def _extract_bounded(filename: str, data: bytes) -> tuple[str, dict, str]:
-    """(text, meta, status). Bounded in wall time and in characters returned.
-
-    Extraction is third-party parsing of third-party bytes: it runs off the event
-    loop so one slow document cannot stall every other request, it is abandoned
-    after EXTRACTION_TIMEOUT_SECONDS, its output is truncated, and *any* parser
-    failure is recorded on the row rather than raised — a corrupt PDF is a
-    document with no text, not a 500 on upload.
-
-    "Abandoned" is precise: Python cannot cancel a running thread, so a pathological
-    parser finishes in the background while the request moves on. What is bounded is
-    the request, and the memory that thread holds (one upload, at most the size cap).
-    """
-    try:
-        text, meta = await asyncio.wait_for(
-            asyncio.to_thread(extract_text, filename, data), EXTRACTION_TIMEOUT_SECONDS
-        )
-    except (asyncio.TimeoutError, TimeoutError):
-        return "", {"error": f"text extraction timed out after {EXTRACTION_TIMEOUT_SECONDS:.0f}s"}, "failed"
-    except ValueError as e:  # unsupported type: the message is for the user
-        return "", {"error": str(e)}, "failed"
-    except Exception as e:  # a parser blowing up on hostile bytes
-        log.warning("text extraction failed for %r: %s", filename, e)
-        return "", {"error": f"text extraction failed: {type(e).__name__}"}, "failed"
-    if len(text) > MAX_EXTRACTED_CHARS:
-        meta = {**meta, "truncated": True, "extracted_chars": MAX_EXTRACTED_CHARS}
-        text = text[:MAX_EXTRACTED_CHARS]
-    return text, meta, "done"
-
-
 @router.post("/documents")
 async def upload_document(
     request: Request,
@@ -205,22 +186,186 @@ async def upload_document(
         raise HTTPException(400, "Invalid filename")
     temp_path.replace(storage_path)
 
-    doc = Document(
+    doc = await ingest_document(
         project_id=project.id,
         filename=filename,
         content_type=safe_content_type(file.content_type),
-        byte_size=size,
-        storage_path=str(storage_path),
+        storage_path=storage_path,
         sha256=sha,
+        byte_size=size,
+        data=storage_path.read_bytes(),
         uploaded_by=user.id,
     )
-    text, meta, status = await _extract_bounded(filename, storage_path.read_bytes())
-    doc.extracted_text = text or None  # None = nothing was extracted, as before
-    doc.meta = meta
-    doc.extraction_status = status
     db.add(doc)
     await db.commit()
     return _doc_out(doc)
+
+
+class ImportItem(BaseModel):
+    id: str
+    name: str
+    drive_id: str | None = None
+
+
+class ImportBody(BaseModel):
+    provider: str
+    # Bound the batch so one request can't queue an unbounded pile of imports.
+    items: list[ImportItem] = Field(..., max_length=50)
+
+
+def _import_too_large(name: str, num_bytes: int) -> ValueError:
+    return ValueError(
+        f"{name} is {num_bytes // (1024 * 1024)}MB, over the "
+        f"{IMPORT_MAX_BYTES // (1024 * 1024)}MB import limit"
+    )
+
+
+async def _import_one(
+    *,
+    access_token: str,
+    provider: str,
+    item: ImportItem,
+    project_id: uuid.UUID,
+    uploaded_by: uuid.UUID,
+    storage_dir: Path,
+    imported_at: str,
+) -> Document:
+    """Download one picked item and ingest it exactly like an upload.
+
+    A metadata call precedes the download for both providers: it is where the
+    declared size (the "prefer a Content-Length/size check before download"
+    half of the cap), the mime type (gdrive: raw vs. `files.export`), and the
+    `modified_at` provenance field all come from — none of the three are in
+    the request body, which only ever names *which* file was picked.
+    """
+    if provider == GDRIVE:
+        meta = await gdrive_file_metadata(access_token, file_id=item.id)
+        size = meta.get("size")
+        if size is not None and int(size) > IMPORT_MAX_BYTES:
+            raise _import_too_large(item.name, int(size))
+        mime_type = meta.get("mimeType")
+        data = await download_gdrive_file(access_token, file_id=item.id, mime_type=mime_type)
+        filename = gdrive_export_filename(item.name, mime_type)
+        content_type = safe_content_type(gdrive_download_content_type(mime_type))
+        modified_at = meta.get("modifiedTime")
+        drive_id = None
+    else:
+        drive_id = item.drive_id
+        if not drive_id:
+            raise ValueError(f"{item.name}: m365 items require a drive_id")
+        meta = await m365_item_metadata(access_token, drive_id=drive_id, item_id=item.id)
+        size = meta.get("size")
+        if size is not None and int(size) > IMPORT_MAX_BYTES:
+            raise _import_too_large(item.name, int(size))
+        data = await download_m365_file(access_token, drive_id=drive_id, item_id=item.id)
+        filename = item.name
+        content_type = safe_content_type((meta.get("file") or {}).get("mimeType"))
+        modified_at = meta.get("lastModifiedDateTime")
+
+    filename = safe_filename(filename)
+    sha = hashlib.sha256(data).hexdigest()
+    storage_path = (storage_dir / f"{sha}-{filename}").resolve()
+    if storage_path.parent != storage_dir:
+        raise ValueError("Invalid filename")
+    storage_path.write_bytes(data)
+
+    return await ingest_document(
+        project_id=project_id,
+        filename=filename,
+        content_type=content_type,
+        storage_path=storage_path,
+        sha256=sha,
+        byte_size=len(data),
+        data=data,
+        uploaded_by=uploaded_by,
+        meta_extra={
+            "source": {
+                "provider": provider,
+                "file_id": item.id,
+                "drive_id": drive_id,
+                "name": item.name,
+                "modified_at": modified_at,
+                "imported_at": imported_at,
+            }
+        },
+    )
+
+
+@router.post("/projects/{project_id}/documents/import")
+async def import_documents(
+    project_id: uuid.UUID,
+    body: ImportBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import files picked from a connected provider straight into a
+    project's documents, without the bytes ever passing through the caller's
+    browser: each item is downloaded server-side with the workspace
+    connection's own access token and fed into `ingest_document` — the exact
+    ingestion the upload endpoint above uses.
+
+    One request shares one provider and one token for every item in it, so a
+    connection that cannot refresh (`ConnectionAuthError`) fails the whole
+    request with 409 before any item is touched. Once past that, a single
+    item failing — too big, gone, an unreadable export, or a DB-level
+    failure adding/committing its row (e.g. a rare sha256 collision tripping
+    the unique constraint) — is recorded in `errors` and must not fail the
+    rest of the batch. `db.add`/`commit` happen inside the same per-item
+    guard as the download/ingest for that reason: a failure there is rolled
+    back before the loop moves on, so the batch's own AsyncSession is never
+    left in the "commit failed, transaction still open" state SQLAlchemy
+    would otherwise carry into the next item.
+    """
+    if body.provider not in (GDRIVE, M365):
+        raise HTTPException(404, f"unknown provider {body.provider!r}")
+    project = await project_in_workspace(db, project_id, ctx.id)
+    if project is None:
+        raise HTTPException(404, "Project not found")
+
+    try:
+        access_token = await get_access_token(db, ctx.id, body.provider)
+    except ConnectionAuthError as exc:
+        raise HTTPException(
+            409, f"the {body.provider} connection needs to be reconnected: {exc}"
+        ) from exc
+
+    storage_dir = Path(get_settings().storage_dir).resolve()
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    imported_at = datetime.now(timezone.utc).isoformat()
+
+    # Captured as plain values, not read off `project`/`user` inside the loop
+    # below: `db.rollback()` (a per-item DB failure) expires every object
+    # still attached to the session, and re-reading an expired ORM attribute
+    # from inside an async endpoint outside of an awaited refresh blows up
+    # with SQLAlchemy's `MissingGreenlet` rather than transparently
+    # reloading it. `project_id` is the path parameter itself — the same
+    # value `project.id` already equals, since `project_in_workspace` only
+    # returned a row at all if its id matched it.
+    uploaded_by = user.id
+
+    documents = []
+    errors = []
+    for item in body.items:
+        try:
+            doc = await _import_one(
+                access_token=access_token,
+                provider=body.provider,
+                item=item,
+                project_id=project_id,
+                uploaded_by=uploaded_by,
+                storage_dir=storage_dir,
+                imported_at=imported_at,
+            )
+            db.add(doc)
+            await db.commit()
+        except (ValueError, DownloadTooLargeError, RuntimeError, IntegrityError) as exc:
+            log.warning("document import failed for %s %r: %s", body.provider, item.id, exc)
+            await db.rollback()
+            errors.append({"id": item.id, "name": item.name, "detail": str(exc)})
+            continue
+        documents.append(_doc_out(doc))
+    return {"documents": documents, "errors": errors}
 
 
 @router.get("/documents")
