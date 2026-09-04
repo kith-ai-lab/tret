@@ -322,6 +322,42 @@ export type FactorConfidence =
   | 'placeholder'
   | 'excluded'
 
+/** `GridTable.summary()` — the shape and value range of an hourly grid table
+ *  actually behind a `table`/`table_summary` field. `kind` is `"diurnal"` (24
+ *  hour-of-day rows) or `"series"` (an ascending ISO-8601 timestamp series);
+ *  `first_timestamp`/`last_timestamp` are only ever set for `"series"`. */
+export interface EmissionsGridTableSummary {
+  kind: 'diurnal' | 'series'
+  label: string
+  basis: EmissionsGridBasisValue
+  row_count: number
+  first_timestamp: string | null
+  last_timestamp: string | null
+  min_g_per_kwh: number | null
+  max_g_per_kwh: number | null
+  mean_g_per_kwh: number | null
+}
+
+/** `profile_summary()` — a named hardware profile's inputs, the resulting
+ *  grams/run, and the same cited constants/caveat every embodied figure
+ *  carries, whether or not it came from a profile. Overloads
+ *  `EmissionsFactor.profile` (a plain string on the `pue` factor). */
+export interface EmissionsEmbodiedProfileSummary {
+  gpus: number
+  runs_over_lifetime: number
+  batch_size: number
+  include_server: boolean
+  gpu_model: string // "h100" — the only cited GPU model today
+  label: string | null
+  grams_per_run: number
+  gpu_h100_kg: number
+  server_excluding_gpus_kg: number
+  lifetime_years: number
+  source: string
+  url: string | null
+  caveat: string
+}
+
 /** One constant that went into a run, with where it came from.
  *
  *  Arrives as a **list** rather than an object because `energy_accounting` is
@@ -365,13 +401,30 @@ export interface EmissionsFactor {
    *  recorded before that existed, which renders with no layer chip rather
    *  than a guessed one (see `emissions.ts::layerMeta`). */
   layer?: string
-  // pue
-  profile?: string
-  // embodied_hardware
+  // pue: the deployment profile name (hyperscaler_cloud | workstation |
+  // onprem_datacenter). embodied_hardware: overloaded to the profile
+  // *summary* object instead — see `profile` below and
+  // `factorEmbodiedProfile`/`factorPueProfile` in `shared/emissions.ts` for
+  // the two ways this same key is read back out.
+  profile?: string | EmissionsEmbodiedProfileSummary
+  // embodied_hardware — reference constants cited on every embodied record
+  // regardless of whether it came from a plain g_per_run or a profile.
   gpu_h100_kg?: number
   server_excluding_gpus_kg?: number
   lifetime_years?: number
   batch_size?: number
+  // grid_intensity, Phase 3 additive — an operator-pinned region
+  // (tret.services.grid_regions), and whether this value came from an
+  // hourly table or the plain annual figure (tret.services.grid_tables).
+  // All undefined/null on a run recorded before either feature existed.
+  grid_region?: string | null
+  temporal?: 'annual_average' | 'hourly' | null
+  table?: string | null
+  table_summary?: EmissionsGridTableSummary | null
+  table_miss?: boolean | null
+  // uncertainty_band — whether this run's headline band was narrowed by
+  // evidence rather than left at the plain configured low/high.
+  derived?: boolean
 }
 
 /** What moves if this one input is wrong. A sensitivity view — the product of
@@ -383,6 +436,28 @@ export interface EmissionsUncertaintyContribution {
   high_multiplier: number
   dominant: boolean
   note: string
+  /** Which evidence flag narrowed this row (`energy_measured` |
+   *  `pue_metered` | `grid_sourced_dated` | `embodied_profiled`) — only
+   *  present on a row `adjust_contributions` actually touched, i.e. only
+   *  when `band.derived` is set and this run has that evidence. */
+  evidence?: string
+}
+
+/** What actually governed an evidence-derived band — present only when
+ *  `EmissionsUncertainty.derivation` is present, i.e. `band.derived` was set
+ *  and at least one contribution row narrowed. `rule` is `"configured"` when
+ *  no row narrowed past the configured band, `"dominant_contribution"` when
+ *  one did; `dominant_key` names that row's `key`, null when `rule` is
+ *  `"configured"`. `configured_low`/`configured_high` are the band that would
+ *  have applied without evidence — the ceiling `low`/`high` can never cross. */
+export interface EmissionsUncertaintyDerivation {
+  low: number
+  high: number
+  rule: 'configured' | 'dominant_contribution'
+  dominant_key: string | null
+  narrowed: boolean
+  configured_low: number
+  configured_high: number
 }
 
 /** The band around a run's figures.
@@ -404,6 +479,10 @@ export interface EmissionsUncertainty {
   energy_wh_total_high: number
   contributions: EmissionsUncertaintyContribution[]
   basis: string
+  /** Present only when `band.derived` was set for this run — see
+   *  `EmissionsUncertaintyDerivation`. Absent (not null) otherwise, same
+   *  rule as every other Phase 3 addition here. */
+  derivation?: EmissionsUncertaintyDerivation
 }
 
 /** Money against the same-token baseline. The firmest figure in the block:
@@ -497,6 +576,15 @@ export interface EnergyAccounting {
   grid_co2e_source?: string
   /** The operator's own label for that factor, when they set one. */
   grid_co2e_label?: string | null
+  /** Phase 3, additive: an operator-pinned region for this provider
+   *  (tret.services.grid_regions), or null when none applied to this run's
+   *  win. Undefined on a run recorded before regions existed. */
+  grid_region?: string | null
+  /** "annual_average" (the plain per-provider/default figure, or an hourly
+   *  table referenced but not evaluated/missed) or "hourly" (an hourly
+   *  grid.tables entry had a value for this run's actual start time).
+   *  Undefined on a run recorded before hourly tables existed. */
+  grid_temporal?: 'annual_average' | 'hourly'
   // ── money, uncertainty, provenance ──
   cost?: EmissionsCost
   uncertainty?: EmissionsUncertainty
@@ -1465,11 +1553,30 @@ export interface EmissionsAnalytics {
 export type EmissionsGridBasisValue = 'location_based' | 'market_based' | 'unspecified'
 
 /** One grid factor an operator or workspace configured, with its provenance.
- *  `label` is required by the server whenever `g_per_kwh` is set. */
+ *  `label` is required by the server whenever `g_per_kwh` is set. `table`
+ *  names an entry in this same document's `grid.tables` whose hourly value
+ *  stands in for `g_per_kwh` at a run's actual start time — `g_per_kwh`
+ *  remains required and is the fallback when the table has no value for
+ *  that hour (a "table miss"). */
 export interface EmissionsGridOverride {
   g_per_kwh: number
   basis: EmissionsGridBasisValue
   label: string
+  url?: string | null
+  as_of?: string | null
+  table?: string | null
+}
+
+/** One named entry in `grid.tables`: an operator-pasted CSV of grid carbon
+ *  intensity, either a 24-row diurnal profile (`hour_utc,g_per_kwh`) or an
+ *  ascending ISO-8601 hourly series (`timestamp_utc,g_per_kwh`). `name` (the
+ *  map key in `grid.tables`) must match `^[a-z0-9][a-z0-9_-]{0,63}$`; `csv`
+ *  is capped at 600,000 characters — both enforced server-side, and cheaply
+ *  mirrored client-side before submitting. */
+export interface EmissionsGridTableOverride {
+  label: string
+  basis: EmissionsGridBasisValue
+  csv: string
   url?: string | null
   as_of?: string | null
 }
@@ -1479,6 +1586,15 @@ export interface EmissionsGridOverride {
  *  factor slot in the override schema. */
 export const EMISSIONS_OVERRIDE_PROVIDERS = ['local', 'anthropic', 'kimi', 'openrouter'] as const
 export type EmissionsOverrideProvider = (typeof EMISSIONS_OVERRIDE_PROVIDERS)[number]
+
+/** A region token, as `tret.services.grid_regions` validates it:
+ *  lowercase-start, alphanumeric plus `-`. Declared by the operator, never
+ *  inferred — see `GRID_NO_INFERENCE_NOTE`. */
+export const REGION_TOKEN_RE = /^[a-z0-9][a-z0-9-]*$/
+
+/** A `grid.providers` key: a bare provider or a provider pinned to a region
+ *  (`"anthropic@us-east"`). */
+export const PROVIDER_KEY_RE = /^[a-z][a-z0-9_-]*(@[a-z0-9][a-z0-9-]*)?$/
 
 export type EmissionsPueLocalProfile = 'workstation' | 'onprem_datacenter'
 
@@ -1490,28 +1606,61 @@ export interface EmissionsPueOverride {
   label: string
 }
 
-/** `label` required whenever `g_per_run` is set. */
+/** A named hardware setup `embodied.profile` describes instead of a flat
+ *  `g_per_run` figure — the same fields
+ *  `tret.services.embodied_profiles.EmbodiedProfile` validates.
+ *  `batch_size` defaults to 64 and `include_server` to true server-side when
+ *  omitted; `gpu_model` is fixed to `"h100"`, the only GPU with a cited
+ *  embodied figure. */
+export interface EmissionsEmbodiedProfile {
+  gpus: number
+  runs_over_lifetime: number
+  batch_size?: number
+  include_server?: boolean
+  gpu_model?: 'h100'
+  label?: string
+}
+
+/** `g_per_run` and `profile` are mutually exclusive (the server 422s
+ *  "embodied: set g_per_run or profile, not both"); `label` is required
+ *  whenever either is set. */
 export interface EmissionsEmbodiedOverride {
-  g_per_run: number
+  g_per_run?: number
+  profile?: EmissionsEmbodiedProfile
   label: string
 }
 
 /** The judgment band an operator configures — never a confidence interval; see
- *  `emissions.ts::BAND_SHORT`. `label` required whenever `low`/`high` are set. */
+ *  `emissions.ts::BAND_SHORT`. `label` required whenever `low`/`high` are set.
+ *  `derived`, when true, narrows this run's headline band toward whatever
+ *  evidence the run actually has (a metered PUE, a sourced/dated grid
+ *  factor, measured energy, a hardware profile) — never past the configured
+ *  `low`/`high`, only ever at or inside them. */
 export interface EmissionsBandOverride {
   low?: number
   high?: number
   label: string
+  derived?: boolean
 }
 
 /** The full override document, one per workspace. GET/PUT/DELETE
  *  `/api/workspace/settings/emissions` all exchange this shape (empty object
- *  when the workspace has cleared or never set any overrides). */
+ *  when the workspace has cleared or never set any overrides).
+ *
+ *  `grid.regions` pins a bare provider to a region for lookup purposes
+ *  (`{"anthropic": "us-east"}`) — declared by the operator, never inferred.
+ *  Pinning a provider makes a `provider@region` entry in `grid.providers`
+ *  apply ahead of that provider's bare entry; the pin has no effect on its
+ *  own without a matching regional entry somewhere in the ladder.
+ *  `grid.tables` holds named hourly CSVs `grid.default.table` / a provider
+ *  entry's own `table` can reference. */
 export interface EmissionsOverrides {
   version?: number
   grid?: {
     default?: EmissionsGridOverride
     providers?: Partial<Record<string, EmissionsGridOverride>>
+    regions?: Partial<Record<string, string>>
+    tables?: Record<string, EmissionsGridTableOverride>
   }
   pue?: EmissionsPueOverride
   embodied?: EmissionsEmbodiedOverride
@@ -1533,6 +1682,31 @@ export interface EmissionsResolvedValue {
   /** The dotted setting path that changes this value, e.g.
    *  `workspace.emissions.pue.cloud` — mirrors `EmissionsFactor.setting`. */
   setting: string
+  /** Grid only: the region actually applied to this win (the part after "@"
+   *  in a matched `provider@region` key), or null when no region pinned it. */
+  region?: string | null
+  /** Grid only: "annual_average" (no table, or the GET/PUT/DELETE settings
+   *  endpoint computes without a run time, so a table reference always
+   *  reads as annual here — see `table` below) or "hourly". */
+  temporal?: 'annual_average' | 'hourly' | null
+  /** Grid only: the name of the `grid.tables` entry the winning grid entry
+   *  referenced, or null if it referenced none. Set even when `temporal`
+   *  reads "annual_average" here — meaning "hourly table `<table>` will
+   *  apply at run time", not "no table is configured". */
+  table?: string | null
+  /** Grid only: `GridTable.summary()` for `table`, or null/undefined when no
+   *  table was referenced. */
+  table_summary?: EmissionsGridTableSummary | null
+  /** Grid only: true when a table lookup actually missed and fell back to
+   *  the entry's own annual figure. Always false from the settings
+   *  endpoint (it resolves without a run time, so no lookup is attempted). */
+  table_miss?: boolean | null
+  /** Embodied only: the named hardware profile behind this value, when it
+   *  came from one rather than a flat `g_per_run`. */
+  profile?: EmissionsEmbodiedProfileSummary | null
+  /** Band only (mirrored onto both `band_low` and `band_high`): whether this
+   *  workspace's band is configured to derive from evidence. */
+  derived?: boolean | null
 }
 
 /** The resolved factor set for one provider — "what will apply to the next

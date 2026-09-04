@@ -117,6 +117,19 @@ def derive_band(
     ever pull an axis tighter than configured, never push it wider. Ties
     within an axis keep the first row in `contributions` order.
 
+    An axis narrows below `configured_*` only when the row that set its
+    candidate was itself evidence-stamped (`row["evidence"]`, set by
+    `adjust_contributions` for a row an `Evidence` flag actually touched) —
+    otherwise the axis stays at the configured value, even if some untouched
+    row's own baseline multiplier happens to imply a tighter bound. Without
+    this, `derived: true` narrows a run's band off whichever row's ordinary,
+    always-present sensitivity multiplier is smallest, regardless of whether
+    this run actually closed out anything — a deliberately conservative
+    configured band would then narrow on every run with no evidence at all,
+    and a run with only one kind of evidence (energy measured, say) could get
+    narrowed on an axis a completely different, unevidenced row (grid
+    intensity's own undated default) happens to dominate.
+
     `rule` is `"dominant_contribution"` when either axis actually landed
     below its configured value, else `"configured"`. `dominant_key` names the
     row that set the tighter of the two axes when both narrowed (the row
@@ -129,11 +142,14 @@ def derive_band(
 
     candidate_low: Decimal | None = None
     candidate_low_key: str | None = None
+    candidate_low_evidenced = False
     candidate_high: Decimal | None = None
     candidate_high_key: str | None = None
+    candidate_high_evidenced = False
 
     for row in contributions:
         key = row.get("key")
+        evidenced = bool(row.get("evidence"))
         low_mult = _to_decimal(row["low_multiplier"])
         high_mult = _to_decimal(row["high_multiplier"])
         if low_mult > 0:
@@ -141,14 +157,16 @@ def derive_band(
             if candidate_low is None or implied_low > candidate_low:
                 candidate_low = implied_low
                 candidate_low_key = key
+                candidate_low_evidenced = evidenced
         if candidate_high is None or high_mult > candidate_high:
             candidate_high = high_mult
             candidate_high_key = key
+            candidate_high_evidenced = evidenced
 
-    if candidate_low is None:
+    if candidate_low is None or not candidate_low_evidenced:
         candidate_low = configured_low
         candidate_low_key = None
-    if candidate_high is None:
+    if candidate_high is None or not candidate_high_evidenced:
         candidate_high = configured_high
         candidate_high_key = None
 

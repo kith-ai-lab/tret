@@ -258,6 +258,21 @@ async def test_put_an_unknown_key_is_422(client, seed):
     assert "not_a_real_field" in response.json()["detail"]
 
 
+# ── B1: request body size cap ─────────────────────────────────────────────────
+async def test_put_over_the_body_cap_is_413(client, seed):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner6b@example.com")
+    await seed(team, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    # Comfortably over the 3MB cap — the content need not even be a shape
+    # `EmissionsOverrides` would ever accept: the cap is checked, and raises,
+    # before the body is ever validated.
+    oversized = {"grid": {"tables": {"t": {"csv": "x" * (3 * 1024 * 1024 + 1024)}}}}
+    response = await client.put("/api/workspace/settings/emissions", json=oversized)
+    assert response.status_code == 413, response.text
+
+
 async def test_put_baseline_model_not_in_catalog_is_422(client, seed):
     team = make_workspace("Climate Co")
     owner = make_user("owner7@example.com")

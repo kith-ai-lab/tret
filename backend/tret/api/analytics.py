@@ -27,11 +27,11 @@ Read-only; any authenticated user may look.
 from __future__ import annotations
 
 import uuid
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -59,6 +59,7 @@ from tret.router_llm.priors import (
 from tret.services import transcript
 from tret.services.emission_factors import EmissionsOverrides, build_factor_set
 from tret.services.emission_settings import (
+    MAX_EMISSIONS_BODY_BYTES,
     validation_detail as _validation_detail,
     workspace_emissions_layers,
 )
@@ -1092,6 +1093,18 @@ async def _whatif_rows(db: AsyncSession, project_id: uuid.UUID | None, since) ->
     return (await db.execute(q)).all()
 
 
+def _aware_utc(created_at) -> datetime | None:
+    """`created_at` as a timezone-aware UTC datetime, treating a naive
+    stored timestamp as already being UTC (every `created_at_col()` is
+    `TIMESTAMP(timezone=True)`, so this only ever matters for a row a test
+    inserted by hand) — never `None` unless `created_at` itself is."""
+    if created_at is None:
+        return None
+    if created_at.tzinfo is None:
+        return created_at.replace(tzinfo=timezone.utc)
+    return created_at
+
+
 def _whatif_accounting(
     *,
     model_used: str | None,
@@ -1101,14 +1114,22 @@ def _whatif_accounting(
     cache_write_tokens: int | None,
     model_timeline: list | None,
     catalog,
-    workspace_doc: dict[str, Any] | None,
-    managed_doc: dict[str, Any] | None,
-    factors_doc: dict[str, Any],
+    workspace_doc: dict[str, Any] | EmissionsOverrides | None,
+    managed_doc: dict[str, Any] | EmissionsOverrides | None,
+    factors_doc: dict[str, Any] | EmissionsOverrides,
     fs_cache: dict,
+    created_at=None,
 ) -> dict | None:
     """The scenario `energy_accounting` block for one run under `factors_doc`,
     or `None` if a model it used is missing from the catalog today (the caller
     excludes such a run from both `recorded` and `scenario`).
+
+    `factors_doc`/`workspace_doc`/`managed_doc` each accept either a raw dict
+    or an already-validated `EmissionsOverrides` instance — see
+    `build_factor_set`'s own docstring (B1). `_emissions_whatif_response`
+    validates each of its three documents exactly once per request and passes
+    the instances here, so a window with many runs never re-validates the
+    same scenario/workspace/managed document once per run.
 
     `factors_doc` — the request's scenario document — is passed as
     `build_factor_set`'s `harness_settings`: the reserved, more-specific-than-
@@ -1125,16 +1146,26 @@ def _whatif_accounting(
     set, combined with `combine_accountings` — never one call over the run's
     running totals against whichever model happened to be current.
 
-    `fs_cache` is keyed on `(provider, model_id)`, not `provider` alone: a
-    `model_overrides` entry in any layer (`workspace_doc`, or a `factors_doc`
-    scenario carrying its own) is resolved *per model id*
+    `created_at` — this run's own recorded start time — is passed through as
+    `build_factor_set`'s `at`, so an hourly `grid.tables` entry in
+    `factors_doc`/`workspace_doc` resolves against the hour this run actually
+    happened, not "now": two runs recorded an hour apart can get different
+    grid factors under the identical scenario document.
+
+    `fs_cache` is keyed on `(provider, model_id, at)`, not `(provider,
+    model_id)` alone: a `model_overrides` entry in any layer (`workspace_doc`,
+    or a `factors_doc` scenario carrying its own) is resolved *per model id*
     (`build_factor_set`'s `model_id`), so two segments sharing a provider but
     using different models must never share a cached `FactorSet` — one
-    segment's model override would otherwise silently apply to the other's.
+    segment's model override would otherwise silently apply to the other's —
+    and an hourly grid table resolves *per run time*, so two runs sharing a
+    provider and model but recorded at different hours must never share one
+    either.
     """
+    at = _aware_utc(created_at)
 
     def _factor_set(provider: str | None, model_id: str | None):
-        key = (provider, model_id)
+        key = (provider, model_id, at)
         if key not in fs_cache:
             fs_cache[key] = build_factor_set(
                 provider=provider,
@@ -1142,6 +1173,7 @@ def _whatif_accounting(
                 workspace_settings=workspace_doc,
                 managed_settings=managed_doc,
                 model_id=model_id,
+                at=at,
             )
         return fs_cache[key]
 
@@ -1188,8 +1220,31 @@ LAYER_NOTE = (
 )
 
 
+def _too_large_body() -> HTTPException:
+    return HTTPException(
+        413, f"Request body too large ({MAX_EMISSIONS_BODY_BYTES // (1024 * 1024)}MB max)"
+    )
+
+
+def _check_body_not_too_large(request: Request) -> None:
+    """Refuse a declared `Content-Length` over the cap before the expensive
+    part of this request (validating the scenario document against
+    `EmissionsOverrides`, which parses every `grid.tables` CSV entry) ever
+    runs — same posture as `api/packs.py`'s archive-upload cap and
+    `api/documents.py`'s file-upload cap: FastAPI has already read the whole
+    body into memory by the time this check runs (a JSON body, unlike a
+    multipart upload, is fully parsed before this handler is even entered),
+    so what this actually buys is refusing the validation work, not the
+    network transfer itself.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_EMISSIONS_BODY_BYTES:
+        raise _too_large_body()
+
+
 @router.post("/emissions/whatif")
 async def emissions_whatif(
+    request: Request,
     body: EmissionsWhatIfRequest,
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(current_workspace),
@@ -1204,8 +1259,14 @@ async def emissions_whatif(
     plain string) and checks the `emissions_whatif` workspace gate (403 on
     refusal) before anything else runs.
     """
+    _check_body_not_too_large(request)
+
+    raw_factors = body.factors or {}
     try:
-        EmissionsOverrides(**(body.factors or {}))
+        # Validated once here rather than once per run in
+        # `_emissions_whatif_response` (B1) — the instance is threaded all
+        # the way down to every `build_factor_set` call this request makes.
+        factors_instance = EmissionsOverrides(**raw_factors) if raw_factors else None
     except ValidationError as exc:
         raise HTTPException(422, detail=_validation_detail(exc)) from exc
 
@@ -1216,7 +1277,7 @@ async def emissions_whatif(
     return await _emissions_whatif_response(
         project_id=await _scoped_project_id(db, ctx, body.project_id),
         days=body.days,
-        factors_doc=body.factors or {},
+        factors_doc=factors_instance if factors_instance is not None else {},
         ctx=ctx,
         db=db,
     )
@@ -1225,7 +1286,7 @@ async def emissions_whatif(
 async def _emissions_whatif_response(
     project_id: uuid.UUID | None,
     days: int | None,
-    factors_doc: dict[str, Any],
+    factors_doc: dict[str, Any] | EmissionsOverrides,
     ctx: WorkspaceContext,
     db: AsyncSession,
 ) -> dict:
@@ -1233,6 +1294,11 @@ async def _emissions_whatif_response(
     recomputed accounting block per run) for the identical set of runs, plus
     their `delta`. Read-only throughout: no `db.add`/`commit`/`flush` anywhere
     in this call graph.
+
+    `factors_doc` is an already-validated `EmissionsOverrides` instance when
+    called from `emissions_whatif` (the only production caller); a plain dict
+    still works (some tests call `_whatif_accounting` directly with one) since
+    `build_factor_set` accepts either.
     """
     since = utcnow() - timedelta(days=days) if days else None
     rows = await _whatif_rows(db, project_id, since)
@@ -1248,7 +1314,10 @@ async def _emissions_whatif_response(
     warnings: list[str] = []
     if workspace_doc:
         try:
-            EmissionsOverrides(**workspace_doc)
+            # Validated once here, not once per run below (B1) — the
+            # instance replaces the raw dict for every `_whatif_accounting`
+            # call this request makes.
+            workspace_doc = EmissionsOverrides(**workspace_doc)
         except ValidationError as exc:
             warnings.append(
                 "This workspace's stored emissions override document no longer "
@@ -1256,6 +1325,21 @@ async def _emissions_whatif_response(
                 "computed with no workspace layer."
             )
             workspace_doc = None
+    # The managed layer, when there is one, is validated once here too, for
+    # the identical reason — see `build_factor_set`'s docstring (B1). Same
+    # fail-open treatment as the workspace layer above: a managed document an
+    # extension hands back that no longer validates must not 500 a read-only
+    # recompute either.
+    if managed_doc:
+        try:
+            managed_doc = EmissionsOverrides(**managed_doc)
+        except ValidationError as exc:
+            warnings.append(
+                "This workspace's managed emissions override document no "
+                f"longer validates ({_validation_detail(exc)}); the scenario "
+                "below was computed with no managed layer."
+            )
+            managed_doc = None
 
     fs_cache: dict = {}
     recorded_rows: list = []
@@ -1295,6 +1379,7 @@ async def _emissions_whatif_response(
             managed_doc=managed_doc,
             factors_doc=factors_doc,
             fs_cache=fs_cache,
+            created_at=created_at,
         )
         if scenario_accounting is None:
             runs_skipped += 1

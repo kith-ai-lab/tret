@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +28,7 @@ from tret.providers.catalog import get_catalog
 from tret.services.emission_factors import EmissionsOverrides
 from tret.services.emission_settings import (
     EMISSIONS_SETTINGS_KEY,
+    MAX_EMISSIONS_BODY_BYTES,
     effective_factors,
     shipped_defaults,
     validation_detail as _validation_detail,
@@ -96,13 +97,30 @@ async def get_emissions_settings(
     return _response(workspace_doc, managed_doc)
 
 
+def _too_large_body() -> HTTPException:
+    return HTTPException(
+        413, f"Request body too large ({MAX_EMISSIONS_BODY_BYTES // (1024 * 1024)}MB max)"
+    )
+
+
 @router.put("/workspace/settings/emissions")
 async def put_emissions_settings(
+    request: Request,
     body: dict = Body(default_factory=dict),
     ctx: WorkspaceContext = Depends(require_workspace_admin),
     caller: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # Refused before the expensive part (`EmissionsOverrides(**body)`, which
+    # parses every `grid.tables` CSV entry) ever runs — same posture as
+    # `api/packs.py`'s archive-upload cap and `api/documents.py`'s
+    # file-upload cap: FastAPI has already parsed this JSON body into memory
+    # by the time this handler runs, so this buys refusing the validation
+    # work, not the network transfer itself. See `MAX_EMISSIONS_BODY_BYTES`.
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_EMISSIONS_BODY_BYTES:
+        raise _too_large_body()
+
     try:
         overrides = EmissionsOverrides(**body)
     except ValidationError as exc:

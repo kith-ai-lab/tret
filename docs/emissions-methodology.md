@@ -353,6 +353,237 @@ what does not:
 `measured_energy_wh` must be `>= 0`; a negative value raises `ValueError`
 rather than silently producing a negative energy figure.
 
+## Regions, hourly tables, hardware profiles, and a band that responds to evidence
+
+Four small, independent additions to the override document described under
+[Configuration layers](#configuration-layers) — each is its own opt-in, each
+resolves through the identical layer ladder (`run_override > harness >
+workspace > managed > env > global_default`) as everything else in this
+document, and none of them changes a single figure unless an operator's own
+document asks for it.
+
+**Regions.** A `grid.providers` key may now be a bare provider
+(`"anthropic"`) or a provider pinned to a region (`"anthropic@us-east"`), and
+a document may separately carry `grid.regions`, a `{provider: region}` map:
+
+```json
+{
+  "grid": {
+    "regions": {"anthropic": "us-east"},
+    "providers": {
+      "anthropic": {"g_per_kwh": 400, "basis": "location_based", "label": "US average"},
+      "anthropic@us-east": {"g_per_kwh": 90, "basis": "location_based", "label": "PJM East"}
+    }
+  }
+}
+```
+
+The region itself is resolved exactly like every other factor here — the
+most specific layer (`harness`, then `workspace`, then `managed`) that pins a
+region for this provider wins — and the *resolved* region then applies to
+the provider-entry lookup in **every** layer being checked, not only the one
+that pinned it: a workspace-level `grid.regions` pin makes a managed layer's
+`anthropic@us-east` entry win over its own bare `anthropic` entry, even
+though the pin and the entry live in two different documents. A run's
+`grid_region` (top level and on the `grid_intensity` factor record) names
+the region actually used, or `null` when none applied. Every `grid.providers`
+key — bare or pinned — is validated against the same `provider` /
+`provider@region` shape; an unrecognised one is rejected by name (422).
+
+**Hourly tables.** `grid.tables` names one or more operator-pasted CSV
+tables of grid carbon intensity, and any `grid.default` or
+`grid.providers.<key>` entry may reference one by name:
+
+```json
+{
+  "grid": {
+    "default": {
+      "g_per_kwh": 410, "basis": "location_based",
+      "label": "annual average, falls back when the table has no value",
+      "table": "regional_hourly"
+    },
+    "tables": {
+      "regional_hourly": {
+        "label": "utility-published hourly intensity, 2025",
+        "basis": "location_based",
+        "csv": "timestamp_utc,g_per_kwh\n2025-01-01T00:00:00Z,520\n2025-01-01T01:00:00Z,505\n..."
+      }
+    }
+  }
+}
+```
+
+Two CSV shapes are accepted: a **diurnal** profile (`hour_utc,g_per_kwh`,
+exactly the 24 rows 0-23 — a typical day with no dates, so every lookup
+hits) or a dated **series** (`timestamp_utc,g_per_kwh`, strictly ascending).
+A table is parsed and validated when the document is written — a malformed
+CSV is rejected as `grid.tables.<name>.csv: <what was wrong>` — and again,
+from a cache keyed on a content hash of the CSV text, its label and its
+basis, so an unchanged table is never re-parsed, whenever a run needs its
+value. That cache is bounded by total CSV characters resident (16,000,000
+across every table any workspace has ever configured, oldest evicted first),
+not by entry count, so it cannot grow without bound the way an entry-count
+cache could. A table reference that names no table in the same document is
+rejected as `grid.default.table` / `grid.providers.<key>.table references
+unknown table '<name>'`; one that names a table whose own `basis` differs
+from the referencing entry's is rejected too (`grid.default.table 't' has
+basis market_based but the entry is location_based`, and the
+`grid.providers.<key>.table` equivalent) — a run must never land in a
+different GHG basis depending on which hour it happened to start in.
+
+A document is capped at **8 tables**, with their CSV text summing to at most
+**2,000,000 characters** combined (each table is separately capped at
+600,000 characters on its own) — `grid.tables: at most 8 tables per
+document` / `grid.tables: combined csv exceeds 2000000 characters` (422).
+Validating a maximal document is real CPU (parsing every table's rows), so
+both endpoints that accept one — `PUT /api/workspace/settings/emissions`
+and `POST /api/analytics/emissions/whatif` — additionally refuse a request
+body over **3MB** with 413, before that validation ever runs. A what-if
+recompute over many stored runs validates its scenario, workspace, and
+managed documents once per request rather than once per run, so a window
+with hundreds of runs sharing one tabled document costs the same as a window
+with one.
+
+At the moment a run actually happens, `build_factor_set(..., at=<run's start
+time, timezone-aware>)` looks the table up against `at`:
+
+- **A diurnal table always hits** (there is always an hour of day to
+  match). A series table returns the latest row at or before `at`, but only
+  within a two-hour gap — past that, the entry's own `g_per_kwh` applies
+  instead, exactly as if no table had been referenced.
+- **A hit** replaces the entry's value with the table's, and the run records
+  `grid_temporal: "hourly"` alongside the table's name and a summary (row
+  count, value range, first/last timestamp for a series).
+- **A miss, or no `at` at all**, keeps the entry's own `g_per_kwh` and
+  records `grid_temporal: "annual_average"` — `at` omitted is exactly what
+  the effective-factors GET below does, so a table that is configured but
+  not yet evaluated against a specific run still shows up by name (a UI can
+  say "an hourly table will apply at run time" without claiming to know
+  which hour's value that will be).
+- **`at` must be timezone-aware.** A naive datetime is ambiguous about which
+  UTC offset it means, and guessing would be a silent local-time bug, so it
+  raises `ValueError` instead. A stored `created_at` that round-trips naive
+  — every deployment on SQLite, since it has no genuine timezone-aware
+  storage, not only a row written before this feature existed — is treated
+  as UTC by every caller that reads it (the runner's own `execute()`, the
+  what-if recompute's `_aware_utc`) before it is ever handed to `at`, never
+  guessed at any other offset and never silently substituted with "now".
+
+Same stance as [Why this is configuration and not
+geolocation](#why-this-is-configuration-and-not-geolocation): a region pin
+and a table's rows are both entirely operator-supplied. Nothing here
+geolocates a request, fetches a utility's published intensity feed, or
+infers a table from a provider name — an operator who wants either pastes it
+in.
+
+**Hardware profiles.** `embodied.profile` describes a self-hosted deployment
+— GPU count, expected lifetime run count, batch size, whether to amortize
+the server chassis alongside the GPUs, which GPU model (`h100` is the only
+one with a cited figure today) — instead of requiring the operator to work
+out the resulting grams-per-run figure by hand:
+
+```json
+{
+  "embodied": {
+    "profile": {
+      "gpus": 8, "runs_over_lifetime": 500000, "batch_size": 32,
+      "label": "our own H100 box, 3-year depreciation"
+    }
+  }
+}
+```
+
+`embodied.g_per_run` (a flat figure) and `embodied.profile` (a described
+setup) are two complete, independent answers to "what does this run's
+embodied carbon cost" — a document may set one or the other, never both
+(`embodied: set g_per_run or profile, not both`, 422). Exactly like
+`g_per_run`, a profile only ever amortizes against self-hosted inference —
+a cloud run's embodied figure is unconditionally 0 regardless of what a
+document's `embodied.profile` describes, because that hardware is not the
+operator's. The resolved value is identical to what the shipped
+`amortized_embodied_g_per_run` constants would produce for the same inputs;
+the run's `embodied_hardware` factor record carries the whole profile
+(inputs and the resulting grams/run) alongside the **same** `"placeholder"`
+confidence and caveat text every embodied figure already carries — a
+profile changes which numbers feed the arithmetic, not the confidence of
+the H100/server constants underneath it. The constant is a placeholder
+resting on a placeholder either way, and the record says so either way.
+
+**A band that responds to evidence.** `band.derived: true` switches a run's
+headline uncertainty band from the plain configured `low`/`high` to one
+narrowed by whatever this specific run can actually prove:
+
+```json
+{"band": {"derived": true}}
+```
+
+Four conditions, each independently checkable off the run's own resolved
+`FactorSet` — no new configuration beyond what a document already sets
+elsewhere in this same layer ladder:
+
+| Evidence | True when |
+|---|---|
+| `energy_measured` | this run's energy came from `measured_energy_wh`, not the per-token estimate |
+| `pue_metered` | the winning PUE came from a labeled `workspace`/`managed`/`harness` layer |
+| `grid_sourced_dated` | the winning grid factor came from a labeled `workspace`/`managed`/`harness` layer **and** carries an `as_of` date |
+| `embodied_profiled` | the winning embodied figure came from a named hardware profile — recorded on the run today, but narrows no row: `uncertainty_contributions` ships no per-factor sensitivity row for embodied carbon to narrow |
+
+Each true condition narrows the matching row(s) in `uncertainty.contributions`
+to instrument-level tolerance (see [Per-factor
+sensitivity](#per-factor-sensitivity) for what each row otherwise claims) —
+`energy_measured` narrows `energy_class`, `batching`, `measurement_bias` and
+(on a local run) `unbatched_local_inference`; `pue_metered` narrows `pue`;
+`grid_sourced_dated` narrows `grid_intensity`. The (possibly narrowed) rows
+are then folded into a band bounded **above** by the configured `low`/`high`
+— never wider than configured, only ever at or inside it, and never *below*
+it on an axis nothing actually evidenced: for each axis, the widest
+remaining row's implied bound is compared against the configured value —
+but only counts if that row was itself narrowed by evidence a moment ago;
+an axis whose widest row is an ordinary, untouched baseline sensitivity
+(nobody's evidence, just the row's own always-present uncertainty) stays at
+the configured value rather than narrowing off it. This is deliberate, not
+an oversight: `derived: true` with none of the four conditions true must
+reproduce the plain configured band exactly (a deliberately conservative
+4.0x/4.0x stays 4.0x/4.0x, never quietly tightens to whichever row's
+baseline multiplier happens to be smallest), and one kind of evidence alone
+(energy measured, say, with grid and PUE still unsourced) must not borrow
+narrowing credit from `grid_intensity`'s own wide, undated default just
+because that default happens to be the largest number left on the table.
+`uncertainty` gains a `derivation` key naming the configured band, the one
+actually applied, which rule chose it (`"configured"` when neither axis
+narrowed, `"dominant_contribution"` when one did), and which row (if any)
+governed the result. `band.derived` false or absent is exactly today's
+behaviour: the configured band applies untouched and there is no
+`derivation` key.
+
+A worked example, for a **non-reasoning** model: a run whose energy was
+measured, whose PUE came from a labeled workspace layer, and whose grid
+factor came from a labeled, dated workspace layer (no hardware profile) —
+against the shipped default 2.5x/2.5x band. `grid_intensity` narrows to
+0.7/1.3, `pue` to 0.95/1.05, `energy_class`/`batching`/`measurement_bias` to
+0.9/1.1 each, `token_energy_ratio`/`reasoning_tokens` untouched (1.15 and
+1.2 respectively — smaller than grid's 1.3 either way). Every touched row is
+evidence-stamped, and `grid_intensity` is the widest of them on both axes:
+on the low axis its `1/0.7 ≈ 1.4286` is the largest divisor among the
+touched rows and beats the configured 2.5, so it wins; on the high axis its
+own `1.3` is likewise the largest touched multiplier and again beats 2.5.
+The run reports `band_factor_low ≈ 1.4286`, `band_factor_high == 1.3`,
+`derivation.rule == "dominant_contribution"`, `derivation.dominant_key ==
+"grid_intensity"` — the grid factor's own sourcing was the single most
+convincing piece of evidence this run had, and the band says so.
+
+A **reasoning-tier** run under the identical evidence keeps the *high* axis
+at the configured value instead: `reasoning_tokens`' own high_multiplier
+jumps to `3.0` for a reasoning model (one-sided — hidden thinking tokens can
+only make real generation work higher than what was counted, never lower),
+which is wider than `grid_intensity`'s evidenced `1.3` and yet `evidence`
+was never stamped on it (none of the four conditions touches
+`reasoning_tokens`) — so per the rule above, the high axis stays at
+whatever was configured rather than narrowing off `grid_intensity` in its
+place. The low axis is unaffected (`reasoning_tokens`' `low_multiplier` is
+`1.0` either way, never the widest divisor) and still narrows to
+`grid_intensity`'s `≈1.4286` exactly as in the non-reasoning example.
+
 ## Data-centre overhead (PUE)
 
 PUE = total facility energy / IT-load energy. Resolved per **deployment

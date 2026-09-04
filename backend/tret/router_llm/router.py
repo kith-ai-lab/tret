@@ -315,6 +315,14 @@ class ModelRouter:
         # before this parameter existed) is exactly that fallback.
         emissions_workspace_doc: dict | None = None,
         emissions_managed_doc: dict | None = None,
+        # The run's start time, timezone-aware — threaded through to
+        # `factor_set_for` below exactly like the two documents above, so a
+        # routing call's own accounting sees the same hourly grid-table
+        # value (if any) the run it serves does, rather than resolving its
+        # own from "now". `None` (every caller before this parameter
+        # existed) means "annual" — same as `factor_set_for`/
+        # `build_factor_set` themselves.
+        emissions_at: datetime | None = None,
     ) -> RoutingDecision:
         objective = objective_of(model_policy)
         max_tier = _max_cost_tier(model_policy)
@@ -426,6 +434,7 @@ class ModelRouter:
                             workspace_doc=emissions_workspace_doc,
                             managed_doc=emissions_managed_doc,
                             model_id=router_info.id,
+                            at=emissions_at,
                         )
                     except Exception:
                         # Same fallback the engine gives a broken workspace

@@ -19,6 +19,13 @@
  *  filename next to a figure, because a filename is not readable in-product. The
  *  dialog itself fetches the file from `GET /api/docs/emissions-methodology`, so
  *  the prose on screen is the prose in the repo. */
+import type {
+  EmissionsEmbodiedProfileSummary,
+  EmissionsGridTableSummary,
+  EmissionsUncertaintyDerivation,
+} from '../../api/client'
+import { formatFactor } from './format'
+
 export const METHODOLOGY_DOC = 'docs/emissions-methodology.md'
 
 /** The trigger label used everywhere a carbon figure appears. One wording, so a
@@ -597,4 +604,105 @@ export const TOKEN_BUCKET_LABELS: Record<string, string> = {
   output: 'output',
   cache_read: 'cache read',
   cache_write: 'cache write',
+}
+
+// ── regions, hourly grid tables, hardware profiles, evidence-derived band ──
+// Four independent, opt-in additions to the factor layers above. Each one is
+// an operator statement, never an inference — see `GRID_NO_INFERENCE_NOTE`,
+// which already says this for the grid factor itself and applies just as
+// much to a region pin.
+
+/** Explains, in one line, what pinning a provider to a region actually does
+ *  — shown once above the Regions sub-block in the settings form. */
+export const REGION_PIN_NOTE =
+  'Pinning a provider to a region makes that provider’s provider@region entry apply ahead of its bare entry, wherever one is configured. The region is declared here by the operator — tret never infers it from where a request originated.'
+
+/** The two CSV header shapes `grid.tables` accepts, shown as placeholder
+ *  text on the table's CSV textarea. */
+export const GRID_TABLE_HEADER_HINT =
+  'hour_utc,g_per_kwh (exactly 24 rows, one per hour 0–23) — or — timestamp_utc,g_per_kwh (ascending ISO-8601 hourly series)'
+
+export const GRID_TABLE_KIND_LABELS: Record<string, string> = {
+  diurnal: 'diurnal (24-hour profile)',
+  series: 'hourly series',
+}
+
+export function gridTableKindLabel(kind: string | null | undefined): string {
+  return GRID_TABLE_KIND_LABELS[kind ?? ''] ?? (kind || 'unrecorded')
+}
+
+/** A one-line summary of an hourly grid table from `GridTable.summary()` —
+ *  what the effective-factors detail row and the provenance table show
+ *  instead of the raw pasted CSV. */
+export function gridTableSummaryText(summary: EmissionsGridTableSummary): string {
+  const range =
+    summary.min_g_per_kwh !== null && summary.max_g_per_kwh !== null
+      ? `${formatFactor(summary.min_g_per_kwh, 1)}–${formatFactor(summary.max_g_per_kwh, 1)} gCO₂e/kWh (mean ${formatFactor(
+          summary.mean_g_per_kwh,
+          1,
+        )})`
+      : null
+  const span =
+    summary.kind === 'series' && summary.first_timestamp && summary.last_timestamp
+      ? `${summary.first_timestamp} … ${summary.last_timestamp}`
+      : null
+  return [gridTableKindLabel(summary.kind), `${summary.row_count} row${summary.row_count === 1 ? '' : 's'}`, range, span]
+    .filter((p): p is string => Boolean(p))
+    .join(' · ')
+}
+
+/** Shown on a run whose grid win named an hourly table but the lookup
+ *  missed — a series table's gap past its lookup window — so the entry's
+ *  own annual figure applied instead. */
+export const TABLE_MISS_NOTE =
+  'This run’s hourly table had no value within its lookup window at the run’s actual start time — the entry’s own annual figure applied instead.'
+
+/** A named hardware profile's inputs, as one line — "4x h100 · 100,000 runs
+ *  lifetime · batch 64 · server included". */
+export function embodiedProfileText(profile: EmissionsEmbodiedProfileSummary): string {
+  return [
+    `${profile.gpus}x ${profile.gpu_model}`,
+    `${formatFactor(profile.runs_over_lifetime, 0)} runs lifetime`,
+    `batch ${profile.batch_size}`,
+    profile.include_server ? 'server included' : 'GPUs only',
+  ].join(' · ')
+}
+
+/** The one sentence explaining what "Derive from evidence" does to the
+ *  judgment band — shown once above the checkbox in both the settings form
+ *  and the what-if scenario drawer. */
+export const BAND_DERIVE_NOTE =
+  'The band narrows when this run has measured energy, a labeled PUE from an operator layer, a sourced and dated grid factor, or a hardware profile. It never widens beyond the configured band and stays a judgment band, not a confidence interval.'
+
+const BAND_DERIVATION_RULE_LABELS: Record<string, string> = {
+  configured: 'configured',
+  dominant_contribution: 'dominant contribution',
+}
+
+/** "Band derived from evidence: dominant contribution, binding factor
+ *  grid_intensity; configured 2.5×/2.5×, derived 1.8×/2.5×" — the line the
+ *  provenance table shows beneath a run whose band was evidence-derived. */
+export function bandDerivationText(derivation: EmissionsUncertaintyDerivation): string {
+  const rule = BAND_DERIVATION_RULE_LABELS[derivation.rule] ?? derivation.rule
+  const binding = derivation.dominant_key ? `, binding factor ${derivation.dominant_key}` : ''
+  return (
+    `Band derived from evidence: ${rule}${binding}; ` +
+    `configured ${formatFactor(derivation.configured_low, 2)}×/${formatFactor(derivation.configured_high, 2)}×, ` +
+    `derived ${formatFactor(derivation.low, 2)}×/${formatFactor(derivation.high, 2)}×`
+  )
+}
+
+/** Which evidence flag narrowed one uncertainty contribution row, in words —
+ *  the small tag a contribution row with `evidence` set gets in
+ *  `FactorProvenance.tsx::SensitivityTable`. */
+export const CONTRIBUTION_EVIDENCE_LABELS: Record<string, string> = {
+  energy_measured: 'measured energy',
+  pue_metered: 'metered PUE',
+  grid_sourced_dated: 'sourced & dated grid factor',
+  embodied_profiled: 'hardware profile',
+}
+
+export function contributionEvidenceLabel(evidence: string | null | undefined): string | null {
+  if (!evidence) return null
+  return CONTRIBUTION_EVIDENCE_LABELS[evidence] ?? evidence
 }

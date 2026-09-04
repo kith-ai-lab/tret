@@ -45,15 +45,26 @@ at import time.
 """
 from __future__ import annotations
 
+import hashlib
 import math
-from dataclasses import dataclass, field
-from datetime import date
+import re
+import threading
+from collections import OrderedDict
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from tret.config import GridFactor, Settings, get_settings
+from tret.services.embodied_profiles import (
+    EmbodiedProfile,
+    ProfileError,
+    grams_per_run,
+    profile_from_dict,
+    profile_summary,
+)
 from tret.services.emissions import (
     DEPLOYMENT_CLOUD,
     DEPLOYMENT_LOCAL,
@@ -70,6 +81,117 @@ from tret.services.emissions import (
     pue_profile_for,
     resolve_grid_factor,
 )
+from tret.services.grid_regions import (
+    PROVIDER_KEY_RE,
+    ProviderKeyError,
+    first_matching_entry,
+    validate_regions,
+)
+from tret.services.grid_tables import GridTable, GridTableError, parse_grid_table
+
+# Cached by a content hash of (csv_text, label, basis): a document's table CSV
+# text never changes between calls (only the *reference* to `at` does), so
+# parsing it once per distinct CSV and reusing the `GridTable` on every
+# subsequent `build_factor_set` call — including a hot loop like the what-if
+# endpoint's, which builds many factor sets over the same handful of
+# documents — costs nothing beyond the first hit. Also doubles as the parse
+# that validates a `grid.tables.<name>.csv` entry when an `EmissionsOverrides`
+# document is constructed (`GridBlock._tables_valid` below).
+#
+# Bounded by total CSV characters resident, not by entry count: an entry-count
+# `functools.lru_cache(maxsize=256)` (what this replaced) could retain up to
+# 256 * `_MAX_TABLE_CSV_CHARS` (~150MB before the per-document caps below
+# existed at all, and worse once a single document could carry many tables) of
+# parsed tables at once — a process-global cache with no relationship to how
+# much CSV was ever actually configured. `_GridTableCache` caps the *content*
+# instead: `_GRID_TABLE_CACHE_MAX_CHARS` total CSV characters across every
+# cached table, oldest evicted first once a new parse would exceed it. A
+# failed parse (`GridTableError`) is never cached — the caller re-parses (and
+# re-fails, identically) every time, matching `functools.lru_cache`'s own
+# behaviour of never memoizing a raised exception.
+#
+# Read this as CSV characters, not resident bytes: a parsed `GridTable` costs
+# roughly 8x its CSV text in Python heap (measured), so this 16,000,000-char
+# cap holds not 16MB but on the order of 130MB of actual `GridTable` objects
+# once the cache is full.
+_GRID_TABLE_CACHE_MAX_CHARS = 16_000_000
+
+
+class _GridTableCacheInfo(NamedTuple):
+    hits: int
+    misses: int
+    total_chars: int  # CSV characters currently resident, across every entry
+
+
+class _GridTableCache:
+    def __init__(self, max_chars: int) -> None:
+        self._max_chars = max_chars
+        self._entries: OrderedDict[str, tuple[GridTable, int]] = OrderedDict()
+        self._total_chars = 0
+        self._hits = 0
+        self._misses = 0
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(csv_text: str, label: str, basis: str) -> str:
+        digest = hashlib.sha256()
+        for part in (label, basis, csv_text):
+            digest.update(part.encode("utf-8", "surrogatepass"))
+            digest.update(b"\x00")
+        return digest.hexdigest()
+
+    def __call__(self, csv_text: str, label: str, basis: str) -> GridTable:
+        key = self._key(csv_text, label, basis)
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit is not None:
+                self._entries.move_to_end(key)
+                self._hits += 1
+                return hit[0]
+        # Parsed outside the lock: `parse_grid_table` touches no shared
+        # state, and a slow parse should not hold the lock against concurrent
+        # lookups of unrelated keys. A raised `GridTableError` propagates from
+        # here straight to the caller — never caught, never cached.
+        table = parse_grid_table(csv_text, label=label, basis=basis)
+        size = len(csv_text)
+        with self._lock:
+            self._misses += 1
+            if key not in self._entries:
+                self._entries[key] = (table, size)
+                self._total_chars += size
+                while self._total_chars > self._max_chars and self._entries:
+                    _, (_, evicted_size) = self._entries.popitem(last=False)
+                    self._total_chars -= evicted_size
+            else:
+                # Lost a race with another thread parsing the identical key —
+                # keep the one already stored rather than double-count it.
+                self._entries.move_to_end(key)
+        return table
+
+    def cache_info(self) -> _GridTableCacheInfo:
+        with self._lock:
+            return _GridTableCacheInfo(self._hits, self._misses, self._total_chars)
+
+    def cache_clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._total_chars = 0
+            self._hits = 0
+            self._misses = 0
+
+
+_cached_grid_table = _GridTableCache(_GRID_TABLE_CACHE_MAX_CHARS)
+
+
+_TABLE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_MAX_TABLE_CSV_CHARS = 600_000
+# B1: caps on `grid.tables` as a whole, not just per table — an unbounded
+# *number* of tables (each individually under `_MAX_TABLE_CSV_CHARS`) still
+# lets one document carry an arbitrarily large combined CSV payload, which is
+# what actually drove the measured cost (a multi-second validation, repeated
+# every what-if run against the same document) this pair of caps closes off.
+_MAX_TABLES_PER_DOCUMENT = 8
+_MAX_TABLES_COMBINED_CSV_CHARS = 2_000_000
 
 # ── the ladder ────────────────────────────────────────────────────────────────
 # `LAYER_RUN_OVERRIDE` is deliberately the same string as
@@ -113,11 +235,40 @@ class GridEntry(GridFactor):
     """One grid factor entry inside an override document: `grid.default` or one
     `grid.providers.<name>` entry. Same fields as `GridFactor` (`g_per_kwh`,
     `basis`, `label` — reusing its validators rather than duplicating them)
-    plus an optional citation `url` and `as_of` date.
+    plus an optional citation `url` and `as_of` date, and an optional `table`
+    naming an hourly table (a key into this same document's `grid.tables`)
+    whose value stands in for `g_per_kwh` at a run's actual start time —
+    `g_per_kwh` remains required and is the fallback when the table has no
+    value for that hour (see `_apply_grid_table`).
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    url: str | None = None
+    as_of: str | None = None
+    table: str | None = None
+
+    @field_validator("as_of", mode="after")
+    @classmethod
+    def _valid_as_of(cls, value: str | None) -> str | None:
+        return _iso_date(value)
+
+
+class GridTableEntry(BaseModel):
+    """One named entry in `grid.tables`: an operator-pasted CSV of grid
+    carbon intensity by hour, parsed and validated once here (see
+    `GridBlock._tables_valid`) so a malformed table is rejected when the
+    document is written, not the first time a run needs it. `label` and
+    `basis` describe the table the same way `GridEntry`'s do; `csv` is the
+    raw text handed to `parse_grid_table` (never fetched — always
+    operator-supplied).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    basis: str
+    csv: str
     url: str | None = None
     as_of: str | None = None
 
@@ -128,12 +279,23 @@ class GridEntry(GridFactor):
 
 
 class GridBlock(BaseModel):
-    """`grid.default` and `grid.providers` in an override document."""
+    """`grid.default`, `grid.providers`, `grid.regions` and `grid.tables` in
+    an override document.
+
+    `providers` keys may be a bare provider (`"anthropic"`) or a provider
+    pinned to a region (`"anthropic@us-east"`, see
+    `tret.services.grid_regions`); `regions` is a separate `{provider:
+    region}` map an operator uses to pin a provider to a region for lookup
+    purposes without necessarily having a `provider@region` entry in this
+    same layer — see `_resolve_grid` for how the two interact across layers.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     default: GridEntry | None = None
     providers: dict[str, GridEntry] | None = None
+    regions: dict[str, str] | None = None
+    tables: dict[str, GridTableEntry] | None = None
 
     @model_validator(mode="after")
     def _labels_required(self) -> "GridBlock":
@@ -147,6 +309,85 @@ class GridBlock(BaseModel):
                     f"grid.providers.{name}.label is required when "
                     f"grid.providers.{name}.g_per_kwh is set"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _provider_keys_valid(self) -> "GridBlock":
+        for key in self.providers or {}:
+            if not PROVIDER_KEY_RE.match(key):
+                raise ValueError(
+                    f"grid.providers.{key} is not a valid provider key "
+                    "(expected 'provider' or 'provider@region')"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _regions_valid(self) -> "GridBlock":
+        if self.regions:
+            try:
+                self.regions = validate_regions(self.regions)
+            except ProviderKeyError as exc:
+                raise ValueError(f"grid.regions: {exc}") from exc
+        return self
+
+    @model_validator(mode="after")
+    def _tables_valid(self) -> "GridBlock":
+        tables = self.tables or {}
+        if len(tables) > _MAX_TABLES_PER_DOCUMENT:
+            raise ValueError(
+                f"grid.tables: at most {_MAX_TABLES_PER_DOCUMENT} tables per document"
+            )
+        combined = 0
+        for name, entry in tables.items():
+            if not _TABLE_NAME_RE.match(name):
+                raise ValueError(
+                    f"grid.tables key {name!r} must match "
+                    "^[a-z0-9][a-z0-9_-]{0,63}$"
+                )
+            if len(entry.csv) > _MAX_TABLE_CSV_CHARS:
+                raise ValueError(
+                    f"grid.tables.{name}.csv exceeds {_MAX_TABLE_CSV_CHARS} characters"
+                )
+            combined += len(entry.csv)
+        if combined > _MAX_TABLES_COMBINED_CSV_CHARS:
+            raise ValueError(
+                f"grid.tables: combined csv exceeds {_MAX_TABLES_COMBINED_CSV_CHARS} characters"
+            )
+        for name, entry in tables.items():
+            try:
+                _cached_grid_table(entry.csv, entry.label, entry.basis)
+            except GridTableError as exc:
+                raise ValueError(f"grid.tables.{name}.csv: {exc}") from exc
+        return self
+
+    @model_validator(mode="after")
+    def _table_refs_valid(self) -> "GridBlock":
+        tables = self.tables or {}
+        if self.default is not None and self.default.table is not None:
+            table_name = self.default.table
+            if table_name not in tables:
+                raise ValueError(
+                    f"grid.default.table references unknown table {table_name!r}"
+                )
+            table = tables[table_name]
+            if table.basis != self.default.basis:
+                raise ValueError(
+                    f"grid.default.table {table_name!r} has basis {table.basis} "
+                    f"but the entry is {self.default.basis}"
+                )
+        for name, entry in (self.providers or {}).items():
+            if entry.table is not None:
+                if entry.table not in tables:
+                    raise ValueError(
+                        f"grid.providers.{name}.table references unknown table "
+                        f"{entry.table!r}"
+                    )
+                table = tables[entry.table]
+                if table.basis != entry.basis:
+                    raise ValueError(
+                        f"grid.providers.{name}.table {entry.table!r} has basis "
+                        f"{table.basis} but the entry is {entry.basis}"
+                    )
         return self
 
 
@@ -189,12 +430,47 @@ class PueBlock(BaseModel):
         return self
 
 
+class EmbodiedProfileBlock(BaseModel):
+    """`embodied.profile` in an override document: the same fields as
+    `tret.services.embodied_profiles.EmbodiedProfile`, validated through
+    `profile_from_dict` (`_valid` below) so the two can never drift apart —
+    this class only supplies the pydantic shape (required keys, `extra`
+    forbidden); every actual constraint (gpu count, lifetime, known GPU
+    model) lives in `EmbodiedProfile.__post_init__`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    gpus: int
+    runs_over_lifetime: int
+    batch_size: int = 64
+    include_server: bool = True
+    gpu_model: str = "h100"
+    label: str | None = None
+
+    @model_validator(mode="after")
+    def _valid(self) -> "EmbodiedProfileBlock":
+        try:
+            profile_from_dict(self.model_dump())
+        except ProfileError as exc:
+            raise ValueError(f"embodied.profile: {exc}") from exc
+        return self
+
+    def to_profile(self) -> EmbodiedProfile:
+        return profile_from_dict(self.model_dump())
+
+
 class EmbodiedBlock(BaseModel):
-    """`embodied` in an override document."""
+    """`embodied` in an override document. Either `g_per_run` (a flat figure)
+    or `profile` (a described hardware setup `grams_per_run` computes the
+    figure from) may be set — never both, since each is a complete answer to
+    "what does this run's embodied carbon cost" on its own.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     g_per_run: float | None = None
+    profile: EmbodiedProfileBlock | None = None
     label: str | None = None
 
     @field_validator("g_per_run", mode="after")
@@ -205,9 +481,22 @@ class EmbodiedBlock(BaseModel):
         return value
 
     @model_validator(mode="after")
+    def _one_or_other(self) -> "EmbodiedBlock":
+        if self.g_per_run is not None and self.profile is not None:
+            raise ValueError("embodied: set g_per_run or profile, not both")
+        return self
+
+    @model_validator(mode="after")
     def _label_required(self) -> "EmbodiedBlock":
-        if self.g_per_run is not None and not (self.label or "").strip():
-            raise ValueError("embodied.label is required when embodied.g_per_run is set")
+        has_value = self.g_per_run is not None or self.profile is not None
+        has_label = bool((self.label or "").strip()) or bool(
+            self.profile is not None and (self.profile.label or "").strip()
+        )
+        if has_value and not has_label:
+            raise ValueError(
+                "embodied.label is required when embodied.g_per_run or "
+                "embodied.profile is set"
+            )
         return self
 
 
@@ -270,6 +559,11 @@ class ModelOverride(BaseModel):
 class BandBlock(BaseModel):
     """`band` in an override document. One `label` covers both bounds, for the
     same reason `PueBlock`'s does.
+
+    `derived`, when true, switches this run's headline band from the plain
+    configured `low`/`high` to one narrowed by whatever evidence the run
+    actually has — see `_resolve_band_derived` and
+    `tret.services.uncertainty_derivation`.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -277,6 +571,7 @@ class BandBlock(BaseModel):
     low: float | None = None
     high: float | None = None
     label: str | None = None
+    derived: bool | None = None
 
     @field_validator("low", "high", mode="after")
     @classmethod
@@ -343,10 +638,21 @@ class EmissionsOverrides(BaseModel):
         return value
 
 
-def _parse_overrides(raw: dict[str, Any] | None) -> EmissionsOverrides | None:
-    """`None`/`{}` -> `None` (that layer contributes nothing); otherwise
-    validated, raising `pydantic.ValidationError` on anything wrong with it.
+def _parse_overrides(
+    raw: dict[str, Any] | EmissionsOverrides | None,
+) -> EmissionsOverrides | None:
+    """`None`/`{}` -> `None` (that layer contributes nothing); a dict is
+    validated, raising `pydantic.ValidationError` on anything wrong with it —
+    exactly as before. An already-validated `EmissionsOverrides` instance
+    (B1: a caller that validates once per request/run rather than once per
+    `build_factor_set` call — the what-if endpoint over many runs, the
+    harness over many segments/model switches) is returned as-is, skipping
+    re-validation entirely.
     """
+    if raw is None:
+        return None
+    if isinstance(raw, EmissionsOverrides):
+        return raw
     if not raw:
         return None
     return EmissionsOverrides(**raw)
@@ -371,6 +677,37 @@ class Resolved:
     url: str | None
     as_of: str | None
     setting: str | None
+    # ── Phase 3, all additive: every existing positional construction of
+    # `Resolved` (7 args) still works unchanged; these only ever arrive by
+    # keyword, from the one resolver that fills them in.
+    # Grid only: the region actually applied to this win (the part after "@"
+    # in a matched `provider@region` key), or None when no region pinned this
+    # particular value (see `_resolve_grid`/`grid_regions.py`).
+    region: str | None = None
+    # Grid only: "annual_average" (no table, or `at` wasn't given, or the
+    # table had no value for `at`) or "hourly" (the table had one) — see
+    # `_apply_grid_table`. Left None on every non-grid factor.
+    temporal: str | None = None
+    # Grid only: the name of the `grid.tables` entry the winning grid entry
+    # referenced, or None if it referenced none. Populated even when
+    # `temporal` stayed "annual_average" (no `at`, or a miss), so a GET
+    # response computed without `at` can still say "table X will apply at
+    # run time".
+    table: str | None = None
+    # Grid only: `GridTable.summary()` for `table`, or None when no table was
+    # referenced.
+    table_summary: dict | None = None
+    # Grid only: True when a table was referenced, `at` was given, and the
+    # table had no value within its lookup gap — the entry's own `g_per_kwh`
+    # applied instead (temporal stays "annual_average").
+    table_miss: bool = False
+    # Embodied only: `profile_summary(...)` when the winning embodied value
+    # came from a named hardware profile, else None.
+    profile: dict | None = None
+    # Band only (mirrored onto both `band_low` and `band_high`): whether this
+    # run's headline uncertainty band is evidence-derived rather than the
+    # plain configured low/high — see `_resolve_band_derived`.
+    derived: bool = False
 
 
 @dataclass(frozen=True)
@@ -462,17 +799,83 @@ def _env_or_global(field_is_decisive: bool, field_name: str, settings: Settings)
 
 
 # ── grid ──────────────────────────────────────────────────────────────────────
-def _grid_from_doc(doc: EmissionsOverrides, provider: str | None):
+def _resolve_grid_region(
+    provider: str | None,
+    harness: EmissionsOverrides | None,
+    workspace: EmissionsOverrides | None,
+    managed: EmissionsOverrides | None,
+) -> str | None:
+    """The region pinned to `provider`, from the most specific layer that
+    pins one — resolved once, per factor, exactly like every other value in
+    this module, then handed to `_grid_from_doc` so it applies to the
+    provider-entry lookup in *every* layer, not only the layer that pinned
+    it (see `GridBlock.regions`'s docstring and this module's own docstring
+    on cross-document precedence).
+    """
+    if not provider:
+        return None
+    for doc in (harness, workspace, managed):
+        if doc is None or doc.grid is None or not doc.grid.regions:
+            continue
+        region = doc.grid.regions.get(provider)
+        if region:
+            return region
+    return None
+
+
+def _grid_from_doc(doc: EmissionsOverrides, provider: str | None, region: str | None):
     if doc.grid is None:
         return None
     block = doc.grid
-    if provider and block.providers and provider in block.providers:
-        e = block.providers[provider]
-        return (Decimal(str(e.g_per_kwh)), e.basis, e.label, e.url, e.as_of, provider)
+    if provider and block.providers:
+        hit = first_matching_entry(
+            block.providers, provider, {provider: region} if region else None
+        )
+        if hit is not None:
+            key, e = hit
+            return (Decimal(str(e.g_per_kwh)), e.basis, e.label, e.url, e.as_of, key, e.table)
     if block.default is not None:
         e = block.default
-        return (Decimal(str(e.g_per_kwh)), e.basis, e.label, e.url, e.as_of, None)
+        return (Decimal(str(e.g_per_kwh)), e.basis, e.label, e.url, e.as_of, None, e.table)
     return None
+
+
+def _apply_grid_table(
+    value: Decimal,
+    basis: str,
+    table_name: str | None,
+    doc: EmissionsOverrides,
+    at: datetime | None,
+) -> tuple[Decimal, str, str, str | None, dict | None, bool]:
+    """`(value, basis, temporal, table, table_summary, table_miss)` for a
+    winning grid entry that may reference an hourly table.
+
+    A no-op — `(value, basis, "annual_average", None, None, False)` — when
+    the entry named no table. Otherwise the table is parsed once (cached by
+    its own CSV text, see `_cached_grid_table`) and:
+
+    * `at` is `None` — annual: `(value, basis, "annual_average", table_name,
+      summary, False)`. The table's name and summary are still returned so a
+      caller computing "what would apply" without a run's actual start time
+      (the settings API's GET) can still say "an hourly table is configured
+      here".
+    * `at` is given and the table has a value for it — `(table_value,
+      table's own basis, "hourly", table_name, summary, False)`.
+    * `at` is given and the table has no value for it (a `series` table with
+      a gap past `max_gap`) — the entry's own value applies, unchanged:
+      `(value, basis, "annual_average", table_name, summary, True)`.
+    """
+    if table_name is None:
+        return value, basis, "annual_average", None, None, False
+    entry = (doc.grid.tables or {})[table_name]  # existence checked at parse time
+    table = _cached_grid_table(entry.csv, entry.label, entry.basis)
+    summary = table.summary()
+    if at is None:
+        return value, basis, "annual_average", table_name, summary, False
+    hit = table.lookup(at)
+    if hit is not None:
+        return hit, entry.basis, "hourly", table_name, summary, False
+    return value, basis, "annual_average", table_name, summary, True
 
 
 def _resolve_grid(
@@ -483,25 +886,38 @@ def _resolve_grid(
     harness: EmissionsOverrides | None,
     workspace: EmissionsOverrides | None,
     managed: EmissionsOverrides | None,
+    at: datetime | None = None,
 ) -> tuple[Resolved, str]:
     override = run_overrides.get("grid_g_per_kwh")
     if override is not None:
         return (
             Resolved(Decimal(str(override)), LAYER_RUN_OVERRIDE, GRID_SOURCE_RUN_OVERRIDE,
-                      None, None, None, None),
+                      None, None, None, None, temporal="annual_average"),
             "unspecified",
         )
 
-    hit = _first_doc_hit(harness, workspace, managed, lambda d: _grid_from_doc(d, provider))
+    region = _resolve_grid_region(provider, harness, workspace, managed)
+    hit = _first_doc_hit(
+        harness, workspace, managed, lambda d: _grid_from_doc(d, provider, region)
+    )
     if hit is not None:
-        layer, doc, (value, basis, label, url, as_of, matched) = hit
+        layer, doc, (value, basis, label, url, as_of, matched, table_name) = hit
         source = _layer_source(layer, doc, matched)
         setting = (
             f"{layer}.emissions.grid.providers.{matched}"
             if matched
             else f"{layer}.emissions.grid.default"
         )
-        return Resolved(value, layer, source, label, url, as_of, setting), basis
+        region_used = matched.split("@", 1)[1] if matched and "@" in matched else None
+        value, basis, temporal, table, table_summary, table_miss = _apply_grid_table(
+            value, basis, table_name, doc, at
+        )
+        resolved = Resolved(
+            value, layer, source, label, url, as_of, setting,
+            region=region_used, temporal=temporal, table=table,
+            table_summary=table_summary, table_miss=table_miss,
+        )
+        return resolved, basis
 
     resolution = resolve_grid_factor(provider, deployment, settings, override=None)
     layer = _env_or_global(
@@ -510,6 +926,7 @@ def _resolve_grid(
     resolved = Resolved(
         Decimal(str(resolution["value"])), layer, resolution["source"],
         resolution["label"], None, None, resolution["setting"],
+        temporal="annual_average",
     )
     return resolved, resolution["basis"]
 
@@ -593,16 +1010,30 @@ def _resolve_embodied(
                          None, None, None, None)
 
     def _getter(doc: EmissionsOverrides):
-        if doc.embodied is None or doc.embodied.g_per_run is None:
+        if doc.embodied is None:
             return None
-        return (Decimal(str(doc.embodied.g_per_run)), doc.embodied.label)
+        block = doc.embodied
+        if block.g_per_run is not None:
+            return (Decimal(str(block.g_per_run)), block.label, None, "g_per_run")
+        if block.profile is not None:
+            profile = block.profile.to_profile()
+            return (
+                grams_per_run(profile),
+                block.label or profile.label,
+                profile_summary(profile),
+                "profile",
+            )
+        return None
 
     hit = _first_doc_hit(harness, workspace, managed, _getter)
     if hit is not None:
-        layer, doc, (value, label) = hit
+        layer, doc, (value, label, profile_dict, which) = hit
         source = _layer_source(layer, doc, None)
-        return Resolved(value, layer, source, label, None, None,
-                         f"{layer}.emissions.embodied.g_per_run")
+        return Resolved(
+            value, layer, source, label, None, None,
+            f"{layer}.emissions.embodied.{which}",
+            profile=profile_dict,
+        )
 
     raw = embodied_g_for(deployment, settings)
     layer = LAYER_ENV if "embodied_g_per_run" in settings.model_fields_set else LAYER_GLOBAL_DEFAULT
@@ -641,6 +1072,35 @@ def _resolve_band_side(
     env_name = f"TRET_UNCERTAINTY_BAND_{which.upper()}"
     layer = LAYER_ENV if field_name in settings.model_fields_set else LAYER_GLOBAL_DEFAULT
     return Resolved(raw, layer, layer, None, None, None, env_name)
+
+
+def _resolve_band_derived(
+    harness: EmissionsOverrides | None,
+    workspace: EmissionsOverrides | None,
+    managed: EmissionsOverrides | None,
+) -> Resolved:
+    """Whether this run's headline band should be evidence-derived
+    (`BandBlock.derived`), resolved the same layered way as `low`/`high` —
+    but as its own factor, since a document may set `band.derived` without
+    setting `low`/`high` at all (narrowing the shipped defaults rather than
+    a configured band). No `run_override` or `env` rung: there is no
+    per-run or `TRET_*` way to ask for this, so an unconfigured run gets the
+    shipped `False` straight from `LAYER_GLOBAL_DEFAULT`.
+    """
+
+    def _getter(doc: EmissionsOverrides):
+        if doc.band is None or doc.band.derived is None:
+            return None
+        return bool(doc.band.derived)
+
+    hit = _first_doc_hit(harness, workspace, managed, _getter)
+    if hit is not None:
+        layer, doc, value = hit
+        source = _layer_source(layer, doc, None)
+        return Resolved(value, layer, source, None, None, None,
+                         f"{layer}.emissions.band.derived", derived=value)
+    return Resolved(False, LAYER_GLOBAL_DEFAULT, LAYER_GLOBAL_DEFAULT,
+                     None, None, None, None, derived=False)
 
 
 # ── baseline model ────────────────────────────────────────────────────────────
@@ -739,19 +1199,37 @@ def build_factor_set(
     *,
     provider: str | None,
     settings: Settings | None = None,
-    workspace_settings: dict[str, Any] | None = None,
-    managed_settings: dict[str, Any] | None = None,
-    harness_settings: dict[str, Any] | None = None,
+    workspace_settings: dict[str, Any] | EmissionsOverrides | None = None,
+    managed_settings: dict[str, Any] | EmissionsOverrides | None = None,
+    harness_settings: dict[str, Any] | EmissionsOverrides | None = None,
     run_overrides: dict[str, Any] | None = None,
     model_id: str | None = None,
+    at: datetime | None = None,
 ) -> FactorSet:
     """Resolve every accounting constant for one run, layer by layer.
 
-    `workspace_settings`, `managed_settings` and `harness_settings` are each a
-    dict in the `EmissionsOverrides` shape, validated here (a `None` or `{}`
-    contributes nothing — indistinguishable from omitting it). `harness_settings`
-    is a reserved layer: accepted and resolved like the others, but nothing
-    populates it yet.
+    `workspace_settings`/`managed_settings`/`harness_settings` each accept
+    either a raw dict (validated here, same as always) or an already-validated
+    `EmissionsOverrides` instance (B1: validate once per request/run and reuse
+    the instance across every `build_factor_set` call that shares it, instead
+    of re-validating — including re-parsing every `grid.tables` CSV entry's
+    shape — on every single call. A hot caller with many calls sharing one
+    document (the what-if endpoint over a window of runs, the harness over
+    one run's segments) is exactly who this matters for; a caller with one
+    document per call may keep passing a plain dict unchanged.
+
+    `at` — the run's actual start time, timezone-aware — is what an hourly
+    `grid.tables` entry is looked up against (see `_apply_grid_table`); a
+    naive `at` raises `ValueError` rather than silently guessing a UTC
+    offset. Omitted (the default), any winning grid entry that names a table
+    resolves to its own annual `g_per_kwh` (`temporal="annual_average"`) —
+    this is what the settings API's GET (computed without a specific run)
+    uses, so it can still say a table is configured without claiming a hint
+    of which hour's value would apply.
+
+    A `None` or `{}` (dict form) contributes nothing — indistinguishable from
+    omitting it. `harness_settings` is a reserved layer: accepted and resolved
+    like the others, but nothing populates it yet.
 
     `run_overrides` carries explicit per-run values that outrank every
     configured layer: `grid_g_per_kwh` (what `energy_accounting`'s own
@@ -771,6 +1249,9 @@ def build_factor_set(
     layer's `model_overrides` can ever match and `model_override` on the
     returned `FactorSet` is always `None`.
     """
+    if at is not None and at.tzinfo is None:
+        raise ValueError("build_factor_set(at=...) requires a timezone-aware datetime")
+
     settings = settings or get_settings()
     run_overrides = run_overrides or {}
     deployment = deployment_for(provider) if provider else DEPLOYMENT_CLOUD
@@ -782,7 +1263,7 @@ def build_factor_set(
     profile = _effective_local_profile(deployment, settings, harness, workspace, managed)
 
     grid, grid_basis = _resolve_grid(
-        provider, deployment, settings, run_overrides, harness, workspace, managed
+        provider, deployment, settings, run_overrides, harness, workspace, managed, at=at
     )
     pue = _resolve_pue(deployment, profile, settings, run_overrides, harness, workspace, managed)
     embodied_g = _resolve_embodied(deployment, settings, run_overrides, harness, workspace, managed)
@@ -793,12 +1274,15 @@ def build_factor_set(
     band_high = _resolve_band_side(
         "high", settings, run_overrides, harness, workspace, managed, both
     )
+    band_derived = _resolve_band_derived(harness, workspace, managed)
+    band_low = replace(band_low, derived=band_derived.value)
+    band_high = replace(band_high, derived=band_derived.value)
     baseline_model = _resolve_baseline_model(settings, run_overrides, harness, workspace, managed)
     energy_strategy = _resolve_energy_strategy(run_overrides, harness, workspace, managed)
     model_override = _resolve_model_override(model_id, harness, workspace, managed)
 
     won = {grid.layer, pue.layer, embodied_g.layer, band_low.layer, band_high.layer,
-           baseline_model.layer, energy_strategy.layer}
+           band_derived.layer, baseline_model.layer, energy_strategy.layer}
     if model_override is not None:
         won.add(model_override.layer)
     layers_present = tuple(layer for layer in LAYER_PRECEDENCE if layer in won)

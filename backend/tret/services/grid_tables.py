@@ -25,6 +25,7 @@ pasted table's operator can find their mistake without re-deriving it.
 """
 from __future__ import annotations
 
+import bisect
 import csv
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -73,14 +74,17 @@ class GridTable:
                     return value
             return None  # unreachable in practice: parsing guarantees all 24 hours
 
-        candidate: tuple[datetime, Decimal] | None = None
-        for ts, value in self.rows:
-            if ts > at_utc:
-                break
-            candidate = (ts, value)
-        if candidate is None:
+        # `self.rows` is ascending by timestamp (enforced at parse time), so
+        # the latest row at-or-before `at_utc` is a binary search rather than
+        # a linear scan: `bisect_right` finds the insertion point for
+        # `at_utc` among the rows' own timestamps (via `key=`), which is
+        # exactly the count of rows with `ts <= at_utc` — the row just before
+        # it (if any) is the candidate the old linear scan used to find by
+        # walking until it saw a `ts > at_utc`.
+        idx = bisect.bisect_right(self.rows, at_utc, key=lambda row: row[0])
+        if idx == 0:
             return None
-        ts, value = candidate
+        ts, value = self.rows[idx - 1]
         if at_utc - ts > max_gap:
             return None
         return value

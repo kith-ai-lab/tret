@@ -18,6 +18,7 @@ having to account for it.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
@@ -399,6 +400,54 @@ async def test_a_broken_workspace_document_is_excluded_with_a_warning(client, se
     assert any("no longer validates" in w for w in body["warnings"])
 
 
+# ── a managed document that no longer validates ──────────────────────────────
+async def test_a_broken_managed_document_is_excluded_with_a_warning(client, seed, monkeypatch):
+    """A managed-layer document that no longer validates must not 500 a
+    read-only recompute either — the same fallback as the workspace layer
+    above, named separately in `warnings` since it is a different layer
+    failing.
+
+    `workspace_emissions_layers` is monkeypatched directly rather than routed
+    through a registered factor-layer provider: `ExtensionAPI.get_factor_layer`
+    already validates whatever a provider returns and never hands back a
+    document that fails `EmissionsOverrides` (see its own docstring), so this
+    exercises `_emissions_whatif_response`'s own fallback directly regardless
+    of that earlier guard.
+    """
+    _, user, project, harness = await make_tenant(
+        seed, name="Co", email="brokenmanaged@example.com"
+    )
+
+    async def fake_layers(db, workspace_id):
+        # Missing the required `label` — fails `GridBlock._labels_required`.
+        return None, {
+            "grid": {"default": {"g_per_kwh": 42, "basis": "location_based"}}
+        }
+
+    monkeypatch.setattr(analytics_module, "workspace_emissions_layers", fake_layers)
+
+    tokens = (1_000_000, 200_000, 0, 0)
+    run = make_run(
+        project_id=project.id,
+        harness_id=harness.id,
+        created_by=user.id,
+        model_used=MODEL_ID,
+        accounting=_account(MODEL, FIXED_SETTINGS, tokens),
+        input_tokens=tokens[0],
+        output_tokens=tokens[1],
+    )
+    await seed(run)
+
+    await login(client, user.email)
+    response = await client.post("/api/analytics/emissions/whatif", json={"factors": {}})
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["runs_recomputed"] == 1
+    assert body.get("warnings"), "expected a warnings entry naming the broken document"
+    assert any("managed" in w and "no longer validates" in w for w in body["warnings"])
+
+
 # ── a run whose model left the catalog ────────────────────────────────────────
 async def test_run_with_unknown_model_is_skipped_from_both_sides(client, seed):
     _, user, project, harness = await make_tenant(seed, name="Co", email="ghost@example.com")
@@ -487,6 +536,19 @@ async def test_invalid_factors_document_returns_422_naming_the_field(client, see
     )
     assert response.status_code == 422
     assert "pue.cloud" in response.json()["detail"]
+
+
+# ── B1: request body size cap ─────────────────────────────────────────────────
+async def test_whatif_over_the_body_cap_is_413(client, seed):
+    _, user, _project, _harness = await make_tenant(seed, name="Co", email="oversized@example.com")
+    await login(client, user.email)
+
+    # Comfortably over the 3MB cap — the content need not even be a shape
+    # `EmissionsOverrides` would ever accept: the cap is checked, and raises,
+    # before the body is ever validated.
+    oversized = {"factors": {"grid": {"tables": {"t": {"csv": "x" * (3 * 1024 * 1024 + 1024)}}}}}
+    response = await client.post("/api/analytics/emissions/whatif", json=oversized)
+    assert response.status_code == 413, response.text
 
 
 async def test_days_bounds_are_enforced(client, seed):
@@ -655,3 +717,108 @@ async def test_multi_model_run_is_recomputed_segment_by_segment(client, seed):
     assert body["scenario"]["totals"]["energy_wh"] == pytest.approx(
         body["recorded"]["totals"]["energy_wh"]
     )
+
+
+# ── Phase 3: an hourly grid table resolves per run, not per recompute call ───
+def test_whatif_accounting_resolves_an_hourly_table_per_runs_own_created_at():
+    """`_whatif_accounting`'s `fs_cache` used to key on `(provider, model_id)`
+    alone; an hourly `grid.tables` entry in the scenario document needs the
+    *run's own* start time, not whichever run happened to build the cached
+    `FactorSet` first — two runs recorded at different hours, under the
+    identical scenario document, must get different grid factors.
+    """
+    from tret.api.analytics import _whatif_accounting
+
+    diurnal_rows = "\n".join(f"{h},{100 + h}" for h in range(24))
+    factors_doc = {
+        "grid": {
+            "default": {
+                "g_per_kwh": 50, "basis": "location_based", "label": "annual fallback",
+                "table": "diurnal",
+            },
+            "tables": {
+                "diurnal": {
+                    "label": "test diurnal profile", "basis": "location_based",
+                    "csv": "hour_utc,g_per_kwh\n" + diurnal_rows,
+                }
+            },
+        }
+    }
+    tokens = (1_000_000, 200_000, 0, 0)
+    fs_cache: dict = {}
+    common = dict(
+        input_tokens=tokens[0],
+        output_tokens=tokens[1],
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        model_timeline=None,
+        catalog=FAKE_CATALOG,
+        workspace_doc=None,
+        managed_doc=None,
+        factors_doc=factors_doc,
+        fs_cache=fs_cache,
+    )
+
+    at_dawn = datetime(2025, 6, 1, 5, 0, tzinfo=timezone.utc)
+    at_dusk = datetime(2025, 6, 1, 20, 0, tzinfo=timezone.utc)
+    dawn = _whatif_accounting(model_used=MODEL_ID, created_at=at_dawn, **common)
+    dusk = _whatif_accounting(model_used=MODEL_ID, created_at=at_dusk, **common)
+
+    assert dawn["grid_co2e_g_per_kwh"] == 105.0  # hour 5 -> 100 + 5
+    assert dusk["grid_co2e_g_per_kwh"] == 120.0  # hour 20 -> 100 + 20
+    assert dawn["grid_temporal"] == "hourly"
+    assert dusk["grid_temporal"] == "hourly"
+    # Both hours' FactorSets were cached (never re-parsed the CSV table),
+    # keyed apart by `at` alongside `(provider, model_id)`.
+    assert len(fs_cache) == 2
+
+
+# ── B1: the table CSV is parsed once, no matter how many runs share it ───────
+def test_whatif_over_50_runs_with_a_tabled_document_parses_the_csv_exactly_once():
+    """`fs_cache` is keyed on `(provider, model_id, at)`, so a window with 50
+    runs recorded at 50 different times builds 50 distinct `FactorSet`s — each
+    one, pre-fix, re-validated the scenario document from scratch (including
+    re-parsing its `grid.tables` CSV). `_cached_grid_table`'s own byte-bounded
+    cache (keyed on the CSV's own content, not on `at`) must still only parse
+    that CSV once.
+    """
+    from tret.api.analytics import _whatif_accounting
+    from tret.services.emission_factors import _cached_grid_table
+
+    diurnal_rows = "\n".join(f"{h},{200 + h}" for h in range(24))
+    factors_doc = {
+        "grid": {
+            "default": {
+                "g_per_kwh": 60, "basis": "location_based", "label": "annual fallback",
+                "table": "diurnal_50run_test",
+            },
+            "tables": {
+                "diurnal_50run_test": {
+                    "label": "50-run test diurnal profile", "basis": "location_based",
+                    "csv": "hour_utc,g_per_kwh\n" + diurnal_rows,
+                }
+            },
+        }
+    }
+    tokens = (1_000_000, 200_000, 0, 0)
+    fs_cache: dict = {}
+    common = dict(
+        input_tokens=tokens[0],
+        output_tokens=tokens[1],
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        model_timeline=None,
+        catalog=FAKE_CATALOG,
+        workspace_doc=None,
+        managed_doc=None,
+        factors_doc=factors_doc,
+        fs_cache=fs_cache,
+    )
+
+    before = _cached_grid_table.cache_info()
+    for i in range(50):
+        at = datetime(2025, 6, 1, i % 24, 0, tzinfo=timezone.utc)
+        _whatif_accounting(model_used=MODEL_ID, created_at=at, **common)
+    after = _cached_grid_table.cache_info()
+
+    assert after.misses - before.misses == 1

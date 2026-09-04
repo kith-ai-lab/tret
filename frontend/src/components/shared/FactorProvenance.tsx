@@ -27,13 +27,18 @@ import type {
   EmissionsUncertaintyContribution,
 } from '../../api/client'
 import {
+  bandDerivationText,
+  BAND_DERIVE_NOTE,
   caveatDirection,
   confidenceMeta,
+  contributionEvidenceLabel,
+  embodiedProfileText,
   gridBasisLabel,
   gridSourceLabel,
   gridSourceWhat,
   layerMeta,
   PUE_PROFILE_LABELS,
+  TABLE_MISS_NOTE,
 } from './emissions'
 import { NO_ESTIMATE, formatFactor } from './format'
 
@@ -63,7 +68,7 @@ function factorDetail(factor: EmissionsFactor): string | null {
     )
     if (factor.reasoning_tier) parts.push('reasoning tier')
   }
-  if (factor.key === 'pue' && factor.profile) {
+  if (factor.key === 'pue' && typeof factor.profile === 'string') {
     parts.push(`profile: ${PUE_PROFILE_LABELS[factor.profile] ?? factor.profile}`)
   }
   if (factor.key === 'grid_intensity') {
@@ -74,18 +79,39 @@ function factorDetail(factor: EmissionsFactor): string | null {
     if (factor.source_key) parts.push(gridSourceLabel(factor.source_key))
     if (factor.source_label) parts.push(`“${factor.source_label}”`)
     if (factor.overridden) parts.push('supplied for this run')
+    // Phase 3, additive: an operator-pinned region, and whether this run's
+    // value came from an hourly table or the plain annual figure.
+    if (factor.grid_region) parts.push(`region: ${factor.grid_region}`)
+    if (factor.temporal === 'hourly' && factor.table) {
+      parts.push(`hourly: ${factor.table}`)
+    } else if (factor.table) {
+      parts.push(`annual (hourly table ${factor.table} configured)`)
+    }
+    if (factor.table_miss) parts.push('table miss, fell back to annual')
+  }
+  if (factor.key === 'embodied_hardware' && factor.profile && typeof factor.profile === 'object') {
+    parts.push(embodiedProfileText(factor.profile))
+  }
+  if (factor.key === 'uncertainty_band' && factor.derived) {
+    parts.push('derived from evidence')
   }
   return parts.length > 0 ? parts.join(' · ') : null
 }
 
-/** The tooltip for that suffix. Only the grid factor has one worth writing: which
- *  configuration rule applied is not self-explanatory from its name. */
+/** The tooltip for that suffix. The grid factor and the band both have one
+ *  worth writing: which configuration rule applied (and whether a table
+ *  lookup missed) is not self-explanatory from its name, and neither is what
+ *  "derived" means for the band. */
 function factorDetailHint(factor: EmissionsFactor): string | undefined {
-  if (factor.key !== 'grid_intensity') return undefined
-  const source = gridSourceWhat(factor.source_key)
-  return factor.source_label
-    ? `${source} The operator's label for it: “${factor.source_label}”.`
-    : source
+  if (factor.key === 'grid_intensity') {
+    const source = gridSourceWhat(factor.source_key)
+    const withLabel = factor.source_label
+      ? `${source} The operator's label for it: “${factor.source_label}”.`
+      : source
+    return factor.table_miss ? `${withLabel} ${TABLE_MISS_NOTE}` : withLabel
+  }
+  if (factor.key === 'uncertainty_band' && factor.derived) return BAND_DERIVE_NOTE
+  return undefined
 }
 
 /** Per-factor provenance. The heart of deliverable "where did this come from". */
@@ -172,6 +198,14 @@ export function FactorTable({ factors }: { factors: EmissionsFactor[] }) {
                       </span>
                     ) : null
                   })()}
+                  {/* The band's own "was this narrowed by evidence" marker —
+                      a different question from confidence or precedence
+                      layer, so its own chip. */}
+                  {factor.key === 'uncertainty_band' && factor.derived && (
+                    <span className="badge badge-violet" style={{ marginLeft: 4 }} title={BAND_DERIVE_NOTE}>
+                      derived
+                    </span>
+                  )}
                 </td>
               </tr>
             )
@@ -260,13 +294,30 @@ export function SensitivityTable({ uncertainty }: { uncertainty: EmissionsUncert
                     <span style={{ color: 'var(--text-muted)' }}>second order</span>
                   )}
                 </td>
-                <td style={{ color: 'var(--text-muted)' }}>{row.note}</td>
+                <td style={{ color: 'var(--text-muted)' }}>
+                  {row.note}
+                  {contributionEvidenceLabel(row.evidence) && (
+                    <span
+                      className="badge badge-blue"
+                      style={{ marginLeft: 6 }}
+                      title="This row was narrowed because the run actually has this evidence — see the band's own derivation note below."
+                    >
+                      {contributionEvidenceLabel(row.evidence)}
+                    </span>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
       <div className="fine-print">{oneSidedNote(rows)}</div>
+      {/* Present only when `band.derived` was set and at least one row
+          actually narrowed past the configured band — see
+          `emissions.ts::bandDerivationText`. */}
+      {uncertainty.derivation && (
+        <div className="fine-print">{bandDerivationText(uncertainty.derivation)}</div>
+      )}
     </div>
   )
 }

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 if TYPE_CHECKING:
-    from tret.services.emission_factors import FactorSet
+    from tret.services.emission_factors import EmissionsOverrides, FactorSet
 
 from tret.db.engine import get_session_factory
 from tret.db.models import Document, Harness, Pack, Run
@@ -246,7 +246,7 @@ class ModelSegment:
 @dataclass
 class _EmissionsContext:
     """One `execute()` call's workspace/managed emissions-override documents,
-    and the `FactorSet`s already resolved from them this run.
+    already parsed, and the `FactorSet`s already resolved from them this run.
 
     Replaces what used to be `HarnessEngine._emissions_workspace_doc` /
     `_emissions_managed_doc` instance attributes. `HarnessEngine` is
@@ -259,14 +259,36 @@ class _EmissionsContext:
     place that needs a `FactorSet` — `run`/`db` are threaded the same way, for
     the same reason — so no per-run emissions state ever lives on the engine
     instance.
+
+    `workspace_doc`/`managed_doc` are `EmissionsOverrides` instances (or
+    `None`), parsed once here rather than once per `_factors_for` call (B1: a
+    run with several model segments/switches used to re-validate the same two
+    documents — including re-parsing every `grid.tables` CSV entry's shape —
+    on every single one). `build_factor_set` accepts either a raw dict or an
+    already-validated instance for exactly this reason.
+
+    `broken` is set when either document failed to parse (a downgrade, a
+    hand-edited row) — `_factors_for` treats that the same way a raised
+    `build_factor_set` call used to: `factors=None` for the whole run, not
+    just the layer that broke, matching `build_factor_set`'s own behaviour of
+    raising on the first invalid document it reaches rather than skipping it.
     """
 
-    workspace_doc: dict | None = None
-    managed_doc: dict | None = None
+    workspace_doc: "EmissionsOverrides | None" = None
+    managed_doc: "EmissionsOverrides | None" = None
+    broken: bool = False
+    # This run's start time, timezone-aware — what an hourly `grid.tables`
+    # entry is looked up against (see `emission_factors._apply_grid_table`).
+    # Constant for the whole run (every segment/switch/compaction call
+    # shares it), so it lives here rather than being recomputed per
+    # `_factors_for` call — same reasoning as `workspace_doc`/`managed_doc`.
+    at: datetime = field(default_factory=_utcnow)
     # Keyed on `(provider, model_id)`: a `model_overrides` entry is resolved
     # per model id (see `emission_settings.factor_set_for`), so two segments
     # sharing a provider but running different models must never share a
-    # cached `FactorSet`.
+    # cached `FactorSet`. `at` is not part of this key — it never varies
+    # within one run, unlike the what-if endpoint's own `fs_cache`, which
+    # spans many runs at many different times.
     _factor_sets: dict[tuple[str | None, str | None], "FactorSet | None"] = field(
         default_factory=dict, repr=False
     )
@@ -316,30 +338,36 @@ class HarnessEngine:
         key: two segments on the same provider but different models must never
         share a resolved `FactorSet`.
 
-        Never raises: `factor_set_for` is pure validation and arithmetic over
-        two already-loaded dicts, but a workspace document that fails
-        `EmissionsOverrides` validation after it was stored (a downgrade, a
-        hand-edited row) must not turn into a run that cannot account its own
-        energy at all — `None` here is exactly today's behaviour,
-        `energy_accounting` building its own factor set from `settings` alone.
+        Never raises: `emissions.workspace_doc`/`managed_doc` are already
+        `EmissionsOverrides` instances (or `None`) parsed once at context
+        creation, so `factor_set_for` here is pure arithmetic, never
+        validation — but a document that failed to parse at context
+        creation (a downgrade, a hand-edited row) still must not turn into a
+        run that cannot account its own energy at all, so `emissions.broken`
+        (set once, at parse time) short-circuits straight to `None` here,
+        exactly like a raised `factor_set_for` call used to.
         """
         key = (provider, model_id)
         if key in emissions._factor_sets:
             return emissions._factor_sets[key]
-        try:
-            factors = factor_set_for(
-                provider,
-                workspace_doc=emissions.workspace_doc,
-                managed_doc=emissions.managed_doc,
-                model_id=model_id,
-            )
-        except Exception:
-            log.exception(
-                "failed to resolve emissions factors for provider %r; "
-                "accounting for this segment with no configured layers",
-                provider,
-            )
+        if emissions.broken:
             factors = None
+        else:
+            try:
+                factors = factor_set_for(
+                    provider,
+                    workspace_doc=emissions.workspace_doc,
+                    managed_doc=emissions.managed_doc,
+                    model_id=model_id,
+                    at=emissions.at,
+                )
+            except Exception:
+                log.exception(
+                    "failed to resolve emissions factors for provider %r; "
+                    "accounting for this segment with no configured layers",
+                    provider,
+                )
+                factors = None
         emissions._factor_sets[key] = factors
         return factors
 
@@ -441,11 +469,62 @@ class HarnessEngine:
                     workspace_id,
                 )
                 emissions_workspace_doc, emissions_managed_doc = None, None
+            # Parsed once here, not once per `_factors_for` call (B1) — see
+            # `_EmissionsContext`'s docstring. A document that fails to
+            # validate (a downgrade, a hand-edited row) sets `emissions_broken`
+            # rather than raising: `_factors_for` gives the run `factors=None`
+            # for exactly that reason, the same fallback a raised
+            # `build_factor_set` call used to produce.
+            from tret.services.emission_factors import EmissionsOverrides
+
+            emissions_broken = False
+            workspace_instance = None
+            if emissions_workspace_doc:
+                try:
+                    workspace_instance = EmissionsOverrides(**emissions_workspace_doc)
+                except Exception:
+                    log.exception(
+                        "workspace %s: stored emissions override document no longer "
+                        "validates; run will account with no configured layers",
+                        workspace_id,
+                    )
+                    emissions_broken = True
+            managed_instance = None
+            if emissions_managed_doc:
+                try:
+                    managed_instance = EmissionsOverrides(**emissions_managed_doc)
+                except Exception:
+                    log.exception(
+                        "workspace %s: managed emissions layer document does not "
+                        "validate; run will account with no configured layers",
+                        workspace_id,
+                    )
+                    emissions_broken = True
             # Built fresh per call and threaded down explicitly (never held on
             # `self`) — see `_EmissionsContext`'s docstring for why: this
             # engine instance is process-wide and `execute()` runs concurrently
             # per run.
-            emissions = _EmissionsContext(emissions_workspace_doc, emissions_managed_doc)
+            # `run.created_at` is a `TIMESTAMP(timezone=True)` column, so a
+            # freshly loaded row already carries a timezone-aware value. A
+            # naive one — only ever a hand-built `Run` a test constructs
+            # without going through the DB round trip, or a SQLite install,
+            # where the same column round-trips naive (see reconcile.py's own
+            # `_as_aware_utc`) — is treated as already being UTC, the same as
+            # the what-if endpoint's `_aware_utc` treats a naive stored
+            # `created_at`; it is never silently substituted with "now",
+            # which would price an hourly `grid.tables` lookup (if any)
+            # against the wrong hour entirely. Only a genuinely absent
+            # `created_at` (never happens outside a hand-built `Run`; the
+            # column is NOT NULL) falls back to `_utcnow()`.
+            if run.created_at is None:
+                run_started_at = _utcnow()
+            elif run.created_at.tzinfo is None:
+                run_started_at = run.created_at.replace(tzinfo=timezone.utc)
+            else:
+                run_started_at = run.created_at
+            emissions = _EmissionsContext(
+                workspace_instance, managed_instance, broken=emissions_broken, at=run_started_at
+            )
             if _emissions_test_hook is not None:
                 await _emissions_test_hook()
             try:
@@ -641,6 +720,7 @@ class HarnessEngine:
                 run_override=run.task_input.get("_model_override"),
                 emissions_workspace_doc=emissions.workspace_doc,
                 emissions_managed_doc=emissions.managed_doc,
+                emissions_at=emissions.at,
             )
         except RoutingUnavailable as e:
             await self._fail_before_start(db, run, str(e), workspace_id=harness.workspace_id)

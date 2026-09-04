@@ -508,6 +508,35 @@ h1, h2, h3, h4 {
   border-radius: 3px;
 }
 
+/* A value cell in the effective-factors table (EmissionsFactorsPanel.tsx) —
+   a real <button> that expands an inline detail row beneath it. Deliberately
+   just a hover tint and a focus ring rather than a border on every cell,
+   which would turn the table into a wall of boxes. */
+.factor-cell-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  margin: 0;
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.factor-cell-btn:hover {
+  background: var(--bg-hover);
+}
+
+.factor-cell-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
 /* A clickable table row is role="button" + tabIndex=0, so it needs a ring too. */
 .mono-table tr.clickable:focus-visible {
   outline: 1px solid var(--accent);

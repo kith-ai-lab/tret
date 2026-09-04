@@ -36,6 +36,7 @@ import {
   MONEY_EXACT_NOTE,
   MONEY_PCT_PRECISION_NOTE,
   SCOPE_META,
+  TABLE_MISS_NOTE,
   TOKEN_BUCKET_LABELS,
   avoidedFraming,
   avoidedMoneyFraming,
@@ -216,12 +217,16 @@ function buildSteps(energy: EnergyAccounting): Step[] {
       energy.grid_co2e_source ? gridSourceLabel(energy.grid_co2e_source) : 'instance setting',
       gridBasisLabel(energy.grid_co2e_basis),
       energy.grid_co2e_label ? `“${energy.grid_co2e_label}”` : null,
+      energy.grid_region ? `region: ${energy.grid_region}` : null,
+      energy.grid_temporal === 'hourly' ? 'hourly table' : null,
     ]
       .filter((part): part is string => Boolean(part))
       .join(' · '),
     sourceHint: `Grid intensity as configured when this run happened, with its GHG Protocol basis. Location-based and market-based factors answer different questions and must never be summed. A region- or supplier-specific factor is the single biggest improvement available here. ${gridSourceWhat(
       energy.grid_co2e_source,
-    )} ${GRID_NO_INFERENCE_NOTE}`,
+    )} ${GRID_NO_INFERENCE_NOTE}${
+      energy.factors?.find((f) => f.key === 'grid_intensity')?.table_miss ? ` ${TABLE_MISS_NOTE}` : ''
+    }`,
   })
 
   if (embodied !== undefined && embodied > 0) {

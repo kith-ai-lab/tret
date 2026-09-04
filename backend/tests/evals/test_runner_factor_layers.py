@@ -9,8 +9,10 @@ the doctrine or tool behaviour `test_golden_runs.py` already covers.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
+from unittest.mock import patch
 
-from golden_world import GOLDEN_MODEL
+from golden_world import GOLDEN_MODEL, _replay_registry
 from test_golden_runs import PERIL, SITE, divergence_happy_script
 
 from tret.config import get_settings
@@ -53,6 +55,115 @@ async def test_a_workspace_override_is_recorded_as_the_workspace_layer(world):
     assert run.status == "completed", run.error
     assert run.energy_accounting["grid_co2e_layer"] == "workspace"
     assert run.energy_accounting["grid_co2e_g_per_kwh"] == 90.0
+
+
+async def test_a_workspace_hourly_table_is_recorded_as_hourly(world):
+    """A workspace `grid.tables` entry referenced by the default entry
+    applies at the run's actual start time — a 24-row diurnal profile always
+    has a value for whatever hour the run happens to start in, so this needs
+    no clock mocking to assert `grid_temporal == "hourly"`.
+    """
+    from replay_provider import ReplayProvider
+
+    diurnal_rows = "\n".join(f"{h},{100 + h}" for h in range(24))
+    await _set_workspace_emissions(
+        world,
+        {
+            "grid": {
+                "default": {
+                    "g_per_kwh": 50,
+                    "basis": "location_based",
+                    "label": "annual fallback",
+                    "table": "diurnal",
+                },
+                "tables": {
+                    "diurnal": {
+                        "label": "test diurnal profile",
+                        "basis": "location_based",
+                        "csv": "hour_utc,g_per_kwh\n" + diurnal_rows,
+                    }
+                },
+            }
+        },
+    )
+
+    provider = ReplayProvider(divergence_happy_script())
+    result = await world.run(
+        provider=provider,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+    run = result.run
+    assert run.status == "completed", run.error
+    assert run.energy_accounting["grid_temporal"] == "hourly"
+    assert run.energy_accounting["factors"]
+    grid_factor = next(f for f in run.energy_accounting["factors"] if f["key"] == "grid_intensity")
+    assert grid_factor["table"] == "diurnal"
+
+
+async def test_a_naive_stored_created_at_is_treated_as_utc_not_now(world):
+    """SQLite (what `world` runs on) has no genuine timezone-aware storage, so
+    a `Run.created_at` round-trips naive there (see `reconcile.py`'s own
+    `_as_aware_utc` docstring). The runner must treat that naive value as
+    already being UTC — the same way the what-if endpoint's `_aware_utc`
+    treats a naive stored `created_at` — never substitute `_utcnow()` for it:
+    an hourly `grid.tables` entry would otherwise resolve against whatever
+    hour the run happens to *execute* in rather than the hour it was actually
+    created at.
+    """
+    from replay_provider import ReplayProvider
+    from tret.engine.harness import HarnessEngine
+    from tret.providers.catalog import ModelCatalog
+    from tret.router_llm.priors import NoPriors
+
+    diurnal_rows = "\n".join(f"{h},{100 + h}" for h in range(24))
+    await _set_workspace_emissions(
+        world,
+        {
+            "grid": {
+                "default": {
+                    "g_per_kwh": 50,
+                    "basis": "location_based",
+                    "label": "annual fallback",
+                    "table": "diurnal",
+                },
+                "tables": {
+                    "diurnal": {
+                        "label": "test diurnal profile",
+                        "basis": "location_based",
+                        "csv": "hour_utc,g_per_kwh\n" + diurnal_rows,
+                    }
+                },
+            }
+        },
+    )
+
+    harness_id = await world.create_harness(tool_names=[])
+    run_id = await world.create_run(
+        harness_id=harness_id,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+    # A naive `created_at`, years in the past and at an hour (3am UTC ->
+    # 100 + 3 = 103) nothing near "now" would coincide with by accident.
+    frozen_naive = datetime(2020, 1, 1, 3, 0, 0)
+    async with world.session_factory() as db:
+        run = await db.get(Run, run_id)
+        run.created_at = frozen_naive
+        await db.commit()
+        assert run.created_at.tzinfo is None  # sanity: genuinely naive in storage
+
+    provider = ReplayProvider(divergence_happy_script())
+    engine = HarnessEngine(catalog=ModelCatalog(), priors=NoPriors())
+    with patch("tret.engine.harness.ProviderRegistry", _replay_registry(provider)):
+        await engine.execute(run_id)
+
+    result = await world.read_back(run_id, provider=provider)
+    run = result.run
+    assert run.status == "completed", run.error
+    assert run.energy_accounting["grid_temporal"] == "hourly"
+    grid_factor = next(f for f in run.energy_accounting["factors"] if f["key"] == "grid_intensity")
+    assert grid_factor["value"] == 103.0  # hour 3 -> 100 + 3, from the frozen created_at
 
 
 async def test_with_no_workspace_doc_the_layer_falls_back_to_env_or_global_default(world):

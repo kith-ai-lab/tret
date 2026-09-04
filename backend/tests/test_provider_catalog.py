@@ -384,6 +384,7 @@ async def test_startup_warms_the_catalog_without_blocking_the_boot(monkeypatch):
 
     from tret import main as main_module
     from tret.services import bootstrap as bootstrap_module
+    from tret.services import emission_settings as emission_settings_module
     from tret.services import instance_lock as instance_lock_module
     from tret.services import reconcile as reconcile_module
 
@@ -428,17 +429,24 @@ async def test_startup_warms_the_catalog_without_blocking_the_boot(monkeypatch):
     async def _no_sweep(db):
         return 0
 
+    async def _no_emissions_check(db):
+        return 0
+
     monkeypatch.setattr(main_module, "get_catalog", lambda: catalog)
     monkeypatch.setattr(main_module, "get_engine", lambda: None)
     monkeypatch.setattr(main_module, "ensure_schema", _no_schema)
     monkeypatch.setattr(main_module, "get_session_factory", lambda: _FakeSession)
     monkeypatch.setattr(bootstrap_module, "bootstrap", _no_bootstrap)
-    # Both are real lifespan steps now (single-instance enforcement, sweeping
-    # runs a prior process left running) — irrelevant to what this test is
-    # about, but real enough to need the same `_FakeSession`-style stubbing as
-    # bootstrap above, since `_FakeSession` supports no actual queries.
+    # All real lifespan steps now (single-instance enforcement, sweeping runs
+    # a prior process left running, the M2 emissions-document boot check) —
+    # irrelevant to what this test is about, but real enough to need the same
+    # `_FakeSession`-style stubbing as bootstrap above, since `_FakeSession`
+    # supports no actual queries.
     monkeypatch.setattr(instance_lock_module, "acquire_instance_lock", _no_instance_lock)
     monkeypatch.setattr(reconcile_module, "sweep_orphaned_runs", _no_sweep)
+    monkeypatch.setattr(
+        emission_settings_module, "check_workspace_emissions_documents", _no_emissions_check
+    )
 
     async with main_module.lifespan(None):
         # Startup completed: the pass is running, and nothing waited for it.

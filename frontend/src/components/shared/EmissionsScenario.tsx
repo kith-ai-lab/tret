@@ -19,7 +19,9 @@ import { useState } from 'react'
 import {
   api,
   ApiError,
+  EMISSIONS_OVERRIDE_PROVIDERS,
   gateRefusalDetail,
+  REGION_TOKEN_RE,
   type EmissionsBandOverride,
   type EmissionsGridBasisValue,
   type EmissionsOverrides,
@@ -27,11 +29,13 @@ import {
   type GridBasis,
 } from '../../api/client'
 import {
+  BAND_DERIVE_NOTE,
   BAND_SHORT,
   BAND_WHY,
   GRID_BASIS_META,
   gridBasisLabel,
   NOT_SUMMABLE_WHY,
+  REGION_PIN_NOTE,
   SUMMABLE_ACROSS_BASES_NOTE,
 } from './emissions'
 import { formatCo2eScaled, formatCostScaled, formatEnergyScaled, formatTokens, NO_ESTIMATE, orDash } from './format'
@@ -50,6 +54,12 @@ interface ScenarioDraft {
   bandLow: string
   bandHigh: string
   bandLabel: string
+  bandDerived: boolean
+  /** A region pin for exactly one provider — '' means no pin in this
+   *  scenario. Mirrors `grid.regions` in the real override document, scoped
+   *  down to one provider since this drawer is a reduced form. */
+  regionProvider: string
+  regionValue: string
 }
 
 function emptyDraft(): ScenarioDraft {
@@ -63,6 +73,9 @@ function emptyDraft(): ScenarioDraft {
     bandLow: '',
     bandHigh: '',
     bandLabel: '',
+    bandDerived: false,
+    regionProvider: '',
+    regionValue: '',
   }
 }
 
@@ -89,6 +102,9 @@ function validateDraft(draft: ScenarioDraft): string[] {
   if (low !== undefined || high !== undefined) {
     if (draft.bandLabel.trim() === '') errors.push('band.label is required when band.low or band.high is set')
   }
+  if (draft.regionProvider && draft.regionValue.trim() && !REGION_TOKEN_RE.test(draft.regionValue.trim())) {
+    errors.push(`grid.regions: invalid region: '${draft.regionValue.trim()}'`)
+  }
   return errors
 }
 
@@ -109,11 +125,14 @@ function draftToFactors(draft: ScenarioDraft): Partial<EmissionsOverrides> {
   }
   const low = num(draft.bandLow)
   const high = num(draft.bandHigh)
-  if (low !== undefined || high !== undefined) {
-    const band: EmissionsBandOverride = { label: draft.bandLabel.trim() }
+  if (low !== undefined || high !== undefined || draft.bandDerived) {
+    const band: EmissionsBandOverride = { label: draft.bandLabel.trim(), derived: draft.bandDerived }
     if (low !== undefined) band.low = low
     if (high !== undefined) band.high = high
     factors.band = band
+  }
+  if (draft.regionProvider && draft.regionValue.trim()) {
+    factors.grid = { ...(factors.grid ?? {}), regions: { [draft.regionProvider]: draft.regionValue.trim() } }
   }
   return factors
 }
@@ -203,6 +222,41 @@ function ScenarioContent({ projectId, days }: { projectId: string | null; days: 
 
         <div>
           <div className="mono-label" style={{ marginBottom: 6 }}>
+            Region pin
+          </div>
+          <div className="fine-print" style={{ marginBottom: 6 }}>
+            {REGION_PIN_NOTE}
+          </div>
+          <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-end', gap: 10 }}>
+            <div className="field" style={{ marginBottom: 0, width: 160 }}>
+              <label className="mono-label">Provider</label>
+              <select
+                value={draft.regionProvider}
+                onChange={(e) => setDraft({ ...draft, regionProvider: e.target.value })}
+              >
+                <option value="">none</option>
+                {EMISSIONS_OVERRIDE_PROVIDERS.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field" style={{ marginBottom: 0, width: 150 }}>
+              <label className="mono-label">Region</label>
+              <input
+                type="text"
+                placeholder="us-east"
+                disabled={!draft.regionProvider}
+                value={draft.regionValue}
+                onChange={(e) => setDraft({ ...draft, regionValue: e.target.value })}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div className="mono-label" style={{ marginBottom: 6 }}>
             PUE
           </div>
           <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-end', gap: 10 }}>
@@ -243,6 +297,17 @@ function ScenarioContent({ projectId, days }: { projectId: string | null; days: 
           </div>
           <div className="fine-print" style={{ marginBottom: 6 }}>
             {BAND_WHY} {BAND_SHORT}
+          </div>
+          <label className="check-row" style={{ padding: 0, marginBottom: 6 }}>
+            <input
+              type="checkbox"
+              checked={draft.bandDerived}
+              onChange={(e) => setDraft({ ...draft, bandDerived: e.target.checked })}
+            />
+            <span>Derive from evidence</span>
+          </label>
+          <div className="fine-print" style={{ marginBottom: 6 }}>
+            {BAND_DERIVE_NOTE}
           </div>
           <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-end', gap: 10 }}>
             <div className="field" style={{ marginBottom: 0, width: 110 }}>

@@ -15,20 +15,31 @@
  *  `emissions.ts::BAND_SHORT`. The effective-factors table beneath the form is
  *  "what will apply to the next run", not a history of what already happened;
  *  every value carries the precedence layer that produced it as a small chip.
+ *
+ *  Phase 3 additions, all opt-in and all additive to the shapes above: a
+ *  region pin per provider plus an optional `provider@region` row beside the
+ *  bare one; named hourly grid tables a grid entry's "Hourly table" select
+ *  can reference; a toggle between a flat embodied g/run and a described
+ *  hardware profile; and a "derive from evidence" checkbox on the judgment
+ *  band. None of these infer anything — a region, a table, a profile and the
+ *  evidence used to narrow a band are all operator statements.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
+import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react'
 
 import {
   api,
   ApiError,
   EMISSIONS_OVERRIDE_PROVIDERS,
   gateRefusalDetail,
+  REGION_TOKEN_RE,
   type EmissionsBandOverride,
   type EmissionsEffectiveFactors,
   type EmissionsEmbodiedOverride,
+  type EmissionsEmbodiedProfile,
   type EmissionsGridBasisValue,
   type EmissionsGridOverride,
+  type EmissionsGridTableOverride,
   type EmissionsOverrides,
   type EmissionsPueLocalProfile,
   type EmissionsPueOverride,
@@ -36,18 +47,38 @@ import {
   type EmissionsShippedDefault,
 } from '../../api/client'
 import {
+  BAND_DERIVE_NOTE,
   BAND_SHORT,
   BAND_WHY,
+  embodiedProfileText,
   GRID_BASIS_META,
   gridBasisLabel,
+  GRID_TABLE_HEADER_HINT,
+  gridTableSummaryText,
   layerMeta,
   PUE_PROFILE_LABELS,
+  REGION_PIN_NOTE,
+  TABLE_MISS_NOTE,
 } from '../shared/emissions'
 import { formatDateTime } from '../shared/format'
 import { QueryError } from '../shared/MonoTable'
 
 const GRID_BASIS_OPTIONS: EmissionsGridBasisValue[] = ['location_based', 'market_based', 'unspecified']
 const LOCAL_PROFILE_OPTIONS: EmissionsPueLocalProfile[] = ['workstation', 'onprem_datacenter']
+const EMBODIED_MODES = ['per_run', 'profile'] as const
+type EmbodiedMode = (typeof EMBODIED_MODES)[number]
+const EMBODIED_GPU_MODEL = 'h100' as const
+const DEFAULT_PROFILE_BATCH_SIZE = '64'
+const TABLE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
+const MAX_TABLE_CSV_CHARS = 600_000
+const MAX_TABLES_PER_DOCUMENT = 8
+const MAX_TABLES_COMBINED_CSV_CHARS = 2_000_000
+/** Shown under every entry's "Hourly table" select — explains why picking a
+ *  table can change the basis field right above it (see `checkGridRow`'s
+ *  basis check in `validateDraft`, and the auto-set in `GridRowFields`). */
+const TABLE_BASIS_SYNC_NOTE = "Picking a table sets this entry's GHG basis to match it."
+const DIURNAL_HEADER = 'hour_utc,g_per_kwh'
+const SERIES_HEADER = 'timestamp_utc,g_per_kwh'
 
 const PROVIDER_LABELS: Record<string, string> = {
   local: 'local',
@@ -65,6 +96,17 @@ interface GridRowDraft {
   label: string
   url: string
   as_of: string
+  /** Name of a `grid.tables` entry, or '' for "none". */
+  table: string
+}
+
+interface GridTableDraft {
+  name: string
+  label: string
+  basis: EmissionsGridBasisValue
+  csv: string
+  url: string
+  as_of: string
 }
 
 interface PueDraft {
@@ -74,20 +116,39 @@ interface PueDraft {
   label: string
 }
 
+interface EmbodiedProfileDraft {
+  gpus: string
+  runs_over_lifetime: string
+  batch_size: string
+  include_server: boolean
+  label: string
+}
+
 interface EmbodiedDraft {
+  mode: EmbodiedMode
   g_per_run: string
   label: string
+  profile: EmbodiedProfileDraft
 }
 
 interface BandDraft {
   low: string
   high: string
   label: string
+  derived: boolean
 }
 
 interface FormDraft {
   gridDefault: GridRowDraft
   gridProviders: Record<string, GridRowDraft>
+  /** One region text per provider — independent of whether a `provider@region`
+   *  row is also open below; a region may be pinned on its own. */
+  gridRegions: Record<string, string>
+  /** The optional `provider@region` row beside each bare provider row. Only
+   *  submitted when `regionalOpen[provider]` is true and it carries a value. */
+  gridRegional: Record<string, GridRowDraft>
+  regionalOpen: Record<string, boolean>
+  gridTables: GridTableDraft[]
   pue: PueDraft
   embodied: EmbodiedDraft
   band: BandDraft
@@ -95,7 +156,7 @@ interface FormDraft {
 }
 
 function emptyGridRow(): GridRowDraft {
-  return { g_per_kwh: '', basis: 'unspecified', label: '', url: '', as_of: '' }
+  return { g_per_kwh: '', basis: 'unspecified', label: '', url: '', as_of: '', table: '' }
 }
 
 function gridRowFromOverride(o: EmissionsGridOverride | undefined): GridRowDraft {
@@ -106,18 +167,53 @@ function gridRowFromOverride(o: EmissionsGridOverride | undefined): GridRowDraft
     label: o.label,
     url: o.url ?? '',
     as_of: o.as_of ?? '',
+    table: o.table ?? '',
+  }
+}
+
+function emptyGridTable(): GridTableDraft {
+  return { name: '', label: '', basis: 'location_based', csv: '', url: '', as_of: '' }
+}
+
+function gridTableFromOverride(name: string, t: EmissionsGridTableOverride): GridTableDraft {
+  return { name, label: t.label, basis: t.basis, csv: t.csv, url: t.url ?? '', as_of: t.as_of ?? '' }
+}
+
+function emptyEmbodiedProfile(): EmbodiedProfileDraft {
+  return {
+    gpus: '',
+    runs_over_lifetime: '',
+    batch_size: DEFAULT_PROFILE_BATCH_SIZE,
+    include_server: true,
+    label: '',
   }
 }
 
 function draftFromOverrides(overrides: EmissionsOverrides | Record<string, never>): FormDraft {
   const o = overrides as EmissionsOverrides
   const gridProviders: Record<string, GridRowDraft> = {}
+  const gridRegions: Record<string, string> = {}
+  const gridRegional: Record<string, GridRowDraft> = {}
+  const regionalOpen: Record<string, boolean> = {}
   for (const provider of EMISSIONS_OVERRIDE_PROVIDERS) {
     gridProviders[provider] = gridRowFromOverride(o.grid?.providers?.[provider])
+    const region = o.grid?.regions?.[provider] ?? ''
+    gridRegions[provider] = region
+    const regionalOverride = region ? o.grid?.providers?.[`${provider}@${region}`] : undefined
+    gridRegional[provider] = gridRowFromOverride(regionalOverride)
+    regionalOpen[provider] = Boolean(regionalOverride)
   }
+  const gridTables: GridTableDraft[] = Object.entries(o.grid?.tables ?? {}).map(([name, t]) =>
+    gridTableFromOverride(name, t),
+  )
+  const embodiedMode: EmbodiedMode = o.embodied?.profile ? 'profile' : 'per_run'
   return {
     gridDefault: gridRowFromOverride(o.grid?.default),
     gridProviders,
+    gridRegions,
+    gridRegional,
+    regionalOpen,
+    gridTables,
     pue: {
       cloud: o.pue?.cloud !== undefined ? String(o.pue.cloud) : '',
       local_profile: o.pue?.local_profile ?? 'workstation',
@@ -125,13 +221,27 @@ function draftFromOverrides(overrides: EmissionsOverrides | Record<string, never
       label: o.pue?.label ?? '',
     },
     embodied: {
+      mode: embodiedMode,
       g_per_run: o.embodied?.g_per_run !== undefined ? String(o.embodied.g_per_run) : '',
       label: o.embodied?.label ?? '',
+      profile: o.embodied?.profile
+        ? {
+            gpus: String(o.embodied.profile.gpus),
+            runs_over_lifetime: String(o.embodied.profile.runs_over_lifetime),
+            batch_size:
+              o.embodied.profile.batch_size !== undefined
+                ? String(o.embodied.profile.batch_size)
+                : DEFAULT_PROFILE_BATCH_SIZE,
+            include_server: o.embodied.profile.include_server ?? true,
+            label: o.embodied.profile.label ?? '',
+          }
+        : emptyEmbodiedProfile(),
     },
     band: {
       low: o.band?.low !== undefined ? String(o.band.low) : '',
       high: o.band?.high !== undefined ? String(o.band.high) : '',
       label: o.band?.label ?? '',
+      derived: o.band?.derived ?? false,
     },
     baselineModel: o.baseline_model ?? '',
   }
@@ -152,26 +262,163 @@ function num(s: string): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
-/** Client-side mirror of the server's one validation rule: a block that sets a
- *  number requires a non-empty label. Runs before every submit; the server
- *  still re-checks and its message wins if the two ever disagree. */
+/** The two CSV shapes `grid.tables` accepts. Returns an error string naming
+ *  what is wrong (mirroring the server's own parser messages where cheap), or
+ *  null when the CSV looks acceptable. Not a full parse — the server's own
+ *  `parse_grid_table` is the real validator; this only catches the mistakes a
+ *  member would otherwise only find on save. */
+function validateTableCsv(csv: string): string | null {
+  const lines = csv
+    .trim()
+    .split(/\r?\n/)
+    .filter((l) => l.trim() !== '')
+  if (lines.length === 0) return 'csv is empty'
+  const header = lines[0].trim()
+  if (header === DIURNAL_HEADER) {
+    const rows = lines.length - 1
+    if (rows !== 24) return `expected exactly 24 rows for ${DIURNAL_HEADER}, got ${rows}`
+    return null
+  }
+  if (header === SERIES_HEADER) {
+    if (lines.length < 2) return `expected at least one row for ${SERIES_HEADER}`
+    return null
+  }
+  return `header must be '${DIURNAL_HEADER}' or '${SERIES_HEADER}'`
+}
+
+/** Client-side mirror of the server's validation rules: a block that sets a
+ *  number requires a non-empty label, a region/table name/CSV must be
+ *  well-formed, and embodied is one thing or the other. Runs before every
+ *  submit; the server still re-checks and its message wins if the two ever
+ *  disagree. */
 function validateDraft(draft: FormDraft): DraftError[] {
   const errors: DraftError[] = []
   const checkGridRow = (row: GridRowDraft, field: string) => {
     if (num(row.g_per_kwh) !== undefined && row.label.trim() === '') {
       errors.push({ field: `${field}.label`, message: `${field}.label is required when ${field}.g_per_kwh is set` })
     }
+    // Table ref — only matters once the entry itself is set (unset entries
+    // are never submitted, so a stale/mismatched pick can't reach the
+    // server); mirrors `GridBlock._table_refs_valid` on the backend exactly.
+    if (num(row.g_per_kwh) !== undefined && row.table) {
+      const table = draft.gridTables.find((t) => t.name.trim() === row.table)
+      if (!table) {
+        errors.push({
+          field: `${field}.table`,
+          message: `${field}.table references unknown table '${row.table}'`,
+        })
+      } else if (table.basis !== row.basis) {
+        errors.push({
+          field: `${field}.table`,
+          message: `${field}.table '${row.table}' has basis ${table.basis} but the entry is ${row.basis}`,
+        })
+      }
+    }
   }
   checkGridRow(draft.gridDefault, 'grid.default')
   for (const provider of EMISSIONS_OVERRIDE_PROVIDERS) {
     checkGridRow(draft.gridProviders[provider], `grid.providers.${provider}`)
   }
+
+  // Regions — format-checked for every provider with a region typed in,
+  // whether or not a regional row is open; a bare pin with no regional entry
+  // is still meaningful (it applies to a matching entry in another layer).
+  for (const provider of EMISSIONS_OVERRIDE_PROVIDERS) {
+    const region = draft.gridRegions[provider].trim()
+    if (region && !REGION_TOKEN_RE.test(region)) {
+      errors.push({ field: `grid.regions.${provider}`, message: `grid.regions: invalid region: '${region}'` })
+    }
+  }
+  // Regional rows — only checked while open, and only once a value is set.
+  for (const provider of EMISSIONS_OVERRIDE_PROVIDERS) {
+    if (!draft.regionalOpen[provider]) continue
+    const region = draft.gridRegions[provider].trim()
+    const row = draft.gridRegional[provider]
+    if (num(row.g_per_kwh) === undefined) continue
+    if (!region) {
+      errors.push({
+        field: `grid.regions.${provider}`,
+        message: `grid.regions.${provider} is required to save a regional entry for ${provider}`,
+      })
+    }
+    checkGridRow(row, `grid.providers.${provider}@${region || '<region>'}`)
+  }
+
+  // Tables — count cap, combined size cap, name shape, uniqueness, per-table
+  // size cap, and the two accepted header shapes (with the diurnal 24-row
+  // rule). Mirrors `GridBlock._tables_valid` on the backend.
+  if (draft.gridTables.length > MAX_TABLES_PER_DOCUMENT) {
+    errors.push({
+      field: 'grid.tables.count',
+      message: `grid.tables: at most ${MAX_TABLES_PER_DOCUMENT} tables per document`,
+    })
+  }
+  const combinedCsvChars = draft.gridTables.reduce((sum, t) => sum + t.csv.length, 0)
+  if (combinedCsvChars > MAX_TABLES_COMBINED_CSV_CHARS) {
+    errors.push({
+      field: 'grid.tables.combined',
+      message: `grid.tables: combined csv exceeds ${MAX_TABLES_COMBINED_CSV_CHARS} characters`,
+    })
+  }
+  const seenNames = new Set<string>()
+  draft.gridTables.forEach((t, i) => {
+    const name = t.name.trim()
+    const label = name || `#${i + 1}`
+    if (!name || !TABLE_NAME_RE.test(name)) {
+      errors.push({
+        field: `grid.tables.${label}`,
+        message: `grid.tables key '${name}' must match ^[a-z0-9][a-z0-9_-]{0,63}$`,
+      })
+    } else if (seenNames.has(name)) {
+      errors.push({ field: `grid.tables.${label}`, message: `grid.tables key '${name}' is already used` })
+    }
+    seenNames.add(name)
+    if (t.csv.length > MAX_TABLE_CSV_CHARS) {
+      errors.push({
+        field: `grid.tables.${label}.csv`,
+        message: `grid.tables.${label}.csv exceeds ${MAX_TABLE_CSV_CHARS} characters`,
+      })
+    } else {
+      const csvError = validateTableCsv(t.csv)
+      if (csvError) errors.push({ field: `grid.tables.${label}.csv`, message: `grid.tables.${label}.csv: ${csvError}` })
+    }
+  })
+
   if ((num(draft.pue.cloud) !== undefined || num(draft.pue.local) !== undefined) && draft.pue.label.trim() === '') {
     errors.push({ field: 'pue.label', message: 'pue.label is required when pue.cloud or pue.local is set' })
   }
-  if (num(draft.embodied.g_per_run) !== undefined && draft.embodied.label.trim() === '') {
-    errors.push({ field: 'embodied.label', message: 'embodied.label is required when embodied.g_per_run is set' })
+
+  // Embodied — mode-aware: either a flat g_per_run or a profile's two
+  // required numbers; either the shared label or the profile's own label
+  // satisfies the "label required" rule, mirroring `EmbodiedBlock` exactly.
+  const profileGpusSet = draft.embodied.profile.gpus.trim() !== ''
+  const profileRunsSet = draft.embodied.profile.runs_over_lifetime.trim() !== ''
+  if (draft.embodied.mode === 'profile' && (profileGpusSet || profileRunsSet)) {
+    if (num(draft.embodied.profile.gpus) === undefined) {
+      errors.push({ field: 'embodied.profile.gpus', message: 'embodied.profile.gpus must be a number' })
+    }
+    const runs = num(draft.embodied.profile.runs_over_lifetime)
+    if (runs === undefined || runs <= 0) {
+      errors.push({
+        field: 'embodied.profile.runs_over_lifetime',
+        message: 'embodied.profile.runs_over_lifetime must be a positive number',
+      })
+    }
   }
+  const embodiedHasValue =
+    draft.embodied.mode === 'per_run'
+      ? num(draft.embodied.g_per_run) !== undefined
+      : num(draft.embodied.profile.gpus) !== undefined && num(draft.embodied.profile.runs_over_lifetime) !== undefined
+  const embodiedHasLabel =
+    draft.embodied.label.trim() !== '' ||
+    (draft.embodied.mode === 'profile' && draft.embodied.profile.label.trim() !== '')
+  if (embodiedHasValue && !embodiedHasLabel) {
+    errors.push({
+      field: 'embodied.label',
+      message: 'embodied.label is required when embodied.g_per_run or embodied.profile is set',
+    })
+  }
+
   const bandLow = num(draft.band.low)
   const bandHigh = num(draft.band.high)
   if (bandLow !== undefined || bandHigh !== undefined) {
@@ -188,33 +435,59 @@ function validateDraft(draft: FormDraft): DraftError[] {
 function overridesFromDraft(draft: FormDraft): EmissionsOverrides {
   const body: EmissionsOverrides = {}
 
+  const buildGridEntry = (row: GridRowDraft, v: number): EmissionsGridOverride => ({
+    g_per_kwh: v,
+    basis: row.basis,
+    label: row.label.trim(),
+    url: row.url.trim() || undefined,
+    as_of: row.as_of.trim() || undefined,
+    table: row.table || undefined,
+  })
+
   const gridDefaultVal = num(draft.gridDefault.g_per_kwh)
   const providers: Record<string, EmissionsGridOverride> = {}
   for (const provider of EMISSIONS_OVERRIDE_PROVIDERS) {
     const row = draft.gridProviders[provider]
     const v = num(row.g_per_kwh)
-    if (v !== undefined) {
-      providers[provider] = {
-        g_per_kwh: v,
-        basis: row.basis,
-        label: row.label.trim(),
-        url: row.url.trim() || undefined,
-        as_of: row.as_of.trim() || undefined,
+    if (v !== undefined) providers[provider] = buildGridEntry(row, v)
+
+    if (draft.regionalOpen[provider]) {
+      const region = draft.gridRegions[provider].trim()
+      const regionalRow = draft.gridRegional[provider]
+      const rv = num(regionalRow.g_per_kwh)
+      if (rv !== undefined && region) {
+        providers[`${provider}@${region}`] = buildGridEntry(regionalRow, rv)
       }
     }
   }
-  if (gridDefaultVal !== undefined || Object.keys(providers).length > 0) {
-    body.grid = {}
-    if (gridDefaultVal !== undefined) {
-      body.grid.default = {
-        g_per_kwh: gridDefaultVal,
-        basis: draft.gridDefault.basis,
-        label: draft.gridDefault.label.trim(),
-        url: draft.gridDefault.url.trim() || undefined,
-        as_of: draft.gridDefault.as_of.trim() || undefined,
-      }
+  const regions: Record<string, string> = {}
+  for (const provider of EMISSIONS_OVERRIDE_PROVIDERS) {
+    const region = draft.gridRegions[provider].trim()
+    if (region) regions[provider] = region
+  }
+  const tables: Record<string, EmissionsGridTableOverride> = {}
+  for (const t of draft.gridTables) {
+    const name = t.name.trim()
+    if (!name) continue
+    tables[name] = {
+      label: t.label.trim(),
+      basis: t.basis,
+      csv: t.csv,
+      url: t.url.trim() || undefined,
+      as_of: t.as_of.trim() || undefined,
     }
+  }
+  if (
+    gridDefaultVal !== undefined ||
+    Object.keys(providers).length > 0 ||
+    Object.keys(regions).length > 0 ||
+    Object.keys(tables).length > 0
+  ) {
+    body.grid = {}
+    if (gridDefaultVal !== undefined) body.grid.default = buildGridEntry(draft.gridDefault, gridDefaultVal)
     if (Object.keys(providers).length > 0) body.grid.providers = providers
+    if (Object.keys(regions).length > 0) body.grid.regions = regions
+    if (Object.keys(tables).length > 0) body.grid.tables = tables
   }
 
   const pueCloud = num(draft.pue.cloud)
@@ -227,19 +500,33 @@ function overridesFromDraft(draft: FormDraft): EmissionsOverrides {
     body.pue = pue
   }
 
-  const embodiedVal = num(draft.embodied.g_per_run)
-  if (embodiedVal !== undefined) {
-    const embodied: EmissionsEmbodiedOverride = {
-      g_per_run: embodiedVal,
-      label: draft.embodied.label.trim(),
+  const embodiedHasValue =
+    draft.embodied.mode === 'per_run'
+      ? num(draft.embodied.g_per_run) !== undefined
+      : num(draft.embodied.profile.gpus) !== undefined && num(draft.embodied.profile.runs_over_lifetime) !== undefined
+  if (embodiedHasValue) {
+    const embodied: EmissionsEmbodiedOverride = { label: draft.embodied.label.trim() }
+    if (draft.embodied.mode === 'per_run') {
+      embodied.g_per_run = num(draft.embodied.g_per_run)
+    } else {
+      const profile: EmissionsEmbodiedProfile = {
+        gpus: num(draft.embodied.profile.gpus) as number,
+        runs_over_lifetime: num(draft.embodied.profile.runs_over_lifetime) as number,
+        gpu_model: EMBODIED_GPU_MODEL,
+      }
+      const batchSize = num(draft.embodied.profile.batch_size)
+      if (batchSize !== undefined) profile.batch_size = batchSize
+      profile.include_server = draft.embodied.profile.include_server
+      if (draft.embodied.profile.label.trim()) profile.label = draft.embodied.profile.label.trim()
+      embodied.profile = profile
     }
     body.embodied = embodied
   }
 
   const bandLow = num(draft.band.low)
   const bandHigh = num(draft.band.high)
-  if (bandLow !== undefined || bandHigh !== undefined) {
-    const band: EmissionsBandOverride = { label: draft.band.label.trim() }
+  if (bandLow !== undefined || bandHigh !== undefined || draft.band.derived) {
+    const band: EmissionsBandOverride = { label: draft.band.label.trim(), derived: draft.band.derived }
     if (bandLow !== undefined) band.low = bandLow
     if (bandHigh !== undefined) band.high = bandHigh
     body.band = band
@@ -279,6 +566,8 @@ function GridRowFields({
   errors,
   field,
   shipped,
+  inputId,
+  tables,
 }: {
   row: GridRowDraft
   onChange: (row: GridRowDraft) => void
@@ -286,12 +575,35 @@ function GridRowFields({
   errors: DraftError[]
   field: string
   shipped: EmissionsShippedDefault | undefined
+  /** Id for the gCO₂e/kWh input — the jump target the effective-factors table's
+   *  "Override for <provider>" action focuses. Only the per-provider rows get
+   *  one; the single default row isn't a jump target. */
+  inputId?: string
+  /** Named `grid.tables` entries this document has (basis included), for the
+   *  "Hourly table" select — every grid entry (default, provider, regional)
+   *  offers the same list plus "none". Picking one whose basis differs from
+   *  this row's basis updates the row's basis to match — see the select's
+   *  onChange below. */
+  tables: GridTableDraft[]
 }) {
+  const selectTable = (name: string) => {
+    if (!name) {
+      onChange({ ...row, table: '' })
+      return
+    }
+    const table = tables.find((t) => t.name.trim() === name)
+    if (table && table.basis !== row.basis) {
+      onChange({ ...row, table: name, basis: table.basis })
+    } else {
+      onChange({ ...row, table: name })
+    }
+  }
   return (
     <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-start', gap: 10 }}>
       <div className="field" style={{ marginBottom: 0, width: 140 }}>
         <label className="mono-label">gCO₂e/kWh</label>
         <input
+          id={inputId}
           type="number"
           step="any"
           min={0}
@@ -344,6 +656,23 @@ function GridRowFields({
           disabled={disabled}
           onChange={(e) => onChange({ ...row, as_of: e.target.value })}
         />
+      </div>
+      <div className="field" style={{ marginBottom: 0, width: 160 }}>
+        <label className="mono-label">Hourly table</label>
+        <select value={row.table} disabled={disabled} onChange={(e) => selectTable(e.target.value)}>
+          <option value="">none</option>
+          {tables.map((t) => t.name.trim()).filter((name) => name !== '').map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+        {row.table && (
+          <div className="fine-print" style={{ marginTop: 2 }}>
+            {TABLE_BASIS_SYNC_NOTE}
+          </div>
+        )}
+        <FieldError errors={errors} field={`${field}.table`} />
       </div>
     </div>
   )
@@ -413,6 +742,8 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
   const shipped = data.shipped_defaults
   const saveError = saveMutation.error as ApiError | null
   const clearError = clearMutation.error as ApiError | null
+  const disabled = !canEdit || saveMutation.isPending
+  const combinedTableCsvChars = draft.gridTables.reduce((sum, t) => sum + t.csv.length, 0)
 
   const submit = () => {
     const errors = validateDraft(draft)
@@ -424,6 +755,53 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
   const clear = () => {
     if (!window.confirm('Clear every emissions override for this workspace? Runs will fall back to the managed/env/global defaults.')) return
     clearMutation.mutate()
+  }
+
+  const updateTable = (i: number, next: GridTableDraft) => {
+    const oldName = draft.gridTables[i]?.name.trim()
+    const newName = next.name.trim()
+    const gridTables = draft.gridTables.slice()
+    gridTables[i] = next
+    if (!oldName || oldName === newName) {
+      setDraft({ ...draft, gridTables })
+      return
+    }
+    // Renamed — rewrite every entry that pointed at the old name so the
+    // draft never carries a dangling `table` ref the server would 422 on.
+    const renameRef = (row: GridRowDraft) => (row.table === oldName ? { ...row, table: newName } : row)
+    setDraft({
+      ...draft,
+      gridTables,
+      gridDefault: renameRef(draft.gridDefault),
+      gridProviders: Object.fromEntries(
+        EMISSIONS_OVERRIDE_PROVIDERS.map((p) => [p, renameRef(draft.gridProviders[p])]),
+      ),
+      gridRegional: Object.fromEntries(
+        EMISSIONS_OVERRIDE_PROVIDERS.map((p) => [p, renameRef(draft.gridRegional[p])]),
+      ),
+    })
+  }
+  const addTable = () => {
+    if (draft.gridTables.length >= MAX_TABLES_PER_DOCUMENT) return
+    setDraft({ ...draft, gridTables: [...draft.gridTables, emptyGridTable()] })
+  }
+  const removeTable = (i: number) => {
+    const removedName = draft.gridTables[i]?.name
+    const gridTables = draft.gridTables.filter((_, idx) => idx !== i)
+    // Clear any grid entry that referenced the removed table so the form
+    // never submits a dangling `table` reference the server would 422 on.
+    const clearRef = (row: GridRowDraft) => (row.table === removedName ? { ...row, table: '' } : row)
+    setDraft({
+      ...draft,
+      gridTables,
+      gridDefault: clearRef(draft.gridDefault),
+      gridProviders: Object.fromEntries(
+        EMISSIONS_OVERRIDE_PROVIDERS.map((p) => [p, clearRef(draft.gridProviders[p])]),
+      ),
+      gridRegional: Object.fromEntries(
+        EMISSIONS_OVERRIDE_PROVIDERS.map((p) => [p, clearRef(draft.gridRegional[p])]),
+      ),
+    })
   }
 
   return (
@@ -455,7 +833,7 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
           below for what is in force right now.
         </div>
 
-        {/* ── grid: default + per-provider ── */}
+        {/* ── grid: default + regions + per-provider + tables ── */}
         <div>
           <div className="mono-label" style={{ marginBottom: 6 }}>
             Grid intensity — default
@@ -463,38 +841,236 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
           <GridRowFields
             row={draft.gridDefault}
             onChange={(row) => setDraft({ ...draft, gridDefault: row })}
-            disabled={!canEdit || saveMutation.isPending}
+            disabled={disabled}
             errors={clientErrors}
             field="grid.default"
             shipped={shipped.grid_default}
+            tables={draft.gridTables}
           />
         </div>
+
+        <div>
+          <div className="mono-label" style={{ marginBottom: 6 }}>
+            Grid intensity — regions
+          </div>
+          <div className="fine-print" style={{ marginBottom: 6 }}>
+            {REGION_PIN_NOTE}
+          </div>
+          <div className="row" style={{ flexWrap: 'wrap', gap: 10 }}>
+            {EMISSIONS_OVERRIDE_PROVIDERS.map((provider) => (
+              <div key={provider} className="field" style={{ marginBottom: 0, width: 160 }}>
+                <label className="mono-label">{PROVIDER_LABELS[provider] ?? provider}</label>
+                <input
+                  type="text"
+                  placeholder="us-east"
+                  value={draft.gridRegions[provider]}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    setDraft({ ...draft, gridRegions: { ...draft.gridRegions, [provider]: e.target.value } })
+                  }
+                />
+                <FieldError errors={clientErrors} field={`grid.regions.${provider}`} />
+              </div>
+            ))}
+          </div>
+        </div>
+
         <div>
           <div className="mono-label" style={{ marginBottom: 6 }}>
             Grid intensity — per provider
           </div>
           <div className="stack" style={{ gap: 10 }}>
-            {EMISSIONS_OVERRIDE_PROVIDERS.map((provider) => (
-              <div key={provider}>
-                <div className="fine-print" style={{ marginBottom: 4 }}>
-                  {PROVIDER_LABELS[provider] ?? provider}
+            {EMISSIONS_OVERRIDE_PROVIDERS.map((provider) => {
+              const region = draft.gridRegions[provider].trim()
+              const isOpen = draft.regionalOpen[provider]
+              return (
+                <div key={provider}>
+                  <div className="fine-print" style={{ marginBottom: 4 }}>
+                    {PROVIDER_LABELS[provider] ?? provider}
+                  </div>
+                  <GridRowFields
+                    row={draft.gridProviders[provider]}
+                    onChange={(row) =>
+                      setDraft({
+                        ...draft,
+                        gridProviders: { ...draft.gridProviders, [provider]: row },
+                      })
+                    }
+                    disabled={disabled}
+                    errors={clientErrors}
+                    field={`grid.providers.${provider}`}
+                    shipped={shipped.grid_providers?.[provider]}
+                    inputId={gridProviderInputId(provider)}
+                    tables={draft.gridTables}
+                  />
+                  {isOpen ? (
+                    <div
+                      style={{
+                        marginTop: 8,
+                        paddingLeft: 14,
+                        borderLeft: '2px solid var(--border-subtle)',
+                      }}
+                    >
+                      <div className="fine-print" style={{ marginBottom: 4 }}>
+                        regional entry — key: <code>{provider}@{region || '…'}</code>
+                        {!region && ' (enter a region above to enable this row)'}
+                      </div>
+                      <GridRowFields
+                        row={draft.gridRegional[provider]}
+                        onChange={(row) =>
+                          setDraft({ ...draft, gridRegional: { ...draft.gridRegional, [provider]: row } })
+                        }
+                        disabled={disabled}
+                        errors={clientErrors}
+                        field={`grid.providers.${provider}@${region || '<region>'}`}
+                        shipped={undefined}
+                        tables={draft.gridTables}
+                      />
+                      {canEdit && (
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          onClick={() =>
+                            setDraft({ ...draft, regionalOpen: { ...draft.regionalOpen, [provider]: false } })
+                          }
+                        >
+                          Remove regional row
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    canEdit && (
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        style={{ marginTop: 6 }}
+                        onClick={() =>
+                          setDraft({ ...draft, regionalOpen: { ...draft.regionalOpen, [provider]: true } })
+                        }
+                      >
+                        + Add regional row
+                      </button>
+                    )
+                  )}
                 </div>
-                <GridRowFields
-                  row={draft.gridProviders[provider]}
-                  onChange={(row) =>
-                    setDraft({
-                      ...draft,
-                      gridProviders: { ...draft.gridProviders, [provider]: row },
-                    })
-                  }
-                  disabled={!canEdit || saveMutation.isPending}
-                  errors={clientErrors}
-                  field={`grid.providers.${provider}`}
-                  shipped={shipped.grid_providers?.[provider]}
-                />
+              )
+            })}
+          </div>
+        </div>
+
+        <div>
+          <div className="mono-label" style={{ marginBottom: 6 }}>
+            Hourly grid tables
+          </div>
+          <div className="fine-print" style={{ marginBottom: 6 }}>
+            Named CSV tables any grid entry's "Hourly table" select above can reference. Two shapes
+            accepted: {GRID_TABLE_HEADER_HINT}. Up to {MAX_TABLES_PER_DOCUMENT} tables, combined{' '}
+            {MAX_TABLES_COMBINED_CSV_CHARS.toLocaleString('en-US')} characters.
+          </div>
+          <FieldError errors={clientErrors} field="grid.tables.count" />
+          <FieldError errors={clientErrors} field="grid.tables.combined" />
+          <div className="stack" style={{ gap: 12 }}>
+            {draft.gridTables.map((t, i) => (
+              <div key={i} className="panel stack" style={{ gap: 8, padding: 10 }}>
+                <div className="row" style={{ flexWrap: 'wrap', gap: 10, alignItems: 'flex-start' }}>
+                  <div className="field" style={{ marginBottom: 0, width: 150 }}>
+                    <label className="mono-label">Name (key)</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. ontario_hourly"
+                      value={t.name}
+                      disabled={disabled}
+                      onChange={(e) => updateTable(i, { ...t, name: e.target.value })}
+                    />
+                    <FieldError errors={clientErrors} field={`grid.tables.${t.name.trim() || `#${i + 1}`}`} />
+                  </div>
+                  <div className="field" style={{ marginBottom: 0, flex: 1, minWidth: 180 }}>
+                    <label className="mono-label">Label (source)</label>
+                    <input
+                      type="text"
+                      value={t.label}
+                      disabled={disabled}
+                      onChange={(e) => updateTable(i, { ...t, label: e.target.value })}
+                    />
+                  </div>
+                  <div className="field" style={{ marginBottom: 0, width: 150 }}>
+                    <label className="mono-label">GHG basis</label>
+                    <select
+                      value={t.basis}
+                      disabled={disabled}
+                      onChange={(e) => updateTable(i, { ...t, basis: e.target.value as EmissionsGridBasisValue })}
+                    >
+                      {GRID_BASIS_OPTIONS.map((b) => (
+                        <option key={b} value={b}>
+                          {GRID_BASIS_META[b]?.label ?? b}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field" style={{ marginBottom: 0, width: 160 }}>
+                    <label className="mono-label">URL (optional)</label>
+                    <input
+                      type="text"
+                      value={t.url}
+                      disabled={disabled}
+                      onChange={(e) => updateTable(i, { ...t, url: e.target.value })}
+                    />
+                  </div>
+                  <div className="field" style={{ marginBottom: 0, width: 120 }}>
+                    <label className="mono-label">As of (optional)</label>
+                    <input
+                      type="text"
+                      placeholder="YYYY-MM-DD"
+                      value={t.as_of}
+                      disabled={disabled}
+                      onChange={(e) => updateTable(i, { ...t, as_of: e.target.value })}
+                    />
+                  </div>
+                </div>
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label className="mono-label">CSV</label>
+                  <textarea
+                    rows={6}
+                    placeholder={GRID_TABLE_HEADER_HINT}
+                    value={t.csv}
+                    disabled={disabled}
+                    onChange={(e) => updateTable(i, { ...t, csv: e.target.value })}
+                  />
+                  <div className="fine-print" style={{ marginTop: 2 }}>
+                    {t.csv.length.toLocaleString('en-US')} / {MAX_TABLE_CSV_CHARS.toLocaleString('en-US')} characters
+                    {' · combined '}
+                    {combinedTableCsvChars.toLocaleString('en-US')} /{' '}
+                    {MAX_TABLES_COMBINED_CSV_CHARS.toLocaleString('en-US')} characters
+                  </div>
+                  <FieldError errors={clientErrors} field={`grid.tables.${t.name.trim() || `#${i + 1}`}.csv`} />
+                </div>
+                {canEdit && (
+                  <div>
+                    <button type="button" className="btn btn-sm btn-danger" onClick={() => removeTable(i)}>
+                      Remove table
+                    </button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
+          {canEdit && (
+            <div className="row" style={{ alignItems: 'center', gap: 8, marginTop: 8 }}>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={draft.gridTables.length >= MAX_TABLES_PER_DOCUMENT}
+                onClick={addTable}
+              >
+                + Add table
+              </button>
+              {draft.gridTables.length >= MAX_TABLES_PER_DOCUMENT && (
+                <span className="fine-print" style={{ margin: 0 }}>
+                  maximum of {MAX_TABLES_PER_DOCUMENT} tables reached
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* ── PUE ── */}
@@ -506,11 +1082,12 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
             <div className="field" style={{ marginBottom: 0, width: 110 }}>
               <label className="mono-label">Cloud</label>
               <input
+                id="pue-cloud"
                 type="number"
                 step="any"
                 min={1}
                 value={draft.pue.cloud}
-                disabled={!canEdit || saveMutation.isPending}
+                disabled={disabled}
                 onChange={(e) => setDraft({ ...draft, pue: { ...draft.pue, cloud: e.target.value } })}
               />
               <ShippedDefaultHint shipped={shipped.pue_cloud} />
@@ -519,7 +1096,7 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
               <label className="mono-label">Local profile</label>
               <select
                 value={draft.pue.local_profile}
-                disabled={!canEdit || saveMutation.isPending}
+                disabled={disabled}
                 onChange={(e) =>
                   setDraft({
                     ...draft,
@@ -537,11 +1114,12 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
             <div className="field" style={{ marginBottom: 0, width: 110 }}>
               <label className="mono-label">Local</label>
               <input
+                id="pue-local"
                 type="number"
                 step="any"
                 min={1}
                 value={draft.pue.local}
-                disabled={!canEdit || saveMutation.isPending}
+                disabled={disabled}
                 onChange={(e) => setDraft({ ...draft, pue: { ...draft.pue, local: e.target.value } })}
               />
               <ShippedDefaultHint
@@ -554,7 +1132,7 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
                 type="text"
                 placeholder="e.g. our colo's own PUE report"
                 value={draft.pue.label}
-                disabled={!canEdit || saveMutation.isPending}
+                disabled={disabled}
                 onChange={(e) => setDraft({ ...draft, pue: { ...draft.pue, label: e.target.value } })}
               />
               <FieldError errors={clientErrors} field="pue.label" />
@@ -567,33 +1145,145 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
           <div className="mono-label" style={{ marginBottom: 6 }}>
             Embodied hardware
           </div>
-          <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-start', gap: 10 }}>
-            <div className="field" style={{ marginBottom: 0, width: 140 }}>
-              <label className="mono-label">g CO₂e / run</label>
-              <input
-                type="number"
-                step="any"
-                min={0}
-                value={draft.embodied.g_per_run}
-                disabled={!canEdit || saveMutation.isPending}
-                onChange={(e) =>
-                  setDraft({ ...draft, embodied: { ...draft.embodied, g_per_run: e.target.value } })
-                }
-              />
-              <ShippedDefaultHint shipped={shipped.embodied_g_per_run} unit="g/run" />
+          <div className="row" style={{ marginBottom: 10 }}>
+            {EMBODIED_MODES.map((mode) => (
+              <label key={mode} className="check-row" style={{ padding: 0 }}>
+                <input
+                  type="radio"
+                  name="embodied-mode"
+                  checked={draft.embodied.mode === mode}
+                  disabled={disabled}
+                  onChange={() => setDraft({ ...draft, embodied: { ...draft.embodied, mode } })}
+                />
+                <span>{mode === 'per_run' ? 'grams per run' : 'hardware profile'}</span>
+              </label>
+            ))}
+          </div>
+          {draft.embodied.mode === 'per_run' ? (
+            <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-start', gap: 10 }}>
+              <div className="field" style={{ marginBottom: 0, width: 140 }}>
+                <label className="mono-label">g CO₂e / run</label>
+                <input
+                  id="embodied-g_per_run"
+                  type="number"
+                  step="any"
+                  min={0}
+                  value={draft.embodied.g_per_run}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    setDraft({ ...draft, embodied: { ...draft.embodied, g_per_run: e.target.value } })
+                  }
+                />
+                <ShippedDefaultHint shipped={shipped.embodied_g_per_run} unit="g/run" />
+              </div>
             </div>
-            <div className="field" style={{ marginBottom: 0, flex: 1, minWidth: 200 }}>
-              <label className="mono-label">Label (source)</label>
-              <input
-                type="text"
-                value={draft.embodied.label}
-                disabled={!canEdit || saveMutation.isPending}
-                onChange={(e) =>
-                  setDraft({ ...draft, embodied: { ...draft.embodied, label: e.target.value } })
-                }
-              />
-              <FieldError errors={clientErrors} field="embodied.label" />
+          ) : (
+            <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-start', gap: 10 }}>
+              <div className="field" style={{ marginBottom: 0, width: 90 }}>
+                <label className="mono-label">GPUs</label>
+                <input
+                  id="embodied-profile-gpus"
+                  type="number"
+                  step="1"
+                  min={0}
+                  value={draft.embodied.profile.gpus}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      embodied: { ...draft.embodied, profile: { ...draft.embodied.profile, gpus: e.target.value } },
+                    })
+                  }
+                />
+                <FieldError errors={clientErrors} field="embodied.profile.gpus" />
+              </div>
+              <div className="field" style={{ marginBottom: 0, width: 150 }}>
+                <label className="mono-label">Runs over lifetime</label>
+                <input
+                  type="number"
+                  step="1"
+                  min={1}
+                  value={draft.embodied.profile.runs_over_lifetime}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      embodied: {
+                        ...draft.embodied,
+                        profile: { ...draft.embodied.profile, runs_over_lifetime: e.target.value },
+                      },
+                    })
+                  }
+                />
+                <FieldError errors={clientErrors} field="embodied.profile.runs_over_lifetime" />
+              </div>
+              <div className="field" style={{ marginBottom: 0, width: 110 }}>
+                <label className="mono-label">Batch size</label>
+                <input
+                  type="number"
+                  step="1"
+                  min={1}
+                  placeholder={DEFAULT_PROFILE_BATCH_SIZE}
+                  value={draft.embodied.profile.batch_size}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      embodied: {
+                        ...draft.embodied,
+                        profile: { ...draft.embodied.profile, batch_size: e.target.value },
+                      },
+                    })
+                  }
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 0, width: 110 }}>
+                <label className="mono-label">GPU model</label>
+                <input type="text" value={EMBODIED_GPU_MODEL} disabled />
+              </div>
+              <label className="check-row" style={{ paddingTop: 22 }}>
+                <input
+                  type="checkbox"
+                  checked={draft.embodied.profile.include_server}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      embodied: {
+                        ...draft.embodied,
+                        profile: { ...draft.embodied.profile, include_server: e.target.checked },
+                      },
+                    })
+                  }
+                />
+                <span>include server chassis</span>
+              </label>
+              <div className="field" style={{ marginBottom: 0, flex: 1, minWidth: 180 }}>
+                <label className="mono-label">Profile label (optional)</label>
+                <input
+                  type="text"
+                  placeholder="e.g. our own H100 pool"
+                  value={draft.embodied.profile.label}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      embodied: { ...draft.embodied, profile: { ...draft.embodied.profile, label: e.target.value } },
+                    })
+                  }
+                />
+              </div>
             </div>
+          )}
+          <div className="field" style={{ marginBottom: 0, marginTop: 10, maxWidth: 420 }}>
+            <label className="mono-label">Label (source)</label>
+            <input
+              type="text"
+              value={draft.embodied.label}
+              disabled={disabled}
+              onChange={(e) => setDraft({ ...draft, embodied: { ...draft.embodied, label: e.target.value } })}
+            />
+            <FieldError errors={clientErrors} field="embodied.label" />
           </div>
         </div>
 
@@ -605,15 +1295,28 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
           <div className="fine-print" style={{ marginBottom: 6 }}>
             {BAND_WHY} {BAND_SHORT}
           </div>
+          <label className="check-row" style={{ padding: 0, marginBottom: 6 }}>
+            <input
+              type="checkbox"
+              checked={draft.band.derived}
+              disabled={disabled}
+              onChange={(e) => setDraft({ ...draft, band: { ...draft.band, derived: e.target.checked } })}
+            />
+            <span>Derive from evidence</span>
+          </label>
+          <div className="fine-print" style={{ marginBottom: 6 }}>
+            {BAND_DERIVE_NOTE}
+          </div>
           <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-start', gap: 10 }}>
             <div className="field" style={{ marginBottom: 0, width: 110 }}>
               <label className="mono-label">Low (÷)</label>
               <input
+                id="band-low"
                 type="number"
                 step="any"
                 min={1}
                 value={draft.band.low}
-                disabled={!canEdit || saveMutation.isPending}
+                disabled={disabled}
                 onChange={(e) => setDraft({ ...draft, band: { ...draft.band, low: e.target.value } })}
               />
               <ShippedDefaultHint shipped={shipped.band_low} />
@@ -626,7 +1329,7 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
                 step="any"
                 min={1}
                 value={draft.band.high}
-                disabled={!canEdit || saveMutation.isPending}
+                disabled={disabled}
                 onChange={(e) => setDraft({ ...draft, band: { ...draft.band, high: e.target.value } })}
               />
               <ShippedDefaultHint shipped={shipped.band_high} />
@@ -638,7 +1341,7 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
                 type="text"
                 placeholder="e.g. our own validation study"
                 value={draft.band.label}
-                disabled={!canEdit || saveMutation.isPending}
+                disabled={disabled}
                 onChange={(e) => setDraft({ ...draft, band: { ...draft.band, label: e.target.value } })}
               />
               <FieldError errors={clientErrors} field="band.label" />
@@ -653,10 +1356,11 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
           </div>
           <div className="field" style={{ marginBottom: 0, maxWidth: 320 }}>
             <input
+              id="baseline-model"
               type="text"
               placeholder={shipped.baseline_model ? String(shipped.baseline_model.value) : 'model id'}
               value={draft.baselineModel}
-              disabled={!canEdit || saveMutation.isPending}
+              disabled={disabled}
               onChange={(e) => setDraft({ ...draft, baselineModel: e.target.value })}
             />
           </div>
@@ -718,7 +1422,7 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
       </div>
 
       {data.effective ? (
-        <EffectiveFactorsTable effective={data.effective} />
+        <EffectiveFactorsTable effective={data.effective} canEdit={canEdit} />
       ) : (
         <div className="fine-print" style={{ marginTop: 18 }}>
           Effective factors are unavailable until the stored overrides above validate again — fix
@@ -731,6 +1435,55 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
 
 // ── effective factors: "what will apply to the next run" ─────────────────
 
+/** Id for a provider's grid-override input in the form above — the jump
+ *  target the "Override for <provider>" action in the effective-factors
+ *  table below focuses. */
+function gridProviderInputId(provider: string): string {
+  return `grid-provider-${provider}-g_per_kwh`
+}
+
+/** One factor cell in the effective-factors table — matches the disclosure
+ *  it can expand beneath the row it's in. "Band" covers both the low and
+ *  high multiplier, which the table renders as a single cell. */
+type FactorField = 'grid' | 'pue' | 'embodied' | 'band' | 'baseline'
+
+const FACTOR_FIELD_LABELS: Record<FactorField, string> = {
+  grid: 'Grid intensity',
+  pue: 'PUE (power usage effectiveness)',
+  embodied: 'Embodied hardware',
+  band: 'Judgment band',
+  baseline: 'Baseline model',
+}
+
+/** Which form input "Override for <provider>" jumps to. Mirrors the layout
+ *  of the form above: PUE has one shared cloud input and one shared local
+ *  input rather than one per provider, so it branches on deployment instead
+ *  of provider; everything else has exactly one input regardless of which
+ *  provider's cell was clicked. */
+function overrideInputId(field: FactorField, provider: string, deployment: 'cloud' | 'local'): string {
+  switch (field) {
+    case 'grid':
+      return gridProviderInputId(provider)
+    case 'pue':
+      return deployment === 'local' ? 'pue-local' : 'pue-cloud'
+    case 'embodied':
+      return 'embodied-g_per_run'
+    case 'band':
+      return 'band-low'
+    case 'baseline':
+      return 'baseline-model'
+  }
+}
+
+/** Scrolls the target override input into view and focuses it. A no-op if
+ *  the input isn't on the page for some reason (it always should be). */
+function focusOverrideInput(id: string) {
+  const el = document.getElementById(id)
+  if (!(el instanceof HTMLElement)) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  if ('focus' in el) (el as HTMLInputElement).focus({ preventScroll: true })
+}
+
 function resolvedTitle(r: EmissionsResolvedValue): string {
   const parts = [`source: ${r.source}`]
   if (r.label) parts.push(`label: “${r.label}”`)
@@ -739,7 +1492,23 @@ function resolvedTitle(r: EmissionsResolvedValue): string {
   return parts.join(' · ')
 }
 
-function ResolvedCell({ resolved, text }: { resolved: EmissionsResolvedValue; text: string }) {
+/** A factor's value and its layer chip — the always-visible content of both
+ *  the collapsed cell and its expanded detail. The chip used to be pinned
+ *  `whiteSpace: nowrap` to the value, which is what let it run off the edge
+ *  of a narrow table instead of wrapping onto its own line.
+ *
+ *  `tags` are additional small badges beyond the layer chip — Phase 3's
+ *  region pin and "hourly: <table>" marker on a grid cell, "profile" on an
+ *  embodied cell, "derived" on a band cell. */
+function ResolvedCell({
+  resolved,
+  text,
+  tags,
+}: {
+  resolved: EmissionsResolvedValue
+  text: string
+  tags?: { text: string; title?: string }[]
+}) {
   const layer = layerMeta(resolved.layer)
   const body = resolved.url ? (
     <a href={resolved.url} target="_blank" rel="noopener noreferrer" title={resolvedTitle(resolved)}>
@@ -749,19 +1518,179 @@ function ResolvedCell({ resolved, text }: { resolved: EmissionsResolvedValue; te
     <span title={resolvedTitle(resolved)}>{text}</span>
   )
   return (
-    <span style={{ whiteSpace: 'nowrap' }}>
+    <span style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 4 }}>
       {body}
       {layer && (
-        <span className={`badge ${layer.badge}`} style={{ marginLeft: 4 }} title={layer.what}>
+        <span className={`badge ${layer.badge}`} title={layer.what}>
           {layer.label}
         </span>
       )}
+      {tags?.map((tag, i) => (
+        <span key={i} className="badge badge-gray" title={tag.title}>
+          {tag.text}
+        </span>
+      ))}
     </span>
   )
 }
 
-function EffectiveFactorsTable({ effective }: { effective: Record<string, EmissionsEffectiveFactors> }) {
+/** The full provenance for one resolved value — what the cell's detail row
+ *  shows once it's expanded. */
+function ResolvedDetail({ resolved, text }: { resolved: EmissionsResolvedValue; text: string }) {
+  const layer = layerMeta(resolved.layer)
+  return (
+    <div className="stack" style={{ gap: 4 }}>
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <span className="mono-body">{text}</span>
+        {layer && (
+          <span className={`badge ${layer.badge}`} title={layer.what}>
+            {layer.label}
+          </span>
+        )}
+      </div>
+      <div className="fine-print">source: {resolved.source}</div>
+      <div className="fine-print">
+        setting: <code>{resolved.setting}</code>
+      </div>
+      {resolved.label && <div className="fine-print">label: “{resolved.label}”</div>}
+      {resolved.as_of && <div className="fine-print">as of {resolved.as_of}</div>}
+      {resolved.url && (
+        <div className="fine-print">
+          <a href={resolved.url} target="_blank" rel="noopener noreferrer">
+            {resolved.url}
+          </a>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** The row that opens beneath a provider's row when one of its cells is
+ *  expanded. Read-only members see the same provenance without the "Override
+ *  for <provider>" action, since they have no form to jump to it in. */
+function EffectiveDetailRow({
+  provider,
+  field,
+  factors,
+  canEdit,
+}: {
+  provider: string
+  field: FactorField
+  factors: EmissionsEffectiveFactors
+  canEdit: boolean
+}) {
+  const providerLabel = PROVIDER_LABELS[provider] ?? provider
+  return (
+    <tr>
+      <td colSpan={7} style={{ background: 'var(--bg-input)' }}>
+        <div className="mono-label" style={{ marginBottom: 8 }}>
+          {FACTOR_FIELD_LABELS[field]} — {providerLabel}
+        </div>
+        {field === 'grid' && (
+          <>
+            <ResolvedDetail
+              resolved={factors.grid}
+              text={`${factors.grid.value} gCO₂e/kWh · ${gridBasisLabel(factors.grid_basis)}`}
+            />
+            {factors.grid.table && (
+              <div className="fine-print" style={{ marginTop: 8 }}>
+                Hourly table <code>{factors.grid.table}</code>
+                {factors.grid.table_summary ? `: ${gridTableSummaryText(factors.grid.table_summary)}` : ''}
+                {factors.grid.temporal === 'annual_average'
+                  ? ' — hourly table will apply at run time; effective factors here are computed without a run time, so this shows the annual fallback.'
+                  : ''}
+                {factors.grid.table_miss ? ` ${TABLE_MISS_NOTE}` : ''}
+              </div>
+            )}
+          </>
+        )}
+        {field === 'pue' && (
+          <ResolvedDetail
+            resolved={factors.pue}
+            text={`${factors.pue.value} (${PUE_PROFILE_LABELS[factors.pue_profile] ?? factors.pue_profile})`}
+          />
+        )}
+        {field === 'embodied' && (
+          <>
+            <ResolvedDetail resolved={factors.embodied_g} text={`${factors.embodied_g.value} g/run`} />
+            {factors.embodied_g.profile && (
+              <div className="fine-print" style={{ marginTop: 8 }}>
+                Hardware profile: {embodiedProfileText(factors.embodied_g.profile)}
+                {factors.embodied_g.profile.label ? ` — “${factors.embodied_g.profile.label}”` : ''}
+              </div>
+            )}
+          </>
+        )}
+        {field === 'band' && (
+          <>
+            <div className="row" style={{ gap: 28, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+              <div>
+                <div className="fine-print" style={{ marginBottom: 4 }}>
+                  Low (÷)
+                </div>
+                <ResolvedDetail resolved={factors.band_low} text={`÷${factors.band_low.value}`} />
+              </div>
+              <div>
+                <div className="fine-print" style={{ marginBottom: 4 }}>
+                  High (×)
+                </div>
+                <ResolvedDetail resolved={factors.band_high} text={`×${factors.band_high.value}`} />
+              </div>
+            </div>
+            {(factors.band_low.derived || factors.band_high.derived) && (
+              <div className="fine-print" style={{ marginTop: 8 }}>
+                {BAND_DERIVE_NOTE}
+              </div>
+            )}
+          </>
+        )}
+        {field === 'baseline' && (
+          <ResolvedDetail resolved={factors.baseline_model} text={String(factors.baseline_model.value)} />
+        )}
+        {canEdit && (
+          <button
+            type="button"
+            className="btn btn-sm"
+            style={{ marginTop: 10 }}
+            onClick={() => focusOverrideInput(overrideInputId(field, provider, factors.deployment))}
+          >
+            Override for {providerLabel}
+          </button>
+        )}
+      </td>
+    </tr>
+  )
+}
+
+function EffectiveFactorsTable({
+  effective,
+  canEdit,
+}: {
+  effective: Record<string, EmissionsEffectiveFactors>
+  canEdit: boolean
+}) {
   const rows = Object.entries(effective)
+  // Only one detail row open at a time, table-wide — expanding a second cell
+  // collapses whichever one was already open, rather than stacking rows.
+  const [open, setOpen] = useState<{ provider: string; field: FactorField } | null>(null)
+  const lastTriggerRef = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setOpen(null)
+      lastTriggerRef.current?.focus()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open])
+
+  const toggle = (provider: string, field: FactorField, trigger: HTMLButtonElement) => {
+    lastTriggerRef.current = trigger
+    setOpen((cur) => (cur && cur.provider === provider && cur.field === field ? null : { provider, field }))
+  }
+
   return (
     <div style={{ marginTop: 18 }}>
       <div className="mono-label" style={{ marginBottom: 4 }}>
@@ -770,7 +1699,8 @@ function EffectiveFactorsTable({ effective }: { effective: Record<string, Emissi
       <div className="fine-print" style={{ marginBottom: 8 }}>
         What will apply to the next run, per provider — after run/harness overrides, this workspace's
         own settings above, any managed default, the environment, and finally tret's shipped default,
-        in that order of precedence. Each value carries a chip naming which of those actually won.
+        in that order of precedence. Each value carries a chip naming which of those actually won —
+        click a value to see the rest of its provenance.
       </div>
       {rows.length === 0 ? (
         <div className="empty">No providers configured yet.</div>
@@ -789,35 +1719,98 @@ function EffectiveFactorsTable({ effective }: { effective: Record<string, Emissi
               </tr>
             </thead>
             <tbody>
-              {rows.map(([provider, f]) => (
-                <tr key={provider}>
-                  <td>{PROVIDER_LABELS[provider] ?? provider}</td>
-                  <td>{f.deployment}</td>
-                  <td>
-                    <ResolvedCell
-                      resolved={f.grid}
-                      text={`${f.grid.value} gCO₂e/kWh · ${gridBasisLabel(f.grid_basis)}`}
-                    />
-                  </td>
-                  <td>
-                    <ResolvedCell
-                      resolved={f.pue}
-                      text={`${f.pue.value} (${PUE_PROFILE_LABELS[f.pue_profile] ?? f.pue_profile})`}
-                    />
-                  </td>
-                  <td>
-                    <ResolvedCell resolved={f.embodied_g} text={`${f.embodied_g.value} g/run`} />
-                  </td>
-                  <td>
-                    <ResolvedCell resolved={f.band_low} text={`÷${f.band_low.value}`} />
-                    {' … '}
-                    <ResolvedCell resolved={f.band_high} text={`×${f.band_high.value}`} />
-                  </td>
-                  <td>
-                    <ResolvedCell resolved={f.baseline_model} text={String(f.baseline_model.value)} />
-                  </td>
-                </tr>
-              ))}
+              {rows.map(([provider, f]) => {
+                const providerLabel = PROVIDER_LABELS[provider] ?? provider
+                const isOpen = (field: FactorField) => open?.provider === provider && open.field === field
+                const cellButton = (field: FactorField, content: ReactNode) => (
+                  <button
+                    type="button"
+                    className="factor-cell-btn"
+                    aria-expanded={isOpen(field)}
+                    onClick={(e) => toggle(provider, field, e.currentTarget)}
+                  >
+                    {content}
+                  </button>
+                )
+                const gridTags = [
+                  ...(f.grid.region ? [{ text: `${provider}@${f.grid.region}`, title: 'Region pinned by the operator for this provider.' }] : []),
+                  ...(f.grid.table
+                    ? [
+                        {
+                          text: `hourly: ${f.grid.table}`,
+                          title:
+                            f.grid.temporal === 'hourly'
+                              ? 'An hourly table applied to this value.'
+                              : 'An hourly table is configured and will apply at run time.',
+                        },
+                      ]
+                    : []),
+                ]
+                return (
+                  <Fragment key={provider}>
+                    <tr>
+                      <td>{providerLabel}</td>
+                      <td>{f.deployment}</td>
+                      <td>
+                        {cellButton(
+                          'grid',
+                          <ResolvedCell
+                            resolved={f.grid}
+                            text={`${f.grid.value} gCO₂e/kWh · ${gridBasisLabel(f.grid_basis)}`}
+                            tags={gridTags.length > 0 ? gridTags : undefined}
+                          />,
+                        )}
+                      </td>
+                      <td>
+                        {cellButton(
+                          'pue',
+                          <ResolvedCell
+                            resolved={f.pue}
+                            text={`${f.pue.value} (${PUE_PROFILE_LABELS[f.pue_profile] ?? f.pue_profile})`}
+                          />,
+                        )}
+                      </td>
+                      <td>
+                        {cellButton(
+                          'embodied',
+                          <ResolvedCell
+                            resolved={f.embodied_g}
+                            text={`${f.embodied_g.value} g/run`}
+                            tags={f.embodied_g.profile ? [{ text: 'profile', title: 'Computed from a named hardware profile.' }] : undefined}
+                          />,
+                        )}
+                      </td>
+                      <td>
+                        {cellButton(
+                          'band',
+                          <>
+                            <ResolvedCell
+                              resolved={f.band_low}
+                              text={`÷${f.band_low.value}`}
+                              tags={f.band_low.derived ? [{ text: 'derived', title: BAND_DERIVE_NOTE }] : undefined}
+                            />
+                            {' … '}
+                            <ResolvedCell
+                              resolved={f.band_high}
+                              text={`×${f.band_high.value}`}
+                              tags={f.band_high.derived ? [{ text: 'derived', title: BAND_DERIVE_NOTE }] : undefined}
+                            />
+                          </>,
+                        )}
+                      </td>
+                      <td>
+                        {cellButton(
+                          'baseline',
+                          <ResolvedCell resolved={f.baseline_model} text={String(f.baseline_model.value)} />,
+                        )}
+                      </td>
+                    </tr>
+                    {open?.provider === provider && (
+                      <EffectiveDetailRow provider={provider} field={open.field} factors={f} canEdit={canEdit} />
+                    )}
+                  </Fragment>
+                )
+              })}
             </tbody>
           </table>
         </div>

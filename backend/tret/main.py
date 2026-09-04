@@ -175,6 +175,15 @@ async def lifespan(app: FastAPI):
     else:
         async with get_session_factory()() as db:
             await sweep_orphaned_runs(db)
+    # M2: a stored workspace's emissions override document can stop validating
+    # without anyone touching it (tret itself tightening a rule, e.g.
+    # `PROVIDER_KEY_RE`) — a run against it already fails open, silently, so
+    # this is the one place an operator learns about it at all. Read-only,
+    # never auto-migrates; logs one WARNING per failing workspace.
+    from tret.services.emission_settings import check_workspace_emissions_documents
+
+    async with get_session_factory()() as db:
+        await check_workspace_emissions_documents(db)
     # Extension seam: awaited, so an extension whose startup work (warming a
     # cache, checking its own schema) must finish before the app is reachable
     # gets to block boot on it. No-op with no extensions loaded.

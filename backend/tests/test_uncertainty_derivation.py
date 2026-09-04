@@ -2,7 +2,10 @@
 offline. The band must only ever get tighter than the configured 2.5/2.5, and
 contributions are never multiplied together (that stance is inherited from
 `tret.services.emissions.uncertainty_contributions`, whose docstring explains
-why) — this module only ever picks `min(configured, row-implied)` per axis."""
+why) — this module only ever picks `min(configured, row-implied)` per axis,
+and only ever picks a row that was itself evidence-stamped by
+`adjust_contributions` — an axis whose tightest row is an ordinary, untouched
+baseline multiplier (nobody's evidence) stays at the configured value."""
 from __future__ import annotations
 
 import copy
@@ -59,8 +62,8 @@ def test_grid_intensitys_own_low_multiplier_never_widens_the_band():
     assert band.low == Decimal("2.5")
 
 
-# ── energy_measured alone: still bounded by grid ──────────────────────────────
-def test_energy_measured_alone_leaves_grid_as_the_dominant_constraint():
+# ── energy_measured alone: never narrows off an unevidenced row ──────────────
+def test_energy_measured_alone_does_not_narrow_on_an_unevidenced_grid_row():
     rows = adjust_contributions(cloud_rows(), Evidence(energy_measured=True))
     band = derive_band(rows, configured_low=CONFIGURED_LOW, configured_high=CONFIGURED_HIGH)
     # energy_class, batching, measurement_bias all narrowed, but grid_intensity
@@ -68,22 +71,25 @@ def test_energy_measured_alone_leaves_grid_as_the_dominant_constraint():
     # implies a divisor far past configured, so the low axis stays exactly at
     # configured...
     assert band.low == CONFIGURED_LOW
-    # ...while grid_intensity's own high_multiplier (1.6) is now the largest
-    # remaining row and it undercuts configured, so the high axis narrows to
-    # it, with grid_intensity named as the row that did it.
-    assert band.high == Decimal("1.6")
-    assert band.rule == "dominant_contribution"
-    assert band.dominant_key == "grid_intensity"
-    assert band.narrowed is True
+    # ...and although grid_intensity's own untouched high_multiplier (1.6)
+    # would undercut configured, it was never evidence-stamped — only energy
+    # evidence was supplied, and it never touches grid_intensity — so the high
+    # axis must not narrow off it either: the axis stays at configured.
+    assert band.high == CONFIGURED_HIGH
+    assert band.rule == "configured"
+    assert band.dominant_key is None
+    assert band.narrowed is False
 
 
-def test_energy_measured_alone_on_local_deployment_same_grid_ceiling():
+def test_energy_measured_alone_on_local_deployment_also_stays_at_configured():
     rows = adjust_contributions(local_rows(), Evidence(energy_measured=True))
     band = derive_band(rows, configured_low=CONFIGURED_LOW, configured_high=CONFIGURED_HIGH)
-    # unbatched_local_inference is also narrowed by energy_measured, so grid
-    # remains the ceiling exactly as in the cloud case.
-    assert band.high == Decimal("1.6")
-    assert band.dominant_key == "grid_intensity"
+    # unbatched_local_inference is narrowed by energy_measured too, but
+    # grid_intensity (still the largest remaining high_multiplier) is not
+    # evidenced here either, so the high axis stays at configured exactly as
+    # in the cloud case.
+    assert band.high == CONFIGURED_HIGH
+    assert band.dominant_key is None
 
 
 # ── fully evidenced: narrows to ~1.3-1.4, grid dominant on both axes ─────────
@@ -199,8 +205,11 @@ def test_derive_band_empty_contributions_is_configured():
 
 def test_derive_band_ignores_rows_with_nonpositive_low_multiplier_for_low_axis():
     rows = [
-        {"key": "x", "low_multiplier": 0, "high_multiplier": 1.5},
-        {"key": "y", "low_multiplier": -1, "high_multiplier": 1.2},
+        # Evidence-stamped so the high axis is actually allowed to narrow off
+        # it (see the evidence-gating tests above) — this test's own point is
+        # the low axis, not the gate.
+        {"key": "x", "low_multiplier": 0, "high_multiplier": 1.5, "evidence": "test"},
+        {"key": "y", "low_multiplier": -1, "high_multiplier": 1.2, "evidence": "test"},
     ]
     band = derive_band(rows, configured_low=CONFIGURED_LOW, configured_high=CONFIGURED_HIGH)
     # neither row contributes to the low axis (both <= 0), so it stays at

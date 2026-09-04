@@ -76,6 +76,12 @@ from tret.config import (
     Settings,
     get_settings,
 )
+from tret.services.uncertainty_derivation import (
+    Evidence,
+    adjust_contributions,
+    band_record,
+    derive_band,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tret.providers.base import Usage
@@ -1334,6 +1340,7 @@ def uncertainty_band(
     settings: Settings | None = None,
     band: tuple[Decimal, Decimal] | None = None,
     measured: bool = False,
+    evidence: "Evidence | None" = None,
 ) -> dict:
     """The judgment band around a run's figures. Never negative, never a CI.
 
@@ -1342,13 +1349,40 @@ def uncertainty_band(
     rather than only the provenance record. Recomputed from `settings` via
     `band_factors` when omitted, exactly as before. `measured` narrows the
     per-factor `energy_class`/`batching` contributions (see
-    `uncertainty_contributions`); the headline band itself is untouched.
+    `uncertainty_contributions`); the headline band itself is untouched by
+    `measured` alone.
+
+    `evidence` (`tret.services.uncertainty_derivation.Evidence`), when given,
+    switches the headline band itself: `contributions` are narrowed per
+    `adjust_contributions`, and `derive_band` folds the (adjusted) rows into
+    a band bounded above by the *configured* `band` (or `band_factors`) —
+    never wider than it, only ever at or inside it. The response then gains
+    a `derivation` key (`band_record`'s output) recording the configured
+    band alongside the one actually applied and which row (if any) governed
+    it. `evidence=None` (every caller before this parameter existed) is
+    exactly today's behaviour: the configured band applies untouched and
+    there is no `derivation` key.
     """
-    low, high = band if band is not None else band_factors(settings)
+    configured_low, configured_high = band if band is not None else band_factors(settings)
+    contributions = uncertainty_contributions(
+        reasoning_tier=reasoning_tier, deployment=deployment, measured=measured
+    )
+    low, high = configured_low, configured_high
+    derivation = None
+    if evidence is not None:
+        contributions = adjust_contributions(contributions, evidence)
+        derived = derive_band(
+            contributions, configured_low=configured_low, configured_high=configured_high
+        )
+        low, high = derived.low, derived.high
+        derivation = band_record(
+            derived, configured_low=configured_low, configured_high=configured_high
+        )
+
     co2e_low, co2e_high = _band(co2e_g, low, high)
     wh_low, wh_high = _band(energy_wh, low, high)
     total_low, total_high = _band(energy_wh_total, low, high)
-    return {
+    result = {
         "kind": "judgment_band",
         # Named explicitly so no downstream renderer can label this a CI by
         # accident. It is the single most important field in the block.
@@ -1361,11 +1395,43 @@ def uncertainty_band(
         "energy_wh_high": _f(wh_high),
         "energy_wh_total_low": _f(total_low),
         "energy_wh_total_high": _f(total_high),
-        "contributions": uncertainty_contributions(
-            reasoning_tier=reasoning_tier, deployment=deployment, measured=measured
-        ),
+        "contributions": contributions,
         "basis": _UNCERTAINTY_BASIS,
     }
+    if derivation is not None:
+        result["derivation"] = derivation
+    return result
+
+
+# A labeled operator layer — as opposed to `env`/`global_default`, where
+# nobody actually vouched for the figure with a citation. Used by
+# `_band_evidence` below to decide whether a PUE/grid win is "metered"/
+# "sourced and dated" for `Evidence`'s purposes.
+_OPERATOR_LAYERS = frozenset({"workspace", "managed", "harness"})
+
+
+def _band_evidence(factors: "FactorSet", is_measured: bool) -> "Evidence | None":
+    """The `Evidence` this run's `FactorSet` actually has, or `None` when
+    neither `band_low` nor `band_high` asked for a derived band
+    (`BandBlock.derived`) — in which case `uncertainty_band` applies the
+    plain configured band, exactly as it always has.
+
+    Each flag names a specific, checkable condition (see
+    `tret.services.uncertainty_derivation.Evidence`'s own docstring for what
+    each one narrows): a PUE/grid win only counts as "metered"/"sourced and
+    dated" when it came from a labeled operator layer (`_OPERATOR_LAYERS`),
+    never from `env`/`global_default` — an env var is not a citation.
+    """
+    if not (factors.band_low.derived or factors.band_high.derived):
+        return None
+    return Evidence(
+        energy_measured=is_measured,
+        pue_metered=factors.pue.layer in _OPERATOR_LAYERS and bool(factors.pue.label),
+        grid_sourced_dated=(
+            factors.grid.layer in _OPERATOR_LAYERS and bool(factors.grid.as_of)
+        ),
+        embodied_profiled=factors.embodied_g.profile is not None,
+    )
 
 
 # ── provenance ───────────────────────────────────────────────────────────────
@@ -1700,6 +1766,16 @@ def factor_records(
             source_rule=grid_source_rule(grid_source),
             source_label=grid_source_label,
             layer=factors.grid.layer,
+            # Phase 3, additive: an operator-pinned region (see
+            # tret.services.grid_regions), and whether this value came from
+            # an hourly table or the plain annual figure (see
+            # tret.services.grid_tables). All None/"annual_average"/False
+            # when neither feature is in play — exactly today's shape.
+            grid_region=factors.grid.region,
+            temporal=factors.grid.temporal,
+            table=factors.grid.table,
+            table_summary=factors.grid.table_summary,
+            table_miss=factors.grid.table_miss,
         ),
         _factor(
             "embodied_hardware",
@@ -1719,6 +1795,14 @@ def factor_records(
                 + "Reference constants: NVIDIA H100 273 kgCO2eq/unit, server chassis "
                 "excluding GPUs 5,700 kgCO2eq, over a 3-year lifetime at batch size 64. "
                 + EMBODIED_REFERENCE["caveat"]
+                + (
+                    " This run's figure was computed from a named hardware profile "
+                    "(gpus/lifetime/batch size below), resting on the same placeholder "
+                    "constants above — a profile changes the inputs, not the "
+                    "confidence of the constants they feed."
+                    if factors.embodied_g.profile is not None
+                    else ""
+                )
             ),
             factors.embodied_g.setting,
             gpu_h100_kg=EMBODIED_REFERENCE["gpu_h100_kg"],
@@ -1726,6 +1810,7 @@ def factor_records(
             lifetime_years=EMBODIED_REFERENCE["lifetime_years"],
             batch_size=EMBODIED_REFERENCE["batch_size"],
             layer=factors.embodied_g.layer,
+            profile=factors.embodied_g.profile,
         ),
         _factor(
             "training_amortization",
@@ -1771,6 +1856,7 @@ def factor_records(
             ),
             "TRET_UNCERTAINTY_BAND_LOW / TRET_UNCERTAINTY_BAND_HIGH",
             layer=band_layer,
+            derived=bool(factors.band_low.derived or factors.band_high.derived),
         ),
     ]
     return factors
@@ -2416,6 +2502,15 @@ def energy_accounting(
         # and always one of `run_override`, `harness`, `workspace`, `managed`,
         # `env`, `global_default`.
         "grid_co2e_layer": factors.grid.layer,
+        # Phase 3, additive: an operator-pinned region for this provider
+        # (tret.services.grid_regions), or None when none applied to this
+        # win — see FactorSet.grid.region / `_resolve_grid`.
+        "grid_region": factors.grid.region,
+        # "annual_average" (the plain per-provider/default figure, or a
+        # table referenced but not evaluated/missed) or "hourly" (an hourly
+        # grid.tables entry had a value for this run's actual start time) —
+        # see tret.services.grid_tables and `_apply_grid_table`.
+        "grid_temporal": factors.grid.temporal or "annual_average",
         # ── added: money and uncertainty ──
         "cost": _cost_block(cost_usd, baseline),
         "uncertainty": uncertainty_band(
@@ -2427,6 +2522,7 @@ def energy_accounting(
             settings=settings,
             band=(factors.band_low.value, factors.band_high.value),
             measured=is_measured,
+            evidence=_band_evidence(factors, is_measured),
         ),
         # ── added: provenance ──
         "factors": factor_records(
