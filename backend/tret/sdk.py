@@ -21,7 +21,7 @@ import asyncio
 import copy
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from tret.providers.base import Msg, Provider, TextDelta, ToolCallComplete, TurnComplete, Usage
 from tret.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry, get_catalog
@@ -34,6 +34,15 @@ from tret.router_llm.router import (
     RoutingUnavailable,
 )
 from tret.services.emissions import energy_accounting
+
+if TYPE_CHECKING:
+    # Type-only: `tret.services.emission_factors` is itself core-safe (no
+    # SQLAlchemy/FastAPI import), but there is no runtime need to import it
+    # here — a caller builds the `FactorSet` it hands to `arun`/`run` however
+    # it likes (a server-side caller would go through
+    # `tret.services.emission_settings.factor_set_for`, which is not
+    # core-safe and stays off this module's import path).
+    from tret.services.emission_factors import FactorSet
 
 __all__ = ["Receipt", "Router", "RunResult"]
 
@@ -223,7 +232,18 @@ class Router:
         *,
         system: str | None = None,
         max_tokens: int = 4096,
+        factors: "FactorSet | None" = None,
     ) -> RunResult:
+        """Route `task` to a model, run it once, and return its `Receipt`.
+
+        `factors` — a `tret.services.emission_factors.FactorSet` — is passed
+        straight through to `energy_accounting()`, the same layered factor
+        set (grid intensity, PUE, embodied hardware, the uncertainty band,
+        the baseline model) a server-side run snapshots at its own start. Left
+        `None` (the default, and every caller before this parameter existed),
+        `energy_accounting` resolves its own from `Settings` alone, exactly as
+        it always has.
+        """
         router = self._ensure_wired()
         assert self._catalog is not None and self._registry is not None  # set by _ensure_wired
         # Best-effort dynamic + local discovery, so a freshly booted process can
@@ -278,7 +298,9 @@ class Router:
         # set (no TurnComplete at all) or arrives all-zero. Either way there is
         # nothing honest to price or weigh — see the Receipt docstring.
         usage_reported = turn_complete_seen and not _usage_is_empty(usage)
-        receipt = _build_receipt(model, usage, decision, self._catalog, usage_reported)
+        receipt = _build_receipt(
+            model, usage, decision, self._catalog, usage_reported, factors=factors
+        )
         return RunResult(
             text="".join(text_parts),
             model=model.id,
@@ -295,8 +317,12 @@ class Router:
         *,
         system: str | None = None,
         max_tokens: int = 4096,
+        factors: "FactorSet | None" = None,
     ) -> RunResult:
-        return _run_sync(lambda: self.arun(task, system=system, max_tokens=max_tokens))
+        """Synchronous `arun()` — see its docstring for `factors`."""
+        return _run_sync(
+            lambda: self.arun(task, system=system, max_tokens=max_tokens, factors=factors)
+        )
 
 
 def _usage_is_empty(usage: Usage) -> bool:
@@ -317,6 +343,7 @@ def _build_receipt(
     usage_reported: bool,
     *,
     estimated: bool = False,
+    factors: "FactorSet | None" = None,
 ) -> Receipt:
     # `raw` is computed either way — even on a zero/unreported usage it is a
     # faithful account of exactly the tokens the provider gave us, and stays
@@ -329,6 +356,7 @@ def _build_receipt(
         usage.cache_read_tokens,
         usage.cache_write_tokens,
         catalog=catalog,
+        factors=factors,
     )
     if usage_reported:
         # Computed directly from the model's own price table — the exact figure

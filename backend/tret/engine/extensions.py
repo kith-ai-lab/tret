@@ -34,6 +34,20 @@ rather than `(db, run, workspace_id)` — there is no `Run` in play — and
 switches on, the same way `GateResult.reason` is a short machine string a
 caller switches on.
 
+A sixth seam, `add_factor_layer_provider` / `get_factor_layer`, lets an
+extension supply the "managed" rung of the emissions factor ladder
+(`tret/services/emission_factors.py`'s `run_override > harness > workspace >
+managed > env > global_default`) — tret_cloud's hosted admin console setting a
+floor or a default for every workspace on the plan, say. `get_factor_layer`
+asks every registered provider in turn for one workspace's managed document
+and the first non-`None` answer wins, fail-open exactly like a gate: a
+provider that raises is logged and skipped, and one that returns a document
+failing `EmissionsOverrides` validation is logged as a warning and treated as
+though it had returned `None` — a broken managed document must never break a
+run's accounting. Read-only and side-effect-free by contract, so it runs
+against the same kind of isolated, freshly-opened session the gates and hooks
+above use, opened only when at least one provider is registered.
+
 With no extensions loaded, `get_extension_registry()` returns a default
 `ExtensionAPI` that allows everything and does nothing — the whole surface is
 inert when `TRET_EXTENSIONS` is unset, which is the open-source deployment.
@@ -98,6 +112,15 @@ WorkspaceGate = Callable[[AsyncSession, uuid.UUID, str], Awaitable[GateResult]]
 # tret_cloud registers one of these to supply its own OAuth app credentials
 # without the open-source engine ever importing a proprietary package.
 OAuthClientProvider = Callable[[str], "OAuthClientConfig | None"]
+# (db, workspace_id) -> a raw `EmissionsOverrides`-shaped dict, or None. Async,
+# unlike the OAuth provider above: this asks an extension to look something up
+# for one workspace (a customer's plan-level configuration, say), which is a
+# database question, not a pure config lookup — so it gets the same per-call
+# session isolation as a gate or hook. Asked by
+# `tret.services.emission_settings.workspace_emissions_layers` whenever a run
+# or the settings API needs to know what the "managed" layer contributes for a
+# workspace.
+FactorLayerProvider = Callable[[AsyncSession, uuid.UUID], Awaitable["dict | None"]]
 
 
 class ExtensionAPI:
@@ -114,6 +137,7 @@ class ExtensionAPI:
         self._startup_tasks: list[StartupTask] = []
         self._workspace_gates: list[WorkspaceGate] = []
         self._oauth_client_providers: list[OAuthClientProvider] = []
+        self._factor_layer_providers: list[FactorLayerProvider] = []
 
     def include_router(self, router: APIRouter) -> None:
         if self._app is not None:
@@ -133,6 +157,9 @@ class ExtensionAPI:
 
     def add_oauth_client_provider(self, fn: OAuthClientProvider) -> None:
         self._oauth_client_providers.append(fn)
+
+    def add_factor_layer_provider(self, fn: FactorLayerProvider) -> None:
+        self._factor_layer_providers.append(fn)
 
     async def run_startup_tasks(self) -> None:
         """Await every registered startup task, in registration order."""
@@ -232,6 +259,63 @@ class ExtensionAPI:
                 )
                 continue
             if result is not None:
+                return result
+        return None
+
+    async def get_factor_layer(self, workspace_id: uuid.UUID) -> dict | None:
+        """Ask every registered factor-layer provider in turn; the first
+        answer that is both non-`None` and a valid `EmissionsOverrides`
+        document wins.
+
+        Fail-open, same contract as every other seam in this class: a
+        provider that raises is logged and skipped, exactly like a gate that
+        raises. A provider that returns something — a dict missing a required
+        label, say — that fails `EmissionsOverrides` validation
+        (`tret/services/emission_factors.py`) is logged as a warning naming
+        the provider and treated as though it had returned `None`, so a later
+        provider still gets asked and a broken managed document can never
+        break a run's accounting.
+
+        Each provider runs against its own fresh session, opened from tret's
+        own session factory — the identical isolation `check_pre_run` and
+        `check_workspace_gate` give theirs (see the module docstring): a
+        provider reading a table the engine knows nothing about must not be
+        able to poison the caller's own transaction on Postgres. No session is
+        opened at all when nothing is registered.
+        """
+        if not self._factor_layer_providers:
+            return None
+        from tret.db.engine import get_session_factory
+
+        async with get_session_factory()() as ext_db:
+            for provider in self._factor_layer_providers:
+                try:
+                    result = await provider(ext_db, workspace_id)
+                except Exception:
+                    await ext_db.rollback()
+                    log.exception(
+                        "factor layer provider %r raised for workspace %s; skipping",
+                        provider, workspace_id,
+                    )
+                    continue
+                if result is None:
+                    continue
+                # Imported lazily: emission_factors.py imports plain functions
+                # from emissions.py at its own top level, and this module sits
+                # underneath both — importing it back here at module load
+                # time would risk a cycle for no benefit, since this is the
+                # only place extensions.py needs it.
+                from tret.services.emission_factors import EmissionsOverrides
+
+                try:
+                    EmissionsOverrides(**result)
+                except Exception:
+                    log.warning(
+                        "factor layer provider %r returned a document that failed "
+                        "EmissionsOverrides validation for workspace %s; ignoring",
+                        provider, workspace_id,
+                    )
+                    continue
                 return result
         return None
 

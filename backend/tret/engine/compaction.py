@@ -363,7 +363,7 @@ def elided_source_text(messages: list[Msg], plan: CompactionPlan, limit: int = 6
 
 
 async def summarize(
-    provider, model, text: str, *, timeout: float = 60.0
+    provider, model, text: str, *, timeout: float = 60.0, factors=None
 ) -> tuple[str | None, dict | None]:
     """(summary, what it cost) — either may be None, independently.
 
@@ -375,6 +375,12 @@ async def summarize(
     were spent either way — a summarizer that answers with an empty string still
     cost money, and that is precisely the case where silently dropping the cost
     would flatter the numbers.
+
+    `factors` (a `tret.services.emission_factors.FactorSet | None`) is passed
+    straight through to `overhead_call`, so a summarizer call started under the
+    same configured emissions layers as the run it serves records its
+    provenance the same way. `None` (every caller before this parameter
+    existed) resolves its own factor set exactly as before.
     """
     if not text.strip():
         return None, None
@@ -390,7 +396,7 @@ async def summarize(
         )
     except Exception:  # noqa: BLE001 - a lost summarizer must not fail the run
         return None, None
-    spend = overhead_call("compaction_summary", model, completion.usage)
+    spend = overhead_call("compaction_summary", model, completion.usage, factors=factors)
     summary = (completion.payload or {}).get("summary")
     usable = summary.strip() if isinstance(summary, str) and summary.strip() else None
     return usable, spend

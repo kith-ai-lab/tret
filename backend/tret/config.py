@@ -422,6 +422,16 @@ class Settings(BaseSettings):
     # audit-grade. Each default's source, date and uncertainty is recorded on
     # every run in `energy_accounting["factors"]`.
     #
+    # Every field below is also the bottom rung — `global_default` / `env` — of a
+    # taller ladder: `tret/services/emission_factors.py` layers a per-run
+    # override, a per-workspace one and a "managed" one (an extension supplies
+    # this, e.g. tret_cloud) on top of these settings, most specific first
+    # (`run_override > harness > workspace > managed > env > global_default`),
+    # resolved per factor rather than per document. `energy_accounting()` still
+    # reads a `Settings` instance exactly as before when nothing above it is in
+    # play; nothing here changes on its own. See "Configuration layers" in
+    # docs/emissions-methodology.md.
+    #
     # Grams of CO2e per kWh of electricity, used to turn a run's estimated energy
     # into an estimated carbon figure. 470 is the IEA's 2024 global power-sector
     # average (Electricity 2025 reports ~460–480; 470 is the midpoint). Set your

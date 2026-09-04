@@ -6,12 +6,17 @@ persists the transcript/cost after every iteration, and publishes RunEvents.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
+
+if TYPE_CHECKING:
+    from tret.services.emission_factors import FactorSet
 
 from tret.db.engine import get_session_factory
 from tret.db.models import Document, Harness, Pack, Run
@@ -72,6 +77,7 @@ from tret.engine.supervisor import (
     assess,
     normalize_for_provider,
 )
+from tret.services.emission_settings import factor_set_for, workspace_emissions_layers
 from tret.services.emissions import (
     combine_accountings,
     overhead_block,
@@ -86,6 +92,8 @@ from tret.services.transcript import (
     NUDGE_TERMINAL,
     REPEATED_CALL_KEY,
 )
+
+log = logging.getLogger("tret.harness")
 
 DEFAULT_MAX_ITERATIONS = 24
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
@@ -156,6 +164,13 @@ class ModelSegment:
     to_iteration: int = 0
     usage: Usage = field(default_factory=Usage)
     cost_usd: Decimal = Decimal(0)
+    # The layered factor set (tret/services/emission_factors.py) this segment's
+    # model was resolved under — the workspace's own override document and any
+    # managed layer an extension supplies, snapshotted once when the segment
+    # was created. None (today's behaviour) when no layers were configured or
+    # loading them failed; `energy_accounting` falls back to `settings` alone
+    # in that case, exactly as it always has.
+    factors: "FactorSet | None" = None
     # True once any turn folded into this segment was an ESTIMATE rather than a
     # provider-reported figure — a turn whose stream died mid-way (see
     # `HarnessEngine._book_usage`). The segment's totals stay one running sum
@@ -200,6 +215,7 @@ class ModelSegment:
             self.usage.output_tokens,
             self.usage.cache_read_tokens,
             self.usage.cache_write_tokens,
+            factors=self.factors,
         )
 
     def to_json(self) -> dict:
@@ -225,6 +241,35 @@ class ModelSegment:
             # figure.
             "estimated": self.estimated_usage,
         }
+
+
+@dataclass
+class _EmissionsContext:
+    """One `execute()` call's workspace/managed emissions-override documents,
+    and the `FactorSet`s already resolved from them this run.
+
+    Replaces what used to be `HarnessEngine._emissions_workspace_doc` /
+    `_emissions_managed_doc` instance attributes. `HarnessEngine` is
+    process-wide and `execute()` runs concurrently per run (see its own
+    docstring for the pre-existing `self.registry`/`self.router` race this
+    does NOT fix); storing per-run documents on `self` meant workspace A's
+    overrides and operator labels could land in workspace B's persisted
+    accounting under concurrent runs. This object is created fresh in
+    `execute()` and threaded explicitly through `_execute_inner` and every
+    place that needs a `FactorSet` — `run`/`db` are threaded the same way, for
+    the same reason — so no per-run emissions state ever lives on the engine
+    instance.
+    """
+
+    workspace_doc: dict | None = None
+    managed_doc: dict | None = None
+    # Keyed on `(provider, model_id)`: a `model_overrides` entry is resolved
+    # per model id (see `emission_settings.factor_set_for`), so two segments
+    # sharing a provider but running different models must never share a
+    # cached `FactorSet`.
+    _factor_sets: dict[tuple[str | None, str | None], "FactorSet | None"] = field(
+        default_factory=dict, repr=False
+    )
 
 
 class HarnessEngine:
@@ -258,6 +303,45 @@ class HarnessEngine:
 
     def unregister_delegation(self, child_id: uuid.UUID) -> None:
         self._parent_of.pop(child_id, None)
+
+    def _factors_for(
+        self, provider: str, model_id: str | None, emissions: "_EmissionsContext"
+    ) -> "FactorSet | None":
+        """The layered factor set a model on `provider` gets under this run's
+        workspace/managed documents (`emissions`, built once in `execute()` and
+        threaded down rather than read off `self` — see `_EmissionsContext`).
+
+        `model_id` is what a `model_overrides` entry is resolved against — see
+        `emission_settings.factor_set_for` — so it is also part of the cache
+        key: two segments on the same provider but different models must never
+        share a resolved `FactorSet`.
+
+        Never raises: `factor_set_for` is pure validation and arithmetic over
+        two already-loaded dicts, but a workspace document that fails
+        `EmissionsOverrides` validation after it was stored (a downgrade, a
+        hand-edited row) must not turn into a run that cannot account its own
+        energy at all — `None` here is exactly today's behaviour,
+        `energy_accounting` building its own factor set from `settings` alone.
+        """
+        key = (provider, model_id)
+        if key in emissions._factor_sets:
+            return emissions._factor_sets[key]
+        try:
+            factors = factor_set_for(
+                provider,
+                workspace_doc=emissions.workspace_doc,
+                managed_doc=emissions.managed_doc,
+                model_id=model_id,
+            )
+        except Exception:
+            log.exception(
+                "failed to resolve emissions factors for provider %r; "
+                "accounting for this segment with no configured layers",
+                provider,
+            )
+            factors = None
+        emissions._factor_sets[key] = factors
+        return factors
 
     def _is_cancelled(self, run_id: uuid.UUID) -> bool:
         """True if `run_id`, or any run it was delegated from, is cancelled.
@@ -301,7 +385,18 @@ class HarnessEngine:
         self._cancelled.add(run_id)
         self._cancelled |= self._descendants_of(run_id)
 
-    async def execute(self, run_id: uuid.UUID) -> None:
+    async def execute(
+        self, run_id: uuid.UUID, *, _emissions_test_hook=None
+    ) -> None:
+        """`_emissions_test_hook`, if given, is awaited once per call, right
+        after this run's `_EmissionsContext` is built and before
+        `_execute_inner` reads it. Test-only: it exists so a concurrency test
+        can deterministically interleave two `execute()` calls sharing one
+        engine instance between "documents loaded" and "first segment built",
+        the narrowest window where the old `self._emissions_workspace_doc` /
+        `_emissions_managed_doc` instance attributes could bleed across runs
+        (see `_EmissionsContext`). No production caller passes it.
+        """
         async with get_session_factory()() as db:
             run = await db.get(Run, run_id)
             if run is None:
@@ -324,8 +419,37 @@ class HarnessEngine:
 
             self.registry = ProviderRegistry(await load_db_keys(db, workspace_id))
             self.router = ModelRouter(self.catalog, self.registry, self.priors)
+            # The two non-run_override layers of the emissions factor ladder
+            # (tret/services/emission_factors.py) — a workspace's own override
+            # document and whatever a loaded extension's managed layer
+            # contributes — loaded once per run, same as registry/router just
+            # above, and turned into a `FactorSet` per provider as each model
+            # segment starts (`_factors_for`) rather than once here, since a
+            # run may use more than one provider (model_timeline). Loading
+            # either document is not this run's business to fail on: a broken
+            # workspace row or a raising managed-layer extension must fall
+            # back to today's behaviour (`factors=None`) rather than take the
+            # run down.
             try:
-                await self._execute_inner(db, run)
+                emissions_workspace_doc, emissions_managed_doc = (
+                    await workspace_emissions_layers(db, workspace_id)
+                )
+            except Exception:
+                log.exception(
+                    "failed to load emissions factor layers for workspace %s; "
+                    "run will account with no configured layers",
+                    workspace_id,
+                )
+                emissions_workspace_doc, emissions_managed_doc = None, None
+            # Built fresh per call and threaded down explicitly (never held on
+            # `self`) — see `_EmissionsContext`'s docstring for why: this
+            # engine instance is process-wide and `execute()` runs concurrently
+            # per run.
+            emissions = _EmissionsContext(emissions_workspace_doc, emissions_managed_doc)
+            if _emissions_test_hook is not None:
+                await _emissions_test_hook()
+            try:
+                await self._execute_inner(db, run, emissions)
             except Exception as e:  # engine bug or provider hard failure
                 # Discard whatever the failed iteration left uncommitted before
                 # recording the failure: a run marked `failed` must not also
@@ -358,7 +482,7 @@ class HarnessEngine:
                 # no later code path ever reaching back to clean it up.
                 self._cancelled.discard(run_id)
 
-    async def _execute_inner(self, db, run: Run) -> None:
+    async def _execute_inner(self, db, run: Run, emissions: "_EmissionsContext") -> None:
         harness = await db.get(Harness, run.harness_id)
         pack = await db.get(Pack, run.pack_id) if run.pack_id else None
 
@@ -515,6 +639,8 @@ class HarnessEngine:
                 n_documents=len(documents),
                 est_input_tokens=est_input_tokens,
                 run_override=run.task_input.get("_model_override"),
+                emissions_workspace_doc=emissions.workspace_doc,
+                emissions_managed_doc=emissions.managed_doc,
             )
         except RoutingUnavailable as e:
             await self._fail_before_start(db, run, str(e), workspace_id=harness.workspace_id)
@@ -570,7 +696,13 @@ class HarnessEngine:
         run.overhead = overhead_block(overhead_calls)
 
         # One segment per model this run uses. Almost always exactly one.
-        segments: list[ModelSegment] = [ModelSegment(model_info, reason="initial")]
+        segments: list[ModelSegment] = [
+            ModelSegment(
+                model_info,
+                reason="initial",
+                factors=self._factors_for(model_info.provider, model_info.id, emissions),
+            )
+        ]
         segment = segments[0]
 
         # Chat turns carry prior conversation turns as history.
@@ -658,6 +790,7 @@ class HarnessEngine:
                     terminal_tool=ctx.terminal_tool,
                     max_tier=model_policy.get("max_cost_tier") or "premium",
                     overhead=overhead_calls,
+                    emissions=emissions,
                 )
                 if record is not None:
                     compaction_records.append(record)
@@ -1023,6 +1156,7 @@ class HarnessEngine:
                     intervention=intervention,
                     segments=segments,
                     iteration=iteration,
+                    emissions=emissions,
                 )
                 context_limit = context_budget(
                     model_info.context_window, max_output_tokens, adaptive.context_headroom
@@ -1207,6 +1341,7 @@ class HarnessEngine:
         intervention: Intervention,
         segments: list[ModelSegment],
         iteration: int,
+        emissions: "_EmissionsContext",
     ):
         """Move the run onto a different model, and record that it happened.
 
@@ -1218,7 +1353,13 @@ class HarnessEngine:
         sequence is in `model_timeline`.
         """
         target = intervention.target
-        segments.append(ModelSegment(target, reason=intervention.reason))
+        segments.append(
+            ModelSegment(
+                target,
+                reason=intervention.reason,
+                factors=self._factors_for(target.provider, target.id, emissions),
+            )
+        )
         record = {
             "at_iteration": iteration,
             "from_model": run.model_used,
@@ -1250,6 +1391,7 @@ class HarnessEngine:
         terminal_tool: str | None,
         max_tier: str,
         overhead: list[dict],
+        emissions: "_EmissionsContext",
     ) -> dict | None:
         """Shrink what the provider sees, and say exactly what was shrunk.
 
@@ -1294,7 +1436,10 @@ class HarnessEngine:
             info = self.router._resolve_router_model(max_tier)
             if info is not None:
                 summary, spend = await summarize(
-                    self.registry.get(info.provider), info, source
+                    self.registry.get(info.provider),
+                    info,
+                    source,
+                    factors=self._factors_for(info.provider, info.id, emissions),
                 )
                 if spend is not None:
                     overhead.append(spend)

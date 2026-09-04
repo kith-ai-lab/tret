@@ -206,17 +206,152 @@ EcoLogits models per-token energy from **active parameter count** instead of a
 class ladder, with published fitted constants α=1.17e-6, β=-1.12e-2, γ=4.05e-5 —
 linear in active params, exponential decay in batch size, default batch 64.
 
-Tret does not implement it, because it would be fed a guessed parameter count
-for every closed model in the catalog, and a precise-looking function over a
-guessed input is worse than an openly coarse bucket. The seam is ready:
-`emissions.wh_per_mtok_for_model` is the single place every caller resolves a
-model's constant, so adding an `active_params_b` to `models.yaml` and teaching
-that one function to prefer it is the whole change.
+Tret does not use it by default, because it would be fed a guessed parameter
+count for every closed model in the catalog, and a precise-looking function
+over a guessed input is worse than an openly coarse bucket — the class ladder
+above stays the shipped default for exactly that reason. The seam described
+here in earlier versions of this doc is now wired up rather than only
+promised: `emissions.wh_per_mtok_for_model` still resolves every caller's
+constant, and an operator who *does* have `active_params_b` for a model (their
+own weights, most often) can opt a workspace into the formula. See
+[Energy strategies and measured runs](#energy-strategies-and-measured-runs),
+directly below, for what that opt-in actually computes and what it still gets
+wrong.
 
 Better data is also coming for open models: Hugging Face's AI Energy Score
 measures ~166 models on identical H100s, and the ML.ENERGY benchmark
 ([arXiv:2505.06371](https://arxiv.org/abs/2505.06371)) covers open weights. Both
 are stronger evidence than this ladder for the models they cover.
+
+## Energy strategies and measured runs
+
+Every run picks its per-token energy constant one of three ways —
+`energy_strategy`, layered exactly like every other factor in
+[Configuration layers](#configuration-layers) (`run_override > harness >
+workspace > managed > global_default`; there is no `env` rung for this one
+factor — no `TRET_*` setting sets it):
+
+| strategy | what it does |
+|---|---|
+| `class_ladder` (default) | The table above: an explicit `models.yaml` constant, or the calibrated class. Unchanged. |
+| `active_params` | EcoLogits' formula, below — only when the model also carries `active_params_b`. Falls back to `class_ladder` (with a caveat) when it does not. |
+| `measured` | A config-time signal that this workspace's `model_overrides` are expected to be kept current. Does not by itself change the arithmetic beyond what a `model_overrides` entry already would. |
+
+**Resolution order for one model, regardless of `energy_strategy`:**
+
+1. A `model_overrides` entry for *this model id* — see below. Outranks
+   everything, including an explicit `models.yaml` constant.
+2. The model's own explicit `energy_wh_per_mtok` in `models.yaml` — unchanged
+   from before this section existed.
+3. The active-parameter formula, only when `energy_strategy` is
+   `active_params` **and** the model has `active_params_b`.
+4. The class ladder, as the fallback for both (3) not applying and the
+   default case.
+
+### `model_overrides`: an operator's own per-model constant
+
+Any override document (workspace, managed, or the reserved harness layer —
+see [Configuration layers](#configuration-layers) for the shape every other
+key here follows) can carry a `model_overrides` block keyed by catalog model
+id:
+
+```json
+{
+  "model_overrides": {
+    "local/qwen2.5:14b": {
+      "energy_wh_per_mtok": 340.0,
+      "label": "Metered on our own A6000 box, Q3 2025",
+      "confidence": "measured",
+      "url": "https://internal.example/energy-log",
+      "as_of": "2025-09-01"
+    }
+  }
+}
+```
+
+`label` is required, for the same reason every other override document here
+requires one for a number it sets. `confidence` is `measured` (the default —
+"I metered my own deployment"), `calibrated`, or `low`, and it becomes both
+the record's `strategy` and its `confidence` — the whole point of this block
+is an operator saying how sure they are about a number that replaces the
+catalog default, and that word describes both how it was reached and how
+much to trust it. A model with no entry here is unaffected; there is no
+per-provider or default fallback the way `grid`/`pue` have — an override
+names one model or it names nothing.
+
+### The active-parameter formula, and its stated assumption
+
+At `energy_strategy: "active_params"`, a model with `active_params_b` set is
+priced by EcoLogits' published GPU energy model instead of the ladder:
+
+```
+E_gpu_per_output_token(Wh) = α × exp(β × B) × active_params_b + γ
+```
+
+at `batch_size (B) = 64` (the published default), converted to Wh per million
+output-equivalent tokens (×1,000,000) to match the ladder's unit. At tret's
+published constants (α=1.17e-6, β=-1.12e-2, γ=4.05e-5) and B=64, this yields
+(Wh/Mtok, rounded): **44.5** at 7B active parameters, **80.5** at 70B, **140.5**
+at 175B, **271.9** at 405B — positive and monotone in `active_params_b` for
+every real model, with no floor anywhere in the range.
+
+**The scope gap this strategy still has, stated plainly — this is why it is
+`"low"` confidence, not `"calibrated"`.** EcoLogits' own `f_E` is per-GPU and
+GPU-energy only: their published pipeline multiplies this per-GPU figure by
+however many GPUs the model needs (derived from total parameter count and
+per-GPU memory) and adds a separate server/host energy term before the result
+is comparable to a whole-request figure. tret has neither of those inputs — no
+GPU count, no server-energy term — and feeds this single-GPU number straight
+into the same "whole-request Wh per Mtok" slot the class ladder fills. That is
+a systematic **UNDERCOUNT**, not a rounding error: 271.9 Wh/Mtok for a
+~405B-active-parameter model sits far below the L-class constant (2,600
+Wh/Mtok, fitted from Claude 3.7 Sonnet — a comparably sized served model). Every
+run this strategy prices carries an `active_params_gpu_only` caveat
+(`direction: "understates"`) naming exactly this gap. Lifting this path to
+`"calibrated"` would need the missing GPU-count term (computable from total
+parameters and per-GPU memory, neither of which tret's catalog carries today)
+and a server/host energy term added on top. A model with no `active_params_b`
+under this strategy gets the class ladder instead, plus an
+`active_params_unknown` caveat naming the fallback.
+
+### Measured energy: an operator's own meter, on top of everything else
+
+`energy_accounting(..., measured_energy_wh=<Wh>)` replaces the *estimate*
+with a real IT-load figure for one run, on any deployment (self-hosted most
+often, but nothing here requires it). What changes, and — as important —
+what does not:
+
+- `energy_wh` becomes the measurement. `energy_wh_estimated` keeps what the
+  configured strategy would have produced (present on every run, measured or
+  not — it just equals `energy_wh` when there is no measurement), and
+  `energy_wh_by_bucket` is scaled proportionally from that estimate so the
+  buckets still sum to the measured total.
+- **PUE, grid intensity and embodied hardware still apply on top,
+  unchanged.** A measurement is IT-load only — the same scope `energy_wh` has
+  always had — never a substitute for facility overhead or hardware
+  amortization. `co2e_g` is still `scope1_g + scope2_g + scope3_g`, computed
+  from the measured (not estimated) electricity figure.
+- The `energy_class` factor record's confidence becomes `"measured"`, its
+  source `"Operator-supplied measurement (IT-load Wh)"`, and it carries
+  `measured: true` — whatever strategy would otherwise have priced the
+  (now-superseded) estimate is still named in the note.
+- Two caveats flip to `applies: false`, and stay in the list rather than
+  disappearing, so a reader can see they were considered:
+  `unbatched_local_inference` (a real meter already reflects however batched
+  or unbatched serving actually was) and `prompt_shape_residual` (there is no
+  per-token model left to have a residual against). Every other caveat is
+  unaffected.
+- `uncertainty.contributions`' `energy_class` and `batching` rows narrow to
+  0.9/1.1 (instrument-level tolerance, not the usual class/batch-size
+  guesswork) — **the headline judgment band itself is unchanged this phase**;
+  narrowing it is future work, not something this run alone should quietly
+  decide.
+- The top-level `energy_source` field is `"estimated"` or `"measured"`; a run
+  spanning several models (`combine_accountings`) reports `"mixed"` unless
+  every segment was measured.
+
+`measured_energy_wh` must be `>= 0`; a negative value raises `ValueError`
+rather than silently producing a negative energy figure.
 
 ## Data-centre overhead (PUE)
 
@@ -805,6 +940,255 @@ TRET_EMISSIONS_BASELINE_MODEL=anthropic/claude-fable-5
 Pick the model you would otherwise have used, if the auto-selected heaviest
 catalog entry is not that.
 
+## Configuration layers
+
+Everything above is a single `TRET_*` setting, read by whichever process runs
+`energy_accounting()`. That is enough for a self-hosted, single-operator
+deployment. It is not enough for a hosted one: an admin console that lets a
+customer set their own grid factor cannot restart the process per request, and
+a managed layer (the hosting product itself) needs to set a floor or a default
+without a customer's own workspace override silently losing to it.
+
+`tret/services/emission_factors.py` generalises the grid factor's existing
+precedence (`run_override` beats `TRET_GRID_FACTORS` beats
+`TRET_LOCAL_GRID_CO2E_G_PER_KWH` beats `TRET_GRID_CO2E_G_PER_KWH`, described
+above under [Grid intensity, and its basis](#grid-intensity-and-its-basis)) to
+every constant this document has described — PUE, embodied hardware, the
+uncertainty band and the baseline model — and adds two rungs above the process
+environment:
+
+```
+run_override  >  harness  >  workspace  >  managed  >  env  >  global_default
+```
+
+* **`run_override`** — a value handed straight to one accounting call. This is
+  what `energy_accounting`'s own `grid_g_per_kwh` argument has always meant;
+  the other factors now accept the same kind of one-off override.
+* **`harness`** — reserved for a future per-harness override. The ladder
+  resolves it today; nothing populates it yet.
+* **`workspace`** — an operator's own configuration for one workspace, stored
+  wherever the API that manages it decides to store it. This module validates
+  the document; it does not read or write a database row.
+* **`managed`** — a configuration a hosting extension supplies (tret_cloud's
+  admin console, for one). Recorded on the run as `managed:<name>` — a short
+  name the document itself carries — so two different managed layers are
+  never confused for one on a stored run.
+* **`env`** — a `TRET_*` setting the operator actually set, in a real
+  environment variable or a loaded `.env` file. Detected through Pydantic's
+  `model_fields_set`, not by comparing against the shipped default: an
+  operator who deliberately sets `TRET_GRID_CO2E_G_PER_KWH` back to `470` is
+  still recorded as `env`, not `global_default`.
+* **`global_default`** — the shipped constant, when nothing above chose
+  otherwise. Everything in this document up to this section describes exactly
+  this rung.
+
+**Resolution is per factor, not per document.** A workspace override document
+that only sets its grid factor still takes its PUE, embodied figure,
+uncertainty band and baseline model from whichever layer below it is the most
+specific one that set them — `managed`, then `env`, then the shipped default.
+Setting one thing does not silently freeze everything else at that layer.
+
+**Within one document, a per-provider entry beats that document's own
+default** — `grid.providers.anthropic` over `grid.default`, exactly like
+`TRET_GRID_FACTORS` over `TRET_GRID_CO2E_G_PER_KWH` today. **Across documents,
+a more specific layer's default beats a less specific layer's per-provider
+entry** — a workspace's flat `grid.default` outranks a managed layer's
+`grid.providers.anthropic`, because the workspace is the operator's own word
+for *this* workspace, and a managed layer's provider-specific guess is still a
+guess made for someone else.
+
+An override document (workspace, managed, or the reserved harness layer) is
+the shape:
+
+```json
+{
+  "version": 1,
+  "grid": {
+    "default": {"g_per_kwh": 42, "basis": "location_based",
+                 "label": "Ontario grid, IESO 2024"},
+    "providers": {"anthropic": {"g_per_kwh": 120, "basis": "market_based",
+                                 "label": "provider PPA disclosure"}}
+  },
+  "pue": {"cloud": 1.2, "local_profile": "onprem_datacenter", "local": 1.38,
+          "label": "Site metered, Q2 2025"},
+  "embodied": {"g_per_run": 0.31, "label": "vendor disclosure"},
+  "band": {"low": 2.0, "high": 2.0, "label": "narrowed after metering"},
+  "baseline_model": "anthropic/claude-opus-5",
+  "source_name": "acme-admin"
+}
+```
+
+Every key is optional. **Any block that sets a number requires a label** — the
+same rule `GridFactor` already enforces for `TRET_GRID_FACTORS`, extended
+everywhere: a number with nowhere to say where it came from is worse than no
+override at all. `baseline_model` is recorded as a plain string here and is
+**not** validated against the model catalog by this module — that stays the
+API's job, exactly as it already is for `TRET_EMISSIONS_BASELINE_MODEL`.
+
+**Source, layer and setting strings.** Every resolved factor on a run carries
+three related but distinct fields, and the grid factor's `grid_co2e_source` /
+`grid_co2e_layer` are the ones that were already public before this section
+existed:
+
+- `source` (`grid_co2e_source` for the grid factor) — the precise,
+  human-legible key: `run_override`, `provider:<name>` / `local_setting` /
+  `global_default` (unchanged from before this section, for the env/global
+  rungs — see [Grid intensity, and its basis](#grid-intensity-and-its-basis)),
+  or, once a configured layer wins, `harness` / `harness:provider:<name>` /
+  `workspace` / `workspace:provider:<name>` / `managed:<name>` /
+  `managed:<name>:provider:<name>`.
+- `layer` (`grid_co2e_layer` for the grid factor) — one of the six rung names
+  above. Coarser than `source`: every provider-specific win at a layer folds
+  into that layer's name.
+- `setting` — the one path that actually applied, never a list of the paths
+  that might have: a `TRET_*` env var name for the `env` / `global_default`
+  rungs (unchanged strings — a run recorded before this section existed reads
+  identically), or a dotted override path (`workspace.emissions.grid.providers.anthropic`,
+  `managed.emissions.pue.local`) otherwise.
+
+Every record in a run's `factors` list carries its own `layer` — the constants
+that are not layered (the energy class, the token weights, per-token prices)
+report `global_default`, since nothing above resolves them any differently.
+The run also carries a top-level `factor_layers`: every layer that contributed
+*anything*, most specific first — `["global_default"]` when nothing was ever
+configured, `["workspace", "env"]` when a workspace overrode the grid factor
+and everything else fell through to the environment.
+
+**Stored runs snapshot the factors in force. There is no backfill.** A run
+persists the `FactorSet` that was actually resolved for it at the moment it
+ran; changing a workspace's grid factor tomorrow does not, and must not,
+rewrite what a run from yesterday says it used — the same principle
+[Window rollups are as-recorded](#window-rollups-are-as-recorded) already
+states for the plain `TRET_*` settings, now extended to every layer above
+them.
+
+### Effective factors and the settings API
+
+The `workspace` layer above is managed through three routes, all under
+`GET/PUT/DELETE /api/workspace/settings/emissions`:
+
+- **`GET`** — open to any workspace member. Returns three things at once:
+  `overrides` (the stored document verbatim, `{}` if none), `effective` (what
+  the *next* run on each of `local` / `anthropic` / `kimi` / `openrouter`
+  would resolve to, as a `Resolved` value per factor — value, layer, source,
+  label, url, as_of, setting), and `shipped_defaults` (tret's own numeric
+  defaults with their citation, so a settings form can show what an empty
+  field falls back to without reading this document). **Fails open** when the
+  stored document no longer validates against the current schema (a
+  downgrade, a hand-edited row, a field a later version removed): `overrides`
+  still carries the raw document (so the panel can show it and offer "clear
+  overrides"), `effective` is `null` rather than guessed, and `error` names
+  the validation failure as the same plain dotted-field string PUT's 422 uses.
+  PUT and DELETE are unaffected — writing (or clearing) the document always
+  leaves it in a state that validates.
+- **`PUT`** — admin or owner only. The body is validated as the same
+  `EmissionsOverrides` document described above, so a request that violates
+  the label rule 422s with the offending validator's own message — a plain
+  string naming the dotted field (`"grid.default.label is required when
+  grid.default.g_per_kwh is set"`), never a nested per-field error blob. A
+  `baseline_model` that does not name a model in the catalog, or names a
+  local one, 422s the same way. Past validation, a registered workspace gate
+  (`check_workspace_gate(db, workspace_id, "emissions_factors_edit")` —
+  `tret/engine/extensions.py`) gets a veto before anything is written; a
+  refusal is a 403 carrying the gate's own `reason`/`detail`, identical to the
+  invite-creation gate `api/workspaces.py` already has. A stored write is
+  stamped with `updated_by` (the caller's email) and `updated_at` (ISO UTC)
+  and replaces `Workspace.settings["emissions"]` wholesale, leaving every
+  other key in `settings` untouched.
+- **`DELETE`** — same admin-or-owner requirement and the same gate action
+  (clearing a workspace's overrides is as much an edit as setting them);
+  removes the key and returns the same shape `GET` does, with `overrides` back
+  to `{}`.
+
+**The runner snapshots the factor set at run start, not per call.**
+`HarnessEngine.execute()` loads a run's workspace document and any managed
+layer once, as soon as the run's workspace is known, and turns each into a
+`FactorSet` per provider (and per model — a `model_overrides` entry is
+resolved per model id, not per provider) as each model segment begins (a run's
+`model_timeline` can span more than one provider, and each gets its own
+layered resolution). The router's own model-choice call and the compaction
+summarizer's call are accounted under the same loaded layers, via the
+identical `factors=` parameter `energy_accounting` and `overhead_call` already
+take. Loading either document is never allowed to fail a run: a workspace row
+that no longer validates, or a managed-layer extension that raises, falls back
+to `factors=None` — today's behaviour, resolving straight from `Settings` —
+logged, not raised. The loaded documents (and the `FactorSet`s already
+resolved from them this run) live on a per-execution object threaded
+explicitly through the call graph, never on the `HarnessEngine` instance
+itself — that engine is process-wide and serves runs from every workspace
+concurrently, so per-run configuration held on `self` would eventually leak
+from one run's workspace into another's persisted accounting.
+
+### `POST /api/analytics/emissions/whatif`
+
+A read-only, on-the-fly recompute of a recent window's emissions under a
+*scenario* factors document — "what would this window's carbon and energy have
+looked like under these settings instead?" Never writes anything: no run row,
+no workspace document, is touched by this endpoint.
+
+**Request**: `{"project_id": <uuid or null>, "days": <1-3650, default 30>,
+"factors": <a partial EmissionsOverrides document>}`. `factors` is validated
+the same way a `PUT` to the settings API is — a violation 422s with the same
+plain, dotted-field message (`_validation_detail`, shared by both routers so
+they can never disagree about how a validation error reads) — and the
+`emissions_whatif` workspace gate may refuse the call outright (403, the
+gate's own `reason`/`detail`), the same fail-open extension seam every other
+gated write in this API uses.
+
+**Response**: `recorded` (the window's stored, as-recorded rollup — identical
+to what `GET /emissions` returns) and `scenario` (the same rollup, recomputed
+per run against `factors`), plus `delta` (`co2e_g`, `co2e_pct` — an **integer**,
+by the same deliberate carbon-percentage-stays-coarse rule as everywhere else
+in this doc, unlike the one-decimal money percentages — `energy_wh`,
+`avoided_usd`; the carbon fields are `null` under the identical cross-basis
+rule `by_basis` uses elsewhere), `runs_recomputed`, `runs_skipped`, `basis` (a
+one-line explanation of what changed and why), and an optional `warnings` list
+— present only when something had to be excluded from the scenario, e.g. the
+workspace's own stored override document no longer validates (treated as no
+workspace layer for this recompute, same as a run's own fail-open contract
+above, with a warning naming why rather than a silent difference from what the
+workspace normally configures).
+
+**Layering semantics — the `layer_note`.** The scenario's `factors` document is
+passed as `build_factor_set`'s `harness_settings` — the reserved,
+more-specific-than-workspace rung nothing else populates today — layered on
+top of whatever the workspace and any managed layer already configure. That
+means a scenario need not repeat factors it isn't changing: leaving `grid`
+unset in the request still resolves the workspace's own configured grid
+factor (or the environment, or the shipped default) underneath it. It also
+means the recomputed block's `grid_co2e_layer`/`factor_layers` reads
+`"harness"` for anything the scenario document itself set — the response's
+`scenario.layer_note` says plainly that this is the one-off scenario document,
+not a saved per-harness override (nothing else ever writes that layer).
+
+**The catalog-miss exclusion rule.** A run whose model (or, for a
+`model_timeline` run, any segment's model) is no longer in the catalog cannot
+be recomputed — there is no `ModelInfo` left to price it against. Such a run
+is excluded from **both** `recorded` and `scenario`, never just one: the two
+sides must cover the identical population of runs, so `runs_skipped` moves the
+same rows out of both totals, and `basis` states the exclusion and the count
+verbatim. A `model_timeline` run is mirrored segment by segment — one
+`energy_accounting` call per segment against that segment's own model and
+provider factor set, combined with `combine_accountings` — exactly how the
+stored block was produced in the first place, never one call over the run's
+running totals against whichever model happened to be current.
+
+**Read-only guarantee.** No `db.add`/`commit`/`flush` anywhere in this
+endpoint's call graph — every number is computed in Python from rows already
+in the database and the request's own `factors`. Verified by
+`tests/test_emissions_whatif.py`'s `test_recompute_never_writes_to_the_run`,
+which snapshots a run before and after a scenario call and asserts they are
+byte-for-byte identical.
+
+**`measured_energy_wh` has no product ingestion path yet.** `energy_accounting`
+accepts a `measured_energy_wh` keyword for a run's own operator-metered figure
+(see [Measured energy](#measured-energy-an-operators-own-meter-on-top-of-everything-else)
+above), but nothing in the harness, the settings API, or this what-if endpoint
+ever supplies one — it is a library parameter for a workspace's own tooling or
+a future product surface to call, not something the running product can set
+today. A what-if scenario recomputes every run's *estimate*; it does not, and
+today cannot, recompute a measured figure.
+
 ## Where the numbers live in the API
 
 Each run's `energy_accounting` block carries, additively:
@@ -817,10 +1201,16 @@ Each run's `energy_accounting` block carries, additively:
   `energy_wh_per_mtok_output`, `tokens`, `energy_wh_by_bucket`;
 - resolution: `pue_profile`, `grid_co2e_basis`, `reasoning_tier`, plus
   `grid_co2e_source` (which precedence rule chose the grid factor:
-  `provider:<name>` | `local_setting` | `global_default` | `run_override`) and
-  `grid_co2e_label` (the operator's own note about it). A run recorded before
-  these existed carries neither — read them as unknown, never as
-  `global_default`;
+  `provider:<name>` | `local_setting` | `global_default` | `run_override`, or
+  — once a workspace/managed/harness layer is in play, see
+  [Configuration layers](#configuration-layers) — `workspace` |
+  `workspace:provider:<name>` | `managed:<name>` |
+  `managed:<name>:provider:<name>` | `harness` | `harness:provider:<name>`),
+  `grid_co2e_layer` (which rung of the ladder chose it — one of
+  `run_override`, `harness`, `workspace`, `managed`, `env`, `global_default`),
+  and `grid_co2e_label` (the operator's own note about it). A run recorded
+  before these existed carries none of the three — read them as unknown, never
+  as `global_default`;
 - `cost` — money against the same-token baseline, including `avoided_pct` (the
   share of frontier spend avoided, one decimal place, null rather than `0%`
   when there is no baseline or the baseline itself costs nothing) — also
@@ -828,11 +1218,15 @@ Each run's `energy_accounting` block carries, additively:
 - `uncertainty` — the band and its per-factor sensitivity;
 - `factors` — **a list** (not an object: JSONB does not preserve key order) with
   one record per constant, each carrying `value`, `unit`, `source`, `url`, `date`,
-  `confidence` and a `setting` to change it. Confidence is one of `exact`,
+  `confidence`, a `layer` (see [Configuration layers](#configuration-layers))
+  and a `setting` to change it. Confidence is one of `exact`,
   `structural`, `calibrated`, `low`, `placeholder`, `excluded`. The
   `grid_intensity` record additionally carries `basis`, `overridden`,
   `source_key`, `source_rule` and `source_label`, and its `setting` names the one
   setting that actually applied rather than the three that might have;
+- `factor_layers` — every configuration layer that contributed anything to this
+  run, most specific first (`["global_default"]` when nothing was ever
+  configured);
 - `caveats` — the named biases that apply to this particular run, each with a
   `direction` (`understates` / `overstates` / `either`). Includes
   `money_excludes_self_hosting_costs` (`direction: "overstates"`) on any run

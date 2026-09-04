@@ -298,7 +298,8 @@ async def test_none_carbon_propagates_and_str_omits_it(wired, monkeypatch):
 
     def _null_carbon_accounting(model, input_tokens, output_tokens,
                                  cache_read_tokens=0, cache_write_tokens=0,
-                                 grid_g_per_kwh=None, *, settings=None, catalog=None):
+                                 grid_g_per_kwh=None, *, settings=None, catalog=None,
+                                 factors=None):
         return {
             "model": model.id,
             "co2e_g": None,

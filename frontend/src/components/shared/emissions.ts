@@ -511,6 +511,79 @@ export const BASIS_SUBTOTAL_HINT =
 export const NOT_SUMMABLE_CELL_HINT =
   'No single figure: the runs behind this row span more than one GHG Protocol basis, which may not be summed. See the per-basis subtotals.'
 
+// ── which precedence layer set a factor ──────────────────────────────────
+// Per-workspace emissions overrides (Settings → Emissions factors) added a
+// fourth-and-fifth precedence layer on top of the existing env/global-default
+// pair: a run override still wins over everything, a harness-level setting
+// outranks the workspace, and a workspace override outranks both an operator's
+// managed default (tret Cloud) and the plain env/global-default pair. This is
+// the vocabulary for rendering that layer wherever a factor is shown — the
+// provenance table (`FactorProvenance.tsx`) and the effective-factors table in
+// Settings. Absent on any factor recorded before layered overrides existed, in
+// which case the chip is omitted rather than guessed.
+
+export const FACTOR_LAYERS = [
+  'run_override',
+  'harness',
+  'workspace',
+  'managed',
+  'env',
+  'global_default',
+] as const
+
+export type FactorLayer = (typeof FACTOR_LAYERS)[number]
+
+export interface LayerMeta {
+  label: string
+  /** Badge class — the same palette used for confidence, kept distinct in tone
+   *  (violet/blue for something an operator or workspace chose, gray for a
+   *  plain default) so the two chips read as different questions. */
+  badge: string
+  what: string
+}
+
+export const LAYER_META: Record<string, LayerMeta> = {
+  run_override: {
+    label: 'run override',
+    badge: 'badge-violet',
+    what: 'Supplied directly for this run. The most specific layer there is — it outranks every configured setting.',
+  },
+  harness: {
+    label: 'harness',
+    badge: 'badge-blue',
+    what: "Set on the harness that ran this. Outranks the workspace's own setting, a managed default, and the plain env/global-default pair.",
+  },
+  workspace: {
+    label: 'workspace',
+    badge: 'badge-blue',
+    what: 'Configured in this workspace’s emissions settings (Settings → Emissions factors) — an override the workspace itself chose.',
+  },
+  managed: {
+    label: 'managed',
+    badge: 'badge-violet',
+    what: "Set by the hosting operator for every workspace on this deployment, ahead of the plain env/global-default pair but behind the workspace's own choice.",
+  },
+  env: {
+    label: 'env',
+    badge: 'badge-gray',
+    what: 'Set by an environment variable on this deployment.',
+  },
+  global_default: {
+    label: 'global default',
+    badge: 'badge-gray',
+    what: 'tret’s own shipped default — nothing more specific is configured anywhere.',
+  },
+}
+
+/** Meta for a recorded layer, or `null` when there is none to show — the caller
+ *  omits the chip entirely rather than rendering an "unrecorded" placeholder,
+ *  so old runs (recorded before layered overrides existed) render exactly as
+ *  they did before this concept existed. */
+export function layerMeta(layer: string | null | undefined): LayerMeta | null {
+  if (!layer) return null
+  return LAYER_META[layer] ?? { label: layer, badge: 'badge-gray', what: 'Recorded precedence layer.' }
+}
+
 /** Readable names for the PUE deployment profiles. */
 export const PUE_PROFILE_LABELS: Record<string, string> = {
   hyperscaler_cloud: 'hyperscaler cloud',

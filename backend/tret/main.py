@@ -16,6 +16,7 @@ from tret.api import (
     connections as connections_api,
     docs,
     documents,
+    emissions_settings as emissions_settings_api,
     findings,
     harnesses,
     pack_builder,
@@ -264,6 +265,7 @@ def create_app() -> FastAPI:
     app.include_router(pack_builder.router)
     app.include_router(packs.router)
     app.include_router(settings_api.router)
+    app.include_router(emissions_settings_api.router)
     # Workspace connections (Google Drive / Microsoft 365 OAuth) — always
     # mounted, like workspaces_api above: every provider simply reports
     # `configured: false` (GET /api/connections/providers) until an operator

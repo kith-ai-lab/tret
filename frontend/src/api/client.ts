@@ -359,6 +359,12 @@ export interface EmissionsFactor {
   source_rule?: string
   /** The operator's own note about the factor, when they set one. */
   source_label?: string | null
+  /** Which precedence layer chose this factor's value: `run_override` |
+   *  `harness` | `workspace` | `managed` | `env` | `global_default`. Added
+   *  alongside per-workspace emissions overrides — absent on any factor
+   *  recorded before that existed, which renders with no layer chip rather
+   *  than a guessed one (see `emissions.ts::layerMeta`). */
+  layer?: string
   // pue
   profile?: string
   // embodied_hardware
@@ -496,6 +502,13 @@ export interface EnergyAccounting {
   uncertainty?: EmissionsUncertainty
   factors?: EmissionsFactor[]
   caveats?: EmissionsCaveat[]
+  /** Every precedence layer that contributed a factor on this run/roll-up, in
+   *  no particular order. Added alongside per-workspace emissions overrides;
+   *  absent on runs recorded before that existed. */
+  factor_layers?: string[]
+  /** Which layer chose this run's grid factor specifically — the layer half
+   *  of what `grid_co2e_source` already names the rule for. */
+  grid_co2e_layer?: string
 }
 
 /** One contiguous stretch of a run spent on one model, with its own accounting.
@@ -1438,6 +1451,183 @@ export interface EmissionsAnalytics {
   disclaimer: string
 }
 
+// ── Workspace emissions factor overrides ─────────────────────────────────
+// Per-workspace overrides for the grid/PUE/embodied/band/baseline factors that
+// otherwise come from env vars and tret's own shipped defaults — Settings →
+// Emissions factors (`EmissionsFactorsPanel.tsx`) and the what-if scenario
+// drawer on the Emissions page (`EmissionsScenario.tsx`). GET is open to any
+// workspace member (read-only); PUT/DELETE require admin/owner and 403 for
+// anyone else. Every top-level key of `EmissionsOverrides` is optional, and a
+// block that sets a number requires a non-empty `label` — the server 422s
+// naming the field on violation, and the client validates the same rule before
+// submitting so the round trip is not the first place the error shows up.
+
+export type EmissionsGridBasisValue = 'location_based' | 'market_based' | 'unspecified'
+
+/** One grid factor an operator or workspace configured, with its provenance.
+ *  `label` is required by the server whenever `g_per_kwh` is set. */
+export interface EmissionsGridOverride {
+  g_per_kwh: number
+  basis: EmissionsGridBasisValue
+  label: string
+  url?: string | null
+  as_of?: string | null
+}
+
+/** The provider roster the settings form offers rows for. Not exhaustive of
+ *  every provider tret can route to — just the ones with their own grid
+ *  factor slot in the override schema. */
+export const EMISSIONS_OVERRIDE_PROVIDERS = ['local', 'anthropic', 'kimi', 'openrouter'] as const
+export type EmissionsOverrideProvider = (typeof EMISSIONS_OVERRIDE_PROVIDERS)[number]
+
+export type EmissionsPueLocalProfile = 'workstation' | 'onprem_datacenter'
+
+/** `label` required whenever `cloud` or `local` is set. */
+export interface EmissionsPueOverride {
+  cloud?: number
+  local_profile?: EmissionsPueLocalProfile
+  local?: number
+  label: string
+}
+
+/** `label` required whenever `g_per_run` is set. */
+export interface EmissionsEmbodiedOverride {
+  g_per_run: number
+  label: string
+}
+
+/** The judgment band an operator configures — never a confidence interval; see
+ *  `emissions.ts::BAND_SHORT`. `label` required whenever `low`/`high` are set. */
+export interface EmissionsBandOverride {
+  low?: number
+  high?: number
+  label: string
+}
+
+/** The full override document, one per workspace. GET/PUT/DELETE
+ *  `/api/workspace/settings/emissions` all exchange this shape (empty object
+ *  when the workspace has cleared or never set any overrides). */
+export interface EmissionsOverrides {
+  version?: number
+  grid?: {
+    default?: EmissionsGridOverride
+    providers?: Partial<Record<string, EmissionsGridOverride>>
+  }
+  pue?: EmissionsPueOverride
+  embodied?: EmissionsEmbodiedOverride
+  band?: EmissionsBandOverride
+  baseline_model?: string
+  updated_by?: string
+  updated_at?: string
+}
+
+/** One resolved value in `effective`: what will actually apply to the next
+ *  run, plus which precedence layer produced it and its full citation. */
+export interface EmissionsResolvedValue {
+  value: number | string
+  layer: string
+  source: string
+  label: string | null
+  url: string | null
+  as_of: string | null
+  /** The dotted setting path that changes this value, e.g.
+   *  `workspace.emissions.pue.cloud` — mirrors `EmissionsFactor.setting`. */
+  setting: string
+}
+
+/** The resolved factor set for one provider — "what will apply to the next
+ *  run" — as GET/PUT/DELETE return it keyed by provider name. */
+export interface EmissionsEffectiveFactors {
+  deployment: 'cloud' | 'local'
+  grid: EmissionsResolvedValue
+  grid_basis: string
+  pue: EmissionsResolvedValue
+  pue_profile: string
+  embodied_g: EmissionsResolvedValue
+  band_low: EmissionsResolvedValue
+  band_high: EmissionsResolvedValue
+  baseline_model: EmissionsResolvedValue
+}
+
+/** One shipped-default figure with the citation text the form shows beside its
+ *  input ("default 470 gCO2e/kWh, IEA 2024"). */
+export interface EmissionsShippedDefault {
+  value: number
+  label: string
+  source?: string
+  url?: string | null
+}
+
+/** `shipped_defaults` on the GET/PUT/DELETE response: tret's own numeric
+ *  defaults, mirrored with their citation so the form can show what an empty
+ *  field would fall back to. Keyed defensively (optional) since the exact
+ *  field set is the backend's to define — read what is present, do not assume
+ *  a key that is missing means zero. */
+export interface EmissionsShippedDefaults {
+  grid_default?: EmissionsShippedDefault
+  grid_providers?: Partial<Record<string, EmissionsShippedDefault>>
+  pue_cloud?: EmissionsShippedDefault
+  pue_local?: EmissionsShippedDefault
+  /** The on-prem-facility counterpart to `pue_local`, shown beside the Local
+   *  PUE input when `pue.local_profile` is `onprem_datacenter` — `pue_local`
+   *  stays the hint for the `workstation` profile. */
+  pue_onprem?: EmissionsShippedDefault
+  embodied_g_per_run?: EmissionsShippedDefault
+  band_low?: EmissionsShippedDefault
+  band_high?: EmissionsShippedDefault
+  baseline_model?: EmissionsShippedDefault
+}
+
+/** GET/PUT/DELETE `/api/workspace/settings/emissions` all return this shape —
+ *  PUT and DELETE differ only in what `overrides` holds afterward.
+ *
+ *  `effective` is null and `error` is set when the stored override document no
+ *  longer validates against the current schema (e.g. a field a later version
+ *  removed) — the backend fails open rather than 500ing: `overrides` still
+ *  carries the raw, un-resolved document so the operator can see and fix or
+ *  clear it, but nothing can be safely resolved to "what applies next", so
+ *  `effective` is withheld rather than guessed. */
+export interface EmissionsSettingsResponse {
+  overrides: EmissionsOverrides | Record<string, never>
+  effective: Record<string, EmissionsEffectiveFactors> | null
+  shipped_defaults: EmissionsShippedDefaults
+  error?: string
+}
+
+/** POST `/api/analytics/emissions/whatif` body — a scenario is a partial
+ *  override document, evaluated over the same window the Emissions page is
+ *  already showing. */
+export interface EmissionsWhatifBody {
+  project_id?: string | null
+  days: number
+  factors: Partial<EmissionsOverrides>
+}
+
+/** The difference the scenario would have made. `co2e_g`/`co2e_pct` are null
+ *  under the same rule as `carbon_is_summable` elsewhere: when either side
+ *  spans more than one GHG Protocol basis, there is no single carbon figure to
+ *  difference. Energy and money are unaffected — see `SUMMABLE_ACROSS_BASES_NOTE`. */
+export interface EmissionsWhatifDelta {
+  co2e_g: number | null
+  co2e_pct: number | null
+  energy_wh: number
+  avoided_usd: number
+}
+
+export interface EmissionsWhatifResult {
+  recorded: EmissionsAnalytics
+  scenario: EmissionsAnalytics
+  delta: EmissionsWhatifDelta
+  runs_recomputed: number
+  runs_skipped: number
+  basis: string
+  /** Present when the workspace's own stored override document could not be
+   *  applied to this scenario (e.g. it no longer validates) — the recompute
+   *  still ran, but layered on less than the workspace normally configures.
+   *  Absent when there is nothing to warn about. */
+  warnings?: string[]
+}
+
 // ── Reference documentation ──────────────────────────────────────────────
 // GET /api/docs/{slug}. Markdown read out of the repository's docs/ directory on
 // every request, so the prose shown in-product is the prose in the repo — there
@@ -1849,12 +2039,35 @@ export interface ReviewDetail extends MarketplacePackVersion {
 
 export class ApiError extends Error {
   status: number
+  /** The raw `detail` value from a JSON error body, when the response was JSON
+   *  and carried one. Usually a plain string (already folded into `message`),
+   *  but some 403s shape it as an object instead — an extension workspace-gate
+   *  refusal sends `{ reason, detail }` rather than a string (see
+   *  `EmissionsFactorsPanel.tsx`'s gate-vs-role 403 handling) — so a caller
+   *  that needs more than the stringified `message` can inspect this.
+   *  `undefined` when the body was not JSON or had no `detail` key. */
+  detail?: unknown
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, detail?: unknown) {
     super(message)
     this.status = status
+    this.detail = detail
     this.name = 'ApiError'
   }
+}
+
+/** A 403's own text, when it came from a registered extension's workspace-gate
+ *  refusal (`{ detail: { reason, detail } }`) rather than a plain role check
+ *  (`{ detail: "<string>" }`, already folded into `error.message`). `null` for
+ *  every other shape, so a caller falls back to its own generic role message. */
+export function gateRefusalDetail(error: ApiError | null | undefined): string | null {
+  if (!error || error.status !== 403) return null
+  const detail = error.detail
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const text = (detail as Record<string, unknown>).detail
+    if (typeof text === 'string' && text.trim() !== '') return text
+  }
+  return null
 }
 
 interface RequestOptions {
@@ -1877,16 +2090,17 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const res = await fetch(`/api${path}`, init)
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`
+    let detail: unknown
     try {
       const data: unknown = await res.json()
       if (data && typeof data === 'object' && 'detail' in data) {
-        const detail = (data as { detail: unknown }).detail
+        detail = (data as { detail: unknown }).detail
         message = typeof detail === 'string' ? detail : JSON.stringify(detail)
       }
     } catch {
       /* non-JSON error body */
     }
-    throw new ApiError(res.status, message)
+    throw new ApiError(res.status, message, detail)
   }
   return (await res.json()) as T
 }
@@ -2194,4 +2408,19 @@ export const api = {
       method: 'POST',
       body: { provider, items },
     }),
+
+  // workspace emissions factor overrides (Settings → Emissions factors, and
+  // the what-if scenario drawer on the Emissions page). GET is any member;
+  // PUT/DELETE require admin/owner and 403 otherwise.
+  getEmissionsSettings: () =>
+    request<EmissionsSettingsResponse>('/workspace/settings/emissions'),
+  setEmissionsSettings: (body: EmissionsOverrides) =>
+    request<EmissionsSettingsResponse>('/workspace/settings/emissions', {
+      method: 'PUT',
+      body,
+    }),
+  clearEmissionsSettings: () =>
+    request<EmissionsSettingsResponse>('/workspace/settings/emissions', { method: 'DELETE' }),
+  emissionsWhatif: (body: EmissionsWhatifBody) =>
+    request<EmissionsWhatifResult>('/analytics/emissions/whatif', { method: 'POST', body }),
 }

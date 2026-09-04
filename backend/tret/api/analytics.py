@@ -29,8 +29,10 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta, timezone
 from decimal import Decimal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,8 +46,9 @@ from tret.config import (
 )
 from tret.db.engine import get_db
 from tret.db.models import EgressCall, Harness, MethodRun, Run, RunOutcome, User, utcnow
+from tret.engine.extensions import get_extension_registry
 from tret.net import egress_status
-from tret.providers.catalog import co2e_grams
+from tret.providers.catalog import co2e_grams, get_catalog
 from tret.router_llm.outcomes import NON_QUALITY_CLASSES, OUTCOME_SCORE_VERSION
 from tret.router_llm.priors import (
     HALF_LIFE_DAYS,
@@ -54,7 +57,12 @@ from tret.router_llm.priors import (
     summarize,
 )
 from tret.services import transcript
-from tret.services.emissions import resolve_baseline_model
+from tret.services.emission_factors import EmissionsOverrides, build_factor_set
+from tret.services.emission_settings import (
+    validation_detail as _validation_detail,
+    workspace_emissions_layers,
+)
+from tret.services.emissions import combine_accountings, energy_accounting, resolve_baseline_model
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -718,8 +726,38 @@ async def _emissions_response(
 ):
     """Estimated emissions over the window, summed as recorded.
 
-    Totals are plain sums of each run's stored figures — never recomputed at
-    today's settings. A window whose runs were recorded under differing factors
+    A thin query-then-rollup wrapper — see `_rollup_emissions` for the actual
+    aggregation, factored out so `POST /emissions/whatif` (`_emissions_whatif_
+    response`) can run the identical rollup twice: once over each run's stored
+    accounting, once over a recomputed one, and never risk the two totals
+    being produced by different code.
+    """
+    since = utcnow() - timedelta(days=days) if days else None
+    rows = await _emissions_rows(db, project_id, since)
+    return await _rollup_emissions(db, project_id, days, rows)
+
+
+async def _rollup_emissions(
+    db: AsyncSession,
+    project_id: uuid.UUID | None,
+    days: int | None,
+    rows: list,
+    *,
+    rows_scanned: int | None = None,
+) -> dict:
+    """One emissions rollup — `totals`, `by_model`, `by_harness`, `by_day`,
+    `by_basis`, `factors`, `scan`, `disclaimer` — over `rows`, each a
+    `(harness_id, model_used, accounting, created_at)` tuple exactly like
+    `_emissions_rows` returns.
+
+    Totals are plain sums of each run's `accounting` block, whatever produced
+    it — a plain sum of *stored* figures for `GET /emissions`'s own use
+    (`_emissions_response` above), or a sum of *recomputed* ones for
+    `POST /emissions/whatif`'s `scenario` side. This function does not care
+    which; it is the one place both call so the two totals can never be
+    computed by drifting logic.
+
+    A window whose runs were recorded (or recomputed) under differing factors
     (a changed grid intensity, a per-provider factor, or a mix of cloud and
     self-hosted runs, which use different factors by design) sets
     `factors.mixed_factors` and says so in the disclaimer: there is no single
@@ -737,11 +775,11 @@ async def _emissions_response(
 
     Bounded scan: the most recent EMISSIONS_RUN_SCAN_LIMIT runs in the window,
     reported in `scan`. Runs with no estimate are excluded from every total and
-    counted in `totals.runs_without_estimate`.
+    counted in `totals.runs_without_estimate`. `rows_scanned` defaults to
+    `len(rows)` (`GET /emissions`'s own case); the what-if endpoint passes the
+    size of its original, unfiltered fetch explicitly, because its `rows` have
+    already had catalog-missing runs removed from them before this is called.
     """
-    since = utcnow() - timedelta(days=days) if days else None
-    rows = await _emissions_rows(db, project_id, since)
-
     totals = _emissions_bucket()
     without_estimate = 0
     without_baseline = 0
@@ -958,8 +996,11 @@ async def _emissions_response(
         },
         "scan": {
             "limit": EMISSIONS_RUN_SCAN_LIMIT,
-            "rows_scanned": len(rows),
-            "truncated": len(rows) >= EMISSIONS_RUN_SCAN_LIMIT,
+            "rows_scanned": rows_scanned if rows_scanned is not None else len(rows),
+            "truncated": (
+                rows_scanned if rows_scanned is not None else len(rows)
+            )
+            >= EMISSIONS_RUN_SCAN_LIMIT,
         },
         "estimated": True,
         "disclaimer": (
@@ -994,6 +1035,324 @@ async def _emissions_response(
             )
         ),
     }
+
+
+# ── emissions: read-only what-if recompute ───────────────────────────────────
+# "What would this window's carbon look like under a different set of factors?"
+# — without writing anything, and without ever touching a stored run. `recorded`
+# is the same rollup as GET /emissions (over the runs this scenario can actually
+# recompute — see below); `scenario` is the identical rollup over a recomputed
+# `energy_accounting` block per run, built under the request's `factors`
+# document layered on top of this workspace's own configured layers. Neither
+# side is persisted: this endpoint never calls `db.add`/`db.commit`/`db.flush`.
+#
+# A run whose model is no longer in the catalog cannot be recomputed at all —
+# there is no `ModelInfo` to feed `energy_accounting` — so it is excluded from
+# **both** `recorded` and `scenario` (not just `scenario`), counted in
+# `runs_skipped`, so the two totals stay comparable over the same population of
+# runs rather than `recorded` covering a superset `scenario` cannot match.
+class EmissionsWhatIfRequest(BaseModel):
+    """`factors` is deliberately typed as a plain dict rather than
+    `EmissionsOverrides` itself: the handler validates it by hand so an invalid
+    document reports a plain validation-message string as the 422 `detail`
+    (see the route below), instead of FastAPI's own structured per-field error
+    body that automatic model validation would produce.
+    """
+
+    project_id: uuid.UUID | None = None
+    days: int = Field(default=30, ge=1, le=3650)
+    factors: dict[str, Any] = Field(default_factory=dict)
+
+
+async def _whatif_rows(db: AsyncSession, project_id: uuid.UUID | None, since) -> list:
+    """Everything `_whatif_accounting` needs to recompute one run: its stored
+    accounting (for `recorded`), and the token counts and model(s) it actually
+    used (to recompute `scenario`). Same scoping and bound as `_emissions_rows`
+    — a run absent from that query's result is absent from this one too.
+    """
+    q = (
+        select(
+            Run.harness_id,
+            Run.model_used,
+            Run.energy_accounting,
+            Run.created_at,
+            Run.input_tokens,
+            Run.output_tokens,
+            Run.cache_read_tokens,
+            Run.cache_write_tokens,
+            Run.model_timeline,
+        )
+        .order_by(Run.created_at.desc())
+        .limit(EMISSIONS_RUN_SCAN_LIMIT)
+    )
+    if project_id is not None:
+        q = q.where(Run.project_id == project_id)
+    if since is not None:
+        q = q.where(Run.created_at >= since)
+    return (await db.execute(q)).all()
+
+
+def _whatif_accounting(
+    *,
+    model_used: str | None,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
+    model_timeline: list | None,
+    catalog,
+    workspace_doc: dict[str, Any] | None,
+    managed_doc: dict[str, Any] | None,
+    factors_doc: dict[str, Any],
+    fs_cache: dict,
+) -> dict | None:
+    """The scenario `energy_accounting` block for one run under `factors_doc`,
+    or `None` if a model it used is missing from the catalog today (the caller
+    excludes such a run from both `recorded` and `scenario`).
+
+    `factors_doc` — the request's scenario document — is passed as
+    `build_factor_set`'s `harness_settings`: the reserved, more-specific-than-
+    workspace layer nothing else populates yet, which is exactly the "this
+    scenario on top of what the workspace already has configured" semantics a
+    what-if recompute needs. It shows up as `"harness"` in the recomputed
+    block's `grid_co2e_layer`/`factor_layers` — the response's top-level
+    `scenario.layer_note` says what that means here.
+
+    A run that switched model mid-run (`model_timeline`) is mirrored segment by
+    segment, exactly as `engine/harness.py`'s `ModelSegment.accounting()` /
+    `_book_usage` produced the stored block: one `energy_accounting` call per
+    segment, each against its own model and that model's own provider factor
+    set, combined with `combine_accountings` — never one call over the run's
+    running totals against whichever model happened to be current.
+
+    `fs_cache` is keyed on `(provider, model_id)`, not `provider` alone: a
+    `model_overrides` entry in any layer (`workspace_doc`, or a `factors_doc`
+    scenario carrying its own) is resolved *per model id*
+    (`build_factor_set`'s `model_id`), so two segments sharing a provider but
+    using different models must never share a cached `FactorSet` — one
+    segment's model override would otherwise silently apply to the other's.
+    """
+
+    def _factor_set(provider: str | None, model_id: str | None):
+        key = (provider, model_id)
+        if key not in fs_cache:
+            fs_cache[key] = build_factor_set(
+                provider=provider,
+                harness_settings=factors_doc,
+                workspace_settings=workspace_doc,
+                managed_settings=managed_doc,
+                model_id=model_id,
+            )
+        return fs_cache[key]
+
+    if model_timeline:
+        blocks = []
+        for seg in model_timeline:
+            model = catalog.get(seg.get("model"))
+            if model is None:
+                return None
+            blocks.append(
+                energy_accounting(
+                    model,
+                    seg.get("input_tokens") or 0,
+                    seg.get("output_tokens") or 0,
+                    seg.get("cache_read_tokens") or 0,
+                    seg.get("cache_write_tokens") or 0,
+                    factors=_factor_set(model.provider, model.id),
+                    catalog=catalog,
+                )
+            )
+        return combine_accountings(blocks)
+
+    model = catalog.get(model_used) if model_used else None
+    if model is None:
+        return None
+    return energy_accounting(
+        model,
+        input_tokens or 0,
+        output_tokens or 0,
+        cache_read_tokens or 0,
+        cache_write_tokens or 0,
+        factors=_factor_set(model.provider, model.id),
+        catalog=catalog,
+    )
+
+
+LAYER_NOTE = (
+    "Scenario factors are layered as the 'harness' precedence rung (run_override "
+    "> harness > workspace > managed > env > global_default) — the most specific "
+    "layer nothing else populates today. 'harness' in this response's "
+    "grid_co2e_layer/factor_layers therefore means this request's one-off "
+    "scenario document, not a saved per-harness override; nothing else writes "
+    "that layer."
+)
+
+
+@router.post("/emissions/whatif")
+async def emissions_whatif(
+    body: EmissionsWhatIfRequest,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """What this window's emissions would look like under a different set of
+    factors — computed on the fly, never written anywhere.
+
+    A thin workspace-scoping-and-validation wrapper — see
+    `_emissions_whatif_response` for the recompute itself. Validates `factors`
+    against `EmissionsOverrides` by hand (422, the validation message as a
+    plain string) and checks the `emissions_whatif` workspace gate (403 on
+    refusal) before anything else runs.
+    """
+    try:
+        EmissionsOverrides(**(body.factors or {}))
+    except ValidationError as exc:
+        raise HTTPException(422, detail=_validation_detail(exc)) from exc
+
+    gate = await get_extension_registry().check_workspace_gate(db, ctx.id, "emissions_whatif")
+    if not gate.allowed:
+        raise HTTPException(403, detail={"reason": gate.reason, "detail": gate.detail})
+
+    return await _emissions_whatif_response(
+        project_id=await _scoped_project_id(db, ctx, body.project_id),
+        days=body.days,
+        factors_doc=body.factors or {},
+        ctx=ctx,
+        db=db,
+    )
+
+
+async def _emissions_whatif_response(
+    project_id: uuid.UUID | None,
+    days: int | None,
+    factors_doc: dict[str, Any],
+    ctx: WorkspaceContext,
+    db: AsyncSession,
+) -> dict:
+    """`recorded` (the stored rollup) and `scenario` (the same rollup, over a
+    recomputed accounting block per run) for the identical set of runs, plus
+    their `delta`. Read-only throughout: no `db.add`/`commit`/`flush` anywhere
+    in this call graph.
+    """
+    since = utcnow() - timedelta(days=days) if days else None
+    rows = await _whatif_rows(db, project_id, since)
+    catalog = get_catalog()
+    workspace_doc, managed_doc = await workspace_emissions_layers(db, ctx.id)
+
+    # A stored workspace document that no longer validates (a downgrade, a
+    # hand-edited row) must not 500 a read-only recompute — treat it as no
+    # workspace layer for this scenario (the same fallback a run's own
+    # `HarnessEngine._factors_for` gives a broken document) and say so, rather
+    # than silently pricing every run one layer thinner than the workspace
+    # actually configures.
+    warnings: list[str] = []
+    if workspace_doc:
+        try:
+            EmissionsOverrides(**workspace_doc)
+        except ValidationError as exc:
+            warnings.append(
+                "This workspace's stored emissions override document no longer "
+                f"validates ({_validation_detail(exc)}); the scenario below was "
+                "computed with no workspace layer."
+            )
+            workspace_doc = None
+
+    fs_cache: dict = {}
+    recorded_rows: list = []
+    scenario_rows: list = []
+    runs_skipped = 0
+    runs_recomputed = 0
+
+    for (
+        harness_id,
+        model_used,
+        accounting,
+        created_at,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        model_timeline,
+    ) in rows:
+        rec = _recorded_emissions(accounting)
+        if rec is None:
+            # No stored estimate at all — nothing to recompute either way.
+            # Carried through unchanged on both sides so `_rollup_emissions`
+            # counts it in `runs_without_estimate` identically on each.
+            recorded_rows.append((harness_id, model_used, accounting, created_at))
+            scenario_rows.append((harness_id, model_used, accounting, created_at))
+            continue
+
+        scenario_accounting = _whatif_accounting(
+            model_used=model_used,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            model_timeline=model_timeline,
+            catalog=catalog,
+            workspace_doc=workspace_doc,
+            managed_doc=managed_doc,
+            factors_doc=factors_doc,
+            fs_cache=fs_cache,
+        )
+        if scenario_accounting is None:
+            runs_skipped += 1
+            continue
+        runs_recomputed += 1
+        recorded_rows.append((harness_id, model_used, accounting, created_at))
+        scenario_rows.append((harness_id, model_used, scenario_accounting, created_at))
+
+    recorded = await _rollup_emissions(db, project_id, days, recorded_rows, rows_scanned=len(rows))
+    scenario = await _rollup_emissions(db, project_id, days, scenario_rows, rows_scanned=len(rows))
+    scenario["layer_note"] = LAYER_NOTE
+
+    recorded_co2e = recorded["totals"]["co2e_g"]
+    scenario_co2e = scenario["totals"]["co2e_g"]
+    if recorded_co2e is None or scenario_co2e is None:
+        delta_co2e_g = None
+        delta_co2e_pct = None
+    else:
+        delta_co2e_g = round(scenario_co2e - recorded_co2e, 6)
+        # `round(x)` with no ndigits returns an int — deliberate, not an
+        # oversight: docs/emissions-methodology.md's carbon-percentage
+        # rounding rule keeps carbon percentages coarse (whole numbers), unlike
+        # the one-decimal money percentages elsewhere in this block. The
+        # frontend prints this value as a whole number on the strength of that
+        # contract, so keep it an int here.
+        delta_co2e_pct = round((delta_co2e_g / recorded_co2e) * 100) if recorded_co2e else None
+
+    delta = {
+        "co2e_g": delta_co2e_g,
+        "co2e_pct": delta_co2e_pct,
+        "energy_wh": round(scenario["totals"]["energy_wh"] - recorded["totals"]["energy_wh"], 6),
+        "avoided_usd": round(
+            scenario["totals"]["avoided_usd"] - recorded["totals"]["avoided_usd"], 6
+        ),
+    }
+
+    basis = (
+        "Scenario figures are computed, not recorded. They never replace a "
+        "run's stored accounting."
+    )
+    if runs_skipped:
+        basis += (
+            f" {runs_skipped} run(s) were excluded from both `recorded` and "
+            "`scenario`: their model is no longer in the catalog, so there is "
+            "nothing to recompute them against."
+        )
+
+    result = {
+        "recorded": recorded,
+        "scenario": scenario,
+        "delta": delta,
+        "runs_recomputed": runs_recomputed,
+        "runs_skipped": runs_skipped,
+        "basis": basis,
+    }
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 # ── routing track record ─────────────────────────────────────────────────────

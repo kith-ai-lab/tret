@@ -307,6 +307,14 @@ class ModelRouter:
         n_documents: int,
         est_input_tokens: int,
         run_override: str | None = None,
+        # The run's workspace/managed emissions-override documents
+        # (tret/services/emission_settings.py), passed through so the
+        # routing call's own `overhead_call` (below) records its energy under
+        # the same configured layers as the run it serves, rather than
+        # resolving its own from `settings` alone. Both `None` (every caller
+        # before this parameter existed) is exactly that fallback.
+        emissions_workspace_doc: dict | None = None,
+        emissions_managed_doc: dict | None = None,
     ) -> RoutingDecision:
         objective = objective_of(model_policy)
         max_tier = _max_cost_tier(model_policy)
@@ -410,7 +418,24 @@ class ModelRouter:
                     # were spent either way, and a router that keeps returning
                     # invalid choices is exactly the case where the unbilled cost
                     # would otherwise be highest.
-                    spend = overhead_call("routing", router_info, completion.usage)
+                    from tret.services.emission_settings import factor_set_for
+
+                    try:
+                        routing_factors = factor_set_for(
+                            router_info.provider,
+                            workspace_doc=emissions_workspace_doc,
+                            managed_doc=emissions_managed_doc,
+                            model_id=router_info.id,
+                        )
+                    except Exception:
+                        # Same fallback the engine gives a broken workspace
+                        # document for the run's own model (harness.py's
+                        # `_factors_for`): a routing call must still be
+                        # accounted, just without the configured layers.
+                        routing_factors = None
+                    spend = overhead_call(
+                        "routing", router_info, completion.usage, factors=routing_factors
+                    )
                     chosen = result.get("model_id")
                     if chosen in candidate_ids:
                         return RoutingDecision(

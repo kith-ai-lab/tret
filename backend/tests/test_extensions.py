@@ -342,6 +342,123 @@ def test_oauth_client_provider_receives_the_provider_string():
     assert seen == ["gdrive", "m365"]
 
 
+# ── factor layer providers (managed emissions overrides) ────────────────────
+async def test_with_no_factor_layer_providers_registered_returns_none_and_opens_no_session(
+    monkeypatch,
+):
+    import tret.db.engine as db_engine_module
+
+    def _must_not_be_called():
+        raise AssertionError("must not open a session when nothing is registered")
+
+    monkeypatch.setattr(db_engine_module, "get_session_factory", _must_not_be_called)
+    ext = ExtensionAPI(None)
+    result = await ext.get_factor_layer(uuid.uuid4())
+    assert result is None
+
+
+async def test_the_first_non_none_factor_layer_provider_wins():
+    ext = ExtensionAPI(None)
+
+    async def declines(db, workspace_id):
+        return None
+
+    async def provides(db, workspace_id):
+        return {"grid": {"default": {"g_per_kwh": 100, "label": "managed"}}}
+
+    ext.add_factor_layer_provider(declines)
+    ext.add_factor_layer_provider(provides)
+    result = await ext.get_factor_layer(uuid.uuid4())
+    assert result == {"grid": {"default": {"g_per_kwh": 100, "label": "managed"}}}
+
+
+async def test_a_later_factor_layer_provider_is_never_asked_once_an_earlier_one_answers():
+    ext = ExtensionAPI(None)
+    calls = []
+
+    async def first(db, workspace_id):
+        return {"grid": {"default": {"g_per_kwh": 50, "label": "first"}}}
+
+    async def second(db, workspace_id):
+        calls.append(workspace_id)
+        return {"grid": {"default": {"g_per_kwh": 60, "label": "second"}}}
+
+    ext.add_factor_layer_provider(first)
+    ext.add_factor_layer_provider(second)
+    result = await ext.get_factor_layer(uuid.uuid4())
+    assert result["grid"]["default"]["g_per_kwh"] == 50
+    assert calls == []
+
+
+async def test_a_raising_factor_layer_provider_fails_open_and_later_providers_still_run(caplog):
+    ext = ExtensionAPI(None)
+
+    async def raises(db, workspace_id):
+        raise RuntimeError("boom")
+
+    async def provides_after(db, workspace_id):
+        return {"grid": {"default": {"g_per_kwh": 70, "label": "after"}}}
+
+    ext.add_factor_layer_provider(raises)
+    ext.add_factor_layer_provider(provides_after)
+    with caplog.at_level(logging.ERROR, logger="tret.extensions"):
+        result = await ext.get_factor_layer(uuid.uuid4())
+    assert result["grid"]["default"]["g_per_kwh"] == 70
+    assert "raised" in caplog.text
+
+
+async def test_an_invalid_document_is_treated_as_none_and_logs_a_warning(caplog):
+    """Missing the label `GridBlock` requires whenever `g_per_kwh` is set —
+    `EmissionsOverrides` rejects it, and the seam must fail open rather than
+    let a broken managed document reach `build_factor_set` and break a run."""
+    ext = ExtensionAPI(None)
+
+    async def invalid(db, workspace_id):
+        return {"grid": {"default": {"g_per_kwh": 42}}}
+
+    ext.add_factor_layer_provider(invalid)
+    with caplog.at_level(logging.WARNING, logger="tret.extensions"):
+        result = await ext.get_factor_layer(uuid.uuid4())
+    assert result is None
+    assert "validation" in caplog.text.lower()
+
+
+async def test_an_invalid_document_falls_through_to_the_next_provider(caplog):
+    ext = ExtensionAPI(None)
+
+    async def invalid(db, workspace_id):
+        return {"grid": {"default": {"g_per_kwh": 42}}}  # no label -> fails validation
+
+    async def valid_after(db, workspace_id):
+        return {"grid": {"default": {"g_per_kwh": 55, "label": "fallback"}}}
+
+    ext.add_factor_layer_provider(invalid)
+    ext.add_factor_layer_provider(valid_after)
+    with caplog.at_level(logging.WARNING, logger="tret.extensions"):
+        result = await ext.get_factor_layer(uuid.uuid4())
+    assert result == {"grid": {"default": {"g_per_kwh": 55, "label": "fallback"}}}
+
+
+async def test_with_no_factor_layer_providers_at_all_returns_none():
+    ext = ExtensionAPI(None)
+    result = await ext.get_factor_layer(uuid.uuid4())
+    assert result is None
+
+
+async def test_factor_layer_provider_receives_the_workspace_id():
+    ext = ExtensionAPI(None)
+    seen = []
+    workspace_id = uuid.uuid4()
+
+    async def records(db, wid):
+        seen.append(wid)
+        return None
+
+    ext.add_factor_layer_provider(records)
+    await ext.get_factor_layer(workspace_id)
+    assert seen == [workspace_id]
+
+
 # ── startup tasks ──────────────────────────────────────────────────────────────
 async def test_startup_tasks_run_in_registration_order():
     ext = ExtensionAPI(None)

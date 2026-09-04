@@ -153,10 +153,20 @@ class ModelInfo:
     energy_wh_per_mtok: Decimal | None = None
     # Billions of active parameters per forward pass — for a mixture-of-experts
     # model, the active subset, not the total. Unpublished for every closed
-    # model here, so this is opt-in and unset by default. Read by nothing yet:
-    # a later energy strategy (EcoLogits' active-parameter formula, see the
-    # models.yaml header) will prefer it over energy_class when present.
+    # model here, so this is opt-in and unset by default. Read by
+    # `emissions._energy_constant_and_flags` when a run's `energy_strategy` is
+    # `"active_params"` and this model has no explicit `energy_wh_per_mtok`.
     active_params_b: float | None = None
+    # Was `energy_wh_per_mtok` set explicitly (a real `models.yaml` constant,
+    # an operator's own metered figure) rather than derived at construction by
+    # the class ladder? Set in `__post_init__` *before* the bake below, so it
+    # is the only reliable way to tell the two apart once construction has
+    # finished — `energy_wh_per_mtok is not None` is true either way, which is
+    # exactly the bug this field exists to fix (see
+    # `emissions._energy_constant_and_flags`'s "explicit constant wins" rung:
+    # checking `is not None` there made it fire for every model, explicit or
+    # not, and the active-parameter branch below it unreachable).
+    energy_wh_per_mtok_explicit: bool = False
 
     def __post_init__(self) -> None:
         if self.energy_class not in ENERGY_CLASS_WH_PER_MTOK:
@@ -167,6 +177,7 @@ class ModelInfo:
             raise ValueError(
                 f"active_params_b must be positive and finite, got {self.active_params_b!r}"
             )
+        self.energy_wh_per_mtok_explicit = self.energy_wh_per_mtok is not None
         if self.energy_wh_per_mtok is None:
             # Via the emissions seam rather than the class table directly, so a
             # future size-based estimator (EcoLogits' active-parameter formula,
@@ -252,6 +263,7 @@ class ModelInfo:
             "released": self.released,
             "energy_class": self.energy_class,
             "energy_wh_per_mtok": float(self.energy_wh_per_mtok),
+            "energy_wh_per_mtok_explicit": self.energy_wh_per_mtok_explicit,
             # Added: the per-bucket figures, so a picker can show that a
             # long-prompt task costs far less than a long-answer one.
             "energy_wh_per_mtok_input": float(

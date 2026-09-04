@@ -62,6 +62,8 @@ imports this module at import time; keep it that way.
 """
 from __future__ import annotations
 
+import dataclasses
+import math
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -78,6 +80,7 @@ from tret.config import (
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tret.providers.base import Usage
     from tret.providers.catalog import ModelCatalog, ModelInfo
+    from tret.services.emission_factors import FactorSet
 
 # ── the calibration dataset ──────────────────────────────────────────────────
 # Jegham, Abdelatti, Elmoubarki & Hendawi, "How Hungry is AI? Benchmarking
@@ -234,7 +237,7 @@ ECOLOGITS_ACTIVE_PARAM_MODEL = {
     "beta": -1.12e-2,
     "gamma": 4.05e-5,
     "default_batch_size": 64,
-    "form": "Wh/output_token ~ alpha x active_params + beta, with exp decay in batch size",
+    "form": "alpha * exp(beta * B) * active_params_b + gamma  (Wh per output token; per GPU, GPU energy only)",
     "source": "EcoLogits (GenAI Impact), published fitted constants",
     "url": "https://ecologits.ai/latest/methodology/llm_inference/",
 }
@@ -656,21 +659,232 @@ def is_reasoning_class(energy_class: str) -> bool:
     return energy_class == REASONING_ENERGY_CLASS
 
 
-def wh_per_mtok_for_model(model: ModelInfo) -> Decimal:
-    """The per-model energy constant, and the seam a better estimator plugs into.
-
-    Today: an explicit `energy_wh_per_mtok` (a real measurement for the
-    operator's own deployment) wins, otherwise the model's calibrated class
-    constant. Tomorrow: an active-parameter model such as EcoLogits' fitted
-    formula (`ECOLOGITS_ACTIVE_PARAM_MODEL`) would slot in here, reading an
-    `active_params_b` off the catalog entry and falling back to the class ladder
-    when it is unknown. Every caller goes through this function so that swap
-    touches nothing else.
+@dataclasses.dataclass(frozen=True)
+class EnergyConstant:
+    """The per-token energy constant a run priced its tokens at, and how it was
+    reached — what `energy_accounting`'s "energy_class" factor record is built
+    from, so that record can never drift from the number actually used.
     """
+
+    wh_per_mtok: Decimal
+    strategy: str  # one of emission_factors.EnergyStrategy, or "measured" for an override
+    confidence: str  # exact | structural | calibrated | low | placeholder | excluded
+    source: str
+    url: str | None
+    date: str | None
+    note: str
+    anchor: str | None  # e.g. "EcoLogits", or the Jegham anchor model, or None
+    label: str | None  # an operator's own label for an override, else None
+
+
+def _class_ladder_note(energy_class: str) -> str:
+    """The "how this class constant was reached" prose, unchanged from what
+    `factor_records` has always said for the `energy_class` record — pulled
+    out so both the class-ladder and (when it falls back) the active-parameter
+    path can produce it identically.
+    """
+    calibration = ENERGY_CLASS_CALIBRATION.get(energy_class, {})
+    anchor = calibration.get("anchor_model")
+    note = (
+        f"Least-squares fit of Wh = a x input + b x output over the three published "
+        f"prompt shapes for {anchor}; b = {calibration.get('fitted_wh_per_mtok')} "
+        f"Wh/Mtok is what this class is anchored on."
+        if anchor
+        else (
+            "No measured anchor for this class: interpolated one geometric step "
+            "above the class below it. The weakest constant in the ladder."
+        )
+    )
+    if is_reasoning_class(energy_class):
+        note += (
+            " Reasoning tier: several providers omit hidden thinking tokens from the "
+            "billed output count tret reads, so energy per *visible* output token is "
+            "inflated for these models. That bias is real and one-sided, not absorbed."
+        )
+    return note
+
+
+def _class_ladder_energy_constant(model: ModelInfo) -> EnergyConstant:
+    """Today's behavior, verbatim: an explicit `model.energy_wh_per_mtok` (set
+    in `models.yaml`, or already derived from the class ladder at catalog
+    construction — the two are indistinguishable by the time a run reads this
+    field, and `factor_records` has never distinguished them either) wins,
+    otherwise the model's calibrated class constant. Confidence, source, url,
+    date and note all come from the model's `energy_class` calibration either
+    way — that is `factor_records`'s existing rule, kept exactly.
+    """
+    energy_class = getattr(model, "energy_class", DEFAULT_ENERGY_CLASS)
     explicit = getattr(model, "energy_wh_per_mtok", None)
-    if explicit is not None:
-        return _d(explicit)
-    return wh_per_mtok_for_class(getattr(model, "energy_class", DEFAULT_ENERGY_CLASS))
+    wh_per_mtok = _d(explicit) if explicit is not None else wh_per_mtok_for_class(energy_class)
+    calibration = ENERGY_CLASS_CALIBRATION.get(energy_class, {})
+    return EnergyConstant(
+        wh_per_mtok=wh_per_mtok,
+        strategy="class_ladder",
+        confidence="calibrated" if calibration.get("measured") else "low",
+        source=JEGHAM_2025["citation"] + " — least-squares fit by tret",
+        url=JEGHAM_2025["url"],
+        date=JEGHAM_2025["date"],
+        note=_class_ladder_note(energy_class),
+        anchor=calibration.get("anchor_model"),
+        label=None,
+    )
+
+
+def _active_params_energy_constant(active_params_b: float) -> EnergyConstant:
+    """EcoLogits' published GPU energy model (`ECOLOGITS_ACTIVE_PARAM_MODEL`):
+
+        E_gpu_per_output_token(Wh) = alpha x exp(beta x B) x active_params_b + gamma
+
+    at `batch_size = default_batch_size` (B), converted to Wh per million
+    output-equivalent tokens (x1e6) to match the ladder's unit. At tret's
+    published constants and B=64 this yields (Wh/Mtok, rounded): ~44.5 (7B),
+    ~80.5 (70B), ~140.5 (175B), ~271.9 (405B) — positive and monotone in
+    `active_params_b` for every real model, unlike the misapplied form this
+    replaced (which was negative for any plausible model and floored at the
+    S-class constant for almost everything it was asked to price).
+
+    **Scope, stated plainly — this is why confidence is `"low"`, not
+    `"calibrated"`.** EcoLogits' own `f_E` is per-GPU and GPU-energy only.
+    Their pipeline multiplies this per-GPU figure by however many GPUs the
+    model needs (derived from total parameter count and per-GPU memory) and
+    adds a separate server/host energy term before the result is comparable to
+    a whole-request figure. tret has neither of those inputs — no GPU count,
+    no server-energy term — and feeds this single-GPU number straight into the
+    same "whole-request Wh per Mtok" slot the class ladder fills. That is a
+    systematic UNDERCOUNT: 271.9 Wh/Mtok for a ~405B-active-parameter model
+    sits far below the L-class constant (2,600 Wh/Mtok, fitted from Claude 3.7
+    Sonnet — a comparably sized served model). Lifting this path to
+    `"calibrated"` would need the missing GPU-count term (computable from
+    total parameters and per-GPU memory, neither of which tret's catalog
+    carries today) and a server/host energy term added on top — see
+    docs/emissions-methodology.md's "The active-parameter formula, and its
+    stated assumption".
+    """
+    const = ECOLOGITS_ACTIVE_PARAM_MODEL
+    batch = const["default_batch_size"]
+    wh_per_token = (
+        const["alpha"] * math.exp(const["beta"] * batch) * active_params_b + const["gamma"]
+    )
+    wh_per_mtok = Decimal(str(wh_per_token * 1_000_000))
+    note = (
+        f"EcoLogits' published fitted GPU-energy constants ({const['form']}), at "
+        f"active_params_b={active_params_b} and batch_size={batch}. This is a "
+        "per-GPU, GPU-energy-only figure: EcoLogits' own pipeline multiplies it by "
+        "the GPU count the model needs and adds server/host energy on top before "
+        "comparing it to a whole-request figure; tret has neither term, so this "
+        "systematically UNDERSTATES the run's real energy (e.g. this model's "
+        f"{_f(wh_per_mtok, 1)} Wh/Mtok against the L-class 2,600 Wh/Mtok fitted "
+        "from a comparably sized served model). Not a measurement — see "
+        "docs/emissions-methodology.md's \"The active-parameter formula, and its "
+        "stated assumption\"."
+    )
+    return EnergyConstant(
+        wh_per_mtok=wh_per_mtok,
+        strategy="active_params",
+        confidence="low",
+        source=const["source"],
+        url=const["url"],
+        date=None,
+        note=note,
+        anchor="EcoLogits",
+        label=None,
+    )
+
+
+def _model_override_energy_constant(override, layer: str) -> EnergyConstant:
+    """A `model_overrides.<id>` entry (an `emission_factors.ModelOverride`).
+
+    `strategy` mirrors the override's own `confidence` label rather than a
+    fixed string: the whole point of `model_overrides` is an operator
+    recording *how sure* they are about a number that replaces the catalog
+    default, and that same word is both how it was reached and how much to
+    trust it.
+    """
+    return EnergyConstant(
+        wh_per_mtok=_d(override.energy_wh_per_mtok),
+        strategy=override.confidence,
+        confidence=override.confidence,
+        source=override.label,
+        url=override.url,
+        date=override.as_of,
+        note=(
+            f"Operator-supplied per-model energy constant, configured at the "
+            f"{layer} layer, replacing whatever the catalog default (an "
+            f"explicit models.yaml constant, the active-parameter formula, or "
+            f"the class ladder) would otherwise have resolved for this model."
+        ),
+        anchor=None,
+        label=override.label,
+    )
+
+
+def _energy_constant_and_flags(
+    model: ModelInfo, factors: "FactorSet | None"
+) -> tuple[EnergyConstant, bool]:
+    """`(EnergyConstant, active_params_unknown)` — the second element is `True`
+    only when `factors.energy_strategy` asked for the active-parameter formula
+    and this model has no `active_params_b` to feed it, i.e. exactly when the
+    `active_params_unknown` caveat belongs on the run.
+
+    Resolution order — first one that applies wins:
+
+    1. `factors.model_override` — an operator's `model_overrides` entry for
+       *this* model id, at whichever layer set it.
+    2. `model.energy_wh_per_mtok`, but *only* when it was set explicitly (a
+       real `models.yaml` constant) rather than baked in by
+       `ModelInfo.__post_init__`'s own class-ladder derivation — see
+       `ModelInfo.energy_wh_per_mtok_explicit`. The field itself is never
+       `None` after construction, explicit or not, so testing it against
+       `None` here would make this rung fire for every model and make rung 3
+       below unreachable.
+    3. The EcoLogits active-parameter formula, when `factors.energy_strategy`
+       is `"active_params"` and `model.active_params_b` is set.
+    4. The class ladder again, as the fallback for (3) not applying — no
+       explicit constant and either the strategy is not `active_params` or
+       the model has no `active_params_b`.
+    """
+    if factors is not None and factors.model_override is not None:
+        resolved = factors.model_override
+        return _model_override_energy_constant(resolved.value, resolved.layer), False
+
+    ladder = _class_ladder_energy_constant(model)
+    if getattr(model, "energy_wh_per_mtok_explicit", False):
+        return ladder, False
+
+    strategy = factors.energy_strategy.value if factors is not None else "class_ladder"
+    active_params_b = getattr(model, "active_params_b", None)
+    if strategy == "active_params":
+        if active_params_b is not None:
+            return _active_params_energy_constant(active_params_b), False
+        return ladder, True
+
+    return ladder, False
+
+
+def energy_constant_for_model(
+    model: ModelInfo, factors: "FactorSet | None" = None
+) -> EnergyConstant:
+    """The full provenance of this run's per-token energy constant. See
+    `_energy_constant_and_flags` for the resolution order; `energy_accounting`
+    calls that directly so it can also see the `active_params_unknown` flag.
+    """
+    constant, _ = _energy_constant_and_flags(model, factors)
+    return constant
+
+
+def wh_per_mtok_for_model(model: ModelInfo, *, factors: "FactorSet | None" = None) -> Decimal:
+    """The per-model energy constant a run should price tokens at.
+
+    Positional-compatible with every existing caller (`factors` is
+    keyword-only and defaults to `None`, which reproduces the exact ladder
+    this function has always used — see `_class_ladder_energy_constant`).
+    Given a `FactorSet`, this is the seam described in
+    docs/emissions-methodology.md's "Energy strategies and measured runs":
+    a `model_overrides` entry or the active-parameter formula can now win
+    instead of the class ladder. See `energy_constant_for_model` for the full
+    provenance (strategy, confidence, source) behind the number returned here.
+    """
+    return energy_constant_for_model(model, factors).wh_per_mtok
 
 
 # ── token weighting ──────────────────────────────────────────────────────────
@@ -983,13 +1197,22 @@ def _band(value: Decimal, low: Decimal, high: Decimal) -> tuple[Decimal, Decimal
     return central / low, central * high
 
 
-def uncertainty_contributions(*, reasoning_tier: bool, deployment: str) -> list[dict]:
+def uncertainty_contributions(
+    *, reasoning_tier: bool, deployment: str, measured: bool = False
+) -> list[dict]:
     """Per-factor sensitivity: what moves if this input alone is wrong.
 
     Deliberately NOT combined into the headline band. Multiplying these together
     would give a band far wider than any published methodology claims, and
     presenting that as the answer would be its own kind of dishonesty. Grid
     intensity and the energy class dominate; the rest are second order.
+
+    `measured=True` (an operator-supplied `measured_energy_wh` on this run)
+    narrows `energy_class` and `batching` to instrument-level tolerance — the
+    class/batch-size guesswork those two rows exist to bound no longer applies
+    once the actual IT-load energy was metered rather than modeled from token
+    counts. The headline band itself is unchanged this phase; only these two
+    per-factor rows narrow.
     """
     out = [
         {
@@ -1086,6 +1309,18 @@ def uncertainty_contributions(*, reasoning_tier: bool, deployment: str) -> list[
                 ),
             }
         )
+    if measured:
+        for c in out:
+            if c["key"] in ("energy_class", "batching"):
+                c["low_multiplier"] = 0.9
+                c["high_multiplier"] = 1.1
+                c["dominant"] = False
+                c["note"] = (
+                    "Measured: this run's IT-load energy was operator-supplied "
+                    "rather than estimated from token counts, so the usual "
+                    "class/batch-size uncertainty narrows to instrument-level "
+                    "tolerance. " + c["note"]
+                )
     return out
 
 
@@ -1097,9 +1332,19 @@ def uncertainty_band(
     reasoning_tier: bool,
     deployment: str,
     settings: Settings | None = None,
+    band: tuple[Decimal, Decimal] | None = None,
+    measured: bool = False,
 ) -> dict:
-    """The judgment band around a run's figures. Never negative, never a CI."""
-    low, high = band_factors(settings)
+    """The judgment band around a run's figures. Never negative, never a CI.
+
+    `band`, when given, is the already-resolved `(low, high)` pair — a
+    `FactorSet`'s, so a layered override actually reaches the arithmetic here
+    rather than only the provenance record. Recomputed from `settings` via
+    `band_factors` when omitted, exactly as before. `measured` narrows the
+    per-factor `energy_class`/`batching` contributions (see
+    `uncertainty_contributions`); the headline band itself is untouched.
+    """
+    low, high = band if band is not None else band_factors(settings)
     co2e_low, co2e_high = _band(co2e_g, low, high)
     wh_low, wh_high = _band(energy_wh, low, high)
     total_low, total_high = _band(energy_wh_total, low, high)
@@ -1117,7 +1362,7 @@ def uncertainty_band(
         "energy_wh_total_low": _f(total_low),
         "energy_wh_total_high": _f(total_high),
         "contributions": uncertainty_contributions(
-            reasoning_tier=reasoning_tier, deployment=deployment
+            reasoning_tier=reasoning_tier, deployment=deployment, measured=measured
         ),
         "basis": _UNCERTAINTY_BASIS,
     }
@@ -1168,18 +1413,13 @@ def _factor(
 def factor_records(
     *,
     energy_class: str,
-    wh_per_mtok: Decimal,
-    pue: Decimal,
-    pue_profile: str,
-    grid: float,
-    grid_basis: str,
-    grid_overridden: bool,
-    embodied_g: Decimal,
     deployment: str,
     settings: Settings,
-    grid_source: str = GRID_SOURCE_GLOBAL_DEFAULT,
-    grid_source_label: str | None = None,
-    grid_setting: str | None = None,
+    factors: "FactorSet",
+    energy_constant: "EnergyConstant",
+    energy_layer: str,
+    energy_setting: str | None,
+    measured_energy: bool = False,
 ) -> list[dict]:
     """Every constant that went into this run, with where it came from.
 
@@ -1187,47 +1427,106 @@ def factor_records(
     this number come from" for every input without consulting the code, the docs,
     or a frontend lookup table. It is generated from the same constants the
     arithmetic uses, so it cannot drift from them.
+
+    `factors` (a `tret.services.emission_factors.FactorSet`) carries the
+    already-resolved value, layer and setting path for grid/PUE/embodied/band —
+    the arguments this function used to take individually and either compute
+    itself (`band_factors(settings)`) or receive pre-computed. Reading them off
+    `factors` instead means a layered override (a workspace's own PUE, say)
+    shows up here exactly as it showed up in the arithmetic, not recomputed
+    from `settings` alone and quietly out of step with it.
+
+    `energy_constant` is the resolved `EnergyConstant` (see
+    `energy_constant_for_model`) the `energy_class` record below is built from;
+    `energy_layer` / `energy_setting` are its layer and setting path — computed
+    by the caller because they depend on *which* rule won (a `model_overrides`
+    layer, the strategy setting's layer, or `global_default` for the plain
+    class ladder), not on anything this function itself resolves.
+    `measured_energy=True` (an operator-supplied `measured_energy_wh` on this
+    run) overrides that record's confidence/source/note regardless of
+    `energy_constant.strategy`: what was actually recorded is a real
+    measurement, not whichever estimate produced it.
     """
-    low, high = band_factors(settings)
-    calibration = ENERGY_CLASS_CALIBRATION.get(energy_class, {})
-    anchor = calibration.get("anchor_model")
-    class_note = (
-        f"Least-squares fit of Wh = a x input + b x output over the three published "
-        f"prompt shapes for {anchor}; b = {calibration.get('fitted_wh_per_mtok')} "
-        f"Wh/Mtok is what this class is anchored on."
-        if anchor
-        else (
-            "No measured anchor for this class: interpolated one geometric step "
-            "above the class below it. The weakest constant in the ladder."
-        )
+    # Lazy: `emission_factors` imports plain functions from this module at its
+    # own top level, so this module cannot import it back at *its* top level
+    # without a circular import. By the time any caller actually runs this
+    # function, both modules have finished loading.
+    from tret.services.emission_factors import (
+        LAYER_ENV,
+        LAYER_GLOBAL_DEFAULT,
+        LAYER_PRECEDENCE,
+        LAYER_RUN_OVERRIDE,
     )
-    if is_reasoning_class(energy_class):
-        class_note += (
-            " Reasoning tier: several providers omit hidden thinking tokens from the "
-            "billed output count tret reads, so energy per *visible* output token is "
-            "inflated for these models. That bias is real and one-sided, not absorbed."
-        )
+
+    pue = factors.pue.value
+    pue_profile = factors.pue_profile
+    grid = float(factors.grid.value)
+    grid_basis = factors.grid_basis
+    grid_overridden = factors.grid.layer == LAYER_RUN_OVERRIDE
+    grid_source = factors.grid.source
+    grid_source_label = factors.grid.label
+    grid_setting = factors.grid.setting
+    embodied_g = factors.embodied_g.value
+    low, high = factors.band_low.value, factors.band_high.value
+    band_layer = (
+        factors.band_low.layer
+        if LAYER_PRECEDENCE.index(factors.band_low.layer)
+        <= LAYER_PRECEDENCE.index(factors.band_high.layer)
+        else factors.band_high.layer
+    )
+    # A run-override source string is textually identical to the layer name
+    # ("run_override"); every other layer's source for grid carries its own
+    # citation-friendly text (see `emission_factors._layer_source`), and the
+    # provider a workspace/managed source names, when it names one.
+    provider_match = (
+        grid_source.split(":provider:")[-1] if ":provider:" in grid_source else None
+    )
     pue_ref = {
         PUE_PROFILE_CLOUD: PUE_REFERENCE["google"],
         PUE_PROFILE_ONPREM: PUE_REFERENCE["industry_average"],
     }.get(pue_profile)
     grid_ref = GRID_REFERENCE["default"]
 
+    # The "energy_class" record's confidence/source/note/date/url come from
+    # `energy_constant` — which, for the plain class-ladder path, is exactly
+    # the calibration lookup this record has always used (see
+    # `_class_ladder_energy_constant`); `strategy` is new, and `measured_energy`
+    # overrides confidence/source/note again on top, whichever strategy priced
+    # the (now-superseded) estimate.
+    energy_note = energy_constant.note
+    energy_confidence = energy_constant.confidence
+    energy_source = energy_constant.source
+    energy_label = f"Energy class {energy_class}"
+    if energy_constant.strategy != "class_ladder":
+        energy_label += f" ({energy_constant.label or energy_constant.strategy})"
+    if measured_energy:
+        energy_confidence = "measured"
+        energy_source = "Operator-supplied measurement (IT-load Wh)"
+        energy_note = (
+            "This run's actual energy was operator-measured directly (IT-load "
+            "Wh) and replaces the per-token estimate below, which is still "
+            "recorded separately as energy_wh_estimated. What would otherwise "
+            "have been estimated: " + energy_note
+        )
+
     factors = [
         _factor(
             "energy_class",
-            f"Energy class {energy_class}",
-            _f(wh_per_mtok, 3),
+            energy_label,
+            _f(energy_constant.wh_per_mtok, 3),
             "Wh per million output-equivalent tokens",
-            JEGHAM_2025["citation"] + " — least-squares fit by tret",
-            JEGHAM_2025["url"],
-            JEGHAM_2025["date"],
-            "calibrated" if calibration.get("measured") else "low",
-            class_note,
-            "models.yaml: energy_class / energy_wh_per_mtok",
-            anchor_model=anchor,
-            measured_anchor=bool(calibration.get("measured")),
+            energy_source,
+            energy_constant.url,
+            energy_constant.date,
+            energy_confidence,
+            energy_note,
+            energy_setting,
+            anchor_model=energy_constant.anchor,
+            measured_anchor=energy_confidence in ("measured", "calibrated"),
             reasoning_tier=is_reasoning_class(energy_class),
+            strategy="measured" if measured_energy else energy_constant.strategy,
+            layer=energy_layer,
+            measured=measured_energy,
         ),
         _factor(
             "token_weight_output",
@@ -1239,6 +1538,7 @@ def factor_records(
             None,
             "structural",
             "The unit of the energy class is one generated token, so this is 1 by definition.",
+            layer=LAYER_GLOBAL_DEFAULT,
         ),
         _factor(
             "token_weight_input",
@@ -1255,6 +1555,7 @@ def factor_records(
                 "the other three fits are degenerate or near-zero in a, so 20 is "
                 "applied as a documented assumption across all classes."
             ),
+            layer=LAYER_GLOBAL_DEFAULT,
         ),
         _factor(
             "token_weight_cache_read",
@@ -1270,6 +1571,7 @@ def factor_records(
                 "fresh forward pass, mirroring the 0.1x providers charge. Not zero — "
                 "the state still has to be fetched and attended over."
             ),
+            layer=LAYER_GLOBAL_DEFAULT,
         ),
         _factor(
             "token_weight_cache_write",
@@ -1281,6 +1583,7 @@ def factor_records(
             None,
             "structural",
             "A cache write is a full prefill pass, so it weighs exactly what input does.",
+            layer=LAYER_GLOBAL_DEFAULT,
         ),
         _factor(
             "pue",
@@ -1309,12 +1612,9 @@ def factor_records(
                     "must not borrow a hyperscaler's number."
                 ),
             }[pue_profile],
-            {
-                PUE_PROFILE_CLOUD: "TRET_DATACENTER_PUE",
-                PUE_PROFILE_WORKSTATION: "TRET_LOCAL_PUE",
-                PUE_PROFILE_ONPREM: "TRET_ONPREM_PUE",
-            }[pue_profile],
+            factors.pue.setting,
             profile=pue_profile,
+            layer=factors.pue.layer,
         ),
         _factor(
             "grid_intensity",
@@ -1342,6 +1642,13 @@ def factor_records(
                     "provenance or its GHG Protocol basis. "
                 )
                 if grid_overridden
+                else (
+                    f"Configured at the {factors.grid.layer} layer"
+                    + (f" for provider {provider_match}" if provider_match else "")
+                    + ", which outranks the environment-level default and the shipped "
+                    "IEA global average for this run. "
+                )
+                if factors.grid.layer not in (LAYER_ENV, LAYER_GLOBAL_DEFAULT)
                 else (
                     "Configured per provider"
                     + (
@@ -1392,6 +1699,7 @@ def factor_records(
             source_key=grid_source,
             source_rule=grid_source_rule(grid_source),
             source_label=grid_source_label,
+            layer=factors.grid.layer,
         ),
         _factor(
             "embodied_hardware",
@@ -1412,11 +1720,12 @@ def factor_records(
                 "excluding GPUs 5,700 kgCO2eq, over a 3-year lifetime at batch size 64. "
                 + EMBODIED_REFERENCE["caveat"]
             ),
-            "TRET_EMBODIED_G_PER_RUN",
+            factors.embodied_g.setting,
             gpu_h100_kg=EMBODIED_REFERENCE["gpu_h100_kg"],
             server_excluding_gpus_kg=EMBODIED_REFERENCE["server_excluding_gpus_kg"],
             lifetime_years=EMBODIED_REFERENCE["lifetime_years"],
             batch_size=EMBODIED_REFERENCE["batch_size"],
+            layer=factors.embodied_g.layer,
         ),
         _factor(
             "training_amortization",
@@ -1428,6 +1737,7 @@ def factor_records(
             None,
             "excluded",
             TRAINING_AMORTIZATION_EXCLUDED,
+            layer=LAYER_GLOBAL_DEFAULT,
         ),
         _factor(
             "token_prices",
@@ -1444,6 +1754,7 @@ def factor_records(
                 "against is still an assumption."
             ),
             "models.yaml: input_price_per_mtok / output_price_per_mtok",
+            layer=LAYER_GLOBAL_DEFAULT,
         ),
         _factor(
             "uncertainty_band",
@@ -1459,6 +1770,7 @@ def factor_records(
                 "and not a sigma. Nothing in this field publishes an interval."
             ),
             "TRET_UNCERTAINTY_BAND_LOW / TRET_UNCERTAINTY_BAND_HIGH",
+            layer=band_layer,
         ),
     ]
     return factors
@@ -1471,11 +1783,27 @@ def caveat_records(
     cost_usd: Decimal | None = None,
     grid_basis: str | None = None,
     baseline_grid_basis: str | None = None,
+    active_params_unknown: bool = False,
+    active_params_gpu_only: bool = False,
+    measured: bool = False,
 ) -> list[dict]:
     """Named biases that travel with the figures instead of living only in a doc.
 
     Every one of these is a known way the number is wrong. They are structured
     rather than prose so a UI can surface the ones that apply to a given run.
+
+    `active_params_unknown=True` adds a caveat naming that the configured
+    `"active_params"` strategy fell back to the class ladder because this
+    model has no `active_params_b`. `active_params_gpu_only=True` (the
+    active-parameter formula actually priced this run) adds the companion
+    caveat naming the GPU-count and server-energy terms EcoLogits' own
+    pipeline includes and tret's does not — see
+    `_active_params_energy_constant`. `measured=True` (an operator-supplied
+    `measured_energy_wh`) flips `unbatched_local_inference` and
+    `prompt_shape_residual` to `applies: False` — both concerns are about the
+    gap between a per-token model and the real thing, which a direct
+    measurement closes — and keeps them in the list rather than dropping them,
+    so a reader can see they were considered and why they do not apply here.
     """
     out = [
         {
@@ -1608,8 +1936,59 @@ def caveat_records(
                 "cost tret already reports."
             ),
         },
+        {
+            "key": "active_params_unknown",
+            "label": "Active-parameter strategy fell back to the class ladder",
+            "direction": "either",
+            "applies": active_params_unknown,
+            "note": (
+                "The configured energy strategy asked for EcoLogits' "
+                "active-parameter formula, but the catalog has no "
+                "active_params_b for this model, so this run priced tokens on "
+                "the class ladder instead — the same fallback "
+                "wh_per_mtok_for_model has always used when no better estimate "
+                "is available."
+            ),
+        },
+        {
+            "key": "active_params_gpu_only",
+            "label": "Active-parameter formula is per-GPU, GPU-energy only",
+            "direction": "understates",
+            "applies": active_params_gpu_only,
+            "note": (
+                "This run's energy came from EcoLogits' active-parameter formula, "
+                "which models GPU energy for a single accelerator only. EcoLogits' "
+                "own pipeline multiplies that per-GPU figure by the GPU count the "
+                "model needs and adds a separate server/host energy term before "
+                "comparing it to a whole-request figure; tret has neither the GPU "
+                "count nor the server-energy term, so this run's energy is priced "
+                "as if it were both — a systematic undercount, not a rounding "
+                "error. This is why the active-parameter strategy records "
+                "confidence 'low' rather than 'calibrated'."
+            ),
+        },
     ]
-    return [c for c in out if c["applies"]]
+    flipped: set[str] = set()
+    if measured:
+        for c in out:
+            if c["key"] == "prompt_shape_residual":
+                c["applies"] = False
+                flipped.add(c["key"])
+                c["note"] += (
+                    " This run's energy was operator-measured (IT-load Wh) "
+                    "directly rather than modeled per token, so this residual "
+                    "does not apply here."
+                )
+            elif c["key"] == "unbatched_local_inference" and deployment == DEPLOYMENT_LOCAL:
+                c["applies"] = False
+                flipped.add(c["key"])
+                c["note"] += (
+                    " This run's energy was operator-measured directly, so it "
+                    "already reflects the real batching (or lack of it) at "
+                    "serving time rather than the class constants' assumed "
+                    "batch size."
+                )
+    return [c for c in out if c["applies"] or c["key"] in flipped]
 
 
 # ── frontier baseline ────────────────────────────────────────────────────────
@@ -1799,19 +2178,23 @@ def energy_accounting(
     *,
     settings: Settings | None = None,
     catalog: ModelCatalog | None = None,
+    factors: "FactorSet | None" = None,
+    measured_energy_wh: float | None = None,
 ) -> dict:
     """The auditable energy/carbon breakdown persisted on a run.
 
     Every field is an estimate derived from token counts, the model's calibrated
     energy class, a per-deployment PUE and a grid intensity — nothing here is
-    metered. JSON-serializable throughout (floats, strings, lists; no Decimals).
+    metered, *unless* `measured_energy_wh` is given (see below). JSON-serializable
+    throughout (floats, strings, lists; no Decimals).
 
     Key meanings, unchanged from the original contract:
 
     * `energy_wh` — **compute (IT-load) energy only**, no data-centre overhead.
     * `energy_wh_per_mtok` — Wh per million tokens, now per million
       *output-equivalent* tokens (see `weighted_tokens`); the chain
-      `energy_wh = energy_wh_per_mtok x weighted_tokens / 1e6` is unchanged.
+      `energy_wh = energy_wh_per_mtok x weighted_tokens / 1e6` is unchanged
+      whenever `measured_energy_wh` is not given.
     * `grid_co2e_g_per_kwh` — the factor actually applied to this run's
       electricity: the operator's per-provider entry when there is one, else the
       legacy local override on a self-hosted run, else the global default.
@@ -1825,32 +2208,125 @@ def energy_accounting(
     Added, all additive: `input_weight`, `output_weight`,
     `energy_wh_per_mtok_input`, `tokens`, `energy_wh_by_bucket`,
     `reasoning_tier`, `pue_profile`, `grid_co2e_basis`, `grid_co2e_source`,
-    `grid_co2e_label`, `cost`, `uncertainty`, `factors`, `caveats`.
+    `grid_co2e_label`, `grid_co2e_layer`, `cost`, `uncertainty`, `factors`,
+    `factor_layers`, `caveats`, `energy_wh_estimated`, `energy_source`.
+
+    `factors` — a `tret.services.emission_factors.FactorSet` — is the layered
+    resolution (`run_override > harness > workspace > managed > env >
+    global_default`) of every constant below. Left `None` (every existing
+    caller), one is built here from `settings` alone (and `model.id`, so a
+    `model_overrides` layer applies automatically), plus `grid_g_per_kwh` as a
+    run override exactly as it always has been — so this call is byte-for-byte
+    what it was before `FactorSet` existed. Given one, its values are used
+    instead; `grid_g_per_kwh`, if *also* passed, still wins as a run override
+    on top of it, same as it would on top of `settings` alone.
+
+    `measured_energy_wh` — an operator-supplied **IT-load** figure (Wh) for
+    this exact call, from their own metering. Must be `>= 0`; a negative value
+    raises `ValueError`. When given, it — not the per-token estimate — becomes
+    `energy_wh`; the estimate the model/strategy would otherwise have produced
+    is kept as `energy_wh_estimated` (present on every run, measured or not,
+    and equal to `energy_wh` when there is no measurement), and
+    `energy_wh_by_bucket` is scaled proportionally from the estimate so the
+    buckets still sum to the measured `energy_wh`. PUE, grid intensity and
+    embodied hardware still apply **on top** of the measurement exactly as
+    they would on top of an estimate — the measurement is IT-load only, not a
+    substitute for facility overhead or hardware amortization. See
+    docs/emissions-methodology.md's "Energy strategies and measured runs".
     """
     settings = settings or get_settings()
     deployment = deployment_for(model.provider)
-    pue = pue_for(deployment, settings)
-    profile = pue_profile_for(deployment, settings)
-    grid_overridden = grid_g_per_kwh is not None
-    # One resolution, used for the arithmetic, the recorded factor, the provenance
-    # record and the rollup key — so "which rule applied" cannot drift from "which
-    # number was used".
-    grid_resolution = resolve_grid_factor(
-        model.provider, deployment, settings, override=grid_g_per_kwh
+
+    if measured_energy_wh is not None and measured_energy_wh < 0:
+        raise ValueError(f"measured_energy_wh must be >= 0, got {measured_energy_wh!r}")
+
+    # Lazy: `emission_factors` imports plain functions from this module at its
+    # own top level, so importing it back at *this* module's top level would
+    # be circular. See the identical note on `factor_records`.
+    from tret.services.emission_factors import (
+        LAYER_GLOBAL_DEFAULT,
+        LAYER_RUN_OVERRIDE,
+        Resolved,
+        build_factor_set,
     )
-    grid = grid_resolution["value"]
-    grid_basis = grid_resolution["basis"]
+
+    if factors is None:
+        run_overrides = (
+            {"grid_g_per_kwh": grid_g_per_kwh} if grid_g_per_kwh is not None else None
+        )
+        factors = build_factor_set(
+            provider=model.provider, settings=settings, run_overrides=run_overrides,
+            model_id=model.id,
+        )
+    elif grid_g_per_kwh is not None and factors.grid.layer != LAYER_RUN_OVERRIDE:
+        # `factors` was handed to us already built, but this call *also* got an
+        # explicit `grid_g_per_kwh` — that still outranks whatever `factors`
+        # resolved, exactly as it would have on top of `settings` alone.
+        factors = dataclasses.replace(
+            factors,
+            grid=Resolved(
+                Decimal(str(grid_g_per_kwh)), LAYER_RUN_OVERRIDE, GRID_SOURCE_RUN_OVERRIDE,
+                None, None, None, None,
+            ),
+            grid_basis=GRID_BASIS_UNSPECIFIED,
+            layers_present=tuple(
+                dict.fromkeys((LAYER_RUN_OVERRIDE, *factors.layers_present))
+            ),
+        )
+
+    pue = factors.pue.value
+    profile = factors.pue_profile
+    grid = float(factors.grid.value)
+    grid_basis = factors.grid_basis
 
     tokens = (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
-    wh_per_mtok = wh_per_mtok_for_model(model)
+    energy_constant, active_params_unknown = _energy_constant_and_flags(model, factors)
+    # The only path that ever sets this strategy is `_active_params_energy_constant`
+    # — a `model_overrides` win's strategy mirrors its own confidence label, never
+    # this string. See that function's docstring for the GPU-only/no-server-energy
+    # scope gap this caveat names.
+    active_params_gpu_only = energy_constant.strategy == "active_params"
+    wh_per_mtok = energy_constant.wh_per_mtok
     energy_class = getattr(model, "energy_class", DEFAULT_ENERGY_CLASS)
     reasoning_tier = is_reasoning_class(energy_class)
 
-    compute_wh = model.energy_wh(*tokens)
-    by_bucket = energy_wh_by_bucket(wh_per_mtok, *tokens)
+    # Which layer *decided this run's energy constant* — for the "energy_class"
+    # provenance record. A `model_overrides` win carries its own layer/setting;
+    # an `active_params` win carries the layer that configured the strategy
+    # (the formula itself is not a layered document); the plain class ladder
+    # has never been layered, so it is always `global_default`.
+    if factors.model_override is not None:
+        energy_layer = factors.model_override.layer
+        energy_setting = factors.model_override.setting
+    elif energy_constant.strategy == "active_params":
+        energy_layer = factors.energy_strategy.layer
+        energy_setting = factors.energy_strategy.setting
+    else:
+        energy_layer = LAYER_GLOBAL_DEFAULT
+        energy_setting = "models.yaml: energy_class / energy_wh_per_mtok"
+
+    by_bucket_estimated = energy_wh_by_bucket(wh_per_mtok, *tokens)
+    compute_wh_estimated = sum(by_bucket_estimated.values(), Decimal(0))
+    is_measured = measured_energy_wh is not None
+    if is_measured:
+        compute_wh = Decimal(str(measured_energy_wh))
+        if compute_wh_estimated > 0:
+            scale = compute_wh / compute_wh_estimated
+            by_bucket = {k: v * scale for k, v in by_bucket_estimated.items()}
+        else:
+            # Nothing to scale from (e.g. zero weighted tokens) — put the whole
+            # measurement in `output`, the dominant bucket, rather than divide
+            # by zero. Buckets still sum to `energy_wh` either way.
+            by_bucket = {
+                k: (compute_wh if k == "output" else Decimal(0)) for k in by_bucket_estimated
+            }
+    else:
+        compute_wh = compute_wh_estimated
+        by_bucket = by_bucket_estimated
+
     total_wh = compute_wh * pue
     electricity_g = co2e_grams(total_wh, grid)
-    embodied_g = embodied_g_for(deployment, settings)
+    embodied_g = factors.embodied_g.value
     cost_usd = model.cost_usd(*tokens)
 
     scopes = scope_split(deployment, electricity_g, embodied_g)
@@ -1862,6 +2338,13 @@ def energy_accounting(
         + Decimal(str(scopes["scope3_g"]))
     )
 
+    # The baseline counterfactual picks its own model from
+    # `emissions_baseline_model` (via `resolve_baseline_model`); route the
+    # layered value through by handing it a settings copy with that one field
+    # swapped, rather than teaching `_baseline_block` a second way to learn it.
+    baseline_settings = settings.model_copy(
+        update={"emissions_baseline_model": factors.baseline_model.value}
+    )
     baseline = _baseline_block(
         model,
         tokens,
@@ -1870,7 +2353,7 @@ def energy_accounting(
         total_wh,
         cost_usd,
         grid_g_per_kwh,
-        settings,
+        baseline_settings,
         catalog,
     )
 
@@ -1883,7 +2366,12 @@ def energy_accounting(
         "weighted_tokens": float(weighted_tokens(*tokens)),
         "cache_read_weight": float(ENERGY_CACHE_READ_MULTIPLIER),
         "cache_write_weight": float(ENERGY_CACHE_WRITE_MULTIPLIER),
-        "energy_wh": _f(compute_wh),  # compute / IT load only
+        "energy_wh": _f(compute_wh),  # compute / IT load only — the measurement, if given
+        # What the model/strategy would have produced from token counts alone.
+        # Equal to `energy_wh` when this run is not measured; kept separately
+        # when it is, so the estimate the buckets were scaled from is never lost.
+        "energy_wh_estimated": _f(compute_wh_estimated),
+        "energy_source": "measured" if is_measured else "estimated",
         "grid_co2e_g_per_kwh": float(grid),
         "co2e_g": _f(total_g),  # == scope1 + scope2 + scope3
         "basis": _ACCOUNTING_BASIS,
@@ -1915,11 +2403,19 @@ def energy_accounting(
         "grid_co2e_basis": grid_basis,
         # Which precedence rule chose the grid factor, as a stable key
         # (`provider:anthropic` | `local_setting` | `global_default` |
-        # `run_override`), and the operator's own label for it when they set one.
-        # A run recorded before these existed carries neither — read them as
+        # `run_override`, or — once a workspace/managed/harness layer is in
+        # play — `workspace` | `workspace:provider:<p>` | `managed:<name>` |
+        # `managed:<name>:provider:<p>` | `harness` | `harness:provider:<p>`),
+        # and the operator's own label for it when they set one. A run
+        # recorded before these existed carries neither — read them as
         # unknown, never as `global_default`.
-        "grid_co2e_source": grid_resolution["source"],
-        "grid_co2e_label": grid_resolution["label"],
+        "grid_co2e_source": factors.grid.source,
+        "grid_co2e_label": factors.grid.label,
+        # Which *layer* of the ladder chose it — coarser than `grid_co2e_source`
+        # (folds every provider-specific win at a layer into that layer's name)
+        # and always one of `run_override`, `harness`, `workspace`, `managed`,
+        # `env`, `global_default`.
+        "grid_co2e_layer": factors.grid.layer,
         # ── added: money and uncertainty ──
         "cost": _cost_block(cost_usd, baseline),
         "uncertainty": uncertainty_band(
@@ -1929,29 +2425,34 @@ def energy_accounting(
             reasoning_tier=reasoning_tier,
             deployment=deployment,
             settings=settings,
+            band=(factors.band_low.value, factors.band_high.value),
+            measured=is_measured,
         ),
         # ── added: provenance ──
         "factors": factor_records(
             energy_class=energy_class,
-            wh_per_mtok=wh_per_mtok,
-            pue=pue,
-            pue_profile=profile,
-            grid=float(grid),
-            grid_basis=grid_basis,
-            grid_overridden=grid_overridden,
-            embodied_g=embodied_g,
             deployment=deployment,
             settings=settings,
-            grid_source=grid_resolution["source"],
-            grid_source_label=grid_resolution["label"],
-            grid_setting=grid_resolution["setting"],
+            factors=factors,
+            energy_constant=energy_constant,
+            energy_layer=energy_layer,
+            energy_setting=energy_setting,
+            measured_energy=is_measured,
         ),
+        # Which layers contributed anything to this run at all, most specific
+        # first — e.g. `["workspace", "env"]` when a workspace overrode the
+        # grid factor but every other constant fell through to the
+        # environment. `["global_default"]` when nothing was ever configured.
+        "factor_layers": list(factors.layers_present),
         "caveats": caveat_records(
             reasoning_tier=reasoning_tier,
             deployment=deployment,
             cost_usd=cost_usd,
             grid_basis=grid_basis,
             baseline_grid_basis=baseline.get("grid_co2e_basis"),
+            active_params_unknown=active_params_unknown,
+            active_params_gpu_only=active_params_gpu_only,
+            measured=is_measured,
         ),
     }
 
@@ -2045,6 +2546,7 @@ def emission_event_fields(accounting: dict | None) -> dict[str, Any]:
 _SUMMABLE_TOP = (
     "energy_wh",
     "energy_wh_total",
+    "energy_wh_estimated",
     "weighted_tokens",
 )
 _SUMMABLE_NESTED = {
@@ -2217,9 +2719,22 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
         | {"embodied_g"}
     )
     for key in set(combined) - handled:
-        if key in ("estimated", "basis", "factors", "caveats"):
+        if key in ("estimated", "basis", "factors", "caveats", "factor_layers", "energy_source"):
             continue
         combined[key] = _agreed([b.get(key) for b in blocks])
+
+    # "measured" only when every segment was; "mixed" when some but not all
+    # were (a run that measured one leg and estimated another is neither
+    # cleanly measured nor cleanly estimated); "estimated" otherwise. A block
+    # from before this key existed reads as "estimated", same as
+    # `energy_accounting` itself has always defaulted.
+    sources = [b.get("energy_source", "estimated") for b in blocks]
+    if all(s == "measured" for s in sources):
+        combined["energy_source"] = "measured"
+    elif any(s == "measured" for s in sources):
+        combined["energy_source"] = "mixed"
+    else:
+        combined["energy_source"] = "estimated"
 
     combined["models"] = [b.get("model") for b in blocks]
     combined["grid_bases"] = bases
@@ -2262,6 +2777,24 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
     if not carbon_summable:
         caveats.append(CROSS_BASIS_CAVEAT)
     combined["caveats"] = caveats
+    # Which layers were in play *anywhere* across the segments — deduped and
+    # ordered by precedence (most specific first), since a run spanning
+    # several models may have pulled its grid factor from a workspace override
+    # on one segment and the environment on another. `FactorSet.layers_present`
+    # already orders a single segment's own `factor_layers` this way (see
+    # `build_factor_set`); a plain alphabetical `sorted()` here would put
+    # "global_default" ahead of "workspace" and disagree with that ordering
+    # (and with this field's own docstring above) the moment a run spans more
+    # than one segment.
+    from tret.services.emission_factors import LAYER_PRECEDENCE
+
+    present = _union_by_key(blocks, "factor_layers")
+    combined["factor_layers"] = sorted(
+        present,
+        key=lambda layer: (
+            LAYER_PRECEDENCE.index(layer) if layer in LAYER_PRECEDENCE else len(LAYER_PRECEDENCE)
+        ),
+    )
     return combined
 
 
@@ -2301,13 +2834,21 @@ def _union_by_key(blocks: list[dict], field_name: str) -> list:
 #   figures instead of recomputing at today's factors.
 
 
-def overhead_call(kind: str, model: ModelInfo, usage: Usage) -> dict:
+def overhead_call(
+    kind: str, model: ModelInfo, usage: Usage, *, factors: "FactorSet | None" = None
+) -> dict:
     """Account one overhead model call, in full, against its own model.
 
     Returns the same shape a run segment carries: the tokens, the money, and a
     complete `energy_accounting` block naming the model, its energy class, its
     provider's grid factor and that factor's basis. Callers persist it; nothing
     here writes.
+
+    `factors`, when given, is passed straight through to `energy_accounting` —
+    so a router or summarizer call started under the same layered
+    configuration as the run it serves records its provenance the same way.
+    Left `None` (every caller today), the call resolves its own factor set
+    exactly as before.
     """
     accounting = energy_accounting(
         model,
@@ -2315,6 +2856,7 @@ def overhead_call(kind: str, model: ModelInfo, usage: Usage) -> dict:
         usage.output_tokens,
         usage.cache_read_tokens,
         usage.cache_write_tokens,
+        factors=factors,
     )
     return {
         "kind": kind,  # routing | compaction_summary

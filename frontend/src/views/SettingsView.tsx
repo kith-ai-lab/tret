@@ -13,6 +13,7 @@ import {
   type WorkspaceMember,
 } from '../api/client'
 import { BillingSection } from '../components/shared/BillingSection'
+import { EmissionsFactorsPanel } from '../components/settings/EmissionsFactorsPanel'
 import { formatDateTime } from '../components/shared/format'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { ProviderKeyForm } from '../components/shared/ProviderKeyForm'
@@ -33,11 +34,25 @@ export function SettingsView() {
       <ProviderKeys />
       <ConnectionsTeaser />
       <BillingSection />
+      <EmissionsFactorsSection />
       <RouterInfo />
       <NetworkAccess />
       <DataRequests />
     </div>
   )
+}
+
+// ── Emissions factors ─────────────────────────────────────────────────────
+// Per-workspace overrides for the grid/PUE/embodied/band/baseline factors.
+// Visible to every member (read-only); editable only by admin/owner — the
+// same `me.role` gate `WorkspaceMembersSection` above uses. The form itself
+// lives in components/settings/EmissionsFactorsPanel — this just resolves the
+// role and hands it down.
+
+function EmissionsFactorsSection() {
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const canEdit = ['owner', 'admin'].includes(meQuery.data?.role ?? '')
+  return <EmissionsFactorsPanel canEdit={canEdit} />
 }
 
 // ── Connections teaser ───────────────────────────────────────────────────

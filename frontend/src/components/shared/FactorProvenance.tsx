@@ -32,6 +32,7 @@ import {
   gridBasisLabel,
   gridSourceLabel,
   gridSourceWhat,
+  layerMeta,
   PUE_PROFILE_LABELS,
 } from './emissions'
 import { NO_ESTIMATE, formatFactor } from './format'
@@ -155,6 +156,22 @@ export function FactorTable({ factors }: { factors: EmissionsFactor[] }) {
                   <span className={`badge ${meta.badge}`} title={meta.what}>
                     {meta.label}
                   </span>
+                  {/* Which precedence layer chose this factor — a different
+                      question from confidence, so its own chip rather than
+                      folded into the one above. Omitted entirely on a run
+                      recorded before layered overrides existed. */}
+                  {(() => {
+                    const layer = layerMeta(factor.layer)
+                    return layer ? (
+                      <span
+                        className={`badge ${layer.badge}`}
+                        style={{ marginLeft: 4 }}
+                        title={layer.what}
+                      >
+                        {layer.label}
+                      </span>
+                    ) : null
+                  })()}
                 </td>
               </tr>
             )

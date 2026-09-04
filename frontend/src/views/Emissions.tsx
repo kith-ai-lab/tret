@@ -23,6 +23,7 @@ import {
   type GridBasis,
 } from '../api/client'
 import { ScopeBar } from '../components/shared/EmissionsCalc'
+import { EmissionsScenarioButton } from '../components/shared/EmissionsScenario'
 import { MethodologyLink } from '../components/shared/MethodologyDialog'
 import {
   BAND_LABEL,
@@ -173,6 +174,9 @@ export function Emissions() {
             scan truncated
           </span>
         )}
+        <span style={{ marginLeft: 'auto' }}>
+          <EmissionsScenarioButton projectId={data?.project_id ?? null} days={days} />
+        </span>
       </div>
 
       {emissionsQuery.isLoading ? (
@@ -358,7 +362,11 @@ function NoEstimates({ totals }: { totals: EmissionsTotals }) {
 
 // ── totals ───────────────────────────────────────────────────────────────
 
-function TotalsStrip({ totals }: { totals: EmissionsTotals }) {
+// Exported so the scenario drawer (components/shared/EmissionsScenario.tsx)
+// can render a what-if result's `recorded`/`scenario` totals with the exact
+// same layout as the page itself — "recorded vs scenario, side by side"
+// means literally the same component, not a lookalike.
+export function TotalsStrip({ totals }: { totals: EmissionsTotals }) {
   const avoided = bucketAvoided(totals)
   const framing = avoidedFraming(avoided)
   const band = bucketBand(totals)
