@@ -2095,7 +2095,22 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
       const data: unknown = await res.json()
       if (data && typeof data === 'object' && 'detail' in data) {
         detail = (data as { detail: unknown }).detail
-        message = typeof detail === 'string' ? detail : JSON.stringify(detail)
+        // An extension workspace-gate refusal shapes `detail` as `{ reason,
+        // detail }` (a 403 from the connections and emissions routes); its
+        // inner `detail` is the sentence meant for a person, so that is what
+        // `message` carries. The raw shape still rides on `ApiError.detail`
+        // for `gateRefusalDetail` below. Anything else non-string is
+        // stringified as before.
+        const nested =
+          detail && typeof detail === 'object' && !Array.isArray(detail)
+            ? (detail as Record<string, unknown>).detail
+            : undefined
+        message =
+          typeof detail === 'string'
+            ? detail
+            : typeof nested === 'string' && nested.trim() !== ''
+              ? nested
+              : JSON.stringify(detail)
       }
     } catch {
       /* non-JSON error body */

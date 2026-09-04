@@ -5,6 +5,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import {
   api,
   ApiError,
+  gateRefusalDetail,
   type ConnectionProvider,
   type ConnectionProviderInfo,
   type WorkspaceConnection,
@@ -242,7 +243,9 @@ function ProviderCard({
               </div>
               {authorizeError && (
                 <div className="error-text" style={{ marginTop: 8 }}>
-                  {authorizeError.status === 403 ? 'Requires admin role.' : authorizeError.message}
+                  {authorizeError.status === 403
+                    ? (gateRefusalDetail(authorizeError) ?? 'Requires admin role.')
+                    : authorizeError.message}
                 </div>
               )}
             </>
