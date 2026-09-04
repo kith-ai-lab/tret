@@ -446,3 +446,68 @@ async def test_startup_warms_the_catalog_without_blocking_the_boot(monkeypatch):
         assert catalog.finished is False
     # Shutdown cancelled it instead of hanging on `never`.
     assert catalog.finished is False
+
+
+# ── active_params_b: legal, optional, validated — read by nothing yet ────────
+def test_active_params_b_defaults_to_none_and_accepts_a_positive_value():
+    base = dict(
+        provider="anthropic",
+        wire_id="m",
+        display_name="M",
+        context_window=1000,
+        input_price_per_mtok=Decimal("1"),
+        output_price_per_mtok=Decimal("2"),
+        cost_tier="economy",
+    )
+    assert ModelInfo(id="a/m", **base).active_params_b is None
+    info = ModelInfo(id="a/m2", active_params_b=70, **base)
+    assert info.active_params_b == 70
+
+
+@pytest.mark.parametrize("bad", [-1, 0, float("nan"), float("inf"), float("-inf")])
+def test_active_params_b_rejects_non_positive_or_non_finite_values(bad):
+    with pytest.raises(ValueError):
+        ModelInfo(
+            id="a/m",
+            provider="anthropic",
+            wire_id="m",
+            display_name="M",
+            context_window=1000,
+            input_price_per_mtok=Decimal("1"),
+            output_price_per_mtok=Decimal("2"),
+            cost_tier="economy",
+            active_params_b=bad,
+        )
+
+
+_MODEL_YAML_ENTRY = """\
+id: anthropic/test-model
+provider: anthropic
+wire_id: test-model
+display_name: Test Model
+context_window: 100000
+input_price_per_mtok: 1.0
+output_price_per_mtok: 2.0
+cost_tier: economy
+"""
+
+
+def test_a_catalog_entry_with_active_params_b_loads_with_the_field_set(monkeypatch, tmp_path):
+    yaml_path = tmp_path / "models.yaml"
+    yaml_path.write_text("models:\n  - " + _MODEL_YAML_ENTRY.replace("\n", "\n    ").rstrip() + "\n    active_params_b: 70\n")
+    monkeypatch.setattr(catalog_module, "_MODELS_YAML", yaml_path)
+
+    catalog = ModelCatalog()
+
+    info = catalog.get("anthropic/test-model")
+    assert info is not None
+    assert info.active_params_b == 70.0
+
+
+def test_a_catalog_entry_with_a_negative_active_params_b_is_rejected(monkeypatch, tmp_path):
+    yaml_path = tmp_path / "models.yaml"
+    yaml_path.write_text("models:\n  - " + _MODEL_YAML_ENTRY.replace("\n", "\n    ").rstrip() + "\n    active_params_b: -1\n")
+    monkeypatch.setattr(catalog_module, "_MODELS_YAML", yaml_path)
+
+    with pytest.raises(ValueError):
+        ModelCatalog()

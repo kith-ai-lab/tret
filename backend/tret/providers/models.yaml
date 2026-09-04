@@ -40,10 +40,14 @@
 # fitted constants α=1.17e-6, β=-1.12e-2, γ=4.05e-5; linear in active params with
 # exponential decay in batch size, default batch 64). tret does not implement it
 # because it would be fed a guessed parameter count, but the seam is ready:
-# add an `active_params_b` here and teach
-# emissions.wh_per_mtok_for_model to prefer it. A model may also override its
-# class outright with an explicit `energy_wh_per_mtok` — do that if you have
-# metered your own deployment. Limits: docs/emissions-methodology.md.
+# `active_params_b` (billions of active parameters per forward pass — for a
+# mixture-of-experts model, the active subset, not the total) is now a legal
+# field on any entry below (ModelInfo validates it positive and finite when
+# present) but is read by nothing yet — a later phase's energy strategy will
+# teach emissions.wh_per_mtok_for_model to prefer it over energy_class when
+# set. A model may also override its class outright with an explicit
+# `energy_wh_per_mtok` — do that if you have metered your own deployment.
+# Limits: docs/emissions-methodology.md.
 models:
   - id: anthropic/claude-fable-5
     provider: anthropic

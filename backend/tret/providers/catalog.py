@@ -7,6 +7,7 @@ optional dynamic OpenRouter fetch adds clearly-marked "uncurated" entries.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -150,10 +151,22 @@ class ModelInfo:
     # token 0.05 — see emissions.weighted_tokens). Passing None means "derive
     # from energy_class"; after construction this is always a Decimal.
     energy_wh_per_mtok: Decimal | None = None
+    # Billions of active parameters per forward pass — for a mixture-of-experts
+    # model, the active subset, not the total. Unpublished for every closed
+    # model here, so this is opt-in and unset by default. Read by nothing yet:
+    # a later energy strategy (EcoLogits' active-parameter formula, see the
+    # models.yaml header) will prefer it over energy_class when present.
+    active_params_b: float | None = None
 
     def __post_init__(self) -> None:
         if self.energy_class not in ENERGY_CLASS_WH_PER_MTOK:
             self.energy_class = DEFAULT_ENERGY_CLASS
+        if self.active_params_b is not None and (
+            not math.isfinite(self.active_params_b) or self.active_params_b <= 0
+        ):
+            raise ValueError(
+                f"active_params_b must be positive and finite, got {self.active_params_b!r}"
+            )
         if self.energy_wh_per_mtok is None:
             # Via the emissions seam rather than the class table directly, so a
             # future size-based estimator (EcoLogits' active-parameter formula,
@@ -347,6 +360,7 @@ class ModelCatalog:
         out: dict[str, ModelInfo] = {}
         for m in raw["models"]:
             wh_override = m.get("energy_wh_per_mtok")
+            active_params_b = m.get("active_params_b")
             info = ModelInfo(
                 id=m["id"],
                 provider=m["provider"],
@@ -364,6 +378,7 @@ class ModelCatalog:
                 # estimated class rather than silently reading as low-energy.
                 energy_class=m.get("energy_class") or energy_class_for_tier(m["cost_tier"]),
                 energy_wh_per_mtok=Decimal(str(wh_override)) if wh_override else None,
+                active_params_b=float(active_params_b) if active_params_b is not None else None,
             )
             out[info.id] = info
         return out
