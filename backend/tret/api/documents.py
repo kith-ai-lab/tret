@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
+from tret.api.connections import USE_ACTION, require_connections_gate
 from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.config import get_settings
 from tret.db.engine import get_db
@@ -316,9 +317,19 @@ async def import_documents(
     back before the loop moves on, so the batch's own AsyncSession is never
     left in the "commit failed, transaction still open" state SQLAlchemy
     would otherwise carry into the next item.
+
+    `require_connections_gate` (from `api/connections.py`) runs with `USE_
+    ACTION` right after the provider is validated and before anything else —
+    before the project lookup, before the connection's token is touched,
+    before any bytes move. Importing is exercising a stored connection, the
+    same as minting a token or browsing does, so it asks the same "use" gate
+    those routes do: a workspace whose plan lapses after connecting loses
+    the ability to import on its very next request, with nothing in this
+    route needing to know that happened beyond this one check.
     """
     if body.provider not in (GDRIVE, M365):
         raise HTTPException(404, f"unknown provider {body.provider!r}")
+    await require_connections_gate(db, ctx.id, USE_ACTION)
     project = await project_in_workspace(db, project_id, ctx.id)
     if project is None:
         raise HTTPException(404, "Project not found")

@@ -661,3 +661,68 @@ async def test_workspace_isolation_cannot_see_or_disconnect_another_workspaces_c
         ).scalars().all()
     assert len(rows) == 1
     assert rows[0].id == conn_a.id
+
+
+# ── GET /api/connections/{provider}/token: the "use" gate ────────────────────
+async def test_token_is_blocked_by_a_registered_workspace_gate(client, seed):
+    """A workspace whose plan lapsed after it connected gdrive must lose the
+    picker token on the very next call — no admin required (any member may
+    call token), and the refresh must never reach the provider: the gate is
+    checked before `get_connection` even loads the row."""
+    workspace = make_workspace("Alpha")
+    member = make_user("token-gate-member@example.com")
+    conn = make_connection(workspace)
+    await seed(workspace, member, make_member(member, workspace, role="analyst"), conn)
+    await login(client, member.email)
+
+    ext = ExtensionAPI(None)
+
+    async def veto(db, workspace_id, action):
+        assert action == "connections.use"
+        assert workspace_id == workspace.id
+        return GateResult(
+            allowed=False,
+            reason="connections_plan_required",
+            detail="Connections require an active plan.",
+        )
+
+    ext.add_workspace_gate(veto)
+    extensions_module._registry = ext
+
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post(GDRIVE_TOKEN_URL).mock(return_value=httpx.Response(200))
+        response = await client.get("/api/connections/gdrive/token")
+        assert route.called is False  # gate refuses before any refresh is attempted
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "connections_plan_required"
+
+
+async def test_token_passes_the_use_action_when_the_gate_allows(client, seed):
+    """A gate that allows the call gets asked `connections.use`, never
+    `connections.connect` — token exercises an existing connection, it does
+    not create one."""
+    workspace = make_workspace("Alpha")
+    member = make_user("token-gate-allow@example.com")
+    conn = make_connection(workspace)
+    await seed(workspace, member, make_member(member, workspace, role="analyst"), conn)
+    await login(client, member.email)
+
+    asked_actions: list[str] = []
+    ext = ExtensionAPI(None)
+
+    async def recorder(db, workspace_id, action):
+        asked_actions.append(action)
+        return GateResult(allowed=True)
+
+    ext.add_workspace_gate(recorder)
+    extensions_module._registry = ext
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(GDRIVE_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        )
+        response = await client.get("/api/connections/gdrive/token")
+
+    assert response.status_code == 200, response.text
+    assert asked_actions == ["connections.use"]

@@ -30,6 +30,7 @@ from tret.config import get_settings
 from tret.db.engine import get_db
 from tret.db.models import Base, Document, Project, User, Workspace, WorkspaceConnection, WorkspaceMember
 from tret.engine import extensions as extensions_module
+from tret.engine.extensions import ExtensionAPI, GateResult
 from tret.net import guard as net_guard
 from tret.services.credentials import get_fernet
 
@@ -329,6 +330,43 @@ async def test_m365_browse_with_an_undecryptable_connection_is_409(client, seed)
     entry = next(c for c in listed.json()["connections"] if c["provider"] == "m365")
     assert entry["status"] == "error"
     assert entry["error_detail"]
+
+
+async def test_m365_browse_is_blocked_by_a_registered_workspace_gate(client, seed):
+    """A lapsed plan must cut off server-side browsing too, not just the
+    gdrive client-side token — and the refuse must land before the m365
+    connection's own token refresh, so no Graph or token HTTP call happens."""
+    workspace = make_workspace("Alpha")
+    user = make_user("browse-gate@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    ext = ExtensionAPI(None)
+
+    async def veto(db, workspace_id, action):
+        assert action == "connections.use"
+        assert workspace_id == workspace.id
+        return GateResult(
+            allowed=False,
+            reason="connections_plan_required",
+            detail="Connections require an active plan.",
+        )
+
+    ext.add_workspace_gate(veto)
+    extensions_module._registry = ext
+
+    with respx.mock(assert_all_called=False) as mock:
+        token_route = mock.post(M365_TOKEN_URL).mock(return_value=httpx.Response(200))
+        graph_route = mock.get(f"{GRAPH}/sites", params={"search": "*"}).mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        response = await client.get("/api/connections/m365/browse")
+        assert token_route.called is False
+        assert graph_route.called is False
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "connections_plan_required"
 
 
 # ── POST /api/projects/{project_id}/documents/import ─────────────────────────
@@ -638,3 +676,92 @@ async def test_import_batch_over_50_items_is_422(client, seed):
         json={"provider": "gdrive", "items": items},
     )
     assert response.status_code == 422
+
+
+# ── import: the "use" gate ────────────────────────────────────────────────────
+async def test_import_is_blocked_by_a_registered_workspace_gate_and_touches_nothing(
+    client, seed, session_factory
+):
+    """A lapsed plan must stop an import before anything is downloaded or
+    written: no `Document` row is created and no provider HTTP call is
+    made."""
+    workspace = make_workspace("Alpha")
+    user = make_user("import-gate@example.com")
+    project = make_project(workspace)
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, conn)
+    await login(client, user.email)
+
+    ext = ExtensionAPI(None)
+
+    async def veto(db, workspace_id, action):
+        assert action == "connections.use"
+        assert workspace_id == workspace.id
+        return GateResult(
+            allowed=False,
+            reason="connections_plan_required",
+            detail="Connections require an active plan.",
+        )
+
+    ext.add_workspace_gate(veto)
+    extensions_module._registry = ext
+
+    with respx.mock(assert_all_called=False) as mock:
+        token_route = mock.post(GDRIVE_TOKEN_URL).mock(return_value=httpx.Response(200))
+        meta_route = mock.get(f"{GDRIVE_API}/files/file-1").mock(return_value=httpx.Response(200, json={}))
+        response = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [{"id": "file-1", "name": "notes.txt", "drive_id": None}]},
+        )
+        assert token_route.called is False
+        assert meta_route.called is False
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "connections_plan_required"
+
+    async with session_factory() as db:
+        docs = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().all()
+    assert docs == []
+
+
+async def test_import_asks_the_gate_with_the_use_action(client, seed, session_factory):
+    """The happy path asks the gate `connections.use`, never `connections.
+    connect` — import exercises a connection that already exists."""
+    workspace = make_workspace("Alpha")
+    user = make_user("import-gate-allow@example.com")
+    project = make_project(workspace)
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, conn)
+    await login(client, user.email)
+
+    asked_actions: list[str] = []
+    ext = ExtensionAPI(None)
+
+    async def recorder(db, workspace_id, action):
+        asked_actions.append(action)
+        return GateResult(allowed=True)
+
+    ext.add_workspace_gate(recorder)
+    extensions_module._registry = ext
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_gdrive_refresh(mock)
+        mock.get(f"{GDRIVE_API}/files/file-1", params={"fields": "id,name,mimeType,size,modifiedTime"}).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "file-1", "name": "notes.txt", "mimeType": "text/plain",
+                    "size": 11, "modifiedTime": "2026-08-01T00:00:00Z",
+                },
+            )
+        )
+        mock.get(f"{GDRIVE_API}/files/file-1", params={"alt": "media"}).mock(
+            return_value=httpx.Response(200, content=b"hello world", headers={"content-type": "text/plain"})
+        )
+        response = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [{"id": "file-1", "name": "notes.txt", "drive_id": None}]},
+        )
+
+    assert response.status_code == 200, response.text
+    assert asked_actions == ["connections.use"]

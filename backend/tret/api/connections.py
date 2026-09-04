@@ -101,6 +101,50 @@ _CALLBACK_PATH = "/api/connections/callback"
 # query param it reads (see docstring / GET /callback below).
 _CONNECTIONS_PAGE = "/settings/connections"
 
+# The two workspace-gate actions this router (and `api/documents.py`'s import
+# endpoint) ask `check_workspace_gate` about. `CONNECT_ACTION` is the front
+# door — asked once, in `authorize`, at the moment a workspace is about to
+# gain a new connection. `USE_ACTION` is asked on every route that exercises
+# a connection *already on file* (the token mint below, m365 browsing, and
+# `api/documents.py::import_documents`): a plan gate registered for
+# `CONNECT_ACTION` alone would only ever stop a workspace from connecting in
+# the first place, and once connected the row just sits there working
+# forever, plan or no plan. Asking `USE_ACTION` on every such route means a
+# workspace whose plan lapses loses the connection's usefulness on its very
+# next call to this API. (One bounded exception: a gdrive Picker token
+# already handed to the browser stays valid client-side until Google expires
+# it, about an hour later — that window is the ceiling on how stale
+# enforcement can be.) No code here needs to revoke the provider token or
+# mutate the stored `WorkspaceConnection` row to make that happen, and none
+# of it does; the row is left exactly as it was. If the plan comes back,
+# `check_workspace_gate` starts returning `allowed=True` again and the same
+# row works again, with nothing to reconnect.
+CONNECT_ACTION = "connections.connect"  # asked once, when a connection is established
+USE_ACTION = "connections.use"  # asked every time a stored connection is exercised
+
+
+async def require_connections_gate(db: AsyncSession, workspace_id: uuid.UUID, action: str) -> None:
+    """Ask the extension registry's workspace gate about `action` and turn a
+    refusal into the 403 shape every connections route shares: `{"reason":
+    <machine code>, "detail": <text>}`.
+
+    `action` is one of the two constants above — `CONNECT_ACTION` at
+    `authorize` time, `USE_ACTION` everywhere a route reads or acts on a
+    connection that already exists. See the constants' own comments for why
+    the split matters: a gate registered on connect alone cannot cut off a
+    workspace that already has a working connection when its plan lapses.
+
+    With no extension registered, `get_extension_registry()` returns core's
+    default `ExtensionAPI`, whose `check_workspace_gate` allows everything —
+    the fail-open contract `tret/engine/extensions.py`'s own module docstring
+    lays out. So a self-hosted deployment with `TRET_EXTENSIONS` unset never
+    sees this raise: every call here is a no-op until an extension (tret_
+    cloud's billing package, for one) registers a gate that has an opinion.
+    """
+    gate = await get_extension_registry().check_workspace_gate(db, workspace_id, action)
+    if not gate.allowed:
+        raise HTTPException(403, detail={"reason": gate.reason, "detail": gate.detail})
+
 
 def _state_serializer() -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(get_settings().secret_key, salt=STATE_SALT)
@@ -197,9 +241,7 @@ async def authorize(
             f"TRET_{provider.upper()}_CLIENT_SECRET",
         )
 
-    gate = await get_extension_registry().check_workspace_gate(db, ctx.id, "connections.connect")
-    if not gate.allowed:
-        raise HTTPException(403, detail={"reason": gate.reason, "detail": gate.detail})
+    await require_connections_gate(db, ctx.id, CONNECT_ACTION)
 
     sid = secrets.token_urlsafe(24)  # binds `state` to this browser — see module docstring
     state = _state_serializer().dumps(
@@ -352,9 +394,17 @@ async def connection_token(
     gdrive only: m365's browsing goes through the server-side `/api/
     connections/m365/browse` endpoint (Phase 1) instead of a client-side SDK,
     so there is nothing for a client to do with an m365 access token.
+
+    Asks `require_connections_gate` for `USE_ACTION` — this route exercises a
+    connection that already exists, not one being created, so it is the
+    "use", not the "connect", gate (see that helper's docstring). Checked
+    before `get_connection` so a workspace whose plan has lapsed gets the 403
+    without a DB lookup for the connection row it is about to be refused
+    anyway.
     """
     if provider != GDRIVE:
         raise HTTPException(404, f"no client-side token for provider {provider!r}")
+    await require_connections_gate(db, ctx.id, USE_ACTION)
     conn = await get_connection(db, ctx.id, provider)
     if conn is None:
         raise HTTPException(404, f"workspace has no {provider} connection")
@@ -377,12 +427,19 @@ async def m365_browse(
     """Server-side Graph browsing for the m365 import picker (Phase 1) — see
     `services/connections.py::browse_m365` for the scope/params contract.
     Any workspace member: browsing does not touch the stored token or the
-    connection row, only reads through it, so this needs no admin gate.
+    connection row, only reads through it, so this needs no admin gate. It
+    does, however, consult the plan gate — `require_connections_gate` with
+    `USE_ACTION`, as the first statement in the body, before the m365
+    connection's token is touched at all — because browsing is exercising an
+    existing connection exactly as much as fetching a token or importing a
+    file is (see that helper's docstring for why "use" is asked separately
+    from "connect").
 
     A `ConnectionAuthError` here means the same thing it means at `GET
     /{provider}/token` above: the m365 connection needs to be reconnected —
     409, same as that route, for the same "actionable conflict" reason.
     """
+    await require_connections_gate(db, ctx.id, USE_ACTION)
     try:
         items = await browse_m365(
             db, ctx.id, scope=scope, site_id=site_id, drive_id=drive_id, item_id=item_id
