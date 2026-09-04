@@ -358,7 +358,7 @@ rather than silently producing a negative energy figure.
 Four small, independent additions to the override document described under
 [Configuration layers](#configuration-layers) — each is its own opt-in, each
 resolves through the identical layer ladder (`run_override > harness >
-workspace > managed > env > global_default`) as everything else in this
+workspace > managed > env > dataset > global_default`) as everything else in this
 document, and none of them changes a single figure unless an operator's own
 document asks for it.
 
@@ -773,9 +773,22 @@ defend; tret never fetches one.
 
 | source | granularity | catch |
 |---|---|---|
-| [Electricity Maps](https://www.electricitymaps.com/) | hourly, per zone | free tier is one zone, non-commercial |
+| [Electricity Maps](https://www.electricitymaps.com/) | hourly, per zone | live API: free tier is one zone, non-commercial. Yearly averages are bundled — see below |
 | [WattTime](https://watttime.org/) | marginal rate, sub-hourly | marginal ≠ average; a different question |
 | [eGRID](https://www.epa.gov/egrid) / IEA | annual average | what most frameworks expect |
+
+**Bundled yearly zone averages.** The one exception to "you paste a figure"
+is a *static* table: tret bundles Electricity Maps' published yearly
+per-zone averages (their free ODbL datasets, imported offline, never fetched
+at run time) together with a map from cloud region names (`us-east-1`,
+`europe-west4`, `westeurope`, …) to the zone each region's data centres sit
+in. It is consulted only when a workspace has pinned a provider to a region
+(`grid.regions`) and nothing they set themselves priced the provider — the
+`dataset` rung, just above the shipped default — so the caveat above
+still holds in full: a hosted provider's serving region is not knowable, and
+pinning one remains the operator's statement, not tret's inference. How the
+table is generated, its licence, and the region map are in
+[grid-zones.md](grid-zones.md).
 
 ## Embodied hardware
 
@@ -1185,11 +1198,11 @@ precedence (`run_override` beats `TRET_GRID_FACTORS` beats
 `TRET_LOCAL_GRID_CO2E_G_PER_KWH` beats `TRET_GRID_CO2E_G_PER_KWH`, described
 above under [Grid intensity, and its basis](#grid-intensity-and-its-basis)) to
 every constant this document has described — PUE, embodied hardware, the
-uncertainty band and the baseline model — and adds two rungs above the process
+uncertainty band and the baseline model — and adds rungs above the process
 environment:
 
 ```
-run_override  >  harness  >  workspace  >  managed  >  env  >  global_default
+run_override  >  harness  >  workspace  >  managed  >  env  >  dataset  >  global_default
 ```
 
 * **`run_override`** — a value handed straight to one accounting call. This is
@@ -1209,6 +1222,16 @@ run_override  >  harness  >  workspace  >  managed  >  env  >  global_default
   `model_fields_set`, not by comparing against the shipped default: an
   operator who deliberately sets `TRET_GRID_CO2E_G_PER_KWH` back to `470` is
   still recorded as `env`, not `global_default`.
+* **`dataset`** — the grid factor only. When a workspace has pinned the run's
+  provider to a region and *nothing an operator set* priced that provider —
+  no document above, no `TRET_GRID_FACTORS` entry, no legacy local setting,
+  no explicitly set global factor — the bundled table of published yearly
+  zone averages (Electricity Maps, ODbL — see [grid-zones.md](grid-zones.md))
+  supplies the figure, recorded as `dataset:zone:<zone>`. It displaces only
+  the shipped default: a region pin says where the load ran, not that the
+  operator's own figure or its GHG Protocol basis should be discarded.
+  Reached only *because* an operator pinned a region; nothing infers one,
+  and an unpinned provider skips this rung.
 * **`global_default`** — the shipped constant, when nothing above chose
   otherwise. Everything in this document up to this section describes exactly
   this rung.
@@ -1436,9 +1459,11 @@ Each run's `energy_accounting` block carries, additively:
   — once a workspace/managed/harness layer is in play, see
   [Configuration layers](#configuration-layers) — `workspace` |
   `workspace:provider:<name>` | `managed:<name>` |
-  `managed:<name>:provider:<name>` | `harness` | `harness:provider:<name>`),
+  `managed:<name>:provider:<name>` | `harness` | `harness:provider:<name>` |
+  `dataset:zone:<zone>`),
   `grid_co2e_layer` (which rung of the ladder chose it — one of
-  `run_override`, `harness`, `workspace`, `managed`, `env`, `global_default`),
+  `run_override`, `harness`, `workspace`, `managed`, `dataset`, `env`,
+  `global_default`),
   and `grid_co2e_label` (the operator's own note about it). A run recorded
   before these existed carries none of the three — read them as unknown, never
   as `global_default`;

@@ -37,7 +37,7 @@ caller switches on.
 A sixth seam, `add_factor_layer_provider` / `get_factor_layer`, lets an
 extension supply the "managed" rung of the emissions factor ladder
 (`tret/services/emission_factors.py`'s `run_override > harness > workspace >
-managed > env > global_default`) — tret_cloud's hosted admin console setting a
+managed > env > dataset > global_default`) — tret_cloud's hosted admin console setting a
 floor or a default for every workspace on the plan, say. `get_factor_layer`
 asks every registered provider in turn for one workspace's managed document
 and the first non-`None` answer wins, fail-open exactly like a gate: a

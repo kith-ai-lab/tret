@@ -1212,7 +1212,7 @@ def _whatif_accounting(
 
 LAYER_NOTE = (
     "Scenario factors are layered as the 'harness' precedence rung (run_override "
-    "> harness > workspace > managed > env > global_default) — the most specific "
+    "> harness > workspace > managed > env > dataset > global_default) — the most specific "
     "layer nothing else populates today. 'harness' in this response's "
     "grid_co2e_layer/factor_layers therefore means this request's one-off "
     "scenario document, not a saved per-harness override; nothing else writes "

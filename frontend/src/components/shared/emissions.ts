@@ -474,13 +474,19 @@ export const GRID_SOURCE_META: Record<string, { label: string; what: string }> =
     label: 'supplied for this run',
     what: 'A factor handed straight to the accounting call. tret cannot state its provenance and will not claim a GHG Protocol basis for it.',
   },
+  dataset: {
+    label: 'published zone average',
+    what: 'The bundled Electricity Maps yearly average for the grid zone the workspace pinned this provider to. Reached only because an operator pinned the region — tret never infers one.',
+  },
 }
 
 /** "per-provider factor (anthropic)" / "global default" / em dash on a run
  *  recorded before the source key existed — never a guessed "global default". */
 export function gridSourceLabel(source: string | null | undefined): string {
   if (!source) return NO_COMPARISON
-  const [rule, name] = source.split(':')
+  const parts = source.split(':')
+  const rule = parts[0]
+  const name = parts.length > 1 ? parts[parts.length - 1] : undefined
   const meta = GRID_SOURCE_META[rule]
   if (!meta) return source
   return name ? `${meta.label} (${name})` : meta.label
@@ -535,6 +541,7 @@ export const FACTOR_LAYERS = [
   'workspace',
   'managed',
   'env',
+  'dataset',
   'global_default',
 ] as const
 
@@ -574,6 +581,11 @@ export const LAYER_META: Record<string, LayerMeta> = {
     label: 'env',
     badge: 'badge-gray',
     what: 'Set by an environment variable on this deployment.',
+  },
+  dataset: {
+    label: 'zone dataset',
+    badge: 'badge-gray',
+    what: 'A published yearly grid average for the zone this workspace pinned the provider to (bundled Electricity Maps data, ODbL). Ahead of only tret’s shipped global default — anything an operator actually set, in a document or an environment variable, still wins.',
   },
   global_default: {
     label: 'global default',

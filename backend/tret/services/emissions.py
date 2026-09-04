@@ -1518,6 +1518,7 @@ def factor_records(
     # without a circular import. By the time any caller actually runs this
     # function, both modules have finished loading.
     from tret.services.emission_factors import (
+        LAYER_DATASET,
         LAYER_ENV,
         LAYER_GLOBAL_DEFAULT,
         LAYER_PRECEDENCE,
@@ -1695,12 +1696,22 @@ def factor_records(
                 if grid_source == GRID_SOURCE_GLOBAL_DEFAULT
                 and not grid_overridden
                 and float(grid) == grid_ref["value"]
+                else f"published — {grid_source_label}"
+                if factors.grid.layer == LAYER_DATASET
                 else f"operator-supplied — {grid_source_label}"
                 if grid_source_label
                 else "operator-supplied"
             ),
-            grid_ref["url"] if float(grid) == grid_ref["value"] else None,
-            grid_ref["date"] if float(grid) == grid_ref["value"] else None,
+            (
+                factors.grid.url
+                if factors.grid.layer == LAYER_DATASET
+                else grid_ref["url"] if float(grid) == grid_ref["value"] else None
+            ),
+            (
+                factors.grid.as_of
+                if factors.grid.layer == LAYER_DATASET
+                else grid_ref["date"] if float(grid) == grid_ref["value"] else None
+            ),
             "low",
             (
                 (
@@ -1708,6 +1719,14 @@ def factor_records(
                     "provenance or its GHG Protocol basis. "
                 )
                 if grid_overridden
+                else (
+                    "Published yearly average for grid zone "
+                    f"{grid_source.rsplit(':', 1)[-1]} (Electricity Maps, ODbL), applied "
+                    "because this workspace pinned the provider to region "
+                    f"{factors.grid.region} — a pin the operator made, not a region tret "
+                    "inferred. "
+                )
+                if factors.grid.layer == LAYER_DATASET
                 else (
                     f"Configured at the {factors.grid.layer} layer"
                     + (f" for provider {provider_match}" if provider_match else "")
@@ -2299,7 +2318,7 @@ def energy_accounting(
 
     `factors` — a `tret.services.emission_factors.FactorSet` — is the layered
     resolution (`run_override > harness > workspace > managed > env >
-    global_default`) of every constant below. Left `None` (every existing
+    dataset > global_default`) of every constant below. Left `None` (every existing
     caller), one is built here from `settings` alone (and `model.id`, so a
     `model_overrides` layer applies automatically), plus `grid_g_per_kwh` as a
     run override exactly as it always has been — so this call is byte-for-byte

@@ -1,0 +1,11 @@
+{
+  "source": "Electricity Maps",
+  "dataset": "yearly carbon intensity, flow-traced, per zone",
+  "license": "ODbL-1.0",
+  "license_url": "https://opendatacommons.org/licenses/odbl/1-0/",
+  "attribution": "Contains data from Electricity Maps (https://www.electricitymaps.com), licensed under the Open Database License (ODbL) v1.0.",
+  "download_url": "https://www.electricitymaps.com/data-portal",
+  "generated_by": "python -m tret.services.grid_zones import <yearly csv files...>",
+  "generated_at": null,
+  "zones": {}
+}

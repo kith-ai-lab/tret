@@ -10,7 +10,7 @@ supplies (`tret_cloud`'s hosted product, for instance).
 
 **The ladder, most specific first**::
 
-    run_override > harness > workspace > managed > env > global_default
+    run_override > harness > workspace > managed > env > dataset > global_default
 
 * `run_override` — an explicit value handed to one accounting call, e.g. the
   `grid_g_per_kwh` argument `energy_accounting()` has always accepted.
@@ -23,6 +23,13 @@ supplies (`tret_cloud`'s hosted product, for instance).
   layers are never confused for one.
 * `env` — a `TRET_*` setting the operator actually set (via a real environment
   variable or `.env` file, detected through `Settings.model_fields_set`).
+* `dataset` — grid factor only: a published annual zone average from the
+  bundled Electricity Maps table (`tret.services.grid_zones`), reached only
+  when a workspace has pinned the run's provider to a region and *nothing an
+  operator set* — no document above, no `TRET_*` grid setting — priced that
+  provider. It beats only the shipped global default: pinning a region says
+  where the load ran, not that the operator's own figure (or its GHG
+  Protocol basis) should be discarded. Nothing infers a region.
 - `global_default` — the shipped constant, when nothing above chose otherwise.
 
 Resolution is **per factor, not per document**: a workspace override that only
@@ -46,6 +53,7 @@ at import time.
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import re
 import threading
@@ -88,6 +96,9 @@ from tret.services.grid_regions import (
     validate_regions,
 )
 from tret.services.grid_tables import GridTable, GridTableError, parse_grid_table
+from tret.services.grid_zones import grid_entry_for_region
+
+logger = logging.getLogger(__name__)
 
 # Cached by a content hash of (csv_text, label, basis): a document's table CSV
 # text never changes between calls (only the *reference* to `at` does), so
@@ -203,6 +214,7 @@ LAYER_RUN_OVERRIDE = "run_override"
 LAYER_HARNESS = "harness"
 LAYER_WORKSPACE = "workspace"
 LAYER_MANAGED = "managed"
+LAYER_DATASET = "dataset"
 LAYER_ENV = "env"
 LAYER_GLOBAL_DEFAULT = "global_default"
 
@@ -213,6 +225,7 @@ LAYER_PRECEDENCE = (
     LAYER_WORKSPACE,
     LAYER_MANAGED,
     LAYER_ENV,
+    LAYER_DATASET,
     LAYER_GLOBAL_DEFAULT,
 )
 
@@ -923,6 +936,30 @@ def _resolve_grid(
     layer = _env_or_global(
         resolution["source"] == GRID_SOURCE_GLOBAL_DEFAULT, "grid_co2e_g_per_kwh", settings
     )
+
+    # The `dataset` rung: a pinned region that nothing an operator set priced
+    # — no document above, no `TRET_*` grid setting — resolves against the
+    # bundled zone table (see `tret.services.grid_zones`). It displaces only
+    # the shipped global default: an env figure keeps both its value and its
+    # GHG Protocol basis, because a region pin says where the load ran, not
+    # that the operator's own factor should go. Only ever reached *because*
+    # an operator pinned a region; a pinned region the table has no zone for,
+    # or a table that cannot be read at all, falls through unchanged.
+    if region and layer == LAYER_GLOBAL_DEFAULT:
+        try:
+            zone_hit = grid_entry_for_region(region)
+        except (OSError, ValueError) as exc:
+            logger.warning("bundled grid zone table unavailable (%s); using %s", exc, layer)
+            zone_hit = None
+        if zone_hit is not None:
+            zone, entry = zone_hit
+            resolved = Resolved(
+                Decimal(str(entry["g_per_kwh"])), LAYER_DATASET, f"dataset:zone:{zone}",
+                entry["label"], entry["url"], entry["as_of"], f"dataset.grid_zones.{zone}",
+                region=region, temporal="annual_average",
+            )
+            return resolved, entry["basis"]
+
     resolved = Resolved(
         Decimal(str(resolution["value"])), layer, resolution["source"],
         resolution["label"], None, None, resolution["setting"],

@@ -426,7 +426,9 @@ class Settings(BaseSettings):
     # taller ladder: `tret/services/emission_factors.py` layers a per-run
     # override, a per-workspace one and a "managed" one (an extension supplies
     # this, e.g. tret_cloud) on top of these settings, most specific first
-    # (`run_override > harness > workspace > managed > env > global_default`),
+    # (`run_override > harness > workspace > managed > env > dataset >
+    # global_default`; `dataset` is the grid factor's bundled zone table, see
+    # tret/services/grid_zones.py),
     # resolved per factor rather than per document. `energy_accounting()` still
     # reads a `Settings` instance exactly as before when nothing above it is in
     # play; nothing here changes on its own. See "Configuration layers" in
