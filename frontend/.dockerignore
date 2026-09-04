@@ -1,0 +1,7 @@
+# The frontend image builds with ./frontend as its context (docker-compose.yml),
+# so the root .dockerignore does not apply here. Without this file `COPY . .`
+# drags the host's node_modules over the ones `npm install` just produced in
+# the image, and a host esbuild binary of one version meets a package of
+# another ("Host version X does not match binary version Y").
+node_modules
+dist
