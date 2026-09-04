@@ -145,6 +145,16 @@ client id/secret set, the feature is simply absent from the UI.
   provider invalidates the connection outside of tret — the connected
   user changes their password, an org admin revokes the app, the
   refresh token expires from disuse — the next token refresh fails and
-  the connection flips to `error` status with a reason. It stops being
-  usable for imports until an admin reconnects it; tret does not retry
-  silently or fall back to a stale token.
+  the connection flips to `error` status with a reason. Once a
+  connection is in `error` status, every browse and import request
+  returns 409 immediately, without contacting the provider again, until
+  an admin reconnects it; tret never falls back to a stale token.
+- **Access tokens are cached briefly, in-process.** A browse or import
+  reuses the last access token it minted for a connection until shortly
+  before that token's own expiry, rather than trading the refresh token
+  for a new one on every single request — clicking through several
+  SharePoint folders in a row costs one refresh, not one per click. The
+  cache holds nothing longer than the token's own lifetime and lives
+  only in the single tret process handling requests (see
+  `docs/hardening.md`'s strict instance lock), so there is nothing to
+  invalidate across a fleet that doesn't exist.

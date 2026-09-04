@@ -40,13 +40,18 @@ from tret.services.connections import (
     get_access_token,
     m365_item_metadata,
 )
-from tret.services.documents import ingest_document
+from tret.services.documents import MAX_DOCUMENT_BYTES, ingest_document
 
 log = logging.getLogger("tret.documents")
 
 router = APIRouter(prefix="/api", tags=["documents"])
 
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+# The same cap the provider-import path enforces (`IMPORT_MAX_BYTES`, from
+# `services/connections.py`) — see `services/documents.py::MAX_DOCUMENT_BYTES`
+# for why one number covers both. Kept under this name, not that one: tests
+# monkeypatch `documents.MAX_UPLOAD_BYTES` directly, and the name reads right
+# for what this module does with it.
+MAX_UPLOAD_BYTES = MAX_DOCUMENT_BYTES
 # The body is consumed in chunks this size, so an oversized upload is refused
 # after one chunk over the cap rather than after the whole thing is a single
 # bytes object in the process.
@@ -230,23 +235,37 @@ async def _import_one(
     uploaded_by: uuid.UUID,
     storage_dir: Path,
     imported_at: str,
-) -> Document:
+) -> tuple[Document, Path | None]:
     """Download one picked item and ingest it exactly like an upload.
 
     A metadata call precedes the download for both providers: it is where the
     declared size (the "prefer a Content-Length/size check before download"
     half of the cap), the mime type (gdrive: raw vs. `files.export`), and the
-    `modified_at` provenance field all come from — none of the three are in
-    the request body, which only ever names *which* file was picked.
+    `modified_at` provenance field all come from. `item.name` is the display
+    name the picker showed the caller when the file was selected — carried in
+    the request body only as a fallback (used below when a provider's own
+    metadata omits `name`, and always for the `errors` entry a failure lands
+    in) — but the provider's own metadata name (`meta["name"]` for both Drive
+    and Graph) is authoritative for the stored filename and for the
+    provenance recorded in `meta_extra`, since the request body is exactly
+    the sort of caller-supplied string the rest of this module already
+    treats as untrusted.
+
+    Returns `(doc, created_path)`: `created_path` is the file this call
+    itself wrote under `storage_dir`, or `None` if a file already sat at
+    that sha-named path (another Document row owns it) — so a caller whose
+    own `db.add`/`commit` fails afterward knows whether it is safe to unlink
+    the bytes on disk.
     """
     if provider == GDRIVE:
         meta = await gdrive_file_metadata(access_token, file_id=item.id)
+        name = meta.get("name") or item.name
         size = meta.get("size")
         if size is not None and int(size) > IMPORT_MAX_BYTES:
-            raise _import_too_large(item.name, int(size))
+            raise _import_too_large(name, int(size))
         mime_type = meta.get("mimeType")
         data = await download_gdrive_file(access_token, file_id=item.id, mime_type=mime_type)
-        filename = gdrive_export_filename(item.name, mime_type)
+        filename = gdrive_export_filename(name, mime_type)
         content_type = safe_content_type(gdrive_download_content_type(mime_type))
         modified_at = meta.get("modifiedTime")
         drive_id = None
@@ -255,11 +274,12 @@ async def _import_one(
         if not drive_id:
             raise ValueError(f"{item.name}: m365 items require a drive_id")
         meta = await m365_item_metadata(access_token, drive_id=drive_id, item_id=item.id)
+        name = meta.get("name") or item.name
         size = meta.get("size")
         if size is not None and int(size) > IMPORT_MAX_BYTES:
-            raise _import_too_large(item.name, int(size))
+            raise _import_too_large(name, int(size))
         data = await download_m365_file(access_token, drive_id=drive_id, item_id=item.id)
-        filename = item.name
+        filename = name
         content_type = safe_content_type((meta.get("file") or {}).get("mimeType"))
         modified_at = meta.get("lastModifiedDateTime")
 
@@ -268,28 +288,60 @@ async def _import_one(
     storage_path = (storage_dir / f"{sha}-{filename}").resolve()
     if storage_path.parent != storage_dir:
         raise ValueError("Invalid filename")
-    storage_path.write_bytes(data)
+    # Matching what `_spool_upload` does with its temp file: a file this
+    # import itself creates is cleaned up if ingestion fails, but a
+    # sha-named path that already existed belongs to another Document row
+    # (the sha collision *is* the reason that row's own import/upload
+    # succeeded) and must survive untouched. An `exists()` check followed by
+    # a separate `write_bytes` is not atomic — two concurrent imports of the
+    # same bytes could both see `exists() == False` and race each other's
+    # write, or one could see `exists() == True` only because the other's
+    # write is already in flight and commit a row over half-written bytes.
+    # `open(..., "xb")` makes the check-and-create one syscall: whichever
+    # caller gets there first creates the file, and every other caller sees
+    # `FileExistsError` only once bytes are actually on disk under that name.
+    # This narrows, but does not remove, every race here: the remaining
+    # window is A creates the file, B's `open("xb")` raises `FileExistsError`
+    # and B goes on to commit a row pointing at it, and then A's own
+    # ingest/commit fails and A unlinks a file B's row now references. That
+    # is strictly better than the always-orphan behaviour this replaced (the
+    # old exists()-then-write version could lose the write itself, not just
+    # race an unlink), so it is accepted rather than solved here.
+    try:
+        with storage_path.open("xb") as sink:
+            sink.write(data)
+        created = True
+    except FileExistsError:
+        # Same sha means the same bytes: another Document row already owns
+        # this file, and it must survive this import's own success or failure.
+        created = False
 
-    return await ingest_document(
-        project_id=project_id,
-        filename=filename,
-        content_type=content_type,
-        storage_path=storage_path,
-        sha256=sha,
-        byte_size=len(data),
-        data=data,
-        uploaded_by=uploaded_by,
-        meta_extra={
-            "source": {
-                "provider": provider,
-                "file_id": item.id,
-                "drive_id": drive_id,
-                "name": item.name,
-                "modified_at": modified_at,
-                "imported_at": imported_at,
-            }
-        },
-    )
+    try:
+        doc = await ingest_document(
+            project_id=project_id,
+            filename=filename,
+            content_type=content_type,
+            storage_path=storage_path,
+            sha256=sha,
+            byte_size=len(data),
+            data=data,
+            uploaded_by=uploaded_by,
+            meta_extra={
+                "source": {
+                    "provider": provider,
+                    "file_id": item.id,
+                    "drive_id": drive_id,
+                    "name": name,
+                    "modified_at": modified_at,
+                    "imported_at": imported_at,
+                }
+            },
+        )
+    except BaseException:
+        if created:
+            storage_path.unlink(missing_ok=True)
+        raise
+    return doc, (storage_path if created else None)
 
 
 @router.post("/projects/{project_id}/documents/import")
@@ -309,10 +361,10 @@ async def import_documents(
     One request shares one provider and one token for every item in it, so a
     connection that cannot refresh (`ConnectionAuthError`) fails the whole
     request with 409 before any item is touched. Once past that, a single
-    item failing — too big, gone, an unreadable export, or a DB-level
-    failure adding/committing its row (e.g. a rare sha256 collision tripping
-    the unique constraint) — is recorded in `errors` and must not fail the
-    rest of the batch. `db.add`/`commit` happen inside the same per-item
+    item failing — too big, gone, an unreadable export, or a per-item DB
+    failure (e.g. a NOT NULL or FK violation on the row) — is recorded in
+    `errors` and must not fail the rest of the batch. `db.add`/`commit`
+    happen inside the same per-item
     guard as the download/ingest for that reason: a failure there is rolled
     back before the loop moves on, so the batch's own AsyncSession is never
     left in the "commit failed, transaction still open" state SQLAlchemy
@@ -358,8 +410,9 @@ async def import_documents(
     documents = []
     errors = []
     for item in body.items:
+        created_path: Path | None = None
         try:
-            doc = await _import_one(
+            doc, created_path = await _import_one(
                 access_token=access_token,
                 provider=body.provider,
                 item=item,
@@ -373,6 +426,15 @@ async def import_documents(
         except (ValueError, DownloadTooLargeError, RuntimeError, IntegrityError) as exc:
             log.warning("document import failed for %s %r: %s", body.provider, item.id, exc)
             await db.rollback()
+            # Matching what `_spool_upload` does with its temp file: a
+            # commit failure here (e.g. a per-item DB failure such as a
+            # NOT NULL or FK violation on the row) must not leave this
+            # import's bytes orphaned on disk. Only the
+            # file *this* call wrote — `created_path` is None whenever the
+            # sha-named path already belonged to another Document row,
+            # which must never be unlinked out from under it.
+            if created_path is not None:
+                created_path.unlink(missing_ok=True)
             errors.append({"id": item.id, "name": item.name, "detail": str(exc)})
             continue
         documents.append(_doc_out(doc))

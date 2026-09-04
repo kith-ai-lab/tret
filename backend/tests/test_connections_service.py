@@ -17,6 +17,7 @@ would fail the suite if services/connections.py ever used bare httpx.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -37,16 +38,20 @@ from tret.engine import extensions as extensions_module
 from tret.engine.extensions import ExtensionAPI
 from tret.services import connections as connections_module
 from tret.services import credentials as credentials_module
+from tret.services import documents as documents_service
 from tret.services.connections import (
     GRAPH_API_BASE,
+    IMPORT_MAX_BYTES,
     ConnectionAuthError,
     OAuthClientConfig,
     browse_m365,
+    clear_access_token_cache,
     exchange_code,
     get_access_token,
     get_access_token_with_expiry,
     get_connection,
     get_oauth_client,
+    invalidate_access_token,
     m365_item_metadata,
 )
 from tret.services.credentials import get_fernet
@@ -87,12 +92,18 @@ async def seed(session_factory):
 @pytest_asyncio.fixture(autouse=True)
 def _clean_settings_and_registry(monkeypatch):
     """Every test starts with a clean Settings cache and no extension
-    registry, same as test_extensions.py's own autouse fixture."""
+    registry, same as test_extensions.py's own autouse fixture. Also clears
+    the module-level access-token cache: without this, a token cached by one
+    test (same provider, and — unlikely but not impossible with random
+    UUIDs — colliding workspace ids) could be served to a later one that
+    never refreshed anything."""
     extensions_module._registry = None
     get_settings.cache_clear()
+    clear_access_token_cache()
     yield
     extensions_module._registry = None
     get_settings.cache_clear()
+    clear_access_token_cache()
 
 
 @pytest.fixture
@@ -478,3 +489,233 @@ async def test_get_access_token_with_no_oauth_client_configured_raises(session_f
             assert False, "expected ConnectionAuthError"
         except ConnectionAuthError:
             pass
+
+
+# ── errored connections are refused without contacting the provider ─────────
+async def test_get_access_token_on_an_errored_connection_raises_without_calling_the_provider(
+    configured_clients, session_factory, seed
+):
+    """Once a connection is in `status='error'`, every subsequent call must
+    refuse it before ever reaching the provider's token endpoint — not just
+    fail *after* a wasted (and, for a revoked grant, guaranteed-to-fail)
+    refresh attempt."""
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="gdrive", status="error")
+    conn.error_detail = "the gdrive connection is in an error state and must be reconnected"
+    await seed(workspace, conn)
+
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post(GDRIVE_TOKEN_URL).mock(return_value=httpx.Response(200))
+        async with session_factory() as db:
+            try:
+                await get_access_token(db, workspace.id, "gdrive")
+                assert False, "expected ConnectionAuthError"
+            except ConnectionAuthError as exc:
+                assert "reconnect" in str(exc).lower()
+        assert route.call_count == 0
+
+
+# ── one size cap shared by upload and import ─────────────────────────────────
+def test_import_max_bytes_matches_the_shared_document_cap():
+    """`IMPORT_MAX_BYTES` (services/connections.py), `MAX_UPLOAD_BYTES`
+    (api/documents.py) and `MAX_DOCUMENT_BYTES` (services/documents.py,
+    the source of truth) must never drift apart — both consumers are meant
+    to be aliases of the one number."""
+    from tret.api.documents import MAX_UPLOAD_BYTES
+
+    assert IMPORT_MAX_BYTES == MAX_UPLOAD_BYTES == documents_service.MAX_DOCUMENT_BYTES
+
+
+# ── access-token cache ───────────────────────────────────────────────────────
+async def test_second_call_within_expiry_is_served_from_cache(configured_clients, session_factory, seed):
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, conn)
+
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.post(GDRIVE_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "cached-token", "expires_in": 3600})
+        )
+        async with session_factory() as db:
+            first = await get_access_token(db, workspace.id, "gdrive")
+        async with session_factory() as db:
+            second = await get_access_token(db, workspace.id, "gdrive")
+    assert first == "cached-token"
+    assert second == "cached-token"
+    assert route.call_count == 1
+
+
+async def test_expiry_at_or_below_the_safety_margin_is_never_cached(configured_clients, session_factory, seed):
+    """A token whose own `expires_in` doesn't clear the safety margin isn't
+    worth caching at all — every call must refresh, same as before the cache
+    existed."""
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, conn)
+
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.post(GDRIVE_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "short-lived-token", "expires_in": 30})
+        )
+        async with session_factory() as db:
+            await get_access_token(db, workspace.id, "gdrive")
+        async with session_factory() as db:
+            await get_access_token(db, workspace.id, "gdrive")
+    assert route.call_count == 2
+
+
+async def test_concurrent_calls_for_the_same_connection_perform_one_refresh(
+    configured_clients, session_factory, seed, monkeypatch
+):
+    """Two callers asking for the same (workspace, provider) token at the
+    same time must serialize on one refresh, not each start their own — the
+    concurrent-refresh race this cache exists to close."""
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, conn)
+
+    calls = 0
+
+    async def slow_token_request(token_url, data):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return {"access_token": "concurrent-token", "expires_in": 3600}
+
+    monkeypatch.setattr(connections_module, "_token_request", slow_token_request)
+
+    async def _one_call():
+        async with session_factory() as db:
+            return await get_access_token(db, workspace.id, "m365")
+
+    results = await asyncio.gather(_one_call(), _one_call())
+
+    assert results == ["concurrent-token", "concurrent-token"]
+    assert calls == 1
+
+
+async def test_invalidate_access_token_forces_the_next_call_to_refresh(
+    configured_clients, session_factory, seed
+):
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, conn)
+
+    with respx.mock(assert_all_called=True) as mock:
+        route = mock.post(GDRIVE_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "tok-1", "expires_in": 3600})
+        )
+        async with session_factory() as db:
+            await get_access_token(db, workspace.id, "gdrive")
+        assert route.call_count == 1
+
+        invalidate_access_token(workspace.id, "gdrive")
+
+        async with session_factory() as db:
+            await get_access_token(db, workspace.id, "gdrive")
+        assert route.call_count == 2
+
+
+async def test_invalid_grant_clears_any_cached_access_token(configured_clients, session_factory, seed):
+    """`_refresh` flipping a connection to `status='error'` must not leave a
+    stale cache entry behind for it — otherwise a *different* code path that
+    only reads the cache (there isn't one today, but the invariant is what
+    makes the cache safe at all) could still hand out a token for a
+    connection that just proved its refresh token no longer works."""
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="gdrive", refresh_token="revoked-refresh-token")
+    await seed(workspace, conn)
+
+    # Seed the cache directly with an *expired* entry — expired so the miss
+    # path actually runs `_refresh` (a still-valid entry would just be
+    # served, never reaching the invalid_grant branch at all) while still
+    # proving `invalidate_access_token` clears an entry that was genuinely
+    # sitting in the dict, not just that the dict happened to be empty.
+    key = (workspace.id, "gdrive")
+    connections_module._access_token_cache[key] = connections_module._CachedAccessToken(
+        access_token="stale-token", expires_at=connections_module.time.monotonic() - 1
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(GDRIVE_TOKEN_URL).mock(
+            return_value=httpx.Response(
+                400, json={"error": "invalid_grant", "error_description": "revoked"}
+            )
+        )
+        async with session_factory() as db:
+            try:
+                await get_access_token(db, workspace.id, "gdrive")
+                assert False, "expected ConnectionAuthError"
+            except ConnectionAuthError:
+                pass
+
+    assert key not in connections_module._access_token_cache
+
+
+async def test_invalidation_landing_during_an_in_flight_refresh_is_not_lost_to_a_stale_write(
+    configured_clients, session_factory, seed, monkeypatch
+):
+    """Caller A misses the cache and blocks inside `_token_request`; while it
+    is blocked, a reconnect (or disconnect) lands and calls
+    `invalidate_access_token` against a cache that — because A hasn't
+    written to it yet — is still empty for this key, so the pop is a no-op.
+    A's refresh then returns and must not have its result cached anyway: the
+    epoch bump `invalidate_access_token` makes even on a miss is what closes
+    this, since a plain pop cannot protect an entry that doesn't exist yet.
+
+    The caller whose refresh raced the invalidation still gets its own
+    freshly-minted token back — only the *cache write* is skipped. A second
+    call afterward must therefore perform another real refresh rather than
+    serving what would otherwise have been served as a stale hit for up to
+    the cache's full window.
+    """
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, conn)
+
+    provider = "gdrive"
+    calls = 0
+
+    async def racing_token_request(token_url, data):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # Simulates the OAuth callback (or disconnect) landing while
+            # this refresh is still in flight.
+            connections_module.invalidate_access_token(workspace.id, provider)
+            return {"access_token": "OLD", "expires_in": 3600}
+        return {"access_token": "NEW", "expires_in": 3600}
+
+    monkeypatch.setattr(connections_module, "_token_request", racing_token_request)
+
+    async with session_factory() as db:
+        first = await get_access_token(db, workspace.id, provider)
+    assert first == "OLD"
+    assert (workspace.id, provider) not in connections_module._access_token_cache
+
+    async with session_factory() as db:
+        second = await get_access_token(db, workspace.id, provider)
+    assert second == "NEW"
+    assert calls == 2
+
+
+async def test_get_access_token_with_expiry_on_a_cache_hit_returns_remaining_seconds(
+    configured_clients, session_factory, seed
+):
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, conn)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(GDRIVE_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 1800})
+        )
+        async with session_factory() as db:
+            _token, first_expiry = await get_access_token_with_expiry(db, workspace.id, "gdrive")
+        async with session_factory() as db:
+            _token, second_expiry = await get_access_token_with_expiry(db, workspace.id, "gdrive")
+    assert first_expiry == 1800  # the miss: the provider's own expires_in, verbatim
+    # the hit: expires_in (1800) less the 60s safety margin, not the original
+    # 1800 — a range this tight also catches the hit path wrongly returning
+    # the uncached expires_in verbatim.
+    assert 1700 < second_expiry <= 1740

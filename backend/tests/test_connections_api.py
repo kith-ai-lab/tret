@@ -34,6 +34,8 @@ from tret.db.engine import get_db
 from tret.db.models import Base, User, Workspace, WorkspaceConnection, WorkspaceMember
 from tret.engine import extensions as extensions_module
 from tret.engine.extensions import ExtensionAPI, GateResult
+from tret.services import connections as connections_module
+from tret.services.connections import clear_access_token_cache
 from tret.services.credentials import get_fernet
 
 HASHER = PasswordHasher()
@@ -49,8 +51,10 @@ def _reset_extension_registry():
     """Same isolation test_workspaces_api.py gives itself — a couple of
     tests below register a workspace gate to exercise the 403 wiring."""
     extensions_module._registry = None
+    clear_access_token_cache()
     yield
     extensions_module._registry = None
+    clear_access_token_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -400,6 +404,46 @@ async def test_callback_on_an_existing_connection_upserts_rather_than_duplicates
     assert rows[0].error_detail is None
 
 
+async def test_callback_invalidates_any_cached_access_token_for_the_connection(
+    client, seed, session_factory
+):
+    """A reconnect may attach a different provider account entirely, so a
+    token this process cached under the connection's old grant must not
+    survive the callback that (re)establishes it."""
+    workspace = make_workspace("Alpha")
+    admin = make_user("callback-cache-admin@example.com")
+    stale = make_connection(workspace, account_label="stale@example.com")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), stale)
+    await login(client, admin.email)
+
+    key = (workspace.id, "gdrive")
+    connections_module._access_token_cache[key] = connections_module._CachedAccessToken(
+        access_token="cached-under-the-old-grant", expires_at=connections_module.time.monotonic() + 3600
+    )
+
+    _authorize_url, state = await _authorize_state(client)
+    id_token = _gdrive_id_token("fresh-account@example.com")
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(GDRIVE_TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "tok",
+                    "refresh_token": "fresh-refresh-token",
+                    "scope": "openid email https://www.googleapis.com/auth/drive.file",
+                    "id_token": id_token,
+                },
+            )
+        )
+        response = await client.get(
+            "/api/connections/callback",
+            params={"code": "auth-code", "state": state},
+            follow_redirects=False,
+        )
+    assert response.status_code == 302
+    assert key not in connections_module._access_token_cache
+
+
 # ── sid cookie: browser binding ──────────────────────────────────────────────
 async def test_callback_missing_sid_cookie_is_bad_state(client, seed):
     """A `(code, state)` pair presented by a browser that never went through
@@ -607,6 +651,29 @@ async def test_disconnect_with_no_connection_is_a_no_op(client, seed):
     response = await client.delete("/api/connections/gdrive")
     assert response.status_code == 200
     assert response.json() == {"ok": True}
+
+
+async def test_disconnect_clears_any_cached_access_token(client, seed):
+    """A token this process cached for the connection must not survive its
+    disconnect — nothing should be servable for a connection that no longer
+    exists."""
+    workspace = make_workspace("Alpha")
+    admin = make_user("disconnect-cache-admin@example.com")
+    conn = make_connection(workspace)
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    key = (workspace.id, "gdrive")
+    connections_module._access_token_cache[key] = connections_module._CachedAccessToken(
+        access_token="cached-before-disconnect", expires_at=connections_module.time.monotonic() + 3600
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(GDRIVE_REVOKE_URL).mock(return_value=httpx.Response(200))
+        response = await client.delete("/api/connections/gdrive")
+    assert response.status_code == 200
+
+    assert key not in connections_module._access_token_cache
 
 
 async def test_disconnect_requires_admin(client, seed):

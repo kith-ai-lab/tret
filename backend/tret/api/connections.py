@@ -78,6 +78,7 @@ from tret.services.connections import (
     get_access_token_with_expiry,
     get_connection,
     get_oauth_client,
+    invalidate_access_token,
     revoke_token,
 )
 from tret.services.credentials import get_fernet
@@ -349,6 +350,11 @@ async def callback(
     conn.connected_by = user_id
     conn.refreshed_at = datetime.now(timezone.utc)
     await db.commit()
+    # A reconnect may attach a different provider account entirely (or the
+    # same account with fresh scopes) — any access token this process cached
+    # under the old grant must not be handed out as if it still spoke for
+    # this connection.
+    invalidate_access_token(workspace_id, provider)
 
     resp = RedirectResponse(f"{_CONNECTIONS_PAGE}?connected={provider}", status_code=302)
     resp.delete_cookie(SID_COOKIE, path=_CALLBACK_PATH)
@@ -376,6 +382,8 @@ async def disconnect(
             log.warning("gdrive token revoke failed during disconnect", exc_info=True)
     await db.delete(conn)
     await db.commit()
+    # Nothing should be served for a connection that no longer exists.
+    invalidate_access_token(ctx.id, provider)
     return {"ok": True}
 
 

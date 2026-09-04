@@ -37,9 +37,11 @@ config" reason) — see `_policy`'s own docstring.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -56,6 +58,7 @@ from tret.engine.extensions import get_extension_registry
 from tret.net import EgressDenied, build_client
 from tret.net.policy import VERIFY_NONE, VERIFY_PUBLIC, ClassPolicy, master_mode
 from tret.services.credentials import get_fernet
+from tret.services.documents import MAX_DOCUMENT_BYTES
 
 log = logging.getLogger("tret.connections")
 
@@ -349,23 +352,41 @@ async def get_connection(
 
 
 async def _refresh(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> dict:
-    """Shared core of `get_access_token`/`get_access_token_with_expiry`: load
-    the connection, refresh it against the provider, persist a rotated
-    refresh token when one comes back, and return the raw token response.
+    """Shared core of `_get_access_token`: load the connection, refresh it
+    against the provider, persist a rotated refresh token when one comes
+    back, and return the raw token response.
+
+    A connection already in `status='error'` is refused immediately, before
+    any provider call: once a refresh has failed with `invalid_grant` (or the
+    stored token failed to decrypt), retrying against the provider on every
+    subsequent browse/import can't succeed either — the row stays broken
+    until an admin reconnects it via `POST /api/connections/{provider}/
+    authorize` (which, like every other path that can change what `error`
+    means for this connection, invalidates the access-token cache — see
+    `invalidate_access_token`). This check is *not* in `get_connection`
+    itself: callers like the connections list and `disconnect` need to keep
+    working on an errored row.
 
     On `invalid_grant` (the connected account revoked access, or the refresh
     token itself expired) the row is flipped to `status='error'` with
-    `error_detail` set and committed before `ConnectionAuthError` is raised —
-    the connection stays broken until a workspace admin reconnects it via
-    `POST /api/connections/{provider}/authorize`. The same happens if the
-    stored refresh token fails to decrypt at all (`InvalidToken` — most likely
-    a `TRET_SECRET_KEY` rotation since the token was written): there is no
-    refresh token to retry with, so this is exactly as unrecoverable without a
-    reconnect as `invalid_grant` is.
+    `error_detail` set and committed before `ConnectionAuthError` is raised.
+    The same happens if the stored refresh token fails to decrypt at all
+    (`InvalidToken` — most likely a `TRET_SECRET_KEY` rotation since the
+    token was written): there is no refresh token to retry with, so this is
+    exactly as unrecoverable without a reconnect as `invalid_grant` is. Both
+    branches invalidate any cached access token for this (workspace,
+    provider) before returning — see `_get_access_token`'s docstring for why
+    that ordering is what keeps an errored connection from ever being served
+    out of the cache.
     """
     conn = await get_connection(db, workspace_id, provider)
     if conn is None:
         raise ConnectionAuthError(f"workspace has no {provider} connection")
+    if conn.status == "error":
+        raise ConnectionAuthError(
+            conn.error_detail
+            or f"the {provider} connection is in an error state and must be reconnected"
+        )
     spec = PROVIDER_SPECS.get(provider)
     if spec is None:
         raise ConnectionAuthError(f"unknown provider {provider!r}")
@@ -383,6 +404,7 @@ async def _refresh(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> 
             "admin must reconnect this connection"
         )
         await db.commit()
+        invalidate_access_token(workspace_id, provider)
         raise ConnectionAuthError(conn.error_detail) from exc
     try:
         body = await _token_request(
@@ -399,6 +421,7 @@ async def _refresh(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> 
             conn.status = "error"
             conn.error_detail = str(exc)
             await db.commit()
+            invalidate_access_token(workspace_id, provider)
         raise
 
     if not body.get("access_token"):
@@ -416,30 +439,195 @@ async def _refresh(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> 
     return body
 
 
-async def get_access_token(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> str:
-    """The workspace's current `provider` access token, freshly minted from
-    the stored refresh token. Every call is a real refresh — nothing here
-    caches an access token — so this is meant for short-lived, per-request
-    use (the picker-token endpoint, and later import/browse), not a hot loop.
+@dataclass
+class _CachedAccessToken:
+    access_token: str
+    expires_at: float  # time.monotonic() deadline
+
+
+# Safety margin subtracted from a provider's `expires_in` before deciding
+# whether (and for how long) to cache — a token cached right up to the edge
+# of its real lifetime could be handed to a caller that then loses a race
+# with the provider's own clock. An entry is only ever written when
+# `expires_in - margin` is positive; anything shorter-lived than the margin
+# itself is refreshed fresh on every call, same as before this cache existed.
+_ACCESS_TOKEN_SAFETY_MARGIN_SECONDS = 60
+
+# Per-process cache of live access tokens, keyed by (workspace_id, provider).
+# tret runs as a single instance (the strict instance lock — docs/
+# hardening.md, fly.toml), so a process-local dict is the whole story: there
+# is no second process for an entry to leak into or go stale across.
+#
+# Invariant this cache depends on: a cached entry is never served for a
+# connection in `status='error'`. Every place that *sets* `status='error'`
+# (both branches in `_refresh` above) also calls `invalidate_access_token`
+# for the same key before returning, and nothing else writes a cache entry
+# except a successful `_refresh` call — which cannot itself observe
+# `status='error'` on the row it just successfully refreshed. So a hit here
+# implies the connection was healthy as of the moment it was cached.
+#
+# A cache-pop alone cannot close the race with an *in-flight* refresh: caller
+# A misses the cache, takes the lock, and blocks inside `await _refresh(...)`
+# while a reconnect (OAuth callback) or `disconnect` commits a change and
+# calls `invalidate_access_token` against what is, at that moment, an empty
+# entry — a no-op. A's refresh then returns and writes its (now-stale)
+# result into the cache anyway, and that stale entry would otherwise be
+# served for up to `cache_for` seconds. `_access_token_epochs` closes this:
+# every invalidation bumps the key's epoch, and `_get_access_token` only
+# writes the cache if the epoch is unchanged from the one it captured right
+# before starting the refresh — so a write that raced an invalidation is
+# simply dropped, while the caller still gets its freshly-minted token back.
+_access_token_cache: dict[tuple[uuid.UUID, str], _CachedAccessToken] = {}
+
+# Bumped by every `invalidate_access_token` call. See the comment above
+# `_access_token_cache` for why a plain pop is not enough to close the
+# reconnect/disconnect-lands-during-an-in-flight-refresh window.
+_access_token_epochs: dict[tuple[uuid.UUID, str], int] = {}
+
+# One `asyncio.Lock` per (workspace_id, provider), created on demand, so
+# concurrent callers asking for the same connection's token serialize on a
+# single refresh rather than each starting their own — the concurrent-
+# refresh race this cache exists to close (see module-level notes on why a
+# lost refresh-token write matters for Microsoft's rotating tokens).
+_access_token_locks: dict[tuple[uuid.UUID, str], asyncio.Lock] = {}
+
+
+def _access_token_lock(key: tuple[uuid.UUID, str]) -> asyncio.Lock:
+    lock = _access_token_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _access_token_locks[key] = lock
+    return lock
+
+
+def invalidate_access_token(workspace_id: uuid.UUID, provider: str) -> None:
+    """Drop this (workspace, provider)'s cached access token, if any, and
+    bump its invalidation epoch.
+
+    Called wherever a token this process might be holding could stop being
+    good for the connection it was cached against: `_refresh` flipping the
+    row to `status='error'`, `DELETE /api/connections/{provider}`
+    (disconnect — nothing should be served for a connection that no longer
+    exists), and the OAuth callback that (re)creates or reactivates a
+    connection (a reconnect may attach an entirely different provider
+    account, so a token minted under the old grant must never be handed out
+    as if it were still valid for the new one).
+
+    The epoch bump is what makes this more than a pop: a plain pop only
+    protects a cache entry that already exists. If this call lands while
+    another caller is blocked *inside* a refresh for the same key (the cache
+    was already empty, so the pop above is a no-op), that caller's refresh
+    still returns a token it is about to cache — one minted against
+    whatever the connection was before this invalidation. Bumping the epoch
+    here means `_get_access_token` (which captured the epoch before it
+    started refreshing) will see a mismatch and skip writing that stale
+    result to the cache.
     """
-    body = await _refresh(db, workspace_id, provider)
-    return body["access_token"]
+    _access_token_cache.pop((workspace_id, provider), None)
+    key = (workspace_id, provider)
+    _access_token_epochs[key] = _access_token_epochs.get(key, 0) + 1
+
+
+def clear_access_token_cache() -> None:
+    """Drop every cached access token, epoch, and per-key lock. Test
+    isolation; also safe to call at process startup, though an empty
+    process-local dict already starts empty."""
+    _access_token_cache.clear()
+    _access_token_epochs.clear()
+    _access_token_locks.clear()
+
+
+async def _get_access_token(
+    db: AsyncSession, workspace_id: uuid.UUID, provider: str
+) -> tuple[str, int]:
+    """Shared core of `get_access_token`/`get_access_token_with_expiry`: a
+    cached, still-valid access token when there is one, otherwise a real
+    refresh through `_refresh` — cached afterward for its own remaining
+    lifetime less `_ACCESS_TOKEN_SAFETY_MARGIN_SECONDS`, so the next call in
+    that window (a folder click during `browse_m365`, most commonly) never
+    starts a second refresh-token exchange for a token that is already good.
+
+    Returns `(access_token, expires_in)`: on a cache hit, the seconds
+    remaining on the cached entry — the token's own lifetime less
+    `_ACCESS_TOKEN_SAFETY_MARGIN_SECONDS`, not the seconds left on the
+    provider's original grant (see the docstring on the caller-facing
+    functions); on a miss, the provider's own `expires_in` verbatim,
+    unchanged from before this cache existed.
+
+    The lock is acquired *after* the first (lock-free) cache check — a
+    cheap, uncontended read for the overwhelmingly common case — and the
+    cache is checked again immediately after acquiring it: a caller that
+    waited on the lock may find another caller already refreshed and cached
+    a token while it waited, and should use that rather than refreshing a
+    second time. See the module-level comment above `_access_token_cache`
+    for the invariant that makes a cache hit here safe to serve even without
+    re-reading the connection row's `status`.
+
+    The epoch captured just before `_refresh` guards against a narrower race
+    than the lock does: an invalidation (reconnect, disconnect) landing
+    *while* this call is blocked inside `_refresh` itself. Such an
+    invalidation cannot pop an entry that does not exist yet, so it bumps
+    the epoch instead — and the write below is skipped when the epoch has
+    moved, so a token minted against a connection that was reconnected or
+    disconnected mid-refresh is still returned to this caller (whoever asked
+    gets an answer) but is never handed to anyone else out of the cache.
+    """
+    key = (workspace_id, provider)
+    now = time.monotonic()
+    cached = _access_token_cache.get(key)
+    if cached is not None and cached.expires_at > now:
+        return cached.access_token, max(1, int(cached.expires_at - now))
+
+    async with _access_token_lock(key):
+        now = time.monotonic()
+        cached = _access_token_cache.get(key)
+        if cached is not None and cached.expires_at > now:
+            return cached.access_token, max(1, int(cached.expires_at - now))
+
+        epoch = _access_token_epochs.get(key, 0)
+        body = await _refresh(db, workspace_id, provider)
+        access_token = body["access_token"]
+        try:
+            expires_in = int(body.get("expires_in") or 3600)
+        except (TypeError, ValueError):
+            expires_in = 3600
+
+        cache_for = expires_in - _ACCESS_TOKEN_SAFETY_MARGIN_SECONDS
+        if cache_for > 0 and _access_token_epochs.get(key, 0) == epoch:
+            _access_token_cache[key] = _CachedAccessToken(
+                access_token=access_token, expires_at=time.monotonic() + cache_for
+            )
+        return access_token, expires_in
+
+
+async def get_access_token(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> str:
+    """The workspace's current `provider` access token — a cached one if a
+    still-valid access token was minted recently enough (see
+    `_get_access_token`), otherwise a fresh refresh of the stored refresh
+    token. The cache is per-process and bounded to the access token's own
+    lifetime (see `_access_token_cache`'s module-level comment for why that
+    is enough on tret's single-instance deployment), so this is still safe
+    for short-lived, per-request use (the picker-token endpoint, browse,
+    import) without either a hot loop of refreshes or a token outliving the
+    provider's own grant.
+    """
+    access_token, _expires_in = await _get_access_token(db, workspace_id, provider)
+    return access_token
 
 
 async def get_access_token_with_expiry(
     db: AsyncSession, workspace_id: uuid.UUID, provider: str
 ) -> tuple[str, int]:
-    """Same refresh as `get_access_token`, additionally returning the
-    provider's own `expires_in` — what `GET /api/connections/{provider}/token`
+    """Same as `get_access_token`, additionally returning how long the
+    access token is good for — what `GET /api/connections/{provider}/token`
     hands the client-side Picker so it knows how long the token is good for.
-    Falls back to 3600s (both providers' actual default) if a provider ever
-    omits the field."""
-    body = await _refresh(db, workspace_id, provider)
-    try:
-        expires_in = int(body.get("expires_in") or 3600)
-    except (TypeError, ValueError):
-        expires_in = 3600
-    return body["access_token"], expires_in
+    On a cache hit this is the seconds remaining on the cached entry (the
+    token's own lifetime less `_ACCESS_TOKEN_SAFETY_MARGIN_SECONDS`), not the
+    original grant length; on a miss (including anything not cached — see
+    `_ACCESS_TOKEN_SAFETY_MARGIN_SECONDS`) it is the provider's own
+    `expires_in` verbatim, falling back to 3600s (both providers' actual
+    default) if a provider ever omits the field."""
+    return await _get_access_token(db, workspace_id, provider)
 
 
 # ── m365 browse (Phase 1) ────────────────────────────────────────────────────
@@ -513,7 +701,11 @@ async def browse_m365(
     `scope="drive_children"` lists what is one level inside whichever id the
     caller drilled into: a bare `site_id` lists that site's drives; a
     `drive_id` (with an optional `item_id`) lists a drive's or folder's
-    children. Raises `ConnectionAuthError` (propagated straight from
+    children. Each navigation calls `get_access_token` again, but a short
+    lived per-process cache (see that function's docstring) means clicking
+    through several folders in a row does not each time trade a refresh
+    token for a fresh access token — only the first call in the cache's
+    window does. Raises `ConnectionAuthError` (propagated straight from
     `get_access_token`) if the m365 connection cannot be refreshed, and
     `ValueError` for a scope/params combination that names nothing.
     """
@@ -549,7 +741,12 @@ async def browse_m365(
 
 
 # ── document import (Phase 1) ────────────────────────────────────────────────
-IMPORT_MAX_BYTES = 50 * 1024 * 1024
+# The single cap `services/documents.py::MAX_DOCUMENT_BYTES` defines — kept
+# under this name because `api/documents.py` imports it as `IMPORT_MAX_BYTES`
+# and every message/test here already reads by that name. See that
+# constant's own comment for why one number covers both the upload and
+# import paths.
+IMPORT_MAX_BYTES = MAX_DOCUMENT_BYTES
 _DOWNLOAD_CHUNK_BYTES = 256 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = 60.0
 _MAX_DOWNLOAD_REDIRECTS = 4

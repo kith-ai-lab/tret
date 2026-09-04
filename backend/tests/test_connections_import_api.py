@@ -32,6 +32,7 @@ from tret.db.models import Base, Document, Project, User, Workspace, WorkspaceCo
 from tret.engine import extensions as extensions_module
 from tret.engine.extensions import ExtensionAPI, GateResult
 from tret.net import guard as net_guard
+from tret.services.connections import clear_access_token_cache
 from tret.services.credentials import get_fernet
 
 HASHER = PasswordHasher()
@@ -47,8 +48,10 @@ BLOB_CONTENT_URL = "https://contoso-my.sharepoint.com/download/signed-blob"
 @pytest.fixture(autouse=True)
 def _reset_extension_registry():
     extensions_module._registry = None
+    clear_access_token_cache()
     yield
     extensions_module._registry = None
+    clear_access_token_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -136,7 +139,13 @@ def make_project(workspace: Workspace, name: str = "P") -> Project:
     return Project(id=uuid.uuid4(), workspace_id=workspace.id, name=name)
 
 
-def make_connection(workspace: Workspace, *, provider: str, refresh_token: str = "stored-refresh-token") -> WorkspaceConnection:
+def make_connection(
+    workspace: Workspace,
+    *,
+    provider: str,
+    refresh_token: str = "stored-refresh-token",
+    status: str = "active",
+) -> WorkspaceConnection:
     return WorkspaceConnection(
         id=uuid.uuid4(),
         workspace_id=workspace.id,
@@ -144,7 +153,7 @@ def make_connection(workspace: Workspace, *, provider: str, refresh_token: str =
         account_label="person@example.com",
         encrypted_refresh_token=get_fernet().encrypt(refresh_token.encode()),
         granted_scopes=["openid", "email"],
-        status="active",
+        status=status,
     )
 
 
@@ -332,6 +341,24 @@ async def test_m365_browse_with_an_undecryptable_connection_is_409(client, seed)
     assert entry["error_detail"]
 
 
+async def test_m365_browse_with_an_errored_connection_is_409_without_contacting_the_provider(client, seed):
+    """A connection already flipped to `status='error'` by a previous
+    failure must not be retried against the provider on every browse call —
+    409 immediately, no token request at all."""
+    workspace = make_workspace("Alpha")
+    user = make_user("browse-errored@example.com")
+    conn = make_connection(workspace, provider="m365", status="error")
+    conn.error_detail = "the m365 connection is in an error state and must be reconnected"
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    with respx.mock(assert_all_called=False) as mock:
+        token_route = mock.post(M365_TOKEN_URL).mock(return_value=httpx.Response(200))
+        response = await client.get("/api/connections/m365/browse")
+        assert token_route.called is False
+    assert response.status_code == 409
+
+
 async def test_m365_browse_is_blocked_by_a_registered_workspace_gate(client, seed):
     """A lapsed plan must cut off server-side browsing too, not just the
     gdrive client-side token — and the refuse must land before the m365
@@ -451,6 +478,129 @@ async def test_import_gdrive_native_doc_is_exported_to_docx(client, seed, sessio
     assert body["documents"][0]["content_type"] == docx_mime
 
 
+async def test_import_gdrive_uses_the_providers_name_not_the_request_bodys(client, seed, session_factory):
+    """The request body's `name` is only the display name the picker showed
+    when the file was selected — Drive's own metadata `name` is what actually
+    gets stored as the filename and recorded as provenance."""
+    workspace = make_workspace("Alpha")
+    user = make_user("import-provider-name-gdrive@example.com")
+    project = make_project(workspace)
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, conn)
+    await login(client, user.email)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_gdrive_refresh(mock)
+        mock.get(f"{GDRIVE_API}/files/file-1", params={"fields": "id,name,mimeType,size,modifiedTime"}).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "file-1", "name": "renamed-on-drive.txt", "mimeType": "text/plain",
+                    "size": 11, "modifiedTime": "2026-08-01T00:00:00Z",
+                },
+            )
+        )
+        mock.get(f"{GDRIVE_API}/files/file-1", params={"alt": "media"}).mock(
+            return_value=httpx.Response(200, content=b"hello world", headers={"content-type": "text/plain"})
+        )
+        response = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [{"id": "file-1", "name": "stale-picker-name.txt", "drive_id": None}]},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["errors"] == []
+    assert body["documents"][0]["filename"] == "renamed-on-drive.txt"
+
+    async with session_factory() as db:
+        doc = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().first()
+    assert doc.filename == "renamed-on-drive.txt"
+    assert doc.meta["source"]["name"] == "renamed-on-drive.txt"
+
+
+async def test_import_gdrive_falls_back_to_the_request_bodys_name_when_metadata_omits_it(
+    client, seed, session_factory
+):
+    """A provider response that omits `name` entirely (not every field in
+    the `fields=` request is guaranteed present) falls back to the request
+    body's own name rather than producing a nameless document."""
+    workspace = make_workspace("Alpha")
+    user = make_user("import-fallback-name-gdrive@example.com")
+    project = make_project(workspace)
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, conn)
+    await login(client, user.email)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_gdrive_refresh(mock)
+        mock.get(f"{GDRIVE_API}/files/file-1", params={"fields": "id,name,mimeType,size,modifiedTime"}).mock(
+            return_value=httpx.Response(
+                200,
+                json={"id": "file-1", "mimeType": "text/plain", "size": 11, "modifiedTime": "2026-08-01T00:00:00Z"},
+            )
+        )
+        mock.get(f"{GDRIVE_API}/files/file-1", params={"alt": "media"}).mock(
+            return_value=httpx.Response(200, content=b"hello world", headers={"content-type": "text/plain"})
+        )
+        response = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [{"id": "file-1", "name": "picker-name.txt", "drive_id": None}]},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["errors"] == []
+    assert body["documents"][0]["filename"] == "picker-name.txt"
+
+    async with session_factory() as db:
+        doc = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().first()
+    assert doc.meta["source"]["name"] == "picker-name.txt"
+
+
+async def test_import_m365_uses_the_providers_name_not_the_request_bodys(client, seed, session_factory, monkeypatch):
+    """Same authoritative-name contract as gdrive, for Graph's own item
+    metadata `name`."""
+    workspace = make_workspace("Alpha")
+    user = make_user("import-provider-name-m365@example.com")
+    project = make_project(workspace)
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, conn)
+    await login(client, user.email)
+
+    async def _fake_resolve(host):
+        return ("8.8.8.8",)
+
+    monkeypatch.setattr(net_guard, "_resolve", _fake_resolve)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/item-1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "item-1", "name": "renamed-on-sharepoint.csv", "size": 8,
+                    "lastModifiedDateTime": "2026-08-02T00:00:00Z",
+                    "file": {"mimeType": "text/csv"},
+                },
+            )
+        )
+        mock.get(f"{GRAPH}/drives/drive-1/items/item-1/content").mock(
+            return_value=httpx.Response(200, content=b"a,b\n1,2\n")
+        )
+        response = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "m365", "items": [{"id": "item-1", "name": "stale-picker-name.csv", "drive_id": "drive-1"}]},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["errors"] == []
+    assert body["documents"][0]["filename"] == "renamed-on-sharepoint.csv"
+
+    async with session_factory() as db:
+        doc = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().first()
+    assert doc.filename == "renamed-on-sharepoint.csv"
+    assert doc.meta["source"]["name"] == "renamed-on-sharepoint.csv"
+
+
 async def test_import_m365_follows_the_content_redirect(client, seed, session_factory, monkeypatch):
     workspace = make_workspace("Alpha")
     user = make_user("import-m365@example.com")
@@ -548,7 +698,7 @@ async def test_import_size_cap_lands_one_item_in_errors_the_other_succeeds(clien
     assert body["documents"][0]["filename"] == "small.txt"
     assert len(body["errors"]) == 1
     assert body["errors"][0]["id"] == "huge-1"
-    assert "50MB" in body["errors"][0]["detail"]
+    assert "25MB" in body["errors"][0]["detail"]
 
     async with session_factory() as db:
         docs = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().all()
@@ -556,7 +706,7 @@ async def test_import_size_cap_lands_one_item_in_errors_the_other_succeeds(clien
 
 
 async def test_import_db_failure_on_one_item_lands_in_errors_the_other_succeeds(
-    client, seed, session_factory, monkeypatch
+    client, seed, session_factory, monkeypatch, storage
 ):
     """A per-item DB failure (here: a NOT NULL violation on `filename`,
     forced by mangling the row `ingest_document` hands back) must land in
@@ -618,6 +768,121 @@ async def test_import_db_failure_on_one_item_lands_in_errors_the_other_succeeds(
         docs = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().all()
     assert [d.filename for d in docs] == ["good.txt"]  # the failed insert never landed
 
+    # The bad item's bytes must not be orphaned on disk once its commit
+    # failed and rolled back — only the successful item's file remains.
+    stored_files = [p.name for p in storage.iterdir()]
+    assert len(stored_files) == 1
+    assert stored_files[0].endswith("-good.txt")
+
+
+async def test_import_ingest_failure_does_not_delete_a_pre_existing_file_at_the_same_sha_path(
+    client, seed, session_factory, storage, monkeypatch
+):
+    """Storage paths are sha-keyed: if a file with the exact bytes being
+    imported already sits on disk (another Document row owns it) and this
+    import's own ingestion then fails, the pre-existing file must survive —
+    only bytes *this* import itself wrote may be cleaned up."""
+    workspace = make_workspace("Alpha")
+    user = make_user("import-preexisting-sha@example.com")
+    project = make_project(workspace)
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, conn)
+    await login(client, user.email)
+
+    content = b"already on disk"
+    sha = hashlib.sha256(content).hexdigest()
+    storage.mkdir(parents=True, exist_ok=True)
+    pre_existing_path = storage / f"{sha}-existing.txt"
+    pre_existing_path.write_bytes(content)
+
+    async def _failing_ingest_document(*, filename, **kwargs):
+        raise RuntimeError("boom: ingestion blew up after the file was written")
+
+    monkeypatch.setattr(documents_api, "ingest_document", _failing_ingest_document)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_gdrive_refresh(mock)
+        mock.get(f"{GDRIVE_API}/files/file-1", params={"fields": "id,name,mimeType,size,modifiedTime"}).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "file-1", "name": "existing.txt", "mimeType": "text/plain",
+                    "size": len(content), "modifiedTime": "2026-08-01T00:00:00Z",
+                },
+            )
+        )
+        mock.get(f"{GDRIVE_API}/files/file-1", params={"alt": "media"}).mock(
+            return_value=httpx.Response(200, content=content, headers={"content-type": "text/plain"})
+        )
+        response = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [{"id": "file-1", "name": "existing.txt", "drive_id": None}]},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["documents"] == []
+    assert len(body["errors"]) == 1
+
+    # The file this import "created" was actually already there — it must
+    # not have been unlinked, and its bytes must be untouched.
+    assert pre_existing_path.exists()
+    assert pre_existing_path.read_bytes() == content
+
+
+async def test_import_ingest_failure_unlinks_a_file_this_import_itself_created(
+    client, seed, session_factory, storage, monkeypatch
+):
+    """The other half of the sha-named-path contract: when this import is
+    the one that actually wrote the file (no pre-existing Document owns that
+    sha), a later ingestion failure must unlink it — `created_path` is not
+    `None` in that case, so the exception handler in `import_documents`
+    cleans it up rather than leaving it orphaned on disk."""
+    workspace = make_workspace("Alpha")
+    user = make_user("import-created-unlink@example.com")
+    project = make_project(workspace)
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, conn)
+    await login(client, user.email)
+
+    async def _flaky_ingest_document(*, filename, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(documents_api, "ingest_document", _flaky_ingest_document)
+
+    content = b"brand new bytes, nobody owns this sha yet"
+    sha = hashlib.sha256(content).hexdigest()
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_gdrive_refresh(mock)
+        mock.get(f"{GDRIVE_API}/files/file-1", params={"fields": "id,name,mimeType,size,modifiedTime"}).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "file-1", "name": "new.txt", "mimeType": "text/plain",
+                    "size": len(content), "modifiedTime": "2026-08-01T00:00:00Z",
+                },
+            )
+        )
+        mock.get(f"{GDRIVE_API}/files/file-1", params={"alt": "media"}).mock(
+            return_value=httpx.Response(200, content=content, headers={"content-type": "text/plain"})
+        )
+        response = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [{"id": "file-1", "name": "new.txt", "drive_id": None}]},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["documents"] == []
+    assert len(body["errors"]) == 1
+    assert body["errors"][0]["id"] == "file-1"
+
+    stored_files = [p.name for p in storage.iterdir()] if storage.exists() else []
+    assert f"{sha}-new.txt" not in stored_files
+
+    async with session_factory() as db:
+        docs = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().all()
+    assert docs == []
+
 
 async def test_import_with_a_revoked_connection_is_409_and_touches_nothing(client, seed, session_factory):
     workspace = make_workspace("Alpha")
@@ -641,6 +906,62 @@ async def test_import_with_a_revoked_connection_is_409_and_touches_nothing(clien
     async with session_factory() as db:
         docs = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().all()
     assert docs == []
+
+
+async def test_import_with_an_errored_connection_is_409_and_creates_no_documents(client, seed, session_factory):
+    """Same short-circuit as m365 browse, for the import endpoint: a
+    connection already in `status='error'` is refused without a provider
+    round trip, and no `Document` row is created."""
+    workspace = make_workspace("Alpha")
+    user = make_user("import-errored@example.com")
+    project = make_project(workspace)
+    conn = make_connection(workspace, provider="gdrive", status="error")
+    conn.error_detail = "the gdrive connection is in an error state and must be reconnected"
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, conn)
+    await login(client, user.email)
+
+    with respx.mock(assert_all_called=False) as mock:
+        token_route = mock.post(GDRIVE_TOKEN_URL).mock(return_value=httpx.Response(200))
+        response = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [{"id": "file-1", "name": "notes.txt", "drive_id": None}]},
+        )
+        assert token_route.called is False
+    assert response.status_code == 409
+    assert "reconnect" in response.json()["detail"].lower()
+
+    async with session_factory() as db:
+        docs = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().all()
+    assert docs == []
+
+
+# ── access-token cache (item 3) ───────────────────────────────────────────────
+async def test_m365_browse_twice_performs_only_one_token_refresh(client, seed):
+    """Two consecutive browse calls against the same connection must not
+    each trade the refresh token for a new access token — the second call
+    should be served from the short-lived in-process cache."""
+    workspace = make_workspace("Alpha")
+    user = make_user("browse-cache@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    with respx.mock(assert_all_called=True) as mock:
+        token_route = mock.post(M365_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "m365-access-token", "expires_in": 3600})
+        )
+        sites_route = mock.get(f"{GRAPH}/sites", params={"search": "*"}).mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        mock.get(f"{GRAPH}/me/drive").mock(
+            return_value=httpx.Response(200, json={"id": "drive-me", "name": "OneDrive"})
+        )
+        first = await client.get("/api/connections/m365/browse")
+        second = await client.get("/api/connections/m365/browse")
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert token_route.call_count == 1
+    assert sites_route.call_count == 2
 
 
 async def test_import_workspace_isolation_returns_404_for_another_workspaces_project(client, seed):

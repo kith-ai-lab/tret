@@ -18,6 +18,16 @@ from tret.db.models import Document
 
 log = logging.getLogger("tret.documents")
 
+# The one size cap for every path that ends up in `ingest_document` — a
+# manual upload (`api/documents.py::upload_document`, which streams the body
+# and enforces this mid-stream) and a provider import (`api/documents.py::
+# _import_one`, via `services/connections.py::IMPORT_MAX_BYTES`, which holds
+# the whole downloaded file in memory before it ever reaches here). 25MB is
+# sized to the import path's memory cost, not the upload path's — streaming
+# could afford a much larger cap, but importing cannot, and both paths must
+# share one number rather than silently diverge on what "too large" means.
+MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
+
 # Extraction bounds. A 25MB CSV of one-character rows, or a PDF crafted to
 # expand, must not turn into an unbounded string in a JSONB column or an
 # unbounded stretch of CPU inside a request.
