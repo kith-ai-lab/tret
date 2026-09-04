@@ -32,7 +32,8 @@ from tret.db.models import Base, Document, Project, User, Workspace, WorkspaceCo
 from tret.engine import extensions as extensions_module
 from tret.engine.extensions import ExtensionAPI, GateResult
 from tret.net import guard as net_guard
-from tret.services.connections import clear_access_token_cache
+from tret.services import connections as connections_module
+from tret.services.connections import clear_access_token_cache, get_connection
 from tret.services.credentials import get_fernet
 
 HASHER = PasswordHasher()
@@ -394,6 +395,37 @@ async def test_m365_browse_is_blocked_by_a_registered_workspace_gate(client, see
 
     assert response.status_code == 403
     assert response.json()["detail"]["reason"] == "connections_plan_required"
+
+
+async def test_m365_browse_survives_a_disconnect_during_the_in_flight_refresh(
+    client, seed, session_factory, monkeypatch
+):
+    """`DELETE /api/connections/m365` can delete the connection row while
+    this request's own token refresh is still waiting on the provider. That
+    must come back as the same 409 "needs to be reconnected" a browse
+    against no connection at all already gets — not a raw StaleDataError
+    surfacing as an unmapped 500."""
+    workspace = make_workspace("Alpha")
+    user = make_user("browse-disconnect-race@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    async def deleting_token_request(token_url, data):
+        # Simulates DELETE /api/connections/m365 landing on a second session
+        # while this request's own refresh is still in flight.
+        async with session_factory() as other_db:
+            row = await get_connection(other_db, workspace.id, "m365")
+            await other_db.delete(row)
+            await other_db.commit()
+        return {"access_token": "m365-access-token", "expires_in": 3600}
+
+    monkeypatch.setattr(connections_module, "_token_request", deleting_token_request)
+
+    response = await client.get("/api/connections/m365/browse")
+    assert response.status_code == 409
+    detail = response.json()["detail"].lower()
+    assert "reconnect" in detail or "no" in detail
 
 
 # ── POST /api/projects/{project_id}/documents/import ─────────────────────────

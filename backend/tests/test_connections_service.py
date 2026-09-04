@@ -28,6 +28,7 @@ import pytest
 import pytest_asyncio
 import respx
 from cryptography.fernet import Fernet
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -697,6 +698,51 @@ async def test_invalidation_landing_during_an_in_flight_refresh_is_not_lost_to_a
         second = await get_access_token(db, workspace.id, provider)
     assert second == "NEW"
     assert calls == 2
+
+
+async def test_disconnect_during_an_in_flight_refresh_raises_no_connection_cleanly(
+    configured_clients, session_factory, seed, monkeypatch
+):
+    """`DELETE /api/connections/{provider}` (disconnect) can delete the
+    `WorkspaceConnection` row while `_refresh`'s own token request is still
+    in flight. The commit that follows then tries to UPDATE a row that is no
+    longer there, which must surface as the same "no connection"
+    `ConnectionAuthError` the `conn is None` branch raises up front — not a
+    raw `StaleDataError` (an unmapped 500 for every caller: `browse_m365`,
+    `import_documents`, the picker token endpoint) — and the caller's own
+    session must stay usable afterward: `import_documents` keeps using `db`
+    after a failed per-item refresh."""
+    workspace = make_workspace()
+    provider = "gdrive"
+    conn = make_connection(workspace, provider=provider, refresh_token="stored-refresh-token")
+    await seed(workspace, conn)
+
+    async def deleting_token_request(token_url, data):
+        # Simulates disconnect landing on a second session while this
+        # refresh's network call is still outstanding.
+        async with session_factory() as other_db:
+            row = await get_connection(other_db, workspace.id, provider)
+            await other_db.delete(row)
+            await other_db.commit()
+        return {"access_token": "tok", "refresh_token": "rotated", "expires_in": 3600}
+
+    monkeypatch.setattr(connections_module, "_token_request", deleting_token_request)
+
+    async with session_factory() as db:
+        try:
+            await get_access_token(db, workspace.id, provider)
+            assert False, "expected ConnectionAuthError"
+        except ConnectionAuthError as exc:
+            message = str(exc).lower()
+            assert "no" in message and provider in message
+
+        # The session handed to `_refresh` must still be usable by the
+        # caller afterward — import_documents continues to use `db` for
+        # later items even after one item's refresh fails this way.
+        await db.execute(select(1))
+        assert await get_connection(db, workspace.id, provider) is None
+
+    assert (workspace.id, provider) not in connections_module._access_token_cache
 
 
 async def test_get_access_token_with_expiry_on_a_cache_hit_returns_remaining_seconds(

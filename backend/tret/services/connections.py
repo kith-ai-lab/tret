@@ -51,6 +51,7 @@ import httpx
 from cryptography.fernet import InvalidToken
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from tret.config import get_settings
 from tret.db.models import WorkspaceConnection
@@ -351,10 +352,44 @@ async def get_connection(
     ).scalars().first()
 
 
+async def _commit_connection(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> None:
+    """Commit a mutation `_refresh` just made to the `WorkspaceConnection`
+    row, tolerating the row having been deleted out from under it.
+
+    `_refresh` holds `conn` across an `await _token_request(...)` call that
+    can take up to ~15s. `DELETE /api/connections/{provider}` (disconnect)
+    takes no lock on the row, so it can delete it while that request is
+    still in flight; the flush this commit triggers then emits an UPDATE
+    matching 0 rows, and SQLAlchemy raises `StaleDataError` — deletion wins
+    the race. That is exactly the state the `conn is None` branch at the top
+    of `_refresh` already expresses as "workspace has no {provider}
+    connection", so it is translated into the same `ConnectionAuthError`
+    here rather than escaping as an unmapped 500 for every caller
+    (`browse_m365`, `import_documents`, the picker token endpoint). The
+    session is rolled back first so it stays usable by the caller afterward
+    — `import_documents` keeps using the same `db` for later items after one
+    item's refresh fails this way — and the cache entry is dropped
+    defensively, though with the row gone there is nothing left to serve it
+    for.
+    """
+    try:
+        await db.commit()
+    except StaleDataError as exc:
+        await db.rollback()
+        invalidate_access_token(workspace_id, provider)
+        raise ConnectionAuthError(f"workspace has no {provider} connection") from exc
+
+
 async def _refresh(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> dict:
     """Shared core of `_get_access_token`: load the connection, refresh it
     against the provider, persist a rotated refresh token when one comes
     back, and return the raw token response.
+
+    If `disconnect` deletes the row while this function is holding it across
+    the provider round trip, every commit below goes through
+    `_commit_connection`, which turns the resulting `StaleDataError` into the
+    same "no connection" `ConnectionAuthError` a fresh `get_connection` miss
+    would raise, instead of letting it escape as an unmapped 500.
 
     A connection already in `status='error'` is refused immediately, before
     any provider call: once a refresh has failed with `invalid_grant` (or the
@@ -403,7 +438,13 @@ async def _refresh(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> 
             "likely because TRET_SECRET_KEY was rotated since it was saved; an "
             "admin must reconnect this connection"
         )
-        await db.commit()
+        try:
+            await _commit_connection(db, workspace_id, provider)
+        except ConnectionAuthError as stale:
+            # Disconnect won the race — see _commit_connection's docstring.
+            # Chained from the decrypt failure so the traceback still shows
+            # why this connection was being flipped to error at all.
+            raise stale from exc
         invalidate_access_token(workspace_id, provider)
         raise ConnectionAuthError(conn.error_detail) from exc
     try:
@@ -420,7 +461,14 @@ async def _refresh(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> 
         if exc.error_code == "invalid_grant":
             conn.status = "error"
             conn.error_detail = str(exc)
-            await db.commit()
+            try:
+                await _commit_connection(db, workspace_id, provider)
+            except ConnectionAuthError as stale:
+                # Disconnect won the race — see _commit_connection's
+                # docstring. Chained from the invalid_grant failure so the
+                # traceback still shows why this connection was being
+                # flipped to error at all.
+                raise stale from exc
             invalidate_access_token(workspace_id, provider)
         raise
 
@@ -435,7 +483,7 @@ async def _refresh(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> 
     if new_refresh_token:
         conn.encrypted_refresh_token = get_fernet().encrypt(new_refresh_token.encode())
     conn.refreshed_at = datetime.now(timezone.utc)
-    await db.commit()
+    await _commit_connection(db, workspace_id, provider)
     return body
 
 
