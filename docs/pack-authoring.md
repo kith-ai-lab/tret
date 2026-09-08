@@ -297,6 +297,7 @@ packs remain future work.
 |---|---|
 | `read_document` / `search_documents` | attached evidence documents |
 | `list_connected_sources` / `search_connected_files` / `read_connected_file` | live files from a workspace's connected SharePoint/OneDrive |
+| `propose_connected_write` | propose writing a file back to a connected SharePoint/OneDrive target |
 | `lookup_dataset` | retrieve stored numbers |
 | `run_method` | compute derived numbers via vetted pack methods |
 | `list_prior_findings` | reference earlier verdicts/extractions |
@@ -352,6 +353,22 @@ them rather than failing.
 
 Hitting a cap returns a tool error naming the limit rather than failing the
 run — the model can keep working with what it already read.
+
+**Writing back** (`propose_connected_write`) is a different shape entirely, and
+deliberately not part of the trio above: it goes through the blessing gate
+instead of a per-run budget. Calling it never touches Microsoft Graph — it
+resolves a `target` slug (from the connection's configured write targets),
+validates the `filename`, and records a `connected_write` Finding with status
+`draft`, exactly like `record_finding`/`draft_section`. Give it either inline
+`content` (up to 4MB) or a `deliverable` slug that already has at least one
+drafted section — never both, never neither — and for a deliverable an
+optional `format` (`markdown`/`html`/`pdf`, default `markdown`) says how it
+will be rendered. The actual upload happens only when a human approves that
+finding (`POST /api/findings/{id}/approval`), and a failed upload is recorded
+on the finding rather than blocking the approval — retry it with `POST
+/api/findings/{id}/upload-retry`. Offering the tool at all additionally
+requires the connection to have write scopes and at least one configured
+write target, checked the same withheld-with-a-reason way as the read trio.
 
 ## Input schema → form
 

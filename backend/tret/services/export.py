@@ -140,6 +140,10 @@ def _deliverable_footprint(runs) -> dict:
     }
 
 
+class DeliverableEmpty(Exception):
+    """No (approved, or approved+draft) sections exist for this deliverable."""
+
+
 class PdfUnavailable(Exception):
     """WeasyPrint's native libraries are missing in this environment."""
 
@@ -243,3 +247,41 @@ never measured, and shared by sections drafted in the same run.</p>
 </body></html>"""
     # url_fetcher is the SSRF/local-file gate: see blocked_url_fetcher.
     return HTML(string=document, url_fetcher=blocked_url_fetcher).write_pdf()
+
+
+async def render_deliverable_bytes(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    deliverable_slug: str,
+    format: str,
+    include_draft: bool = False,
+) -> tuple[bytes, str]:
+    """Assemble a deliverable and render it to `(bytes, content_type)` in
+    `format` ("markdown"|"html"|"pdf") — the one rendering path shared by the
+    deliverable export endpoint and anything that uploads a deliverable
+    elsewhere (`api/findings.py`'s approved-`connected_write` upload and its
+    `POST /api/deliverables/{slug}/publish` route), so the PDF
+    doctrine-hash-dedup logic and the "nothing to render" check live in
+    exactly one place.
+
+    Raises `DeliverableEmpty` when the deliverable has no (approved, or
+    approved+draft) sections, and `PdfUnavailable` (unchanged) when
+    `format="pdf"` and WeasyPrint's native libraries are missing.
+    """
+    if format not in ("markdown", "html", "pdf"):
+        raise ValueError(f"format must be markdown|html|pdf, got {format!r}")
+    result = await assemble_deliverable(db, project_id, deliverable_slug, include_draft)
+    if not result["sections"]:
+        raise DeliverableEmpty(deliverable_slug)
+    if format == "html":
+        return result["html"].encode("utf-8"), "text/html"
+    if format == "pdf":
+        shas = {s.get("doctrine_sha") for s in result["sections"] if s.get("doctrine_sha")}
+        pdf = render_pdf(
+            result["html"],
+            deliverable_slug,
+            result["sections"],
+            shas.pop() if len(shas) == 1 else None,
+        )
+        return pdf, "application/pdf"
+    return result["markdown"].encode("utf-8"), "text/markdown"

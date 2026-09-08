@@ -879,6 +879,41 @@ export interface FindingDetail extends Finding {
   approvals: ApprovalRecord[]
 }
 
+/** `Finding.payload` for `schema_slug: "connected_write"` — a proposed
+ *  write-back to an m365 output folder, awaiting approval. `Finding.subject`
+ *  on the same finding is `{ target: string; filename: string }`. `upload`
+ *  is null until a decision is made (approving triggers the write; rejecting
+ *  never populates it); once populated it never disappears, even on retry —
+ *  a retry replaces it with a fresh result. */
+export interface ConnectedWriteUpload {
+  status: 'uploaded' | 'failed'
+  item_id: string | null
+  web_url: string | null
+  uploaded_at: string | null
+  error: string | null
+  approver_id: string | null
+}
+
+export type ConnectedWriteSource =
+  | { kind: 'inline'; content: string }
+  | { kind: 'deliverable'; slug: string; format: string }
+
+export interface ConnectedWritePayload {
+  target_slug: string
+  target_label: string
+  target_path: string
+  filename: string
+  content_type: string
+  source: ConnectedWriteSource
+  // Both null for a deliverable-sourced proposal — its bytes are rendered
+  // fresh at approval time, not fixed when the finding was proposed, so
+  // there is nothing yet to size or hash. Only an inline-content proposal
+  // carries real values here.
+  size: number | null
+  content_sha256: string | null
+  upload: ConnectedWriteUpload | null
+}
+
 export interface DataRequest {
   id: string
   run_id: string
@@ -1079,6 +1114,27 @@ export interface DeliverableExport {
   sections: DeliverableExportSection[]
   /** Absent when the deliverable has no sections at all (the empty-export shape). */
   energy?: DeliverableExportEnergy
+}
+
+/** POST /api/deliverables/{slug}/publish's body — assembles the deliverable
+ *  the same way `exportDeliverableJson`/the export endpoints do (`format`)
+ *  and writes the result into an m365 write-back target (`target_slug`,
+ *  matching a `WriteTarget.slug`) as `filename`. Unlike the export
+ *  endpoints, there is no `include_draft`: this route ships something, so
+ *  it is always approved-only content. */
+export interface PublishDeliverableBody {
+  target_slug: string
+  filename: string
+  format: 'markdown' | 'html' | 'pdf'
+}
+
+export interface PublishDeliverableResult {
+  web_url: string
+  item_id: string
+  name: string
+  size: number
+  target_slug: string
+  path: string
 }
 
 export interface ChatActivity {
@@ -1917,16 +1973,44 @@ export interface WorkspaceConnection {
    *  carries no such field at all — read it the same way as an empty `read`:
    *  both mean "everything the connected account can see", never "nothing". */
   selected_resources?: SelectedResources
+  /** Whether this connection has been re-authorized with write scopes
+   *  (Files.ReadWrite.All / Sites.ReadWrite.All for m365). Optional because a
+   *  connection fetched before write-back landed carries no such field —
+   *  treat a missing key the same as `false`, never as "on". */
+  write_enabled?: boolean
 }
 
 /** Per-capability resource narrowing on a connection. `read` is the only key
  *  this frontend acts on today; a missing key and an empty array both mean
  *  "everything the connected account can see" (unrestricted) — neither may
- *  ever be read as an allowlist that blocks everything. Other keys are
- *  reserved for capabilities this frontend does not yet narrow. */
+ *  ever be read as an allowlist that blocks everything. `write` is the m365
+ *  write-back allowlist — unlike `read` there is no "everything" mode for
+ *  writes, so an empty/missing `write` means "no output folders configured
+ *  yet", not "write anywhere". Other keys are reserved for capabilities this
+ *  frontend does not yet narrow. */
 export interface SelectedResources {
   read?: M365ReadEntry[]
+  write?: WriteTarget[]
   [key: string]: unknown
+}
+
+/** One SharePoint/OneDrive folder an m365 connection is allowed to write
+ *  into — exactly what PUT /api/connections/m365/resources's `write` array
+ *  takes, and what `WorkspaceConnection.selected_resources.write` and
+ *  GET /api/connections/m365/write-targets echo back. `slug` is this
+ *  frontend's own stable identifier for the folder (unique among an m365
+ *  connection's write targets, not a Graph id) — findings and the publish
+ *  flow address a target by slug rather than by drive/item id. `site_id` is
+ *  null for a OneDrive folder (no site); `web_url` is the Graph-reported
+ *  link, null where the source item lacked one. */
+export interface WriteTarget {
+  slug: string
+  label: string
+  path: string
+  site_id: string | null
+  drive_id: string
+  item_id: string
+  web_url: string | null
 }
 
 /** One location an m365 connection's read-access allowlist can name — a
@@ -2023,6 +2107,37 @@ export interface M365BrowseItem {
 
 export interface M365BrowseResult {
   items: M365BrowseItem[]
+}
+
+/** GET /api/connections/m365/write-targets — the write-back counterpart to
+ *  `M365SourcesResult`: every folder the connection is currently allowed to
+ *  write into, plus whether write-back is enabled at all (mirrors
+ *  `WorkspaceConnection.write_enabled`). Used by the Deliverables "Publish to
+ *  SharePoint" flow, which needs the target list without fetching the whole
+ *  connections list. A 404 (endpoint not deployed yet) or a 409 (m365 not
+ *  connected/write-enabled) both mean "nothing to publish to" — callers hide
+ *  the publish affordance rather than surfacing either as an error. */
+export interface M365WriteTargetsResult {
+  targets: WriteTarget[]
+  write_enabled: boolean
+}
+
+/** One row of GET /api/connections/activity?limit=N (admin only) — an audit
+ *  log entry for a connection read or write (a search hit, a file read, a
+ *  write-back upload, an allowlist change). `target` and `detail` are free
+ *  text the backend formats for display; `actor_run_id` is null for an
+ *  admin-driven action (e.g. changing the allowlist) rather than something a
+ *  run did. */
+export interface ConnectionActivityItem {
+  id: string
+  provider: ConnectionProvider
+  action: string
+  actor_user_id: string | null
+  actor_run_id: string | null
+  target: string | null
+  bytes: number | null
+  detail: string | null
+  created_at: string | null
 }
 
 /** One file picked from either provider, exactly as
@@ -2478,6 +2593,12 @@ export const api = {
       method: 'POST',
       body: { action, note: note || null },
     }),
+  // Re-attempts a failed connected_write upload (payload.upload.status ===
+  // 'failed') without re-approving. Approver-role only, same as deciding the
+  // finding itself; callers show the 403 inline rather than hiding the
+  // button, matching decideFinding's pattern.
+  retryFindingUpload: (id: string) =>
+    request<Finding>(`/findings/${id}/upload-retry`, { method: 'POST' }),
   listDataRequests: (status?: string) =>
     request<DataRequest[]>(`/data-requests${status ? `?status=${status}` : ''}`),
   updateDataRequest: (id: string, status: 'open' | 'fulfilled' | 'dismissed') =>
@@ -2572,6 +2693,15 @@ export const api = {
     request<DeliverableExport>(
       `/deliverables/${encodeURIComponent(slug)}/export?format=json${includeDraft ? '&include_draft=true' : ''}`,
     ),
+  // Writes an export straight into an m365 output folder instead of
+  // downloading it. 409s (refusal — target/connection not writable, name
+  // collision, etc.) carry a `detail` string; callers show it inline rather
+  // than treating it as a generic failure.
+  publishDeliverable: (slug: string, body: PublishDeliverableBody) =>
+    request<PublishDeliverableResult>(`/deliverables/${encodeURIComponent(slug)}/publish`, {
+      method: 'POST',
+      body,
+    }),
 
   // chat
   listConversations: () => request<ConversationSummary[]>('/chat'),
@@ -2665,8 +2795,14 @@ export const api = {
   listConnections: () => request<{ connections: WorkspaceConnection[] }>('/connections'),
   connectionProviders: () =>
     request<{ providers: ConnectionProviderInfo[] }>('/connections/providers'),
-  authorizeConnection: (provider: ConnectionProvider) =>
-    request<ConnectionAuthorizeResult>(`/connections/${provider}/authorize`, { method: 'POST' }),
+  // scopeSet omitted keeps the original call shape/behavior (no body) —
+  // pass 'write' to re-authorize with write scopes (Files.ReadWrite.All /
+  // Sites.ReadWrite.All for m365) without disturbing existing callers.
+  authorizeConnection: (provider: ConnectionProvider, scopeSet?: 'read' | 'write') =>
+    request<ConnectionAuthorizeResult>(`/connections/${provider}/authorize`, {
+      method: 'POST',
+      body: scopeSet ? { scope_set: scopeSet } : undefined,
+    }),
   disconnectConnection: (provider: ConnectionProvider) =>
     request<{ ok: boolean }>(`/connections/${provider}`, { method: 'DELETE' }),
   // gdrive only — a short-lived Picker token, fetched fresh right before the
@@ -2698,6 +2834,23 @@ export const api = {
   m365Sources: () => request<M365SourcesResult>('/connections/m365/sources'),
   setM365ReadAccess: (read: M365ReadEntry[]) =>
     request<WorkspaceConnection>('/connections/m365/resources', { method: 'PUT', body: { read } }),
+  // m365 write-back allowlist (Connections view's M365WriteTargetPicker).
+  // Same PUT as the read allowlist — the body's `read`/`write` keys are
+  // independent, absent keys left untouched server-side — so a write-only
+  // save never disturbs the read allowlist and vice versa. 409s on a
+  // connection without write scopes granted; callers show `ApiError.message`
+  // inline rather than treating it as "no output folders".
+  setM365WriteTargets: (write: WriteTarget[]) =>
+    request<WorkspaceConnection>('/connections/m365/resources', { method: 'PUT', body: { write } }),
+  // Read side of the write allowlist, kept separate from listConnections()
+  // for the Deliverables publish flow, which only needs the target list —
+  // not the whole connections roster — to decide whether to show "Publish to
+  // SharePoint" at all. 404 (endpoint not deployed yet) and 409 (m365 not
+  // connected/write-enabled) both mean "nothing to publish to".
+  m365WriteTargets: () => request<M365WriteTargetsResult>('/connections/m365/write-targets'),
+  // Admin-only audit log across both providers' reads and writes.
+  connectionActivity: (limit = 50) =>
+    request<{ items: ConnectionActivityItem[] }>(`/connections/activity?limit=${limit}`),
   importDocuments: (projectId: string, provider: ConnectionProvider, items: ImportItem[]) =>
     request<ImportDocumentsResult>(`/projects/${projectId}/documents/import`, {
       method: 'POST',

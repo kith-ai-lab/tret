@@ -85,6 +85,11 @@ PROTECTED_TOOLS = frozenset(
         "record_finding",
         "draft_section",
         "file_data_request",
+        # A recording tool, same reasoning as draft_section: it creates a
+        # `connected_write` Finding a later turn (or the run's own summary)
+        # may need to see again — an elided proposal is one the model could
+        # accidentally re-propose or contradict.
+        "propose_connected_write",
     }
 )
 

@@ -6,12 +6,15 @@ import {
   api,
   ApiError,
   gateRefusalDetail,
+  type ConnectionActivityItem,
   type ConnectionProvider,
   type ConnectionProviderInfo,
   type M365ReadEntry,
   type WorkspaceConnection,
+  type WriteTarget,
 } from '../api/client'
 import { M365ReadAccessPicker } from '../components/connections/M365ReadAccessPicker'
+import { M365WriteTargetPicker } from '../components/connections/M365WriteTargetPicker'
 import { formatDateTime } from '../components/shared/format'
 import { Modal } from '../components/shared/Modal'
 import { QueryError } from '../components/shared/MonoTable'
@@ -224,7 +227,11 @@ function ProviderCard({
       )}
 
       {connection?.status === 'active' && info.provider === 'm365' && (
-        <M365ReadAccessSection connection={connection} isAdmin={isAdmin} onChanged={invalidate} />
+        <>
+          <M365ReadAccessSection connection={connection} isAdmin={isAdmin} onChanged={invalidate} />
+          <M365WriteBackSection connection={connection} isAdmin={isAdmin} onChanged={invalidate} />
+          {isAdmin && <M365ActivitySection />}
+        </>
       )}
 
       {!connection && (
@@ -486,5 +493,201 @@ function AllowEverythingButton({ onDone }: { onDone: () => void }) {
         )}
       </Modal>
     </>
+  )
+}
+
+// ── m365 write-back allowlist ────────────────────────────────────────────
+// Unlike read access, write-back has no "everything" mode — a connection
+// carries no write scopes at all until an admin explicitly re-authorizes for
+// them (`write_enabled`), and even then only names folders admins add one at
+// a time. `connection.selected_resources.write` is the source of truth for
+// the folder list, same as `.read` above; the picker only calls the m365
+// browse endpoint once someone opens it.
+
+function M365WriteBackSection({
+  connection,
+  isAdmin,
+  onChanged,
+}: {
+  connection: WorkspaceConnection
+  isAdmin: boolean
+  onChanged: () => void
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const targets = connection.selected_resources?.write ?? []
+  const writeEnabled = connection.write_enabled ?? false
+
+  const enableMutation = useMutation({
+    mutationFn: () => api.authorizeConnection('m365', 'write'),
+    onSuccess: (res) => {
+      window.location.assign(res.authorize_url)
+    },
+  })
+  const enableError = enableMutation.error as ApiError | null
+
+  const removeMutation = useMutation({
+    mutationFn: (target: WriteTarget) =>
+      api.setM365WriteTargets(targets.filter((t) => t.slug !== target.slug)),
+    onSuccess: onChanged,
+  })
+  const removeError = removeMutation.error as ApiError | null
+
+  return (
+    <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border-subtle)' }}>
+      <div className="row" style={{ gap: 8, marginBottom: 4 }}>
+        <div className="mono-label">Write-back</div>
+        {writeEnabled && <span className="chip">write-back on</span>}
+      </div>
+      <div className="mono-body" style={{ color: 'var(--text-muted)', marginBottom: 10 }}>
+        Approved runs and published deliverables can be written into these folders. tret creates a{' '}
+        <code>tret/</code> subfolder inside each and never overwrites or deletes files.
+      </div>
+
+      {!writeEnabled ? (
+        <>
+          <div className="mono-body" style={{ color: 'var(--text-muted)', marginBottom: 10 }}>
+            Write-back is off. Enabling it re-opens Microsoft sign-in to grant edit access
+            (Files.ReadWrite.All, Sites.ReadWrite.All).
+          </div>
+          {isAdmin && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={enableMutation.isPending}
+              onClick={() => enableMutation.mutate()}
+            >
+              {enableMutation.isPending ? 'Redirecting…' : 'Enable write-back'}
+            </button>
+          )}
+          {enableError && (
+            <div className="error-text" style={{ marginTop: 8 }}>
+              {enableError.status === 403
+                ? (gateRefusalDetail(enableError) ?? 'Requires admin role.')
+                : enableError.message}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          {targets.length === 0 ? (
+            <div className="mono-body" style={{ color: 'var(--text-muted)', marginBottom: 10 }}>
+              No output folders yet. Runs cannot propose writes until an admin adds one.
+            </div>
+          ) : (
+            <div className="stack" style={{ gap: 6, marginBottom: 10 }}>
+              {targets.map((target) => (
+                <div key={target.slug} className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
+                  <div className="row" style={{ gap: 8, minWidth: 0 }}>
+                    <span className="mono-body">{target.label}</span>
+                    <span className="desc" style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
+                      {target.path}
+                    </span>
+                    <span className="chip" style={{ fontFamily: 'var(--mono)' }}>
+                      {target.slug}
+                    </span>
+                  </div>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={removeMutation.isPending}
+                      onClick={() => removeMutation.mutate(target)}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {isAdmin && (
+            <button type="button" className="btn btn-sm" onClick={() => setPickerOpen(true)}>
+              Add output folder
+            </button>
+          )}
+        </>
+      )}
+
+      {removeError && (
+        <div className="error-text" style={{ marginTop: 8 }}>
+          {removeError.message}
+        </div>
+      )}
+
+      {isAdmin && (
+        <M365WriteTargetPicker
+          open={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          existingTargets={targets}
+          onSaved={onChanged}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── connection activity (admin only) ─────────────────────────────────────
+// A collapsed disclosure at the bottom of the m365 card — same shape as
+// EmissionsHistory's "Change history": say nothing while loading, hide
+// entirely on a 404 (endpoint not deployed on this backend yet) since that
+// is "this UI does not exist here" rather than an error, and only fetch once
+// someone actually opens it.
+
+function M365ActivitySection() {
+  const [open, setOpen] = useState(false)
+  const activityQuery = useQuery({
+    queryKey: ['connection-activity'],
+    queryFn: () => api.connectionActivity(50),
+    enabled: open,
+    retry: false,
+  })
+  const error = activityQuery.error as ApiError | null
+
+  if (error && error.status === 404) return null
+
+  return (
+    <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border-subtle)' }}>
+      <details open={open} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+        <summary className="mono-label" style={{ cursor: 'pointer' }}>
+          Activity
+        </summary>
+        <div style={{ marginTop: 10 }}>
+          {error && error.status === 403 ? (
+            <div className="fine-print">Admin only — ask an admin or owner to view this.</div>
+          ) : activityQuery.isLoading ? (
+            <div className="empty pulse">Loading…</div>
+          ) : error ? (
+            <QueryError error={error} what="connection activity" />
+          ) : (activityQuery.data?.items.length ?? 0) === 0 ? (
+            <div className="fine-print">No activity recorded yet.</div>
+          ) : (
+            <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+              <table className="mono-table">
+                <thead>
+                  <tr>
+                    <th>When</th>
+                    <th>Action</th>
+                    <th>Target</th>
+                    <th>Bytes</th>
+                    <th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(activityQuery.data?.items ?? []).map((row: ConnectionActivityItem) => (
+                    <tr key={row.id}>
+                      <td>{row.created_at ? formatDateTime(row.created_at) : '—'}</td>
+                      <td>{row.action}</td>
+                      <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{row.target ?? '—'}</td>
+                      <td>{row.bytes ?? '—'}</td>
+                      <td>{row.detail ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </details>
+    </div>
   )
 }

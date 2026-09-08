@@ -163,9 +163,100 @@ to read. Clearing the allowlist (an empty selection) goes back to
 is in effect — restricted to specific locations, or full account
 access — before you ever run something that would touch it.
 
-The allowlist is read-only for now: it scopes what a run may read, not
-what it may write. A write allowlist is a later phase's concern, once
-tret gains anything that writes back to a connected provider at all.
+This is the **read** allowlist — it scopes what a run may read, nothing
+more. What a run (or a person, from a future write-back UI) may write
+*to* is a separate, independent allowlist — see [Write-back](#write-back)
+below.
+
+## Write-back
+
+Beyond reading, an m365 connection can be upgraded to let runs write
+files back into specific SharePoint/OneDrive folders — a report a run
+produced, dropped into a location the workspace picked in advance.
+gdrive has no write-back: `drive.file`'s per-file grant (see
+[Security notes](#security-notes)) has no broader "write access" for a
+separate scope to add on top of.
+
+### Enabling write-back scopes
+
+Reading and writing are separate OAuth grants. A connection made the
+ordinary way (or made before write-back existed at all) only ever has
+the read scopes (`Files.Read.All`, `Sites.Read.All`); write-back needs
+`Files.ReadWrite.All` and `Sites.ReadWrite.All` granted on top.
+
+1. **Add the write permissions** to the same Entra app registration
+   from [Microsoft 365 setup](#microsoft-365-setup) ("API permissions
+   → Add a permission → Microsoft Graph → Delegated"):
+   - `Files.ReadWrite.All`
+   - `Sites.ReadWrite.All`
+
+   Grant admin consent for these the same way as the read permissions.
+2. **Reconnect with write access**: Settings → Connections → the m365
+   connection's "Enable write-back" action. This re-runs the OAuth
+   consent screen requesting the wider scope set (offline_access and
+   User.Read unchanged, Files.Read.All/Sites.Read.All widened to their
+   ReadWrite counterparts) and updates the existing connection in
+   place — same row, new refresh token and granted scopes, nothing to
+   reconnect for reads. Under the hood this is `POST /api/connections/
+   m365/authorize` with `{"scope_set": "write"}` instead of the
+   default `{"scope_set": "read"}`.
+3. Whether the currently granted scopes actually cover write-back is
+   reported as `write_enabled` on the connection (`GET /api/
+   connections`) and on the write-targets list (`GET /api/connections/
+   m365/write-targets`) — the UI uses this to offer "enable write-back"
+   only when it would actually do something.
+
+### Output folders
+
+Unlike the read allowlist, there is no "everything the account can
+write to" default — write-back is opt-in, per-folder, always. A
+workspace admin picks specific folders from Settings → Connections,
+each saved as a named **write target** (a slug, a label, and the
+SharePoint/OneDrive folder it points at) in the same `PUT /api/
+connections/m365/resources` call the read allowlist uses, under a new
+`write` key alongside `read`. Setting one key never touches the other.
+Clearing the write target list (an empty selection) means exactly what
+it says: nothing may be written anywhere, the same as before write-back
+was ever enabled.
+
+A run addresses one of these folders by its slug — `GET /api/
+connections/m365/write-targets` lists what's available.
+
+### The `tret/` subfolder, and create-only semantics
+
+A write never lands directly in the folder an admin picked. The first
+write to a target creates a `tret` subfolder directly under it (reused
+on every later write to the same target), and every file lands inside
+that subfolder — so a run's output is always visually separated from
+whatever else lives in the folder, never mixed in at the top level.
+
+Every write is **create-only**: it never overwrites a file already
+there. If the name it would use is already taken, Microsoft Graph
+renames the new upload instead (its own `conflictBehavior=rename`) —
+the existing file is left exactly as it was, and the new one lands
+under whatever name Graph assigns it. tret never deletes, moves, or
+shares anything through this path; the only writes it ever makes are
+the `tret` folder's own create-if-absent and the file upload itself.
+
+### The write gate
+
+Every write-back call is checked against the workspace's
+`connections.write` gate — a separate check from the `connections.use`
+gate reads and browsing go through, so a plan can allow read access
+without allowing write-back. A workspace whose plan doesn't cover
+write-back gets a clear refusal on the attempt; nothing about reading
+is affected.
+
+### The activity log
+
+Every connections action — a search, a file read, a write-back upload
+(and its failure), a connect, a disconnect, or an admin changing the
+read/write allowlists — is recorded to a per-workspace activity log,
+newest first: `GET /api/connections/activity` (workspace admins only).
+Each row carries the provider, the action, who (or which run) did it
+when known, what it touched, and how many bytes moved — enough to
+answer "what has this connection actually been used for" without
+digging through server logs.
 
 ## Security notes
 

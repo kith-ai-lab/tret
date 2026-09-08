@@ -56,10 +56,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,16 +69,19 @@ from tret.config import get_settings
 from tret.db.engine import get_db
 from tret.db.models import User, WorkspaceConnection, WorkspaceMember
 from tret.engine.extensions import get_extension_registry
+from tret.db.models import ConnectionActivity
 from tret.services.connections import (
     CONNECT_ACTION,
     GDRIVE,
     M365,
     PROVIDER_SPECS,
+    SCOPE_SETS,
     USE_ACTION,
     ConnectionAuthError,
     ConnectionUnavailable,
     authorize_url as build_authorize_url,
     browse_m365,
+    connection_has_write_scopes,
     exchange_code,
     get_access_token_with_expiry,
     get_connection,
@@ -86,6 +89,8 @@ from tret.services.connections import (
     invalidate_access_token,
     invalidate_connected_sources,
     list_connected_sources,
+    list_write_targets,
+    record_connection_activity,
     revoke_token,
 )
 from tret.services.credentials import get_fernet
@@ -177,6 +182,14 @@ def _connection_out(conn: WorkspaceConnection) -> dict:
         # made and must not start making just to answer "is this
         # restricted".
         "selected_resources": conn.selected_resources,
+        # Whether this connection's granted scopes actually include the
+        # write pair (`connection_has_write_scopes`) — distinct from
+        # whether it *has* any write targets set up (that's `GET /m365/
+        # write-targets`'s job): a workspace can reconnect with write scopes
+        # before ever picking a folder to write into, and this flag alone
+        # tells the frontend whether "set up write-back" or "reconnect for
+        # write access" is the next step to offer.
+        "write_enabled": connection_has_write_scopes(conn),
     }
 
 
@@ -233,15 +246,32 @@ async def list_providers(
     return {"providers": out}
 
 
+class AuthorizeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # "write" requests the m365 write-back scope set (SCOPE_SETS["write"])
+    # instead of the plain read set — see services/connections.py::
+    # SCOPE_SETS. gdrive has no separate write scope set to request (its
+    # `drive.file` grant is already read/write per picked file), so a
+    # gdrive authorize with scope_set="write" is refused below rather than
+    # silently falling back to "read".
+    scope_set: Literal["read", "write"] = "read"
+
+
 @router.post("/{provider}/authorize")
 async def authorize(
     provider: str,
     response: Response,
+    body: AuthorizeBody | None = None,
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
     _provider_or_404(provider)
+    scope_set = body.scope_set if body is not None else "read"
+    if scope_set == "write" and provider != M365:
+        raise HTTPException(400, f"scope_set='write' is only valid for provider={M365!r}")
+
     client = get_oauth_client(provider)
     if client is None:
         raise HTTPException(
@@ -260,9 +290,17 @@ async def authorize(
             "provider": provider,
             "nonce": secrets.token_urlsafe(16),
             "sid": sid,
+            # Carried through to the callback purely for `record_connection_
+            # activity`'s `detail` on "connect" — the callback needs no
+            # special-case logic keyed on this: granted_scopes comes back
+            # from the token response either way (see module docstring).
+            "scope_set": scope_set,
         }
     )
-    url = build_authorize_url(provider, client=client, redirect_uri=_redirect_uri(), state=state)
+    scopes = SCOPE_SETS[scope_set] if provider == M365 else None
+    url = build_authorize_url(
+        provider, client=client, redirect_uri=_redirect_uri(), state=state, scopes=scopes
+    )
     response.set_cookie(
         SID_COOKIE,
         sid,
@@ -346,6 +384,11 @@ async def callback(
         log.warning("connections callback: %s token exchange failed: %s", provider, exc)
         return _error_redirect("exchange_failed")
 
+    # A connection that already exists is updated in place, never refused as
+    # a duplicate — this is also how a re-authorize with scope_set="write"
+    # upgrades an existing read-only connection: same row, new refresh
+    # token, new granted_scopes (whatever Graph actually granted for this
+    # attempt), new refreshed_at.
     conn = await get_connection(db, workspace_id, provider)
     if conn is None:
         conn = WorkspaceConnection(workspace_id=workspace_id, provider=provider)
@@ -357,6 +400,11 @@ async def callback(
     conn.error_detail = None
     conn.connected_by = user_id
     conn.refreshed_at = datetime.now(timezone.utc)
+    scope_set = unpacked.get("scope_set") or "read"
+    await record_connection_activity(
+        db, workspace_id=workspace_id, provider=provider, action="connect",
+        actor_user_id=user_id, detail=scope_set,
+    )
     await db.commit()
     # A reconnect may attach a different provider account entirely (or the
     # same account with fresh scopes) — any access token this process cached
@@ -372,6 +420,7 @@ async def callback(
 @router.delete("/{provider}")
 async def disconnect(
     provider: str,
+    user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -389,6 +438,9 @@ async def disconnect(
             # disconnects the workspace.
             log.warning("gdrive token revoke failed during disconnect", exc_info=True)
     await db.delete(conn)
+    await record_connection_activity(
+        db, workspace_id=ctx.id, provider=provider, action="disconnect", actor_user_id=user.id
+    )
     await db.commit()
     # Nothing should be served for a connection that no longer exists.
     invalidate_access_token(ctx.id, provider)
@@ -523,44 +575,169 @@ class ResourceEntry(BaseModel):
     web_url: str | None = None
 
 
+# Admin-supplied, unlike a `ResourceEntry`'s slug-free shape: a write target
+# is the one place in this router a client picks the slug outright, rather
+# than one being derived server-side (see services/connections.py::
+# WriteTarget's own docstring for why). `^[a-z0-9][a-z0-9-]{1,39}$` — starts
+# alphanumeric, otherwise lowercase/digits/hyphen, 2-40 characters — keeps it
+# legible in a URL or a tool call and unambiguous to type by hand.
+_WRITE_SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{1,39}$"
+
+
+class WriteTargetEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str = Field(pattern=_WRITE_SLUG_PATTERN)
+    label: str
+    path: str
+    site_id: str | None = None
+    drive_id: str = Field(min_length=1)
+    item_id: str = Field(min_length=1)
+    web_url: str | None = None
+
+
 class ResourcesBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    read: list[ResourceEntry] = Field(default_factory=list, max_length=50)
+    # `None` (the default, and what a request that omits the key parses to)
+    # means "leave this key on `selected_resources` untouched" — distinct
+    # from `[]`, which is an explicit clear. See `update_m365_resources`'s
+    # own docstring for why that distinction matters for `read` and `write`
+    # alike.
+    read: list[ResourceEntry] | None = Field(default=None, max_length=50)
+    write: list[WriteTargetEntry] | None = Field(default=None, max_length=20)
+
+    @model_validator(mode="after")
+    def _unique_write_slugs(self) -> "ResourcesBody":
+        if self.write is not None:
+            slugs = [entry.slug for entry in self.write]
+            if len(slugs) != len(set(slugs)):
+                raise ValueError("write target slugs must be unique")
+        return self
+
+
+def _write_target_out(target) -> dict:
+    return {
+        "slug": target.slug,
+        "label": target.label,
+        "path": target.path,
+        "site_id": target.site_id,
+        "drive_id": target.drive_id,
+        "item_id": target.item_id,
+        "web_url": target.web_url,
+    }
 
 
 @router.put("/m365/resources")
 async def update_m365_resources(
     body: ResourcesBody,
+    user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Set (or clear) this workspace's m365 read allowlist —
-    `selected_resources["read"]` on the stored connection row. Workspace
-    admin only, the same role every other connection-mutating route in this
-    router requires (`authorize`, `disconnect`): this changes what a run can
-    read, not merely reads through the connection the way browsing or
-    sources listing does.
+    """Set (or clear) this workspace's m365 read allowlist and/or write
+    target list — `selected_resources["read"]`/`["write"]` on the stored
+    connection row. Workspace admin only, the same role every other
+    connection-mutating route in this router requires (`authorize`,
+    `disconnect`): this changes what a run can read or write, not merely
+    reads through the connection the way browsing or sources listing does.
 
-    An empty `read` list clears the restriction — `list_connected_sources`
-    treats an empty (or absent) list identically, falling back to "every
-    drive the account can see" — so `PUT` with `{"read": []}` is exactly how
-    a workspace goes back to unrestricted. Other keys already on
-    `selected_resources` (a future `"write"` allowlist) are preserved:
-    `read` is the only key this route ever writes.
+    `read` and `write` are independent and both optional: a body naming
+    only one leaves the other's stored value exactly as it was (see
+    `ResourcesBody`'s own docstring for `None` vs. `[]`) — narrowing the
+    write targets does not require re-sending the read allowlist, and vice
+    versa. An empty `read` list clears the read restriction —
+    `list_connected_sources` treats an empty (or absent) list identically,
+    falling back to "every drive the account can see" — so `PUT` with
+    `{"read": []}` is exactly how a workspace goes back to unrestricted.
+    An empty `write` list clears every write target — unlike `read`, there
+    is no "everything" fallback on the write side to fall back to (see
+    `services/connections.py`'s write-back module note), so this is simply
+    "nothing may be written to."
 
     Requires a connection to already exist (404 if not — there is nothing
     to scope an allowlist onto) but does not itself call `ensure_connection_
     usable`/the plan gate: this is an admin narrowing what a *future*
-    successful use of the connection may read, not a use of the connection
-    itself.
+    successful use of the connection may read or write, not a use of the
+    connection itself.
     """
     conn = await get_connection(db, ctx.id, M365)
     if conn is None:
         raise HTTPException(404, "workspace has no m365 connection")
     resources = dict(conn.selected_resources or {})
-    resources["read"] = [entry.model_dump() for entry in body.read]
+    if body.read is not None:
+        resources["read"] = [entry.model_dump() for entry in body.read]
+    if body.write is not None:
+        resources["write"] = [entry.model_dump() for entry in body.write]
     conn.selected_resources = resources
+    await record_connection_activity(
+        db, workspace_id=ctx.id, provider=M365, action="resources", actor_user_id=user.id
+    )
     await db.commit()
     invalidate_connected_sources(ctx.id, M365)
     return _connection_out(conn)
+
+
+@router.get("/m365/write-targets")
+async def m365_write_targets(
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """The folders this workspace's connection is allowed to write into —
+    `services/connections.py::list_write_targets`, reported as `targets`.
+    `write_enabled` tells the frontend whether the connection's granted
+    scopes actually cover write-back at all (see `_connection_out`'s own
+    comment on that flag) — a workspace can have targets configured from
+    before a reconnect narrowed its scopes back down, so `targets` alone
+    does not answer that question.
+
+    Any workspace member, same as `m365_sources`: this reads through the
+    connection, it does not mutate it. `ConnectionUnavailable` (raised
+    by `list_write_targets` via `ensure_connection_usable`, under the same
+    conditions as everywhere else in this router) maps to 409, same as
+    `m365_sources`.
+    """
+    try:
+        targets = await list_write_targets(db, ctx.id)
+    except ConnectionUnavailable as exc:
+        raise HTTPException(409, detail=exc.reason) from exc
+    conn = await get_connection(db, ctx.id, M365)
+    write_enabled = bool(conn and connection_has_write_scopes(conn))
+    return {"targets": [_write_target_out(t) for t in targets], "write_enabled": write_enabled}
+
+
+def _activity_out(row: ConnectionActivity) -> dict:
+    return {
+        "id": row.id,
+        "provider": row.provider,
+        "action": row.action,
+        "actor_user_id": row.actor_user_id,
+        "actor_run_id": row.actor_run_id,
+        "target": row.target,
+        "bytes": row.bytes,
+        "detail": row.detail,
+        "created_at": row.created_at,
+    }
+
+
+@router.get("/activity")
+async def list_activity(
+    limit: int = Query(50, ge=1, le=200),
+    ctx: WorkspaceContext = Depends(require_workspace_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """This workspace's connections activity log, newest first —
+    `services/connections.py::record_connection_activity`'s rows, workspace-
+    scoped. Admin only: the log can carry another member's search queries
+    and file paths, which is exactly the kind of thing browsing/sources
+    listing never exposes about *other* members' activity today.
+    """
+    rows = (
+        await db.execute(
+            select(ConnectionActivity)
+            .where(ConnectionActivity.workspace_id == ctx.id)
+            .order_by(ConnectionActivity.created_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return {"items": [_activity_out(r) for r in rows]}

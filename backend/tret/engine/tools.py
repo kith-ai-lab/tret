@@ -28,9 +28,17 @@ Trust-doctrine notes:
   ctx.retrieved_values. Availability is per-workspace (a connection has to
   exist and be usable), checked once per run and withheld — same pattern as
   the web tools — when it is not.
+- `propose_connected_write` never touches Microsoft Graph. Writing back to a
+  workspace's connected SharePoint/OneDrive goes through the same blessing
+  gate as any other structured output: this tool only validates what it can
+  validate now and records a `connected_write` Finding with status `draft`.
+  The actual upload happens later, and only on approval
+  (`api/findings.py::decide_finding`), via
+  `tret.services.connections.upload_connected_file`.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -795,17 +803,218 @@ async def withheld_connector_tools(
     usable. Otherwise returns every connector tool name in `enabled_names`
     (there is one connection per workspace, so the reason is the same for all
     three) alongside the reason the connection was unusable.
+
+    `propose_connected_write` (`WRITE_CONNECTOR_TOOL_NAMES`) rides along but is
+    withheld on its own, stricter terms: even a fully usable connection may
+    lack write scopes, or have no write target configured, in which case the
+    three read tools stay available and only the write tool is withheld.
     """
-    names = {n for n in enabled_names if n in CONNECTOR_TOOL_NAMES}
+    read_names = {n for n in enabled_names if n in CONNECTOR_TOOL_NAMES}
+    write_names = {n for n in enabled_names if n in WRITE_CONNECTOR_TOOL_NAMES}
+    names = read_names | write_names
     if not names:
         return set(), None
     if workspace_id is None:
         return names, "This run has no workspace, so connected sources are unavailable."
     try:
-        await connections_service.ensure_connection_usable(db, workspace_id)
+        conn = await connections_service.ensure_connection_usable(db, workspace_id)
     except connections_service.ConnectionUnavailable as e:
         return names, e.reason
+    if not write_names:
+        return set(), None
+    # The connection itself is usable, so the read tools are never withheld
+    # past this point — only propose_connected_write's own extra
+    # requirements (write scopes, at least one configured write target) are
+    # checked from here on.
+    if not connections_service.connection_has_write_scopes(conn):
+        return write_names, (
+            "This workspace's Microsoft 365 connection does not have write access "
+            "granted. Reconnect with write permission (Settings > Connections) to "
+            "enable writing back to SharePoint."
+        )
+    try:
+        write_targets = await connections_service.list_write_targets(db, workspace_id)
+    except connections_service.ConnectionUnavailable as e:
+        return write_names, e.reason
+    if not write_targets:
+        return write_names, "No write targets are configured for this workspace's connection."
     return set(), None
+
+
+# ── connected sources: write-back to SharePoint, propose-then-approve ───────
+# `propose_connected_write` never writes to Microsoft Graph. Writing anything
+# live is a blessing-gate question the same way a verdict or a drafted section
+# is: the model proposes (this tool, recording a `connected_write` Finding
+# with status `draft`), and only a human approval triggers the real upload
+# (`api/findings.py::decide_finding`, via
+# `connections_service.upload_connected_file`). So this tool's whole job is to
+# validate what it *can* validate now — does the target exist, is the
+# filename safe, is inline content small enough, does a claimed deliverable
+# actually have a drafted section — and record the proposal.
+WRITE_CONNECTOR_TOOL_NAMES = frozenset({"propose_connected_write"})
+
+# UTF-8 bytes. Content over this size has to go through a `deliverable`
+# instead: that source is rendered from its drafted sections at approval time
+# rather than carried inline in the Finding's payload, so there is no size
+# question for it here.
+MAX_CONNECTED_WRITE_CONTENT_BYTES = 4 * 1024 * 1024
+
+_CONNECTED_WRITE_CONTENT_TYPE_BY_EXTENSION = {
+    "md": "text/markdown",
+    "html": "text/html",
+    "txt": "text/plain",
+    "json": "application/json",
+    "csv": "text/csv",
+}
+
+_CONNECTED_WRITE_FORMAT_CONTENT_TYPE = {
+    "markdown": "text/markdown",
+    "html": "text/html",
+    "pdf": "application/pdf",
+}
+_CONNECTED_WRITE_FORMAT_EXTENSION = {"markdown": "md", "html": "html", "pdf": "pdf"}
+
+
+def _connected_write_content_type(filename: str) -> str:
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return _CONNECTED_WRITE_CONTENT_TYPE_BY_EXTENSION.get(ext, "application/octet-stream")
+
+
+def _with_forced_extension(filename: str, extension: str) -> str:
+    stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+    return f"{stem}.{extension}"
+
+
+@builtin(
+    "propose_connected_write",
+    "Propose writing a file to the workspace's connected SharePoint/OneDrive. This records a "
+    "DRAFT finding awaiting human approval and writes NOTHING to SharePoint itself — the upload "
+    "only happens if and when an approver blesses it. Provide exactly one of `content` (inline "
+    "text, up to 4MB) or `deliverable` (a deliverable_slug with at least one drafted section, "
+    "rendered and uploaded in `format` at approval time).",
+    {
+        "type": "object",
+        "required": ["target", "filename"],
+        "properties": {
+            "target": {
+                "type": "string",
+                "description": "Write target slug — see list_connected_sources for what's available",
+            },
+            "filename": {"type": "string"},
+            "content": {
+                "type": ["string", "null"],
+                "description": "Inline file content. Mutually exclusive with `deliverable`.",
+            },
+            "deliverable": {
+                "type": ["string", "null"],
+                "description": "A deliverable_slug drafted via draft_section. Mutually exclusive with `content`.",
+            },
+            "format": {
+                "type": "string",
+                "enum": ["markdown", "html", "pdf"],
+                "default": "markdown",
+                "description": "Render format when using `deliverable`",
+            },
+        },
+    },
+)
+async def propose_connected_write(
+    ctx: RunContext,
+    target: str,
+    filename: str,
+    content: str | None = None,
+    deliverable: str | None = None,
+    format: str = "markdown",
+) -> str:
+    if (content is None) == (deliverable is None):
+        raise ToolError(
+            "Provide exactly one of `content` or `deliverable`, not both and not neither."
+        )
+    if format not in _CONNECTED_WRITE_FORMAT_CONTENT_TYPE:
+        raise ToolError(
+            f"format must be one of {sorted(_CONNECTED_WRITE_FORMAT_CONTENT_TYPE)}, got '{format}'"
+        )
+    if ctx.workspace_id is None:
+        raise ToolError("This run has no workspace, so connected sources are unavailable.")
+
+    try:
+        targets = await connections_service.list_write_targets(ctx.db, ctx.workspace_id)
+    except connections_service.ConnectionUnavailable as e:
+        raise ToolError(e.reason) from e
+    by_slug = {t.slug: t for t in targets}
+    write_target = by_slug.get(target)
+    if write_target is None:
+        raise ToolError(f"Unknown write target '{target}'. Allowed targets: {sorted(by_slug)}")
+
+    try:
+        safe_name = connections_service.safe_upload_filename(filename)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+
+    if content is not None:
+        size = len(content.encode("utf-8"))
+        if size > MAX_CONNECTED_WRITE_CONTENT_BYTES:
+            raise ToolError(
+                f"Content is {size} bytes, over the {MAX_CONNECTED_WRITE_CONTENT_BYTES} byte "
+                "inline limit for propose_connected_write. Draft it as a deliverable section "
+                "(draft_section) and propose that deliverable instead of inline content."
+            )
+        content_type = _connected_write_content_type(safe_name)
+        source = {"kind": "inline", "content": content}
+        size_field: int | None = size
+        sha256: str | None = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    else:
+        rows = (
+            await ctx.db.execute(
+                select(Finding).where(
+                    Finding.project_id == ctx.project_id,
+                    Finding.schema_slug == "draft_section",
+                )
+            )
+        ).scalars().all()
+        if not any(f.subject.get("deliverable") == deliverable for f in rows):
+            raise ToolError(
+                f"No drafted sections exist for deliverable '{deliverable}' in this project. "
+                "Use draft_section to draft at least one section first."
+            )
+        content_type = _CONNECTED_WRITE_FORMAT_CONTENT_TYPE[format]
+        safe_name = _with_forced_extension(safe_name, _CONNECTED_WRITE_FORMAT_EXTENSION[format])
+        source = {"kind": "deliverable", "slug": deliverable, "format": format}
+        size_field = None
+        sha256 = None
+
+    finding = Finding(
+        run_id=ctx.run_id,
+        project_id=ctx.project_id,
+        pack_id=ctx.pack_id,
+        schema_slug="connected_write",
+        subject={"target": write_target.slug, "filename": safe_name},
+        payload={
+            "target_slug": write_target.slug,
+            "target_label": write_target.label,
+            "target_path": write_target.path,
+            "filename": safe_name,
+            "content_type": content_type,
+            "source": source,
+            "size": size_field,
+            "content_sha256": sha256,
+            "upload": None,
+        },
+        provenance={
+            "model": ctx.model_used,
+            "doctrine_sha": ctx.doctrine_sha,
+            "retrieved_values": ctx.retrieved_values,
+            "document_ids": [str(d) for d in ctx.document_ids],
+        },
+        status="draft",
+    )
+    ctx.db.add(finding)
+    await ctx.db.flush()
+    ctx.findings_created.append(finding.id)
+    return (
+        f"Proposed {safe_name} to {write_target.label}/tret — awaiting approval "
+        f"(finding {finding.id}). Nothing has been written to SharePoint."
+    )
 
 
 # ── the deterministic lane ────────────────────────────────────────────────────

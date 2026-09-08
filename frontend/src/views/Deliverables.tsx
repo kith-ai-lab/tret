@@ -1,8 +1,8 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api, ApiError, type Deliverable } from '../api/client'
+import { api, ApiError, type Deliverable, type WriteTarget } from '../api/client'
 import {
   formatCo2eScaled,
   formatDateTime,
@@ -12,6 +12,7 @@ import {
 } from '../components/shared/format'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { MarkdownDoc } from '../components/shared/MarkdownDoc'
+import { Modal } from '../components/shared/Modal'
 import { StatusBadge } from '../components/shared/StatusBadge'
 
 export function Deliverables() {
@@ -242,6 +243,7 @@ function DeliverableDetail({ deliverable }: { deliverable: Deliverable }) {
             <span className="desc">(unapproved-content preview — not for distribution)</span>
           </label>
         </div>
+        <PublishToSharePointButton deliverable={deliverable} />
         {nothingToExport && (
           <div
             style={{
@@ -335,6 +337,195 @@ function DeliverableDetail({ deliverable }: { deliverable: Deliverable }) {
         ) : null}
       </div>
     </div>
+  )
+}
+
+// ── publish to SharePoint ────────────────────────────────────────────────
+// Only offered once write-back is actually usable: an m365 connection with
+// write scopes granted and at least one output folder configured. Both a
+// 404 (endpoint not deployed on this backend yet) and a 409 (m365 not
+// connected/write-enabled) mean "nothing to publish to" here — same as any
+// other error, since there is nothing actionable to show for either.
+
+function PublishToSharePointButton({ deliverable }: { deliverable: Deliverable }) {
+  const [open, setOpen] = useState(false)
+  const writeTargetsQuery = useQuery({
+    queryKey: ['m365-write-targets'],
+    queryFn: api.m365WriteTargets,
+    retry: false,
+  })
+  // Publishing needs workspace-approver or higher — the server enforces
+  // this (require_workspace_approver in api/findings.py, same dependency
+  // POST .../approval uses); this is purely so an analyst isn't shown a
+  // button that would just 403. Same ['owner', 'admin'].includes(me.role)
+  // shape Harnesses.tsx uses for its own role-gated controls, widened to
+  // include 'approver'. Defaults to false (hidden) while `me` is still
+  // loading, rather than flashing an enabled button first.
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const canApprove = ['owner', 'admin', 'approver'].includes(meQuery.data?.role ?? '')
+
+  const targets = writeTargetsQuery.data?.targets ?? []
+  const eligible = (writeTargetsQuery.data?.write_enabled ?? false) && targets.length > 0
+
+  if (writeTargetsQuery.isLoading || writeTargetsQuery.isError || !eligible || !canApprove) return null
+
+  return (
+    <>
+      <button type="button" className="btn btn-sm" onClick={() => setOpen(true)}>
+        Publish to SharePoint
+      </button>
+      <PublishToSharePointModal
+        deliverable={deliverable}
+        targets={targets}
+        open={open}
+        onClose={() => setOpen(false)}
+      />
+    </>
+  )
+}
+
+function PublishToSharePointModal({
+  deliverable,
+  targets,
+  open,
+  onClose,
+}: {
+  deliverable: Deliverable
+  targets: WriteTarget[]
+  open: boolean
+  onClose: () => void
+}) {
+  const [targetSlug, setTargetSlug] = useState(targets[0]?.slug ?? '')
+  const [format, setFormat] = useState<(typeof EXPORT_FORMATS)[number]['format']>('markdown')
+  const [filename, setFilename] = useState(`${deliverable.slug}.md`)
+  const [filenameTouched, setFilenameTouched] = useState(false)
+
+  // Reset to a fresh form on every open — the modal stays mounted between
+  // visits, so without this a prior publish's filename/target would carry
+  // over into the next one.
+  useEffect(() => {
+    if (open) {
+      setTargetSlug(targets[0]?.slug ?? '')
+      setFormat('markdown')
+      setFilename(`${deliverable.slug}.md`)
+      setFilenameTouched(false)
+    }
+  }, [open, deliverable.slug, targets])
+
+  const onFormatChange = (f: (typeof EXPORT_FORMATS)[number]['format']) => {
+    setFormat(f)
+    if (!filenameTouched) {
+      const extension = EXPORT_FORMATS.find((x) => x.format === f)?.extension ?? 'md'
+      setFilename(`${deliverable.slug}.${extension}`)
+    }
+  }
+
+  const publishMutation = useMutation({
+    mutationFn: () =>
+      api.publishDeliverable(deliverable.slug, {
+        target_slug: targetSlug,
+        filename,
+        format,
+      }),
+  })
+  const publishError = publishMutation.error as ApiError | null
+  const result = publishMutation.data
+
+  const close = () => {
+    if (publishMutation.isPending) return
+    onClose()
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={close}
+      title="Publish to SharePoint"
+      subtitle="Writes this deliverable's export straight into an m365 output folder."
+      footer={
+        result ? (
+          <button type="button" className="btn btn-sm" onClick={close}>
+            Close
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={close}
+              disabled={publishMutation.isPending}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              disabled={publishMutation.isPending || !targetSlug || filename.trim() === ''}
+              onClick={() => publishMutation.mutate()}
+            >
+              {publishMutation.isPending ? 'Publishing…' : 'Publish'}
+            </button>
+          </>
+        )
+      }
+    >
+      {result ? (
+        <div className="stack" style={{ gap: 8 }}>
+          <div className="mono-body" style={{ color: 'var(--green)' }}>
+            Published.
+          </div>
+          <div className="mono-body">
+            <a href={result.web_url} target="_blank" rel="noopener noreferrer">
+              {result.name}
+            </a>
+          </div>
+          <div className="fine-print" style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
+            {result.path}
+          </div>
+        </div>
+      ) : (
+        <div className="stack" style={{ gap: 12 }}>
+          <div className="field">
+            <label className="mono-label">Output folder</label>
+            <select value={targetSlug} onChange={(e) => setTargetSlug(e.target.value)}>
+              {targets.map((t) => (
+                <option key={t.slug} value={t.slug}>
+                  {t.label} — {t.path}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label className="mono-label">Filename</label>
+            <input
+              type="text"
+              value={filename}
+              onChange={(e) => {
+                setFilenameTouched(true)
+                setFilename(e.target.value)
+              }}
+            />
+          </div>
+          <div className="field">
+            <label className="mono-label">Format</label>
+            <div className="row" style={{ gap: 12 }}>
+              {EXPORT_FORMATS.map(({ format: f, label }) => (
+                <label key={f} className="check-row" style={{ padding: 0 }}>
+                  <input
+                    type="radio"
+                    name="publish-format"
+                    checked={format === f}
+                    onChange={() => onFormatChange(f)}
+                  />
+                  <span>{label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          {publishError && <div className="error-text">{publishError.message}</div>}
+        </div>
+      )}
+    </Modal>
   )
 }
 

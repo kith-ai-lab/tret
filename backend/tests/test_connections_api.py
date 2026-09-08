@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -31,7 +32,7 @@ from tests.evals.golden_world import install_sqlite_type_shims
 from tret.api import auth, connections as connections_api
 from tret.config import get_settings
 from tret.db.engine import get_db
-from tret.db.models import Base, User, Workspace, WorkspaceConnection, WorkspaceMember
+from tret.db.models import Base, ConnectionActivity, User, Workspace, WorkspaceConnection, WorkspaceMember
 from tret.engine import extensions as extensions_module
 from tret.engine.extensions import ExtensionAPI, GateResult
 from tret.services import connections as connections_module
@@ -45,6 +46,7 @@ GDRIVE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GDRIVE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 M365_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 GRAPH = GRAPH_API_BASE
+GRAPH_ME_URL = f"{GRAPH}/me"
 APP_URL = "https://tret.example.test"
 
 
@@ -1124,3 +1126,530 @@ async def test_m365_sources_and_resources_are_isolated_per_workspace(
     # B's sources view never sees A's allowlist.
     sources_response = await client.get("/api/connections/m365/sources")
     assert sources_response.json()["sources"][0]["drive_id"] == "drive-b"
+
+
+# ── write-back: scope-upgrade authorize -> callback ──────────────────────────
+async def _activity_rows(session_factory, workspace_id) -> list[ConnectionActivity]:
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                select(ConnectionActivity).where(ConnectionActivity.workspace_id == workspace_id)
+            )
+        ).scalars().all()
+    return rows
+
+
+async def test_authorize_default_scope_set_is_read(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    admin = make_user("default-scope-admin@example.com")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"))
+    await login(client, admin.email)
+
+    response = await client.post("/api/connections/m365/authorize")  # no body at all
+    assert response.status_code == 200, response.text
+    scopes = parse_qs(urlsplit(response.json()["authorize_url"]).query)["scope"][0].split()
+    assert "Files.Read.All" in scopes
+    assert "Files.ReadWrite.All" not in scopes
+
+
+async def test_authorize_with_scope_set_write_requests_the_write_scopes(
+    client, seed, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("write-scope-admin@example.com")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"))
+    await login(client, admin.email)
+
+    response = await client.post("/api/connections/m365/authorize", json={"scope_set": "write"})
+    assert response.status_code == 200, response.text
+    authorize_url = response.json()["authorize_url"]
+    qs = parse_qs(urlsplit(authorize_url).query)
+    scopes = qs["scope"][0].split()
+    assert "Files.ReadWrite.All" in scopes
+    assert "Sites.ReadWrite.All" in scopes
+    assert "Files.Read.All" not in scopes
+
+    unpacked = connections_api._state_serializer().loads(qs["state"][0])
+    assert unpacked["scope_set"] == "write"
+
+
+async def test_authorize_scope_set_write_is_400_for_gdrive(client, seed):
+    workspace = make_workspace("Alpha")
+    admin = make_user("gdrive-write-scope-admin@example.com")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"))
+    await login(client, admin.email)
+
+    response = await client.post("/api/connections/gdrive/authorize", json={"scope_set": "write"})
+    assert response.status_code == 400
+
+
+async def test_authorize_rejects_an_unknown_scope_set(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    admin = make_user("bad-scope-set-admin@example.com")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"))
+    await login(client, admin.email)
+
+    response = await client.post("/api/connections/m365/authorize", json={"scope_set": "delete"})
+    assert response.status_code == 422
+
+
+async def test_callback_with_scope_set_write_updates_the_existing_row_and_records_connect_activity(
+    client, seed, session_factory, _configured_m365_client
+):
+    """A re-authorize with `scope_set='write'` upgrades the same connection
+    row in place — same shape `test_callback_on_an_existing_connection_
+    upserts_rather_than_duplicates` proves for gdrive, exercised here for
+    the m365 write-scope upgrade specifically — and records `action=
+    'connect'`, `detail='write'`."""
+    workspace = make_workspace("Alpha")
+    admin = make_user("scope-upgrade-admin@example.com")
+    existing = make_connection(workspace, provider="m365", account_label="person@example.com")
+    existing.granted_scopes = ["offline_access", "User.Read", "Files.Read.All", "Sites.Read.All"]
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), existing)
+    await login(client, admin.email)
+
+    response = await client.post("/api/connections/m365/authorize", json={"scope_set": "write"})
+    assert response.status_code == 200, response.text
+    state = parse_qs(urlsplit(response.json()["authorize_url"]).query)["state"][0]
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(M365_TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "tok",
+                    "refresh_token": "fresh-write-refresh-token",
+                    "scope": "offline_access User.Read Files.ReadWrite.All Sites.ReadWrite.All",
+                },
+            )
+        )
+        mock.get(GRAPH_ME_URL).mock(
+            return_value=httpx.Response(200, json={"userPrincipalName": "person@tenant.onmicrosoft.com"})
+        )
+        response = await client.get(
+            "/api/connections/callback",
+            params={"code": "auth-code", "state": state},
+            follow_redirects=False,
+        )
+    assert response.status_code == 302
+
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                select(WorkspaceConnection).where(WorkspaceConnection.workspace_id == workspace.id)
+            )
+        ).scalars().all()
+    assert len(rows) == 1  # updated in place, not duplicated
+    assert rows[0].id == existing.id
+    assert "Files.ReadWrite.All" in rows[0].granted_scopes
+    assert "Sites.ReadWrite.All" in rows[0].granted_scopes
+    assert get_fernet().decrypt(rows[0].encrypted_refresh_token).decode() == "fresh-write-refresh-token"
+
+    activity = await _activity_rows(session_factory, workspace.id)
+    connect_rows = [r for r in activity if r.action == "connect"]
+    assert len(connect_rows) == 1
+    assert connect_rows[0].detail == "write"
+    assert connect_rows[0].actor_user_id == admin.id
+
+
+async def test_authorize_then_callback_records_connect_activity_with_detail_read(
+    client, seed, session_factory
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("connect-activity-admin@example.com")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"))
+    await login(client, admin.email)
+
+    _authorize_url, state = await _authorize_state(client)
+    id_token = _gdrive_id_token("connect-activity@example.com")
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(GDRIVE_TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": "gdrive-access-token",
+                    "refresh_token": "gdrive-refresh-token",
+                    "scope": "openid email https://www.googleapis.com/auth/drive.file",
+                    "id_token": id_token,
+                },
+            )
+        )
+        response = await client.get(
+            "/api/connections/callback",
+            params={"code": "auth-code", "state": state},
+            follow_redirects=False,
+        )
+    assert response.status_code == 302
+
+    activity = await _activity_rows(session_factory, workspace.id)
+    connect_rows = [r for r in activity if r.action == "connect"]
+    assert len(connect_rows) == 1
+    assert connect_rows[0].detail == "read"
+    assert connect_rows[0].provider == "gdrive"
+
+
+# ── write-back: DELETE records disconnect activity ───────────────────────────
+async def test_disconnect_records_a_disconnect_activity_row(client, seed, session_factory):
+    workspace = make_workspace("Alpha")
+    admin = make_user("disconnect-activity-admin@example.com")
+    conn = make_connection(workspace)
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(GDRIVE_REVOKE_URL).mock(return_value=httpx.Response(200))
+        response = await client.delete("/api/connections/gdrive")
+    assert response.status_code == 200
+
+    activity = await _activity_rows(session_factory, workspace.id)
+    disconnect_rows = [r for r in activity if r.action == "disconnect"]
+    assert len(disconnect_rows) == 1
+    assert disconnect_rows[0].actor_user_id == admin.id
+    assert disconnect_rows[0].provider == "gdrive"
+
+
+# ── write-back: GET /api/connections gains write_enabled ────────────────────
+async def test_list_connections_includes_write_enabled_true(client, seed):
+    workspace = make_workspace("Alpha")
+    user = make_user("write-enabled-true-view@example.com")
+    conn = make_connection(workspace, provider="m365")
+    conn.granted_scopes = ["offline_access", "User.Read", "Files.ReadWrite.All", "Sites.ReadWrite.All"]
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    body = (await client.get("/api/connections")).json()
+    assert body["connections"][0]["write_enabled"] is True
+
+
+async def test_list_connections_write_enabled_false_by_default(client, seed):
+    workspace = make_workspace("Alpha")
+    user = make_user("write-enabled-false-view@example.com")
+    conn = make_connection(workspace)  # gdrive, granted_scopes = ["openid", "email"]
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    body = (await client.get("/api/connections")).json()
+    assert body["connections"][0]["write_enabled"] is False
+
+
+# ── PUT /api/connections/m365/resources: write targets ──────────────────────
+def _write_entry(slug: str = "budget-folder", **overrides) -> dict:
+    entry = {
+        "slug": slug,
+        "label": "Budget Folder",
+        "path": "Finance/Budget",
+        "site_id": "site-1",
+        "drive_id": "drive-1",
+        "item_id": "folder-item-1",
+        "web_url": "https://contoso.sharepoint.com/sites/finance/Budget",
+    }
+    entry.update(overrides)
+    return entry
+
+
+async def test_update_m365_resources_sets_write_targets_and_persists_them(
+    client, seed, session_factory, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("write-targets-set-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    response = await client.put(
+        "/api/connections/m365/resources", json={"write": [_write_entry()]}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["selected_resources"]["write"][0]["slug"] == "budget-folder"
+
+    async with session_factory() as db:
+        row = await db.get(WorkspaceConnection, conn.id)
+    assert row.selected_resources["write"][0]["drive_id"] == "drive-1"
+
+
+async def test_update_m365_resources_write_only_body_leaves_read_untouched(
+    client, seed, session_factory, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("write-leaves-read-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    conn.selected_resources = {"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]}
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    response = await client.put(
+        "/api/connections/m365/resources", json={"write": [_write_entry(slug="out")]}
+    )
+    assert response.status_code == 200, response.text
+
+    async with session_factory() as db:
+        row = await db.get(WorkspaceConnection, conn.id)
+    assert row.selected_resources["read"][0]["drive_id"] == "drive-1"  # untouched
+    assert row.selected_resources["write"][0]["slug"] == "out"
+
+
+async def test_update_m365_resources_read_only_body_leaves_write_untouched(
+    client, seed, session_factory, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("read-leaves-write-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    conn.selected_resources = {"write": [_write_entry(slug="out")]}
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    response = await client.put("/api/connections/m365/resources", json={"read": []})
+    assert response.status_code == 200, response.text
+
+    async with session_factory() as db:
+        row = await db.get(WorkspaceConnection, conn.id)
+    assert row.selected_resources["read"] == []
+    assert row.selected_resources["write"][0]["slug"] == "out"  # untouched
+
+
+async def test_update_m365_resources_rejects_an_invalid_write_slug(
+    client, seed, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("bad-slug-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    response = await client.put(
+        "/api/connections/m365/resources",
+        json={"write": [_write_entry(slug="Not A Valid Slug!")]},
+    )
+    assert response.status_code == 422
+
+
+async def test_update_m365_resources_rejects_duplicate_write_slugs(
+    client, seed, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("dup-slug-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    response = await client.put(
+        "/api/connections/m365/resources",
+        json={
+            "write": [
+                _write_entry(slug="dup", drive_id="d1", item_id="i1"),
+                _write_entry(slug="dup", drive_id="d2", item_id="i2"),
+            ]
+        },
+    )
+    assert response.status_code == 422
+
+
+async def test_update_m365_resources_rejects_more_than_twenty_write_entries(
+    client, seed, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("too-many-write-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    entries = [
+        _write_entry(slug=f"target-{i}", drive_id=f"d{i}", item_id=f"i{i}") for i in range(21)
+    ]
+    response = await client.put("/api/connections/m365/resources", json={"write": entries})
+    assert response.status_code == 422
+
+
+async def test_update_m365_resources_write_requires_admin(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    analyst = make_user("write-analyst@example.com", role="analyst")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, analyst, make_member(analyst, workspace, role="analyst"), conn)
+    await login(client, analyst.email)
+
+    response = await client.put(
+        "/api/connections/m365/resources", json={"write": [_write_entry()]}
+    )
+    assert response.status_code == 403
+
+
+async def test_update_m365_resources_records_a_resources_activity_row(
+    client, seed, session_factory, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("resources-activity-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    response = await client.put("/api/connections/m365/resources", json={"read": []})
+    assert response.status_code == 200, response.text
+
+    activity = await _activity_rows(session_factory, workspace.id)
+    resources_rows = [r for r in activity if r.action == "resources"]
+    assert len(resources_rows) == 1
+    assert resources_rows[0].actor_user_id == admin.id
+
+
+# ── GET /api/connections/m365/write-targets ──────────────────────────────────
+async def test_write_targets_returns_configured_targets_and_write_enabled_true(
+    client, seed, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    user = make_user("write-targets-view@example.com")
+    conn = make_connection(workspace, provider="m365")
+    conn.granted_scopes = ["offline_access", "User.Read", "Files.ReadWrite.All", "Sites.ReadWrite.All"]
+    conn.selected_resources = {"write": [_write_entry()]}
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    response = await client.get("/api/connections/m365/write-targets")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["write_enabled"] is True
+    assert body["targets"] == [_write_entry()]
+
+
+async def test_write_targets_write_enabled_false_without_write_scopes(
+    client, seed, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    user = make_user("write-targets-no-scopes@example.com")
+    conn = make_connection(workspace, provider="m365")  # default scopes lack the write pair
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    response = await client.get("/api/connections/m365/write-targets")
+    assert response.status_code == 200, response.text
+    assert response.json()["write_enabled"] is False
+    assert response.json()["targets"] == []
+
+
+async def test_write_targets_with_no_connection_is_409(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    user = make_user("write-targets-no-conn@example.com")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"))
+    await login(client, user.email)
+
+    response = await client.get("/api/connections/m365/write-targets")
+    assert response.status_code == 409
+
+
+async def test_write_targets_requires_no_admin_role(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    member = make_user("write-targets-any-member@example.com", role="analyst")
+    conn = make_connection(workspace, provider="m365")
+    conn.selected_resources = {"write": [_write_entry()]}
+    await seed(workspace, member, make_member(member, workspace, role="analyst"), conn)
+    await login(client, member.email)
+
+    response = await client.get("/api/connections/m365/write-targets")
+    assert response.status_code == 200, response.text
+
+
+async def test_write_targets_are_isolated_per_workspace(client, seed, _configured_m365_client):
+    a = make_workspace("Alpha")
+    b = make_workspace("Bravo")
+    user_a = make_user("iso-write-targets-a@example.com")
+    user_b = make_user("iso-write-targets-b@example.com")
+    conn_a = make_connection(a, provider="m365")
+    conn_a.selected_resources = {"write": [_write_entry(slug="a-target", drive_id="da", item_id="ia")]}
+    conn_b = make_connection(b, provider="m365")
+    conn_b.selected_resources = {"write": [_write_entry(slug="b-target", drive_id="db", item_id="ib")]}
+    await seed(
+        a, b, user_a, user_b,
+        make_member(user_a, a, role="analyst"), make_member(user_b, b, role="analyst"),
+        conn_a, conn_b,
+    )
+    await login(client, user_b.email)
+
+    response = await client.get("/api/connections/m365/write-targets")
+    assert response.status_code == 200, response.text
+    slugs = {t["slug"] for t in response.json()["targets"]}
+    assert slugs == {"b-target"}
+
+
+# ── GET /api/connections/activity ────────────────────────────────────────────
+async def test_activity_lists_newest_first_and_is_workspace_scoped(
+    client, seed, session_factory, _configured_m365_client
+):
+    a = make_workspace("Alpha")
+    b = make_workspace("Bravo")
+    admin_a = make_user("activity-admin-a@example.com")
+    admin_b = make_user("activity-admin-b@example.com")
+    await seed(
+        a, b, admin_a, admin_b,
+        make_member(admin_a, a, role="admin"),
+        make_member(admin_b, b, role="admin"),
+    )
+
+    base = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    async with session_factory() as db:
+        db.add_all(
+            [
+                ConnectionActivity(
+                    id=uuid.uuid4(), workspace_id=a.id, provider="m365", action="search",
+                    target="q1", created_at=base,
+                ),
+                ConnectionActivity(
+                    id=uuid.uuid4(), workspace_id=a.id, provider="m365", action="upload",
+                    target="budget-folder/tret/report.csv", bytes=8, created_at=base + timedelta(minutes=1),
+                ),
+                ConnectionActivity(
+                    id=uuid.uuid4(), workspace_id=b.id, provider="m365", action="search",
+                    target="another-workspaces-query", created_at=base,
+                ),
+            ]
+        )
+        await db.commit()
+
+    await login(client, admin_a.email)
+    response = await client.get("/api/connections/activity")
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    assert [i["action"] for i in items] == ["upload", "search"]  # newest first
+    assert all(i["target"] != "another-workspaces-query" for i in items)  # never leaks B's row
+
+
+async def test_activity_requires_admin(client, seed):
+    workspace = make_workspace("Alpha")
+    analyst = make_user("activity-analyst@example.com", role="analyst")
+    await seed(workspace, analyst, make_member(analyst, workspace, role="analyst"))
+    await login(client, analyst.email)
+
+    response = await client.get("/api/connections/activity")
+    assert response.status_code == 403
+
+
+async def test_activity_limit_out_of_range_is_422(client, seed):
+    workspace = make_workspace("Alpha")
+    admin = make_user("activity-limit-admin@example.com")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"))
+    await login(client, admin.email)
+
+    assert (await client.get("/api/connections/activity", params={"limit": 500})).status_code == 422
+    assert (await client.get("/api/connections/activity", params={"limit": 0})).status_code == 422
+
+
+async def test_activity_respects_a_valid_limit(client, seed, session_factory):
+    workspace = make_workspace("Alpha")
+    admin = make_user("activity-valid-limit-admin@example.com")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"))
+    await login(client, admin.email)
+
+    base = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    async with session_factory() as db:
+        db.add_all(
+            [
+                ConnectionActivity(
+                    id=uuid.uuid4(), workspace_id=workspace.id, provider="gdrive", action="search",
+                    target=f"q{i}", created_at=base + timedelta(minutes=i),
+                )
+                for i in range(5)
+            ]
+        )
+        await db.commit()
+
+    response = await client.get("/api/connections/activity", params={"limit": 2})
+    assert response.status_code == 200, response.text
+    assert len(response.json()["items"]) == 2

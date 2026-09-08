@@ -23,7 +23,7 @@ from sqlalchemy.pool import StaticPool
 
 from tests.evals.golden_world import install_sqlite_type_shims
 from tret.config import get_settings
-from tret.db.models import Base, Document, Project, Workspace, WorkspaceConnection
+from tret.db.models import Base, ConnectionActivity, Document, Project, Workspace, WorkspaceConnection
 from tret.engine import extensions as extensions_module
 from tret.net import guard as net_guard
 from tret.services import connections as connections_module
@@ -1006,3 +1006,139 @@ async def test_materialize_rejects_a_malformed_item_ref(configured_m365, storage
             await materialize_connected_file(
                 db, workspace_id=workspace.id, project_id=project.id, item_ref="not-a-ref"
             )
+
+
+# ── ConnectionActivity: search and materialize record it ────────────────────
+async def _activity_rows(session_factory, workspace_id) -> list:
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                select(ConnectionActivity).where(ConnectionActivity.workspace_id == workspace_id)
+            )
+        ).scalars().all()
+    return rows
+
+
+async def test_search_records_a_search_activity_row(configured_m365, session_factory, seed):
+    workspace = make_workspace()
+    conn = make_connection(
+        workspace, selected_resources={"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]}
+    )
+    await seed(workspace, conn)
+
+    body = _search_query_response(drive_id="drive-1", item_id="item-1", name="a.txt", summary=None)
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.post(f"{GRAPH}/search/query").mock(return_value=httpx.Response(200, json=body))
+        async with session_factory() as db:
+            hits = await search_connected_files(db, workspace.id, "quarterly budget")
+            await db.commit()
+
+    rows = await _activity_rows(session_factory, workspace.id)
+    search_rows = [r for r in rows if r.action == "search"]
+    assert len(search_rows) == 1
+    row = search_rows[0]
+    assert row.provider == "m365"
+    assert row.target == "quarterly budget"
+    assert row.detail == str(len(hits))
+    assert row.actor_user_id is None  # no caller-supplied actor for this call
+
+
+async def test_search_truncates_the_recorded_query_to_two_hundred_chars(
+    configured_m365, session_factory, seed
+):
+    workspace = make_workspace()
+    conn = make_connection(
+        workspace, selected_resources={"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]}
+    )
+    await seed(workspace, conn)
+
+    long_query = "q" * 250
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.post(f"{GRAPH}/search/query").mock(return_value=httpx.Response(200, json={"value": []}))
+        async with session_factory() as db:
+            await search_connected_files(db, workspace.id, long_query)
+            await db.commit()
+
+    rows = await _activity_rows(session_factory, workspace.id)
+    search_rows = [r for r in rows if r.action == "search"]
+    assert len(search_rows) == 1
+    assert search_rows[0].target == "q" * 200
+    assert search_rows[0].detail == "0"
+
+
+async def test_materialize_records_a_read_activity_row_for_a_fresh_download(
+    configured_m365, storage, resolves_public, session_factory, seed
+):
+    workspace = make_workspace()
+    project = make_project(workspace)
+    conn = make_connection(
+        workspace, selected_resources={"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]}
+    )
+    await seed(workspace, project, conn)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/item-1").mock(
+            return_value=httpx.Response(200, json=_item_metadata())
+        )
+        mock.get(f"{GRAPH}/drives/drive-1/items/item-1/content").mock(
+            return_value=httpx.Response(200, content=b"a,b\n1,2\n")
+        )
+        async with session_factory() as db:
+            doc = await materialize_connected_file(
+                db, workspace_id=workspace.id, project_id=project.id, item_ref="m365:drive-1:item-1",
+            )
+            await db.commit()
+
+    rows = await _activity_rows(session_factory, workspace.id)
+    read_rows = [r for r in rows if r.action == "read"]
+    assert len(read_rows) == 1
+    row = read_rows[0]
+    assert row.provider == "m365"
+    assert row.target == "Finance/Reports/Q3 Budget.xlsx"
+    assert row.bytes == doc.byte_size
+    assert row.detail is None  # not a dedupe hit
+
+
+async def test_materialize_records_detail_cached_on_a_dedupe_hit(
+    configured_m365, storage, session_factory, seed
+):
+    workspace = make_workspace()
+    project = make_project(workspace)
+    conn = make_connection(
+        workspace, selected_resources={"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]}
+    )
+    existing = Document(
+        id=uuid.uuid4(),
+        project_id=project.id,
+        filename="Q3 Budget.xlsx",
+        content_type="text/csv",
+        byte_size=8,
+        storage_path="/tmp/already-there.csv",
+        extraction_status="done",
+        meta={"provider": "m365", "item_id": "item-1", "etag": '"etag-1"'},
+        sha256="0" * 64,
+        source_kind=connections_module.CONNECTED_SOURCE_KIND,
+    )
+    await seed(workspace, project, conn, existing)
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/item-1").mock(
+            return_value=httpx.Response(200, json=_item_metadata())
+        )
+        async with session_factory() as db:
+            doc = await materialize_connected_file(
+                db, workspace_id=workspace.id, project_id=project.id, item_ref="m365:drive-1:item-1",
+            )
+            await db.commit()
+
+    assert doc.id == existing.id
+    rows = await _activity_rows(session_factory, workspace.id)
+    read_rows = [r for r in rows if r.action == "read"]
+    assert len(read_rows) == 1
+    assert read_rows[0].detail == "cached"
+    assert read_rows[0].bytes == existing.byte_size
+    assert read_rows[0].target == "Finance/Reports/Q3 Budget.xlsx"

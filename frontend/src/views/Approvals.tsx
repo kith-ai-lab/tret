@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api, ApiError } from '../api/client'
+import { api, ApiError, type ConnectedWritePayload, type FindingDetail } from '../api/client'
 import { formatDateTime } from '../components/shared/format'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { ProvenanceCard } from '../components/shared/ProvenanceCard'
@@ -118,14 +118,18 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
         </Link>
       </div>
 
-      <div>
-        <div className="mono-label" style={{ marginBottom: 6 }}>
-          Payload
+      {f.schema_slug === 'connected_write' ? (
+        <ConnectedWriteBlock finding={f} />
+      ) : (
+        <div>
+          <div className="mono-label" style={{ marginBottom: 6 }}>
+            Payload
+          </div>
+          <pre className="code-block" style={{ maxHeight: 320 }}>
+            {JSON.stringify(f.payload, null, 2)}
+          </pre>
         </div>
-        <pre className="code-block" style={{ maxHeight: 320 }}>
-          {JSON.stringify(f.payload, null, 2)}
-        </pre>
-      </div>
+      )}
 
       <ProvenanceCard
         model={f.provenance.model}
@@ -236,6 +240,146 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+const PREVIEW_CHAR_LIMIT = 4000
+
+/** Dedicated payload rendering for `schema_slug: "connected_write"` findings
+ *  — destination, content type/size, a source preview (inline content or a
+ *  deliverable reference), and — once a decision has been made — the upload
+ *  result, with a retry affordance on failure. The raw payload stays
+ *  available behind a toggle for anyone who wants the JSON tret sent. */
+function ConnectedWriteBlock({ finding }: { finding: FindingDetail }) {
+  const queryClient = useQueryClient()
+  const [showRaw, setShowRaw] = useState(false)
+  const payload = finding.payload as unknown as ConnectedWritePayload
+
+  const retryMutation = useMutation({
+    mutationFn: () => api.retryFindingUpload(finding.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['finding', finding.id] })
+      queryClient.invalidateQueries({ queryKey: ['findings'] })
+    },
+  })
+  const retryError = retryMutation.error as ApiError | null
+
+  const inline = payload.source.kind === 'inline' ? payload.source.content : null
+  const truncated = inline !== null && inline.length > PREVIEW_CHAR_LIMIT
+  const preview = inline === null ? null : truncated ? `${inline.slice(0, PREVIEW_CHAR_LIMIT)}…` : inline
+
+  return (
+    <div className="stack" style={{ gap: 14 }}>
+      <div>
+        <div className="mono-label" style={{ marginBottom: 4 }}>
+          Destination
+        </div>
+        <div className="mono-body">
+          {payload.target_label} / tret / {payload.filename}
+        </div>
+        <div
+          className="fine-print"
+          style={{ fontFamily: 'var(--mono)', fontSize: 11, marginTop: 2 }}
+        >
+          {payload.target_path}/tret/{payload.filename}
+        </div>
+      </div>
+
+      <div className="row" style={{ gap: 24, flexWrap: 'wrap' }}>
+        <div>
+          <div className="mono-label">Content type</div>
+          <div className="mono-body">{payload.content_type}</div>
+        </div>
+        {/* null for a deliverable-sourced proposal — rendered fresh at
+            approval, so there is nothing fixed to size yet. Omit the row
+            rather than print "null B". */}
+        {payload.size !== null && (
+          <div>
+            <div className="mono-label">Size</div>
+            <div className="mono-body">{formatBytes(payload.size)}</div>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div className="mono-label" style={{ marginBottom: 6 }}>
+          Source
+        </div>
+        {payload.source.kind === 'deliverable' ? (
+          <div className="mono-body">
+            Deliverable {payload.source.slug} exported as {payload.source.format}
+          </div>
+        ) : (
+          <>
+            <pre className="code-block" style={{ maxHeight: 240 }}>
+              {preview}
+            </pre>
+            {truncated && (
+              <div className="fine-print" style={{ marginTop: 4 }}>
+                Showing the first {PREVIEW_CHAR_LIMIT.toLocaleString('en-US')} characters.
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {payload.upload && (
+        <div>
+          <div className="mono-label" style={{ marginBottom: 6 }}>
+            Upload
+          </div>
+          {payload.upload.status === 'uploaded' ? (
+            <div className="mono-body" style={{ color: 'var(--green)' }}>
+              Written to SharePoint
+              {payload.upload.web_url && (
+                <>
+                  {' — '}
+                  <a href={payload.upload.web_url} target="_blank" rel="noopener noreferrer">
+                    open in SharePoint
+                  </a>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="stack" style={{ gap: 8 }}>
+              <div className="error-text">{payload.upload.error ?? 'Upload failed.'}</div>
+              <div>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={retryMutation.isPending}
+                  onClick={() => retryMutation.mutate()}
+                >
+                  {retryMutation.isPending ? 'Retrying…' : 'Retry upload'}
+                </button>
+              </div>
+              {retryError && (
+                <div className="error-text">
+                  {retryError.status === 403 ? 'Requires approver role.' : retryError.message}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div>
+        <button type="button" className="btn btn-sm" onClick={() => setShowRaw((s) => !s)}>
+          {showRaw ? 'Hide raw' : 'Raw'}
+        </button>
+        {showRaw && (
+          <pre className="code-block" style={{ maxHeight: 320, marginTop: 8 }}>
+            {JSON.stringify(finding.payload, null, 2)}
+          </pre>
+        )}
+      </div>
     </div>
   )
 }

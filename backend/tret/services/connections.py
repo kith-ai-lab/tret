@@ -57,7 +57,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
 from tret.config import get_settings
-from tret.db.models import Document, WorkspaceConnection
+from tret.db.models import ConnectionActivity, Document, WorkspaceConnection
 from tret.engine.extensions import get_extension_registry
 from tret.net import EgressDenied, build_client
 from tret.net.policy import MODE_OFF, VERIFY_NONE, VERIFY_PUBLIC, ClassPolicy, master_mode
@@ -103,6 +103,22 @@ GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
 GDRIVE_API_BASE = "https://www.googleapis.com/drive/v3"
 _GRAPH_ME_URL = f"{GRAPH_API_BASE}/me"
 
+# The scopes an m365 connection needs to write back to SharePoint/OneDrive —
+# a strict superset of PROVIDER_SPECS[M365].scopes (offline_access/User.Read
+# unchanged; Files.Read.All/Sites.Read.All widened to their ReadWrite
+# counterparts). Never the *default* scope set a bare `authorize` requests —
+# see SCOPE_SETS and `POST /{provider}/authorize`'s optional `scope_set`
+# body in api/connections.py — so a workspace that only ever wanted read
+# access is never asked to grant more than that.
+M365_WRITE_SCOPES = ("offline_access", "User.Read", "Files.ReadWrite.All", "Sites.ReadWrite.All")
+
+# What `POST /api/connections/{provider}/authorize`'s optional `scope_set`
+# body selects between — m365 only (gdrive's `drive.file` grant is already
+# read/write per-file by construction, see docs/connections.md's Security
+# notes, so there is no separate "write" scope set for it to request; the
+# route 400s a gdrive `scope_set="write"` rather than looking it up here).
+SCOPE_SETS: dict[str, tuple[str, ...]] = {"read": PROVIDER_SPECS[M365].scopes, "write": M365_WRITE_SCOPES}
+
 # The two workspace-gate actions `api/connections.py` (`require_connections_
 # gate`, for the HTTP surface) and `ensure_connection_usable` below (for
 # anything — the engine included — that needs a plain "is this connection
@@ -129,6 +145,28 @@ _GRAPH_ME_URL = f"{GRAPH_API_BASE}/me"
 # row works again, with nothing to reconnect.
 CONNECT_ACTION = "connections.connect"  # asked once, when a connection is established
 USE_ACTION = "connections.use"  # asked every time a stored connection is exercised
+# Asked by `upload_connected_file` on every write-back call, in addition to
+# (never instead of) `USE_ACTION` — `ensure_connection_usable` already asks
+# `USE_ACTION` as part of establishing the connection is usable at all, and
+# write-back is a *further* narrowing on top of that: a plan may allow read
+# access without allowing write-back, so a gate registered for `USE_ACTION`
+# alone would let a lapsed-for-write-but-not-for-read workspace keep writing.
+WRITE_ACTION = "connections.write"
+
+
+def connection_has_write_scopes(conn: WorkspaceConnection) -> bool:
+    """Whether `conn.granted_scopes` actually carries both ReadWrite scopes
+    `M365_WRITE_SCOPES` adds over the read-only default — the token-shape
+    check `upload_connected_file` runs before ever attempting a Graph write,
+    since a connection authorized under the plain "read" scope set (or one
+    authorized before write-back existed at all) has a valid, `active` token
+    that Graph will still happily 403 on any write call. Checked against
+    what the provider actually granted, not what `POST /authorize` most
+    recently *requested*: a tenant admin consent policy can silently drop a
+    scope a user asked for, so the only trustworthy source is the token
+    response itself, already persisted here by the OAuth callback."""
+    granted = set(conn.granted_scopes or [])
+    return {"Files.ReadWrite.All", "Sites.ReadWrite.All"}.issubset(granted)
 
 # `Document.source_kind` for a file materialised from a live connection via
 # `materialize_connected_file` — distinct from `"upload"` (a human put it
@@ -328,13 +366,25 @@ async def _token_request(token_url: str, data: dict) -> dict:
 
 
 # ── authorize / code exchange ────────────────────────────────────────────────
-def authorize_url(provider: str, *, client: OAuthClientConfig, redirect_uri: str, state: str) -> str:
+def authorize_url(
+    provider: str,
+    *,
+    client: OAuthClientConfig,
+    redirect_uri: str,
+    state: str,
+    scopes: tuple[str, ...] | None = None,
+) -> str:
+    """The provider consent-screen URL. `scopes` defaults to `spec.scopes`
+    (unchanged from before write-back existed) — `api/connections.py`'s
+    `authorize` route is the one caller that ever passes something else,
+    picking `SCOPE_SETS[scope_set]` for an m365 write upgrade."""
     spec = PROVIDER_SPECS[provider]
+    scope_tuple = spec.scopes if scopes is None else scopes
     params = {
         "response_type": "code",
         "client_id": client.client_id,
         "redirect_uri": redirect_uri,
-        "scope": " ".join(spec.scopes),
+        "scope": " ".join(scope_tuple),
         "state": state,
         **spec.authorize_extra,
     }
@@ -506,6 +556,50 @@ async def ensure_connection_usable(
             gate.detail or "Connections are not included in this workspace's plan."
         )
     return conn
+
+
+async def record_connection_activity(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    provider: str,
+    action: str,
+    actor_user_id: uuid.UUID | None = None,
+    actor_run_id: uuid.UUID | None = None,
+    target: str | None = None,
+    bytes_count: int | None = None,
+    detail: str | None = None,
+) -> None:
+    """Insert one `ConnectionActivity` row for this workspace's connections
+    audit trail — every read-side call this module makes (`search_
+    connected_files`, `materialize_connected_file`), every write-side call
+    (`upload_connected_file`), and `api/connections.py`'s connect/
+    disconnect/resources routes all funnel through here rather than
+    constructing the row themselves, so the shape stays in one place.
+
+    `db.add` + `db.flush` only, same contract `materialize_connected_
+    file`'s own `Document` insert follows: the caller owns the transaction
+    (commits it, rolls it back, or folds it into a larger unit of work
+    already in flight), so a failed request whose caller rolls back loses
+    its activity row along with everything else it did — which is correct:
+    an activity log entry for a call that never actually happened would be
+    a lie. `target` is never truncated or otherwise reshaped here — each
+    caller already writes it in the shape this row should keep (a search
+    query capped to 200 chars, a `{slug}/tret/{name}` write-back path, …).
+    """
+    db.add(
+        ConnectionActivity(
+            workspace_id=workspace_id,
+            provider=provider,
+            action=action,
+            actor_user_id=actor_user_id,
+            actor_run_id=actor_run_id,
+            target=target,
+            bytes=bytes_count,
+            detail=detail,
+        )
+    )
+    await db.flush()
 
 
 async def _commit_connection(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> None:
@@ -1545,6 +1639,8 @@ async def search_connected_files(
     *,
     source_slug: str | None = None,
     max_results: int = 20,
+    actor_user_id: uuid.UUID | None = None,
+    actor_run_id: uuid.UUID | None = None,
 ) -> list[SearchHit]:
     """Full-text search over the workspace's allowed m365 drives
     (`list_connected_sources`), narrowed to one source when `source_slug` is
@@ -1556,6 +1652,16 @@ async def search_connected_files(
     `[1, 20]` regardless of what is asked for. Raises `ValueError` for an
     empty (or whitespace-only) `query`, and `ConnectionUnavailable` (via
     `list_connected_sources`) under the same conditions that function does.
+
+    Records one `ConnectionActivity` row (`action="search"`) on every
+    successful call — `target` is the query itself, truncated to 200
+    characters (an activity row is for "what was searched for," not a
+    verbatim log an oversized query could bloat), `detail` the number of
+    hits actually returned. `actor_user_id`/`actor_run_id` are optional and
+    default to `None`: a caller that knows who's asking (a future API route)
+    can pass them; `engine/tools.py`'s tool wrapper today does not, so a
+    run's own searches record with no actor — still workspace- and
+    query-attributed, just not person/run-attributed.
     """
     query = (query or "").strip()
     if not query:
@@ -1574,7 +1680,18 @@ async def search_connected_files(
         hits = await _search_via_search_api(token, query, sources_by_drive)
     except _SearchApiUnsupported:
         hits = await _search_via_drive_fallback(token, query, sources_by_drive)
-    return hits[:max_results]
+    result = hits[:max_results]
+    await record_connection_activity(
+        db,
+        workspace_id=workspace_id,
+        provider=M365,
+        action="search",
+        target=query[:200],
+        detail=str(len(result)),
+        actor_user_id=actor_user_id,
+        actor_run_id=actor_run_id,
+    )
+    return result
 
 
 def _safe_connected_filename(raw: str | None) -> str:
@@ -1631,6 +1748,7 @@ async def materialize_connected_file(
     project_id: uuid.UUID,
     item_ref: str,
     uploaded_by: uuid.UUID | None = None,
+    actor_run_id: uuid.UUID | None = None,
 ) -> Document:
     """Pull one `item_ref` (from a `SearchHit`, or anything else that names
     an m365 drive item) into `project_id`'s documents, downloading it only
@@ -1652,6 +1770,16 @@ async def materialize_connected_file(
     exact `item_id` at its current `eTag`, that row is returned unchanged
     and nothing is downloaded — a second search hit (or a second run) for a
     file nobody edited since the last materialize is free.
+
+    Records one `ConnectionActivity` row (`action="read"`) on every
+    successful call, deduped or not — `target` the file's humanized path,
+    `bytes_count` its size, `detail="cached"` only on the dedupe branch (a
+    fresh download leaves `detail` unset), so the activity log can tell a
+    real transfer from a free repeat apart. `actor_user_id` for the row is
+    `uploaded_by` — this function already threads that through to the
+    `Document` it creates, so a second "who was this for" parameter would
+    be redundant; `actor_run_id` has no existing equivalent to reuse, hence
+    the new parameter.
     """
     provider, drive_id, item_id = parse_item_ref(item_ref)
     if provider != M365:
@@ -1676,6 +1804,17 @@ async def materialize_connected_file(
 
     existing = await _find_existing_connected_document(db, project_id, item_id=item_id, etag=etag)
     if existing is not None:
+        await record_connection_activity(
+            db,
+            workspace_id=workspace_id,
+            provider=M365,
+            action="read",
+            target=path,
+            bytes_count=existing.byte_size,
+            detail="cached",
+            actor_user_id=uploaded_by,
+            actor_run_id=actor_run_id,
+        )
         return existing
 
     if isinstance(size, int) and size > IMPORT_MAX_BYTES:
@@ -1737,8 +1876,541 @@ async def materialize_connected_file(
         # Mirrors tret/net/fetch/snapshot.py's own add+flush.
         db.add(doc)
         await db.flush()
+        await record_connection_activity(
+            db,
+            workspace_id=workspace_id,
+            provider=M365,
+            action="read",
+            target=path,
+            bytes_count=len(data),
+            actor_user_id=uploaded_by,
+            actor_run_id=actor_run_id,
+        )
         return doc
     except BaseException:
         if created:
             storage_path.unlink(missing_ok=True)
         raise
+
+
+# ── write-back to SharePoint/OneDrive ────────────────────────────────────────
+# The mirror image of "live access in runs" above: instead of a read
+# allowlist a run may pull *from*, an admin picks a small set of folders a
+# run (or a person, through a future UI) may push files *into* —
+# `selected_resources["write"]` on the same `WorkspaceConnection` row the
+# read allowlist lives on, set by the same `PUT /api/connections/m365/
+# resources` route (a new `write` key alongside the existing `read` one).
+# m365 only, same reasoning as live read access: gdrive's `drive.file` grant
+# is already scoped to files a human picked through the Picker, so there is
+# no "everything the account can write to" to narrow and nothing for a write
+# allowlist to mean for that provider.
+#
+# Unlike the read allowlist, an empty (or absent) write list is never
+# "everything" — there is no sensible "every folder the account can write
+# to" default for write-back the way "every drive the account can read"
+# is for `list_connected_sources`: writing is the one operation that can
+# change what's in a connected account, so it is opt-in, per-folder, always.
+_TRET_SUBFOLDER_NAME = "tret"
+# <=4MB: a single PUT .../content call. Above that Graph requires (and this
+# module uses) an upload session with 5MiB chunks — 4MiB is Graph's own
+# documented ceiling for the simple PUT path, not a number this module chose.
+_UPLOAD_SIMPLE_MAX_BYTES = 4 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 5 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class WriteTarget:
+    """One folder a workspace's m365 connection is allowed to write into —
+    an admin-picked entry from `selected_resources["write"]`, unlike
+    `ConnectedSource` above there is no "everything the account can see"
+    fallback to derive (see the module note above this dataclass). `slug`
+    is admin-supplied and validated at `PUT /api/connections/m365/
+    resources` time (unique within the list, `^[a-z0-9][a-z0-9-]{1,39}$`) —
+    unlike `ConnectedSource.slug`, which this module derives itself, a
+    write target's slug is exactly what the admin who picked the folder
+    typed, so `upload_connected_file`'s `target_slug` argument is legible
+    in a way a hash-suffixed derived slug would not be."""
+
+    slug: str
+    label: str
+    path: str
+    site_id: str | None
+    drive_id: str
+    item_id: str
+    web_url: str | None
+
+
+class ConnectionWriteError(Exception):
+    """A write-back call could not be completed — no HTTP layer downstream
+    to turn this into a 4xx/5xx itself, so `.reason` is one short prose
+    sentence safe to show a model or a user as-is: 'Write-back is not
+    enabled for this connection…', ''budget' is not an allowed output
+    folder.', '32MB exceeds the 25MB write-back limit', 'Microsoft Graph
+    returned 403 (accessDenied)'. Mirrors `ConnectionUnavailable`'s own
+    contract for the read side — a distinct type rather than reusing that
+    one because a write refusal (gate, missing write scopes, an unknown
+    target, a Graph write 4xx/5xx) is not the same claim as "this
+    connection cannot be used *at all* right now", and callers (the API
+    route, an engine tool wrapper) need to tell the two apart."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class UploadResult:
+    """What `upload_connected_file` hands back on success: the final
+    `driveItem`'s id/webUrl/name/size (name and size read from Graph's own
+    response, not echoed back from the request — a `rename` conflict
+    behaviour, per this module's own create-only policy, means the name
+    Graph actually used can differ from the one asked for), plus which
+    target it landed in and its full humanized path under that target's
+    `tret/` subfolder."""
+
+    item_id: str
+    web_url: str | None
+    name: str
+    size: int
+    target_slug: str
+    path: str
+
+
+async def list_write_targets(db: AsyncSession, workspace_id: uuid.UUID) -> list[WriteTarget]:
+    """The folders this workspace's runs (or a future write-back UI) may
+    upload into — `selected_resources["write"]` on the connection row,
+    verbatim, as `WriteTarget`s. `[]` when the admin has never set any (see
+    the module note above `WriteTarget` for why that means "nothing", not
+    "everything", unlike the read side's `list_connected_sources`).
+
+    `ensure_connection_usable` first, same as `list_connected_sources` —
+    raises `ConnectionUnavailable` under the same conditions that function
+    does (no connection, an errored one, egress off, the `connections.use`
+    gate refusing). No Graph call: unlike a `ConnectedSource`, a
+    `WriteTarget`'s every field was already supplied by the admin who set
+    it, so there is nothing here to resolve against the provider — a target
+    that no longer exists (deleted at the provider) only surfaces the next
+    time `upload_connected_file` actually tries to write into it.
+    """
+    conn = await ensure_connection_usable(db, workspace_id, M365)
+    entries = (conn.selected_resources or {}).get("write") or []
+    return [
+        WriteTarget(
+            slug=entry["slug"],
+            label=entry.get("label") or entry["slug"],
+            path=entry.get("path") or "",
+            site_id=entry.get("site_id"),
+            drive_id=entry["drive_id"],
+            item_id=entry["item_id"],
+            web_url=entry.get("web_url"),
+        )
+        for entry in entries
+    ]
+
+
+_UPLOAD_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Illegal in a OneDrive/SharePoint item name outright — Graph itself refuses
+# a create/rename that contains any of these, so refusing here is refusing
+# earlier with a clearer reason, not a stricter rule than the provider's own.
+_UPLOAD_FORBIDDEN_CHARS_RE = re.compile(r'[/\\:*?"<>|]')
+
+
+def safe_upload_filename(name: str) -> str:
+    """A filename Graph will accept for a create-only write-back upload —
+    refused outright (`ValueError`) rather than silently rewritten, unlike
+    `_safe_connected_filename`'s read-side handling of a provider-supplied
+    name: a write-back name comes from a tool call or a form an operator
+    controls, not an untrusted response this module must make *something*
+    safe out of no matter what, so there is no silent-rewrite convenience
+    to offer, and every reason for refusal is one the caller can act on.
+
+    Control characters are stripped first — cosmetic noise, never itself a
+    reason to refuse. What is left is refused if it is empty, is exactly
+    `"."` or `".."`, contains any of ``/ \\ : * ? " < > |`` (illegal in a
+    OneDrive/SharePoint item name), has leading or trailing whitespace or
+    dots, or exceeds 200 characters. Nothing here ever touches an
+    extension: nothing above rewrites the name at all, so whatever
+    extension `name` carried in survives exactly as given.
+    """
+    cleaned = _UPLOAD_CONTROL_CHARS_RE.sub("", name or "")
+    if not cleaned:
+        raise ValueError("filename must not be empty")
+    if cleaned in (".", ".."):
+        raise ValueError(f"{cleaned!r} is not a valid filename")
+    if _UPLOAD_FORBIDDEN_CHARS_RE.search(cleaned):
+        raise ValueError('filename must not contain any of / \\ : * ? " < > |')
+    if cleaned.strip(" .") != cleaned:
+        raise ValueError("filename must not have leading or trailing spaces or dots")
+    if len(cleaned) > 200:
+        raise ValueError("filename must not exceed 200 characters")
+    return cleaned
+
+
+def _graph_write_error_reason(response: httpx.Response) -> str:
+    """A short, safe-to-show reason for a Graph 4xx/5xx encountered while
+    writing back: the status code, plus Graph's own machine `error.code`
+    when the body parses as one — never the full response body, which can
+    carry an internal-state-revealing message meant for a developer console,
+    not a run transcript or a user-facing error."""
+    code = None
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        code = (body.get("error") or {}).get("code")
+    return f"Microsoft Graph returned {response.status_code}" + (f" ({code})" if code else "")
+
+
+async def _graph_write_call(
+    method: str,
+    url: str,
+    *,
+    policy: ClassPolicy,
+    headers: dict,
+    json_body: dict | None = None,
+    content: bytes | None = None,
+    params: dict | None = None,
+) -> httpx.Response:
+    """One write-back HTTP call — GET/POST/PUT against a fixed Graph path or
+    (for an upload-session chunk) an upload URL Microsoft's own response
+    named. Raises `ConnectionWriteError` only for a transport failure
+    (egress denied, a network error): a non-2xx response is returned as-is
+    for the caller to interpret, since one call site (`_ensure_tret_
+    subfolder`'s create) needs to tell a 409 (lost a creation race — re-list
+    and recover) apart from every other failure (refuse outright), and
+    collapsing that distinction into an exception here would take it away.
+    """
+    try:
+        async with build_client(_EGRESS_CLASS, policy=policy, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as client:
+            return await client.request(
+                method, url, params=params, json=json_body, content=content, headers=headers
+            )
+    except EgressDenied as exc:
+        raise ConnectionWriteError(f"connections egress is unavailable: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise ConnectionWriteError(f"could not reach Microsoft Graph: {exc}") from exc
+
+
+def _raise_for_graph_write_status(response: httpx.Response) -> None:
+    if response.status_code >= 400:
+        raise ConnectionWriteError(_graph_write_error_reason(response))
+
+
+async def _find_tret_subfolder_id(token: str, *, drive_id: str, parent_item_id: str) -> str | None:
+    """The item id of the existing `tret` child folder directly under
+    `parent_item_id`, or `None` if there isn't one yet. `$filter=name eq
+    'tret'` narrows server-side, but the result is still matched by hand
+    rather than trusted blind — a case-insensitive or partial match from the
+    filter must not be mistaken for the exact folder this module owns, and
+    neither must something that merely *looks* like it from this listing:
+
+    - `"folder" in item` — a plain folder, not a file.
+    - `"remoteItem" not in item` — not a shortcut to a folder that lives
+      elsewhere (a OneDrive/SharePoint shortcut carries the target's own
+      `folder` facet under `remoteItem`, which would otherwise pass the
+      check above while pointing this module at a folder it does not own
+      and was never granted to write into).
+    - `parentReference.driveId`, when Graph reports one on the item, must
+      equal `drive_id` — a defensive check against a listing that somehow
+      surfaces an item from a different drive; every write below is scoped
+      to `drive_id` and must never be redirected onto another one.
+
+    A candidate that fails any of these is treated exactly like no match at
+    all — the caller (`_ensure_tret_subfolder`) then tries to create the
+    folder and lets the resulting 409 (the name is unavailable for a
+    genuine create) turn into a clear refusal, rather than this function
+    silently reusing something it must not."""
+    url = f"{GRAPH_API_BASE}/drives/{quote(drive_id, safe='')}/items/{quote(parent_item_id, safe='')}/children"
+    response = await _graph_write_call(
+        "GET", url, policy=_policy(url),
+        headers={"Authorization": f"Bearer {token}"},
+        params={"$filter": "name eq 'tret'"},
+    )
+    _raise_for_graph_write_status(response)
+    for item in response.json().get("value", []):
+        if item.get("name") != _TRET_SUBFOLDER_NAME or "folder" not in item or "remoteItem" in item:
+            continue
+        parent_drive_id = (item.get("parentReference") or {}).get("driveId")
+        if parent_drive_id is not None and parent_drive_id != drive_id:
+            continue
+        return item.get("id")
+    return None
+
+
+async def _ensure_tret_subfolder(token: str, *, drive_id: str, parent_item_id: str) -> str:
+    """The item id of the `tret` folder directly under `parent_item_id`,
+    creating it (`conflictBehavior=fail`) if it does not exist yet. A 409
+    on that create means another concurrent uploader won the race between
+    this call's own list and its create — re-listed once rather than
+    treated as a failure, since the folder that "conflicted" is exactly the
+    one this call wanted. Every other outcome (a genuine failure, or the
+    409 recovery itself somehow finding nothing) raises
+    `ConnectionWriteError`."""
+    existing = await _find_tret_subfolder_id(token, drive_id=drive_id, parent_item_id=parent_item_id)
+    if existing is not None:
+        return existing
+    url = f"{GRAPH_API_BASE}/drives/{quote(drive_id, safe='')}/items/{quote(parent_item_id, safe='')}/children"
+    response = await _graph_write_call(
+        "POST", url, policy=_policy(url),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json_body={"name": _TRET_SUBFOLDER_NAME, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"},
+    )
+    if response.status_code == 409:
+        existing = await _find_tret_subfolder_id(token, drive_id=drive_id, parent_item_id=parent_item_id)
+        if existing is not None:
+            return existing
+        # Lost the create race to *something* named `tret`, but the re-list
+        # still finds nothing `_find_tret_subfolder_id` will accept — the
+        # thing occupying that name is a file, a shortcut, or otherwise not
+        # a plain folder this module owns. Name the real problem rather than
+        # the generic "could not create or find" this used to say.
+        raise ConnectionWriteError(
+            "An item named tret already exists in the output folder and is not a plain "
+            "folder — remove or rename it."
+        )
+    _raise_for_graph_write_status(response)
+    folder_id = response.json().get("id")
+    if not folder_id:
+        raise ConnectionWriteError("Microsoft Graph did not return an id for the new tret folder")
+    return folder_id
+
+
+async def _upload_small(
+    token: str, *, drive_id: str, folder_item_id: str, name: str, data: bytes, content_type: str
+) -> dict:
+    """<=4MB path: a single `PUT .../content`, `conflictBehavior=rename` so
+    an existing same-named file is never overwritten (see module note) —
+    Graph renames the *new* upload instead, and the returned `driveItem`
+    carries whatever name it actually landed under."""
+    url = (
+        f"{GRAPH_API_BASE}/drives/{quote(drive_id, safe='')}/items/"
+        f"{quote(folder_item_id, safe='')}:/{quote(name, safe='')}:/content"
+    )
+    response = await _graph_write_call(
+        "PUT", url, policy=_policy(url),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": content_type},
+        content=data,
+        params={"@microsoft.graph.conflictBehavior": "rename"},
+    )
+    _raise_for_graph_write_status(response)
+    return response.json()
+
+
+async def _upload_large(token: str, *, drive_id: str, folder_item_id: str, name: str, data: bytes) -> dict:
+    """>4MB path: `createUploadSession` (also `conflictBehavior=rename` —
+    same never-overwrite policy as the simple path), then the bytes in
+    `_UPLOAD_CHUNK_BYTES`-sized `PUT`s to the session's own `uploadUrl`.
+
+    The upload URL's host is chosen by Microsoft's response, not this
+    module's own config — the same shape `download_m365_file`'s redirect
+    hops are in, and the same fix: a fresh single-host `_policy` scoped to
+    whatever `uploadUrl` actually says, with `verify_addresses=
+    VERIFY_PUBLIC` (the SSRF check, since nothing here vouches for that
+    host being Microsoft's own the way `GRAPH_API_BASE` is) rather than the
+    `VERIFY_NONE` every fixed-Graph-endpoint call above uses. `allow_http=
+    False` on that same policy (see `_policy`'s own default) is what
+    refuses a non-https upload URL — not a special case here, just what
+    building the policy the normal way already gets. No `Authorization`
+    header is sent to the chunk PUTs: the session URL is itself the
+    credential (it is pre-signed and short-lived), and Microsoft's own docs
+    say sending a bearer token to it is at best redundant and at worst
+    rejected.
+    """
+    session_url = (
+        f"{GRAPH_API_BASE}/drives/{quote(drive_id, safe='')}/items/"
+        f"{quote(folder_item_id, safe='')}:/{quote(name, safe='')}:/createUploadSession"
+    )
+    session_response = await _graph_write_call(
+        "POST", session_url, policy=_policy(session_url),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json_body={"item": {"@microsoft.graph.conflictBehavior": "rename", "name": name}},
+    )
+    _raise_for_graph_write_status(session_response)
+    upload_url = session_response.json().get("uploadUrl")
+    if not upload_url:
+        raise ConnectionWriteError("Microsoft Graph did not return an upload session URL")
+
+    total = len(data)
+    upload_policy = _policy(upload_url, verify_addresses=VERIFY_PUBLIC)
+    item: dict | None = None
+    for start in range(0, total, _UPLOAD_CHUNK_BYTES):
+        chunk = data[start : start + _UPLOAD_CHUNK_BYTES]
+        end = start + len(chunk) - 1
+        chunk_response = await _graph_write_call(
+            "PUT", upload_url, policy=upload_policy,
+            headers={"Content-Range": f"bytes {start}-{end}/{total}"},
+            content=chunk,
+        )
+        _raise_for_graph_write_status(chunk_response)
+        if chunk_response.status_code in (200, 201):
+            item = chunk_response.json()
+    if item is None:
+        raise ConnectionWriteError("Microsoft Graph did not confirm the upload's final chunk")
+    return item
+
+
+async def _refuse_upload(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    target: str,
+    bytes_count: int,
+    reason: str,
+    actor_user_id: uuid.UUID | None,
+    actor_run_id: uuid.UUID | None,
+) -> ConnectionWriteError:
+    """Record `action="upload_failed"` for a refusal `upload_connected_file`
+    is about to raise, and hand back the `ConnectionWriteError` to raise —
+    `raise await _refuse_upload(...)` at every one of that function's
+    refusal points, so recording the failure and raising it can never drift
+    apart (one forgotten `record_connection_activity` call would otherwise
+    be an easy, silent way for the activity log to under-report failures)."""
+    await record_connection_activity(
+        db,
+        workspace_id=workspace_id,
+        provider=M365,
+        action="upload_failed",
+        target=target,
+        bytes_count=bytes_count,
+        detail=reason,
+        actor_user_id=actor_user_id,
+        actor_run_id=actor_run_id,
+    )
+    return ConnectionWriteError(reason)
+
+
+async def upload_connected_file(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    target_slug: str,
+    filename: str,
+    data: bytes,
+    content_type: str,
+    actor_user_id: uuid.UUID | None = None,
+    actor_run_id: uuid.UUID | None = None,
+) -> UploadResult:
+    """Write `data` into workspace `workspace_id`'s m365 write target
+    `target_slug`, under a `tret/` subfolder created on first use and reused
+    after. Never overwrites an existing file: both the small (`PUT .../
+    content`) and large (`createUploadSession`) paths request Graph's
+    `rename` conflict behaviour, so a same-named file already there is left
+    alone and the new upload lands under whatever name Graph assigns
+    instead. Never deletes, moves, or shares anything — the only Graph
+    write calls this module ever makes are the `tret` folder's own
+    create-if-absent and the upload itself.
+
+    Refusal order — every one of these raises `ConnectionWriteError` (never
+    `ConnectionUnavailable`, which only `ensure_connection_usable`'s own
+    checks below can raise) and records `action="upload_failed"` first, via
+    `_refuse_upload`, except the `ensure_connection_usable` checks
+    themselves, which behave exactly as they do for every other caller:
+
+    1. `ensure_connection_usable` — no connection, an errored one, egress
+       off, or the `connections.use` gate refusing.
+    2. The `connections.write` workspace gate — a plan may allow read
+       access without allowing write-back.
+    3. `connection_has_write_scopes` — the connection's granted scopes
+       don't include the write pair, most likely because it was authorized
+       under the plain "read" scope set (or before write-back existed).
+    4. `target_slug` not found in `list_write_targets` — an unknown, or no
+       longer allowed, output folder.
+    5. `filename` fails `safe_upload_filename`.
+    6. `data` exceeds `IMPORT_MAX_BYTES` (the same 25MB cap the import path
+       enforces — reused, not reinvented, for write-back's own cap).
+
+    Only past all six does this module ever touch the network: ensuring the
+    `tret` subfolder, then the small- or large-file upload path depending on
+    `len(data)`. A Graph failure at either of those records `action=
+    "upload_failed"` with Graph's own short reason (`_graph_write_error_
+    reason`) and re-raises the same `ConnectionWriteError`.
+
+    On success, records `action="upload"` (`target` the write-back path
+    actually used, `bytes_count=len(data)`) and returns an `UploadResult`
+    built from the final `driveItem` Graph reported.
+    """
+    conn = await ensure_connection_usable(db, workspace_id, M365)
+
+    gate = await get_extension_registry().check_workspace_gate(db, workspace_id, WRITE_ACTION)
+    if not gate.allowed:
+        reason = gate.detail or "Write-back is not included in this workspace's plan."
+        raise await _refuse_upload(
+            db, workspace_id=workspace_id, target=target_slug, bytes_count=len(data),
+            reason=reason, actor_user_id=actor_user_id, actor_run_id=actor_run_id,
+        )
+    if not connection_has_write_scopes(conn):
+        reason = (
+            "Write-back is not enabled for this connection — an admin must "
+            "reconnect it with write access."
+        )
+        raise await _refuse_upload(
+            db, workspace_id=workspace_id, target=target_slug, bytes_count=len(data),
+            reason=reason, actor_user_id=actor_user_id, actor_run_id=actor_run_id,
+        )
+
+    targets = await list_write_targets(db, workspace_id)
+    target = next((t for t in targets if t.slug == target_slug), None)
+    if target is None:
+        reason = f"{target_slug!r} is not an allowed output folder."
+        raise await _refuse_upload(
+            db, workspace_id=workspace_id, target=target_slug, bytes_count=len(data),
+            reason=reason, actor_user_id=actor_user_id, actor_run_id=actor_run_id,
+        )
+
+    try:
+        name = safe_upload_filename(filename)
+    except ValueError as exc:
+        raise await _refuse_upload(
+            db, workspace_id=workspace_id, target=target.slug, bytes_count=len(data),
+            reason=str(exc), actor_user_id=actor_user_id, actor_run_id=actor_run_id,
+        ) from exc
+
+    if len(data) > IMPORT_MAX_BYTES:
+        reason = (
+            f"{len(data) // (1024 * 1024)}MB exceeds the "
+            f"{IMPORT_MAX_BYTES // (1024 * 1024)}MB write-back limit"
+        )
+        raise await _refuse_upload(
+            db, workspace_id=workspace_id, target=target.slug, bytes_count=len(data),
+            reason=reason, actor_user_id=actor_user_id, actor_run_id=actor_run_id,
+        )
+
+    token = await get_access_token(db, workspace_id, M365)
+    activity_target = f"{target.slug}/{_TRET_SUBFOLDER_NAME}/{name}"
+    try:
+        folder_id = await _ensure_tret_subfolder(token, drive_id=target.drive_id, parent_item_id=target.item_id)
+        if len(data) <= _UPLOAD_SIMPLE_MAX_BYTES:
+            item = await _upload_small(
+                token, drive_id=target.drive_id, folder_item_id=folder_id,
+                name=name, data=data, content_type=content_type,
+            )
+        else:
+            item = await _upload_large(
+                token, drive_id=target.drive_id, folder_item_id=folder_id, name=name, data=data
+            )
+    except ConnectionWriteError as exc:
+        await record_connection_activity(
+            db, workspace_id=workspace_id, provider=M365, action="upload_failed",
+            target=activity_target, bytes_count=len(data), detail=exc.reason,
+            actor_user_id=actor_user_id, actor_run_id=actor_run_id,
+        )
+        raise
+
+    result_name = item.get("name") or name
+    result_size = item.get("size") if isinstance(item.get("size"), int) else len(data)
+    result_path = f"{target.path}/{_TRET_SUBFOLDER_NAME}/{result_name}".strip("/")
+    result = UploadResult(
+        item_id=item.get("id"),
+        web_url=item.get("webUrl"),
+        name=result_name,
+        size=result_size,
+        target_slug=target.slug,
+        path=result_path,
+    )
+    await record_connection_activity(
+        db, workspace_id=workspace_id, provider=M365, action="upload",
+        target=f"{target.slug}/{_TRET_SUBFOLDER_NAME}/{result_name}", bytes_count=len(data),
+        actor_user_id=actor_user_id, actor_run_id=actor_run_id,
+    )
+    return result

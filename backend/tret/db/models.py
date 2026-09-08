@@ -632,6 +632,52 @@ class WorkspaceConnection(Base):
     refreshed_at: Mapped[datetime | None] = mapped_column()
 
 
+class ConnectionActivity(Base):
+    """One user-legible event on a workspace's connection: a search, a
+    materialize ("read"), a write-back upload (or its failure), a connect/
+    disconnect, or an admin's resources change — `services/connections.py::
+    record_connection_activity` is the sole writer, called from both the
+    read side (`search_connected_files`, `materialize_connected_file`) and
+    the write side (`upload_connected_file`), plus `api/connections.py`'s
+    callback/disconnect/resources routes.
+
+    Distinct from `EgressCall` below: that table is one row per outbound
+    HTTP request in the `research` egress class (including denials) — the
+    network-layer audit trail. This is the connections *feature's* own
+    activity log, one row per action a person would recognise ("someone
+    searched SharePoint", "a run wrote a file back"), regardless of how
+    many Graph calls that action took underneath (the tret-subfolder
+    list/create calls inside an upload get no row of their own — only the
+    upload/upload_failed outcome does). No JSON column here on purpose:
+    every field a caller might want to filter or display is its own
+    column, not a payload some future reader has to know the shape of.
+    """
+
+    __tablename__ = "connection_activity"
+    __table_args__ = (
+        Index("ix_connection_activity_workspace_id", "workspace_id"),
+        Index("ix_connection_activity_workspace_created", "workspace_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)  # gdrive | m365
+    # search | read | upload | upload_failed | connect | disconnect | resources
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    actor_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL")
+    )
+    target: Mapped[str | None] = mapped_column(Text)
+    bytes: Mapped[int | None] = mapped_column(BigInteger)
+    detail: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+
+
 class EgressCall(Base):
     """One outbound request in the `research` class: what a run reached for.
 

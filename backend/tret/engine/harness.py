@@ -51,6 +51,7 @@ from tret.engine.tools import (
     CONNECTOR_TOOL_NAMES,
     DELEGATION_DEPTH_KEY,
     WEB_TOOL_NAMES,
+    WRITE_CONNECTOR_TOOL_NAMES,
     RunContext,
     execute_tool,
     get_builtin_tools,
@@ -851,7 +852,7 @@ class HarnessEngine:
         # check in the first place.
         project = await db.get(Project, run.project_id)
         workspace_id = project.workspace_id if project else None
-        if set(enabled_names) & CONNECTOR_TOOL_NAMES:
+        if set(enabled_names) & (CONNECTOR_TOOL_NAMES | WRITE_CONNECTOR_TOOL_NAMES):
             withheld_connector, connector_reason = await withheld_connector_tools(
                 db, workspace_id, enabled_names
             )

@@ -31,6 +31,7 @@ from tret.engine import tools as tools_module
 from tret.engine.tools import (
     CONNECTED_SOURCE_KIND,
     CONNECTOR_TOOL_NAMES,
+    WRITE_CONNECTOR_TOOL_NAMES,
     RunContext,
     ToolError,
     _frame_safe,
@@ -254,6 +255,17 @@ def test_the_connector_tools_are_always_registered():
         "search_connected_files",
         "read_connected_file",
     }
+
+
+def test_propose_connected_write_is_a_write_tool_not_a_read_tool():
+    """`propose_connected_write` is withheld on stricter, separate terms (see
+    test_connected_write.py) — it deliberately does not belong to
+    `CONNECTOR_TOOL_NAMES`, the set harness.py's own dispatch checks against
+    for the read trio."""
+    assert "propose_connected_write" in get_builtin_tools()
+    assert "propose_connected_write" not in CONNECTOR_TOOL_NAMES
+    assert WRITE_CONNECTOR_TOOL_NAMES == {"propose_connected_write"}
+    assert not (CONNECTOR_TOOL_NAMES & WRITE_CONNECTOR_TOOL_NAMES)
 
 
 # ── connection availability: checked once, cached, withheld ─────────────────
