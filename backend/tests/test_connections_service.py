@@ -36,17 +36,20 @@ from tests.evals.golden_world import install_sqlite_type_shims
 from tret.config import get_settings
 from tret.db.models import Base, Workspace, WorkspaceConnection
 from tret.engine import extensions as extensions_module
-from tret.engine.extensions import ExtensionAPI
+from tret.engine.extensions import ExtensionAPI, GateResult
 from tret.services import connections as connections_module
 from tret.services import credentials as credentials_module
 from tret.services import documents as documents_service
 from tret.services.connections import (
     GRAPH_API_BASE,
     IMPORT_MAX_BYTES,
+    USE_ACTION,
     ConnectionAuthError,
+    ConnectionUnavailable,
     OAuthClientConfig,
     browse_m365,
     clear_access_token_cache,
+    ensure_connection_usable,
     exchange_code,
     get_access_token,
     get_access_token_with_expiry,
@@ -765,3 +768,88 @@ async def test_get_access_token_with_expiry_on_a_cache_hit_returns_remaining_sec
     # 1800 — a range this tight also catches the hit path wrongly returning
     # the uncached expires_in verbatim.
     assert 1700 < second_expiry <= 1740
+
+
+# ── ensure_connection_usable: every refusal reason ───────────────────────────
+async def test_ensure_connection_usable_returns_the_row_when_healthy(session_factory, seed):
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, conn)
+
+    async with session_factory() as db:
+        returned = await ensure_connection_usable(db, workspace.id, "m365")
+    assert returned.id == conn.id
+
+
+async def test_ensure_connection_usable_raises_when_no_row(session_factory, seed):
+    workspace = make_workspace()
+    await seed(workspace)
+
+    async with session_factory() as db:
+        try:
+            await ensure_connection_usable(db, workspace.id, "m365")
+            assert False, "expected ConnectionUnavailable"
+        except ConnectionUnavailable as exc:
+            assert "no" in exc.reason.lower()
+            assert "microsoft 365" in exc.reason.lower()
+
+
+async def test_ensure_connection_usable_raises_when_status_error(session_factory, seed):
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="m365", status="error")
+    conn.error_detail = "invalid_grant: revoked"
+    await seed(workspace, conn)
+
+    async with session_factory() as db:
+        try:
+            await ensure_connection_usable(db, workspace.id, "m365")
+            assert False, "expected ConnectionUnavailable"
+        except ConnectionUnavailable as exc:
+            assert "error state" in exc.reason.lower()
+            assert "invalid_grant: revoked" in exc.reason
+
+
+async def test_ensure_connection_usable_raises_when_the_gate_refuses(session_factory, seed):
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, conn)
+
+    ext = ExtensionAPI(None)
+
+    async def veto(db, workspace_id, action):
+        assert action == USE_ACTION
+        assert workspace_id == workspace.id
+        return GateResult(
+            allowed=False, reason="plan_required", detail="Connections require an active plan."
+        )
+
+    ext.add_workspace_gate(veto)
+    extensions_module._registry = ext
+
+    async with session_factory() as db:
+        try:
+            await ensure_connection_usable(db, workspace.id, "m365")
+            assert False, "expected ConnectionUnavailable"
+        except ConnectionUnavailable as exc:
+            assert exc.reason == "Connections require an active plan."
+
+
+async def test_ensure_connection_usable_raises_when_egress_master_switch_is_off(
+    monkeypatch, session_factory, seed
+):
+    """The `TRET_EGRESS` master switch refuses before any database lookup —
+    a connection row that would otherwise be perfectly healthy still can't
+    be used once the deployment's own kill switch is off."""
+    workspace = make_workspace()
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, conn)
+
+    monkeypatch.setenv("TRET_EGRESS", "off")
+    get_settings.cache_clear()
+
+    async with session_factory() as db:
+        try:
+            await ensure_connection_usable(db, workspace.id, "m365")
+            assert False, "expected ConnectionUnavailable"
+        except ConnectionUnavailable as exc:
+            assert "disabled on this deployment" in exc.reason

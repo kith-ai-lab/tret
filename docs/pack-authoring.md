@@ -296,12 +296,62 @@ packs remain future work.
 | Tool | Use |
 |---|---|
 | `read_document` / `search_documents` | attached evidence documents |
+| `list_connected_sources` / `search_connected_files` / `read_connected_file` | live files from a workspace's connected SharePoint/OneDrive |
 | `lookup_dataset` | retrieve stored numbers |
 | `run_method` | compute derived numbers via vetted pack methods |
 | `list_prior_findings` | reference earlier verdicts/extractions |
 | `record_verdict` / `record_finding` | schema-validated structured outputs |
 | `draft_section` | store a markdown deliverable section |
 | `file_data_request` | declare a gap instead of guessing |
+
+## Connected sources (live SharePoint/OneDrive)
+
+A workspace can link a Microsoft 365 account under Settings > Connections
+(`tret/services/connections.py`). A task that wants to read from it declares
+the three tools together, the same way `read_document`/`search_documents`
+travel as a pair:
+
+```yaml
+    tools: [list_connected_sources, search_connected_files, read_connected_file, record_verdict]
+```
+
+- `list_connected_sources` — the connected site drives/OneDrives available,
+  each with a `slug` for narrowing a search.
+- `search_connected_files` — searches those sources for a query, returning
+  hits with an `item_ref`.
+- `read_connected_file` — materializes a hit by `item_ref` into a `Document`
+  (`source_kind='connected'`) attached to the run, then pages through it
+  exactly like `read_document`; the document stays readable afterwards via
+  `read_document`/`search_documents` by id.
+
+A connected file is a third trust tier, distinct from an uploaded document and
+from `fetch_url`'s web pages: nobody vetted it before the run started, but it
+also wasn't chosen off the open internet by the model — it's whatever the
+workspace's own connected account can see. It carries its own banner
+(`[CONNECTED SOURCE: ...]`) rather than the web tools' unverified notice, and
+— like the web tools — no value read this way is ever registered for the
+cited-values check; numbers still come only from `lookup_dataset`/`run_method`.
+
+**When nothing is connected.** These three tools stay in the registry
+whether or not any workspace has ever connected an account — a harness that
+lists them is never an `unknown_tool` failure. Whether they're *offered* to
+the model on a given run is a per-workspace check (`ensure_connection_usable`):
+no connection, or a connection that's gone stale, and the engine withholds
+them before the first token and publishes a `tools_withheld` event
+(`reason: "connection_unavailable"`) naming why. The run proceeds without
+them rather than failing.
+
+**Per-run caps**, enforced by the tools themselves (`TRET_` env vars, see
+`.env.example`):
+
+| Cap | Default | Env var |
+|---|---|---|
+| connected reads | 20 | `TRET_CONNECTIONS_MAX_READS_PER_RUN` |
+| connected bytes | 100MB | `TRET_CONNECTIONS_MAX_BYTES_PER_RUN` |
+| connected searches | 30 | `TRET_CONNECTIONS_MAX_SEARCHES_PER_RUN` |
+
+Hitting a cap returns a tool error naming the limit rather than failing the
+run — the model can keep working with what it already read.
 
 ## Input schema → form
 

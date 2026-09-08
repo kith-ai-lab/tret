@@ -1,6 +1,6 @@
-"""Document text extraction (PDF/DOCX/CSV/MD/TXT) and the shared ingestion
-step — bounded extraction plus building the `Document` row — that both
-`api/documents.py`'s upload endpoint and the connections import endpoint
+"""Document text extraction (PDF/DOCX/XLSX/PPTX/CSV/MD/TXT) and the shared
+ingestion step — bounded extraction plus building the `Document` row — that
+both `api/documents.py`'s upload endpoint and the connections import endpoint
 (`POST /api/projects/{project_id}/documents/import`) call, so the two paths
 can never diverge on how a document actually gets ingested once its bytes
 are on disk. Only how the bytes arrived differs between them.
@@ -34,6 +34,35 @@ MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_EXTRACTED_CHARS = 2_000_000
 EXTRACTION_TIMEOUT_SECONDS = 30.0
 
+# .xlsx and .pptx are zip containers that openpyxl/python-pptx inflate while
+# parsing. A small compressed file can declare an enormous uncompressed size
+# per member (a zip bomb), so the total is summed straight from the zip's
+# central directory — no inflation, no parsing — before either library ever
+# touches the bytes.
+#
+# .xlsx keeps the full 200MB allowance: `_extract_xlsx` reads `read_only`,
+# streaming row by row rather than building an in-memory object model, so a
+# large-but-legitimate workbook's memory cost stays bounded regardless of
+# how much the zip expands to. `_extract_pptx` has no such streaming path —
+# `python-pptx`'s `Presentation()` parses the whole package eagerly into
+# memory before extraction ever gets to bound anything — so a pptx gets a
+# lower allowance instead of trusting the same 200MB ceiling to be safe for
+# a parser that cannot stream.
+MAX_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
+MAX_PPTX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+
+
+def _refuse_zip_bombs(filename: str, data: bytes, max_uncompressed_bytes: int = MAX_ZIP_UNCOMPRESSED_BYTES) -> None:
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        total = sum(info.file_size for info in zf.infolist())
+    if total > max_uncompressed_bytes:
+        raise ValueError(
+            f"{filename}: archive expands to {total} bytes, over the "
+            f"{max_uncompressed_bytes} byte limit"
+        )
+
 
 def extract_text(filename: str, data: bytes) -> tuple[str, dict]:
     """Returns (text, meta). Raises ValueError for unsupported types."""
@@ -53,6 +82,10 @@ def extract_text(filename: str, data: bytes) -> tuple[str, dict]:
             for row in table.rows:
                 parts.append(" | ".join(cell.text for cell in row.cells))
         return "\n".join(parts), {"paragraphs": len(document.paragraphs)}
+    if lower.endswith(".xlsx"):
+        return _extract_xlsx(filename, data)
+    if lower.endswith(".pptx"):
+        return _extract_pptx(filename, data)
     if lower.endswith((".csv", ".tsv")):
         delim = "\t" if lower.endswith(".tsv") else ","
         text = data.decode("utf-8", errors="replace")
@@ -61,7 +94,106 @@ def extract_text(filename: str, data: bytes) -> tuple[str, dict]:
         return rendered, {"rows": len(rows), "columns": rows[0] if rows else []}
     if lower.endswith((".md", ".txt", ".json", ".yaml", ".yml")):
         return data.decode("utf-8", errors="replace"), {}
-    raise ValueError(f"Unsupported file type: {filename} (supported: pdf, docx, csv, tsv, md, txt)")
+    raise ValueError(
+        f"Unsupported file type: {filename} (supported: pdf, docx, xlsx, pptx, csv, tsv, md, txt)"
+    )
+
+
+def _extract_xlsx(filename: str, data: bytes) -> tuple[str, dict]:
+    """Row-major text of every worksheet, via `read_only` iteration so a 25MB
+    workbook with millions of cells is streamed rather than built into an
+    in-memory object model. Formulas are never evaluated: `data_only=True`
+    reads each cell's last cached value (what Excel wrote when it last saved
+    the file), not a live recomputation.
+    """
+    import openpyxl
+
+    _refuse_zip_bombs(filename, data)
+    workbook = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        sheet_count = len(workbook.sheetnames)
+        parts: list[str] = []
+        chars = 0
+        total_rows = 0
+        truncated = False
+        for sheet in workbook.worksheets:
+            if truncated:
+                break
+            heading = f"## Sheet: {sheet.title}"
+            parts.append(heading)
+            chars += len(heading) + 1
+            for row in sheet.iter_rows(values_only=True):
+                if row is None or all(value is None for value in row):
+                    continue
+                line = "\t".join("" if value is None else str(value) for value in row)
+                parts.append(line)
+                chars += len(line) + 1
+                total_rows += 1
+                if chars >= MAX_EXTRACTED_CHARS:
+                    truncated = True
+                    break
+    finally:
+        workbook.close()
+    meta: dict = {"sheets": sheet_count, "rows": total_rows}
+    if truncated:
+        meta["truncated"] = True
+    return "\n".join(parts), meta
+
+
+def _extract_pptx(filename: str, data: bytes) -> tuple[str, dict]:
+    """Per-slide text: every shape's text frame (paragraph per line), table
+    cells tab-separated, and speaker notes under a `Notes:` heading.
+    """
+    from pptx import Presentation
+
+    _refuse_zip_bombs(filename, data, MAX_PPTX_UNCOMPRESSED_BYTES)
+    presentation = Presentation(io.BytesIO(data))
+    parts: list[str] = []
+    chars = 0
+    truncated = False
+    for index, slide in enumerate(presentation.slides, start=1):
+        if truncated:
+            break
+        heading = f"## Slide {index}"
+        parts.append(heading)
+        chars += len(heading) + 1
+        for shape in slide.shapes:
+            if truncated:
+                break
+            if shape.has_text_frame:
+                for paragraph in shape.text_frame.paragraphs:
+                    if not paragraph.text:
+                        continue
+                    parts.append(paragraph.text)
+                    chars += len(paragraph.text) + 1
+                    if chars >= MAX_EXTRACTED_CHARS:
+                        truncated = True
+                        break
+            if truncated:
+                break
+            if shape.has_table:
+                for row in shape.table.rows:
+                    line = "\t".join(cell.text for cell in row.cells)
+                    parts.append(line)
+                    chars += len(line) + 1
+                    if chars >= MAX_EXTRACTED_CHARS:
+                        truncated = True
+                        break
+        if truncated:
+            break
+        if slide.has_notes_slide:
+            notes_frame = slide.notes_slide.notes_text_frame
+            notes_text = notes_frame.text if notes_frame else ""
+            if notes_text.strip():
+                parts.append("Notes:")
+                parts.append(notes_text)
+                chars += len(notes_text) + 8
+                if chars >= MAX_EXTRACTED_CHARS:
+                    truncated = True
+    meta: dict = {"slides": len(presentation.slides)}
+    if truncated:
+        meta["truncated"] = True
+    return "\n".join(parts), meta
 
 
 async def extract_bounded(filename: str, data: bytes) -> tuple[str, dict, str]:

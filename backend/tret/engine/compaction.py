@@ -58,6 +58,16 @@ ELIDABLE_TOOLS = frozenset(
         # still re-read the page in full via `read_document`.
         "web_search",
         "fetch_url",
+        # Same reasoning as the web tools, for the same shape of tool:
+        # `list_connected_sources` and `search_connected_files` are short
+        # listings/navigation, cheap to re-call. `read_connected_file`
+        # materializes the file as a Document (source_kind='connected') and
+        # returns pageable text, exactly like `fetch_url` — the file itself
+        # lives in Postgres, not the context window, so an elided read is
+        # still fully recoverable via `read_document`.
+        "list_connected_sources",
+        "search_connected_files",
+        "read_connected_file",
     }
 )
 # Never elided, for two distinct reasons:

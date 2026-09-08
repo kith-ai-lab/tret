@@ -384,6 +384,18 @@ class Settings(BaseSettings):
     # a deterrent; a proxy that the workload cannot bypass is a boundary.
     egress_proxy: str = ""  # e.g. http://egress-proxy.internal:3128
 
+    # Per-run budgets for the connected-source tools (engine/tools.py:
+    # list_connected_sources / search_connected_files / read_connected_file),
+    # which read live from a workspace's linked SharePoint/OneDrive
+    # (services/connections.py). A separate budget from the research limits
+    # above: a connected read goes through the workspace's own OAuth grant
+    # rather than a URL a model chose off the open internet, but it is still an
+    # unbounded resource a tool loop could hammer, so it gets the same per-run
+    # ceiling treatment.
+    connections_max_reads_per_run: int = 20
+    connections_max_bytes_per_run: int = 100 * 1024 * 1024  # 100MB
+    connections_max_searches_per_run: int = 30
+
     # Web search backend (tret/net/search/). Empty = no search: web_search is
     # registered but tells the model it is unconfigured, so a harness that lists
     # the tool still runs. `searxng` is the self-hosted option, which keeps the

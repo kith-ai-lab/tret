@@ -39,12 +39,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
@@ -54,12 +57,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
 from tret.config import get_settings
-from tret.db.models import WorkspaceConnection
+from tret.db.models import Document, WorkspaceConnection
 from tret.engine.extensions import get_extension_registry
 from tret.net import EgressDenied, build_client
-from tret.net.policy import VERIFY_NONE, VERIFY_PUBLIC, ClassPolicy, master_mode
+from tret.net.policy import MODE_OFF, VERIFY_NONE, VERIFY_PUBLIC, ClassPolicy, master_mode
 from tret.services.credentials import get_fernet
-from tret.services.documents import MAX_DOCUMENT_BYTES
+from tret.services.documents import MAX_DOCUMENT_BYTES, ingest_document
 
 log = logging.getLogger("tret.connections")
 
@@ -99,6 +102,111 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
 GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
 GDRIVE_API_BASE = "https://www.googleapis.com/drive/v3"
 _GRAPH_ME_URL = f"{GRAPH_API_BASE}/me"
+
+# The two workspace-gate actions `api/connections.py` (`require_connections_
+# gate`, for the HTTP surface) and `ensure_connection_usable` below (for
+# anything — the engine included — that needs a plain "is this connection
+# usable right now" answer with no HTTP layer downstream to turn a refusal
+# into) both ask `check_workspace_gate` about. Defined here, not in
+# api/connections.py, so both call sites share the one literal rather than
+# `services/connections.py` importing them back from the router package it
+# is itself imported by (a cycle) or the two modules drifting to different
+# strings. `api/connections.py` re-exports both names unchanged — `api/
+# documents.py` already imports `USE_ACTION` from there, and that import
+# keeps working exactly as before.
+#
+# `CONNECT_ACTION` is the front door — asked once, in `authorize`, at the
+# moment a workspace is about to gain a new connection. `USE_ACTION` is asked
+# on every route (or call) that exercises a connection *already on file*: a
+# gate registered for `CONNECT_ACTION` alone would only ever stop a workspace
+# from connecting in the first place, and once connected the row just sits
+# there working forever, plan or no plan. Asking `USE_ACTION` every time
+# means a workspace whose plan lapses loses the connection's usefulness on
+# its very next call. No code here needs to revoke the provider token or
+# mutate the stored `WorkspaceConnection` row to make that happen, and none
+# of it does; the row is left exactly as it was. If the plan comes back,
+# `check_workspace_gate` starts returning `allowed=True` again and the same
+# row works again, with nothing to reconnect.
+CONNECT_ACTION = "connections.connect"  # asked once, when a connection is established
+USE_ACTION = "connections.use"  # asked every time a stored connection is exercised
+
+# `Document.source_kind` for a file materialised from a live connection via
+# `materialize_connected_file` — distinct from `"upload"` (a human put it
+# here) and `"web"` (an agent fetched it from the open web): a connected
+# document came from a specific, workspace-scoped provider drive a run was
+# explicitly allowed to read, which is neither of those trust tiers.
+CONNECTED_SOURCE_KIND = "connected"
+
+_PROVIDER_LABEL: dict[str, str] = {GDRIVE: "Google Drive", M365: "Microsoft 365"}
+
+
+class ConnectionUnavailable(Exception):
+    """A workspace cannot use a connection right now — no HTTP layer
+    downstream to turn this into a 409, so `.reason` is written as one short
+    prose sentence safe to hand straight to a model or show a user: 'No
+    Microsoft 365 connection is active for this workspace.' / 'Connections
+    are not included in this workspace's plan.' / 'The Microsoft 365
+    connection is in an error state: <detail>.' / 'Outbound access to
+    connected services is disabled on this deployment.'"""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class ConnectedSource:
+    """One drive a workspace's m365 connection is allowed to read from —
+    either an admin-picked entry from `selected_resources["read"]`, or (when
+    that allowlist is empty) one Graph reported the connected account can
+    see at all. `slug` is what the rest of the surface (search, materialize,
+    the frontend's source picker) addresses this drive by — stable across
+    calls for the same drive, url-safe, and unique per workspace (see
+    `_source_slug`)."""
+
+    slug: str
+    provider: str  # "m365"
+    kind: str  # "site_drive" | "onedrive"
+    label: str
+    site_id: str | None
+    drive_id: str
+    web_url: str | None
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    item_ref: str  # opaque "m365:{drive_id}:{item_id}" — see make_item_ref
+    name: str
+    path: str
+    web_url: str | None
+    modified: str | None  # ISO 8601, from lastModifiedDateTime
+    size: int | None
+    snippet: str | None
+    source_slug: str
+
+
+def make_item_ref(provider: str, drive_id: str, item_id: str) -> str:
+    """The opaque id `SearchHit.item_ref` and `materialize_connected_file`'s
+    `item_ref` argument share: `"{provider}:{drive_id}:{item_id}"`. Not a
+    Graph id itself — a provider tag glued to one, so a run handling several
+    `item_ref`s never has to guess which provider (or which drive) a bare id
+    came from."""
+    return f"{provider}:{drive_id}:{item_id}"
+
+
+def parse_item_ref(item_ref: str) -> tuple[str, str, str]:
+    """The inverse of `make_item_ref`: `(provider, drive_id, item_id)`.
+    Raises `ValueError` for anything that isn't exactly three `:`-separated,
+    non-empty segments, or whose provider isn't one this module knows about
+    — a malformed or forged `item_ref` must fail loudly here rather than
+    silently resolve to the wrong drive."""
+    parts = (item_ref or "").split(":", 2)
+    if len(parts) != 3 or not all(parts):
+        raise ValueError(f"malformed item_ref: {item_ref!r}")
+    provider, drive_id, item_id = parts
+    if provider not in PROVIDERS:
+        raise ValueError(f"unknown provider in item_ref: {provider!r}")
+    return provider, drive_id, item_id
 
 # provider -> the Settings attrs holding its env-configured client id/secret.
 _ENV_CLIENT_ATTRS: dict[str, tuple[str, str]] = {
@@ -352,6 +460,54 @@ async def get_connection(
     ).scalars().first()
 
 
+async def ensure_connection_usable(
+    db: AsyncSession, workspace_id: uuid.UUID, provider: str = M365
+) -> WorkspaceConnection:
+    """The workspace's `provider` connection, verified usable right now — the
+    one check `list_connected_sources`, `search_connected_files`, and
+    `materialize_connected_file` all share, and what an engine tool wrapper
+    calls before offering live access to a connection inside a run. Raises
+    `ConnectionUnavailable` (never `ConnectionAuthError`/`RuntimeError`:
+    those read as HTTP-shaped failures for a caller with no HTTP layer
+    downstream, `.reason` is written to be shown as-is) when any of:
+
+    - the deployment's own egress kill switch (`TRET_EGRESS`) has outbound
+      provider calls off — checked first, since it needs no database access
+      and is true regardless of which workspace is asking;
+    - no `provider` connection row exists for this workspace;
+    - the row exists but `status != "active"` (a refresh has already failed
+      with `invalid_grant`, or the stored token no longer decrypts — see
+      `_refresh`'s own docstring);
+    - the workspace's `connections.use` gate refuses (a plan gate tret_cloud
+      registers, most commonly) — the same action every HTTP route that
+      exercises an existing connection asks via `api/connections.py::
+      require_connections_gate`, checked last here since it is the one
+      condition that costs a network-free but still async round trip through
+      the extension registry.
+
+    Returns the row on success — every caller above needs it (for
+    `selected_resources`, or simply to prove there is one to work with), so
+    there is no reason to make each of them reload it separately.
+    """
+    label = _PROVIDER_LABEL.get(provider, provider)
+    if master_mode() == MODE_OFF:
+        raise ConnectionUnavailable(
+            "Outbound access to connected services is disabled on this deployment."
+        )
+    conn = await get_connection(db, workspace_id, provider)
+    if conn is None:
+        raise ConnectionUnavailable(f"No {label} connection is active for this workspace.")
+    if conn.status != "active":
+        detail = conn.error_detail or "it must be reconnected"
+        raise ConnectionUnavailable(f"The {label} connection is in an error state: {detail}.")
+    gate = await get_extension_registry().check_workspace_gate(db, workspace_id, USE_ACTION)
+    if not gate.allowed:
+        raise ConnectionUnavailable(
+            gate.detail or "Connections are not included in this workspace's plan."
+        )
+    return conn
+
+
 async def _commit_connection(db: AsyncSession, workspace_id: uuid.UUID, provider: str) -> None:
     """Commit a mutation `_refresh` just made to the `WorkspaceConnection`
     row, tolerating the row having been deleted out from under it.
@@ -548,6 +704,26 @@ def _access_token_lock(key: tuple[uuid.UUID, str]) -> asyncio.Lock:
     return lock
 
 
+# Per-process cache of `list_connected_sources` results, keyed by
+# (workspace_id, provider) exactly like `_access_token_cache` above — same
+# single-instance reasoning (see that dict's own comment). Value is
+# (expires_at, sources): `expires_at` a `time.monotonic()` deadline, not a
+# wall-clock time, for the same reason the access-token cache uses one.
+_sources_cache: dict[tuple[uuid.UUID, str], tuple[float, list[ConnectedSource]]] = {}
+
+
+def invalidate_connected_sources(workspace_id: uuid.UUID, provider: str = M365) -> None:
+    """Drop this (workspace, provider)'s cached `list_connected_sources`
+    result, if any. Called from `invalidate_access_token` below (so every
+    existing call site of that — `_refresh` flipping a connection to
+    `status='error'`, disconnect, the OAuth callback — also drops a now-
+    possibly-stale derived sources list) and directly from `PUT /api/
+    connections/m365/resources` (an admin narrowing or widening the read
+    allowlist must be visible on the very next call, not up to
+    `_SOURCES_CACHE_SECONDS` later)."""
+    _sources_cache.pop((workspace_id, provider), None)
+
+
 def invalidate_access_token(workspace_id: uuid.UUID, provider: str) -> None:
     """Drop this (workspace, provider)'s cached access token, if any, and
     bump its invalidation epoch.
@@ -570,19 +746,28 @@ def invalidate_access_token(workspace_id: uuid.UUID, provider: str) -> None:
     here means `_get_access_token` (which captured the epoch before it
     started refreshing) will see a mismatch and skip writing that stale
     result to the cache.
+
+    Also drops any cached `list_connected_sources` result for the same key
+    — every reason a cached access token stops being trustworthy (the
+    connection erroring, disconnecting, or being reconnected to a possibly
+    different account) is equally a reason a derived "everything the account
+    can see" sources list stops being trustworthy.
     """
     _access_token_cache.pop((workspace_id, provider), None)
     key = (workspace_id, provider)
     _access_token_epochs[key] = _access_token_epochs.get(key, 0) + 1
+    invalidate_connected_sources(workspace_id, provider)
 
 
 def clear_access_token_cache() -> None:
-    """Drop every cached access token, epoch, and per-key lock. Test
-    isolation; also safe to call at process startup, though an empty
-    process-local dict already starts empty."""
+    """Drop every cached access token, epoch, per-key lock, and cached
+    `list_connected_sources` result. Test isolation; also safe to call at
+    process startup, though an empty process-local dict already starts
+    empty."""
     _access_token_cache.clear()
     _access_token_epochs.clear()
     _access_token_locks.clear()
+    _sources_cache.clear()
 
 
 async def _get_access_token(
@@ -819,7 +1004,20 @@ class DownloadTooLargeError(Exception):
     or from the streamed byte count once no size was declared. A distinct
     type so a caller can read "too big" out of an import failure if it ever
     wants to, though the import endpoint currently just stringifies it like
-    any other per-item error."""
+    any other per-item error.
+
+    `size_bytes`, when known, is whichever of the two sizes above tripped
+    the cap (the declared size read from provider metadata/headers, or the
+    actual number of bytes streamed before the cap cut the transfer off) —
+    `None` only where neither was available at the raise site. A caller
+    that spends a per-run byte budget on failed attempts (engine/tools.py's
+    `read_connected_file`) uses this to charge the budget for bytes that
+    were, in fact, moved (or declared and then refused) rather than
+    silently treating a too-large download as free."""
+
+    def __init__(self, message: str, *, size_bytes: int | None = None) -> None:
+        super().__init__(message)
+        self.size_bytes = size_bytes
 
 
 def gdrive_download_content_type(mime_type: str | None) -> str | None:
@@ -865,13 +1063,17 @@ async def gdrive_file_metadata(access_token: str, *, file_id: str) -> dict:
 
 
 async def m365_item_metadata(access_token: str, *, drive_id: str, item_id: str) -> dict:
-    """`{id, name, size, lastModifiedDateTime, file}` for one drive item —
-    same role as `gdrive_file_metadata`: the pre-download size check and the
-    `modified_at` provenance field."""
+    """`{id, name, size, lastModifiedDateTime, file, eTag, webUrl,
+    parentReference}` for one drive item — the pre-download size check and
+    `modified_at` provenance for the Phase 1 import path, plus (`eTag`,
+    `webUrl`, `parentReference.path`) what `materialize_connected_file`
+    needs for its own dedupe check and the `Document.meta` it records."""
     return await _graph_get(
         access_token,
         f"/drives/{quote(drive_id, safe='')}/items/{quote(item_id, safe='')}",
-        params={"$select": "id,name,size,lastModifiedDateTime,file,folder"},
+        params={
+            "$select": "id,name,size,lastModifiedDateTime,file,folder,eTag,webUrl,parentReference"
+        },
     )
 
 
@@ -882,14 +1084,16 @@ async def _read_capped(response: httpx.Response, max_bytes: int) -> bytes:
     declared = response.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > max_bytes:
         raise DownloadTooLargeError(
-            f"{int(declared) // (1024 * 1024)}MB exceeds the {max_bytes // (1024 * 1024)}MB import limit"
+            f"{int(declared) // (1024 * 1024)}MB exceeds the {max_bytes // (1024 * 1024)}MB import limit",
+            size_bytes=int(declared),
         )
     body = bytearray()
     async for chunk in response.aiter_bytes(_DOWNLOAD_CHUNK_BYTES):
         body.extend(chunk)
         if len(body) > max_bytes:
             raise DownloadTooLargeError(
-                f"exceeds the {max_bytes // (1024 * 1024)}MB import limit"
+                f"exceeds the {max_bytes // (1024 * 1024)}MB import limit",
+                size_bytes=len(body),
             )
     return bytes(body)
 
@@ -971,3 +1175,570 @@ async def download_m365_file(
         except httpx.HTTPError as exc:
             raise RuntimeError(f"could not reach Microsoft Graph: {exc}") from exc
     raise RuntimeError(f"more than {_MAX_DOWNLOAD_REDIRECTS} redirects downloading the m365 file")
+
+
+# ── live SharePoint/OneDrive access in runs ──────────────────────────────────
+# What a run gets when it is allowed to reach a workspace's m365 connection
+# live, rather than only through the Phase 1 import picker above: a read
+# allowlist (`list_connected_sources`), full-text search over it
+# (`search_connected_files`), and pulling one hit's bytes into the project's
+# documents on demand (`materialize_connected_file`). gdrive is untouched by
+# any of this — `drive.file`'s own picker-scoped grant (see docs/
+# connections.md's Security notes) already means there is nothing Google
+# would let a connection "see" beyond what a human explicitly picked, so
+# there is no "everything the account can see" to derive and nothing for a
+# read allowlist to narrow.
+_SOURCES_CACHE_SECONDS = 300
+_SEARCH_API_PAGE_SIZE = 50
+_MAX_SEARCH_RESULTS = 20
+_MAX_FALLBACK_DRIVES = 5
+# `_derive_connected_sources` bounds: how many `@odata.nextLink` pages of
+# `/sites?search=*` to follow, how many derived sites to keep before running
+# any per-site `/drive` lookup, and how many of those lookups run at once.
+_MAX_SITE_PAGES = 5
+_MAX_DERIVED_SITES = 200
+_SITE_DRIVE_CONCURRENCY = 8
+_GRAPH_SEARCH_QUERY_URL = f"{GRAPH_API_BASE}/search/query"
+# What a Graph `parentReference.path` starts with for an item inside a
+# drive's own root — stripped off before a path is shown to a model/user, in
+# favour of the source's own human label (see `_humanize_path`).
+_DRIVE_ROOT_PATH_PREFIX = "root:"
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^\w.() \[\]+&,-]")
+_MEDIA_TYPE_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9!#$&\-\^_.+]*/[a-zA-Z0-9][a-zA-Z0-9!#$&\-\^_.+]*")
+_DEFAULT_CONTENT_TYPE = "application/octet-stream"
+
+
+def _source_slug(provider: str, drive_id: str, label: str) -> str:
+    """A stable, url-safe, per-workspace-unique slug for one drive: a
+    slugified prefix of `label` (so it reads as something, in a URL or a
+    frontend dropdown) plus a short hash of `(provider, drive_id)` (so it is
+    actually unique and stable across calls even when two drives share a
+    label, or a label is empty/all-punctuation). Never recomputed from
+    anything other than `provider`/`drive_id` for the hash half, so the same
+    drive gets the same slug on every call regardless of which of the two
+    `list_connected_sources` branches produced it."""
+    digest = hashlib.sha256(f"{provider}:{drive_id}".encode()).hexdigest()[:10]
+    base = re.sub(r"[^a-z0-9]+", "-", (label or provider).lower()).strip("-")[:40]
+    return f"{base}-{digest}" if base else f"{provider}-{digest}"
+
+
+def _connected_source_from_selection(entry: dict) -> ConnectedSource:
+    """One `selected_resources["read"]` entry (already pydantic-validated by
+    `PUT /api/connections/m365/resources` before it was persisted) as a
+    `ConnectedSource`."""
+    drive_id = entry["drive_id"]
+    label = entry.get("label") or drive_id
+    return ConnectedSource(
+        slug=_source_slug(M365, drive_id, label),
+        provider=M365,
+        kind=entry.get("kind") or "site_drive",
+        label=label,
+        site_id=entry.get("site_id"),
+        drive_id=drive_id,
+        web_url=entry.get("web_url"),
+    )
+
+
+async def _fetch_site_drive_source(
+    sem: asyncio.Semaphore, token: str, site: dict
+) -> ConnectedSource | None:
+    """One site's default document library as a `ConnectedSource`, or
+    `None` if the site has no default drive (Graph 404s `/drive` for it —
+    not every SharePoint site has one provisioned) or the lookup otherwise
+    fails. Failures are swallowed (logged at debug) rather than raised:
+    called under `asyncio.gather`, so one mis-provisioned or momentarily
+    unreachable site must not fail the whole derive."""
+    site_id = site.get("id")
+    if not site_id:
+        return None
+    async with sem:
+        try:
+            drive = await _graph_get(token, f"/sites/{quote(site_id, safe='')}/drive")
+        except RuntimeError:
+            log.debug("connections: drive lookup failed for site %s", site_id, exc_info=True)
+            return None
+    drive_id = drive.get("id")
+    if not drive_id:
+        return None
+    site_name = site.get("displayName") or site.get("name") or site_id
+    drive_name = drive.get("name") or "Documents"
+    return ConnectedSource(
+        slug=_source_slug(M365, drive_id, f"{site_name} {drive_name}"),
+        provider=M365,
+        kind="site_drive",
+        label=f"{site_name} / {drive_name}",
+        site_id=site_id,
+        drive_id=drive_id,
+        web_url=drive.get("webUrl"),
+    )
+
+
+async def _derive_connected_sources(db: AsyncSession, workspace_id: uuid.UUID) -> list[ConnectedSource]:
+    """"Everything the account can see": each site's default document
+    library (`GET /sites/{id}/drive`) plus the account's own OneDrive (`GET
+    /me/drive`) — the unrestricted default `list_connected_sources` falls
+    back to when a workspace has never narrowed its `selected_resources
+    ["read"]` allowlist. Reuses `browse_m365`'s own `/sites` listing and
+    `_fetch_m365_upn` for the OneDrive label, rather than re-deriving either.
+
+    `/sites?search=*` is followed across up to `_MAX_SITE_PAGES` pages of
+    `@odata.nextLink` (a tenant with more sites than that stops paging
+    rather than looping forever), and the resulting site list is capped at
+    `_MAX_DERIVED_SITES` (logged once when the cap actually trims
+    something) before any per-site drive lookup runs — an unbounded tenant
+    directory must not turn into an unbounded number of `/drive` calls. The
+    per-site `/drive` lookups themselves run with bounded concurrency
+    (`_SITE_DRIVE_CONCURRENCY` at a time) rather than sequentially, one
+    request per site, which is what made this derive slow enough to matter
+    in the first place; a site whose drive lookup fails is skipped, not
+    fatal to the rest (`_fetch_site_drive_source`).
+    """
+    token = await get_access_token(db, workspace_id, M365)
+    sources: list[ConnectedSource] = []
+
+    sites: list[dict] = []
+    next_link: str | None = None
+    for _ in range(_MAX_SITE_PAGES):
+        if next_link is None:
+            body = await _graph_get(token, "/sites", params={"search": "*"})
+        elif next_link.startswith(GRAPH_API_BASE):
+            # @odata.nextLink is a full URL; _graph_get only takes a path,
+            # so strip the base it always shares with every other Graph call
+            # here (same host `_policy` already pins, not a new one).
+            body = await _graph_get(token, next_link[len(GRAPH_API_BASE):])
+        else:
+            # Graph has never been observed to return a nextLink off-base;
+            # if it ever did, following it blind would sidestep `_policy`'s
+            # host pin, so stop paging instead.
+            break
+        sites.extend(body.get("value", []))
+        next_link = body.get("@odata.nextLink")
+        if not next_link or len(sites) >= _MAX_DERIVED_SITES:
+            break
+
+    # Capped either by trimming an overshoot in one page, or by stopping
+    # early (site cap or page cap) while Graph still had more to give
+    # (`next_link` left over from the loop's last fetch says so either way).
+    capped = len(sites) > _MAX_DERIVED_SITES or bool(next_link)
+    if capped:
+        log.warning(
+            "connections: capped derived sites at %d for workspace %s (tenant has more)",
+            _MAX_DERIVED_SITES,
+            workspace_id,
+        )
+        sites = sites[:_MAX_DERIVED_SITES]
+
+    sem = asyncio.Semaphore(_SITE_DRIVE_CONCURRENCY)
+    site_sources = await asyncio.gather(*(_fetch_site_drive_source(sem, token, site) for site in sites))
+    sources.extend(source for source in site_sources if source is not None)
+
+    my_drive = await _graph_get(token, "/me/drive")
+    my_drive_id = my_drive.get("id")
+    if my_drive_id:
+        upn = await _fetch_m365_upn(token)
+        label = f"OneDrive ({upn})" if upn else "OneDrive"
+        sources.append(
+            ConnectedSource(
+                slug=_source_slug(M365, my_drive_id, label),
+                provider=M365,
+                kind="onedrive",
+                label=label,
+                site_id=None,
+                drive_id=my_drive_id,
+                web_url=my_drive.get("webUrl"),
+            )
+        )
+    return sources
+
+
+async def list_connected_sources(db: AsyncSession, workspace_id: uuid.UUID) -> list[ConnectedSource]:
+    """The m365 drives this workspace is allowed to read from — an admin's
+    explicit `selected_resources["read"]` allowlist when one is set, else
+    every drive `_derive_connected_sources` finds. Result is cached
+    in-process for `_SOURCES_CACHE_SECONDS`, keyed by `(workspace_id, m365)`
+    (see `invalidate_connected_sources`/`invalidate_access_token` for what
+    drops that cache early), so a run doing several searches in a row does
+    not re-list every site on every call.
+
+    Raises `ConnectionUnavailable` via `ensure_connection_usable` — no
+    connection, an errored one, or a plan gate refusal all read the same way
+    to a caller of this function as "there is nothing to list right now".
+    """
+    # The gate must run every call, cache or not — a cached list must not
+    # let a workspace whose connection has since gone unusable (errored,
+    # disconnected, plan downgraded) keep reading through a stale result.
+    conn = await ensure_connection_usable(db, workspace_id, M365)
+
+    key = (workspace_id, M365)
+    now = time.monotonic()
+    cached = _sources_cache.get(key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+
+    selected = (conn.selected_resources or {}).get("read")
+    if selected:
+        sources = [_connected_source_from_selection(entry) for entry in selected]
+    else:
+        sources = await _derive_connected_sources(db, workspace_id)
+
+    _sources_cache[key] = (now + _SOURCES_CACHE_SECONDS, sources)
+    return sources
+
+
+def _strip_html(text: str | None) -> str | None:
+    """The Search API's `summary` field carries `<c0>`/`</c0>`-style
+    highlight markup around matched terms — stripped to plain text, since
+    nothing downstream of `SearchHit.snippet` renders HTML."""
+    if not text:
+        return None
+    stripped = re.sub(r"<[^>]+>", "", text).strip()
+    return stripped or None
+
+
+def _humanize_path(parent_path: str, name: str, source_label: str) -> str:
+    """`parentReference.path` (e.g. `/drives/{id}/root:/Reports/2026`) as a
+    human path prefixed by the source's own label instead of a raw drive id
+    — `{source_label}/Reports/2026/{name}`. The `root:` segment Graph always
+    includes right before the actual folder path is what gets stripped; a
+    drive-root item (no folder path at all) collapses to just
+    `{source_label}/{name}`."""
+    folder = parent_path or ""
+    idx = folder.find(_DRIVE_ROOT_PATH_PREFIX)
+    if idx != -1:
+        folder = folder[idx + len(_DRIVE_ROOT_PATH_PREFIX):]
+    folder = folder.strip("/")
+    segment = f"{folder}/{name}" if folder else name
+    return f"{source_label}/{segment}" if segment else source_label
+
+
+def _search_hit_from_resource(
+    resource: dict, *, summary: str | None, source: ConnectedSource
+) -> SearchHit | None:
+    item_id = resource.get("id")
+    drive_id = (resource.get("parentReference") or {}).get("driveId") or source.drive_id
+    if not item_id or not drive_id:
+        return None
+    parent_path = (resource.get("parentReference") or {}).get("path") or ""
+    return SearchHit(
+        item_ref=make_item_ref(M365, drive_id, item_id),
+        name=resource.get("name") or "",
+        path=_humanize_path(parent_path, resource.get("name") or "", source.label),
+        web_url=resource.get("webUrl"),
+        modified=resource.get("lastModifiedDateTime"),
+        size=resource.get("size"),
+        snippet=_strip_html(summary),
+        source_slug=source.slug,
+    )
+
+
+class _SearchApiUnsupported(Exception):
+    """The Microsoft Search API answered 4xx — most commonly because the
+    connected account is a personal Microsoft account, which the Search API
+    does not support at all (it is a Microsoft 365/Entra-tenant-only
+    surface). Internal to `search_connected_files`: callers never see this,
+    only its per-drive `/root/search` fallback result."""
+
+
+async def _search_query(access_token: str, query: str) -> dict:
+    """POST one `/search/query` request for `query`, scoped to drive items.
+    Raises `_SearchApiUnsupported` for a 4xx response (see that class) and
+    `RuntimeError` for anything else that keeps the call from completing —
+    same transport-vs-support split `_graph_get` draws, just with the two
+    outcomes needing to be told apart here instead of always being the same
+    `RuntimeError`."""
+    body = {
+        "requests": [
+            {
+                "entityTypes": ["driveItem"],
+                "query": {"queryString": query},
+                "from": 0,
+                "size": _SEARCH_API_PAGE_SIZE,
+            }
+        ]
+    }
+    try:
+        async with build_client(
+            _EGRESS_CLASS, policy=_policy(_GRAPH_SEARCH_QUERY_URL), timeout=15.0
+        ) as client:
+            response = await client.post(
+                _GRAPH_SEARCH_QUERY_URL,
+                json=body,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+    except EgressDenied as exc:
+        raise RuntimeError(f"connections egress is unavailable: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"could not reach Microsoft Graph: {exc}") from exc
+    if 400 <= response.status_code < 500:
+        raise _SearchApiUnsupported(f"Microsoft Search API returned {response.status_code}")
+    try:
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"could not reach Microsoft Graph: {exc}") from exc
+    return response.json()
+
+
+async def _search_via_search_api(
+    access_token: str, query: str, sources_by_drive: dict[str, ConnectedSource]
+) -> list[SearchHit]:
+    body = await _search_query(access_token, query)
+    hits: list[SearchHit] = []
+    for req in body.get("value", []):
+        for container in req.get("hitsContainers", []):
+            for hit in container.get("hits", []):
+                resource = hit.get("resource") or {}
+                drive_id = (resource.get("parentReference") or {}).get("driveId")
+                source = sources_by_drive.get(drive_id)
+                if source is None:
+                    continue  # post-filter: not one of this workspace's allowed drives
+                parsed = _search_hit_from_resource(resource, summary=hit.get("summary"), source=source)
+                if parsed is not None:
+                    hits.append(parsed)
+    return hits
+
+
+async def _search_via_drive_fallback(
+    access_token: str, query: str, sources_by_drive: dict[str, ConnectedSource]
+) -> list[SearchHit]:
+    """Per-drive `GET /drives/{id}/root/search(q='{query}')`, for the
+    personal-Microsoft-account case the tenant-only Search API refuses.
+    Capped to the first `_MAX_FALLBACK_DRIVES` allowed drives — a personal
+    account's connection realistically has one drive (its own OneDrive) or a
+    small handful, never the dozens a tenant-wide `/search/query` call
+    covers in one request, so fanning out to every allowed drive here would
+    trade one request for many without a workspace ever having enough drives
+    to make that cost worth it.
+
+    Each hit is pinned to the drive actually searched (`source.drive_id`),
+    never the `parentReference.driveId` Graph reports on the resource: for a
+    consumer OneDrive that field can name a *different* drive — a folder
+    shared into this drive from elsewhere — which would otherwise let a hit
+    resolve against a drive this workspace was never allowed to read. A hit
+    whose `parentReference.driveId` is present and isn't one of this
+    workspace's allowed drives is dropped outright rather than merely
+    repinned, on the same "don't trust it enough to launder it" reasoning.
+    """
+    encoded_query = quote(query, safe="")
+    hits: list[SearchHit] = []
+    for source in list(sources_by_drive.values())[:_MAX_FALLBACK_DRIVES]:
+        path = f"/drives/{quote(source.drive_id, safe='')}/root/search(q='{encoded_query}')"
+        try:
+            body = await _graph_get(access_token, path)
+        except RuntimeError:
+            continue
+        for item in body.get("value", []):
+            parent_drive_id = (item.get("parentReference") or {}).get("driveId")
+            if parent_drive_id is not None and parent_drive_id not in sources_by_drive:
+                continue  # shared-in item from a drive this workspace never allowed
+            parsed = _search_hit_from_resource(item, summary=None, source=source)
+            if parsed is None:
+                continue
+            hits.append(replace(parsed, item_ref=make_item_ref(M365, source.drive_id, item.get("id"))))
+    return hits
+
+
+async def search_connected_files(
+    db: AsyncSession,
+    workspace_id: uuid.UUID,
+    query: str,
+    *,
+    source_slug: str | None = None,
+    max_results: int = 20,
+) -> list[SearchHit]:
+    """Full-text search over the workspace's allowed m365 drives
+    (`list_connected_sources`), narrowed to one source when `source_slug` is
+    given. Tries the tenant-wide Microsoft Search API first, and falls back
+    to a per-drive `/root/search` call (capped to
+    `_MAX_FALLBACK_DRIVES` drives) only when the Search API itself refuses
+    with a 4xx — the shape a personal Microsoft account's connection gets
+    back, since Search is a tenant-only surface. `max_results` is clamped to
+    `[1, 20]` regardless of what is asked for. Raises `ValueError` for an
+    empty (or whitespace-only) `query`, and `ConnectionUnavailable` (via
+    `list_connected_sources`) under the same conditions that function does.
+    """
+    query = (query or "").strip()
+    if not query:
+        raise ValueError("query must not be empty")
+    max_results = max(1, min(_MAX_SEARCH_RESULTS, max_results))
+
+    sources = await list_connected_sources(db, workspace_id)
+    if source_slug is not None:
+        sources = [s for s in sources if s.slug == source_slug]
+    if not sources:
+        return []
+    sources_by_drive = {s.drive_id: s for s in sources}
+
+    token = await get_access_token(db, workspace_id, M365)
+    try:
+        hits = await _search_via_search_api(token, query, sources_by_drive)
+    except _SearchApiUnsupported:
+        hits = await _search_via_drive_fallback(token, query, sources_by_drive)
+    return hits[:max_results]
+
+
+def _safe_connected_filename(raw: str | None) -> str:
+    """A filename that can only ever name a file inside the storage
+    directory — the same threat model `api/documents.py::safe_filename`
+    guards against (a provider-supplied name is exactly as untrusted as a
+    multipart client's), reimplemented here rather than imported: that
+    function lives in the API layer, and this service must not import
+    upward into it."""
+    name = PurePosixPath((raw or "").replace("\\", "/")).name
+    name = _UNSAFE_FILENAME_CHARS.sub("_", name.replace("\x00", ""))
+    name = name.strip(". ")
+    return name or "file"
+
+
+def _safe_connected_content_type(raw: str | None) -> str:
+    candidate = (raw or "").split(";", 1)[0].strip().lower()
+    return candidate if _MEDIA_TYPE_RE.fullmatch(candidate) else _DEFAULT_CONTENT_TYPE
+
+
+async def _find_existing_connected_document(
+    db: AsyncSession, project_id: uuid.UUID, *, item_id: str, etag: str | None
+) -> Document | None:
+    """A `Document` this project already has for `item_id` at exactly
+    `etag`, if any — `materialize_connected_file`'s dedupe check. Filtered
+    in Python rather than in SQL on `meta->>'item_id'`: a project's document
+    count is small enough that this costs nothing, and it sidesteps the
+    sqlite-vs-Postgres JSON-operator differences the rest of this codebase
+    works around with `.op("->>")` (see `services/emission_settings.py`)
+    when there's no such small-N escape hatch. No etag at all (an item Graph
+    reports with none) means nothing to dedupe against — always download
+    fresh."""
+    if not etag:
+        return None
+    rows = (
+        await db.execute(
+            select(Document).where(
+                Document.project_id == project_id,
+                Document.source_kind == CONNECTED_SOURCE_KIND,
+            )
+        )
+    ).scalars().all()
+    for doc in rows:
+        meta = doc.meta or {}
+        if meta.get("provider") == M365 and meta.get("item_id") == item_id and meta.get("etag") == etag:
+            return doc
+    return None
+
+
+async def materialize_connected_file(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    project_id: uuid.UUID,
+    item_ref: str,
+    uploaded_by: uuid.UUID | None = None,
+) -> Document:
+    """Pull one `item_ref` (from a `SearchHit`, or anything else that names
+    an m365 drive item) into `project_id`'s documents, downloading it only
+    if this project does not already have it at its current version.
+
+    Raises `ValueError` for a malformed `item_ref` or one naming a folder
+    rather than a file; `ConnectionUnavailable` if the connection itself
+    cannot be used right now, or if `item_ref`'s drive is not one of this
+    workspace's allowed sources (`list_connected_sources`) — a caller must
+    not be able to materialize a file merely by guessing/forging a
+    `drive_id:item_id` pair Graph itself would happily resolve but this
+    workspace was never allowed to read; `DownloadTooLargeError` if the
+    item's declared size alone exceeds `IMPORT_MAX_BYTES` (checked before
+    any bytes are fetched — `download_m365_file`'s own streamed cap is the
+    backstop for a size Graph didn't declare or lied about, not the first
+    line of defence).
+
+    Dedupe: if this project already has a `Document` recorded from this
+    exact `item_id` at its current `eTag`, that row is returned unchanged
+    and nothing is downloaded — a second search hit (or a second run) for a
+    file nobody edited since the last materialize is free.
+    """
+    provider, drive_id, item_id = parse_item_ref(item_ref)
+    if provider != M365:
+        raise ValueError(f"unsupported provider in item_ref: {provider!r}")
+
+    sources = await list_connected_sources(db, workspace_id)
+    source = next((s for s in sources if s.drive_id == drive_id), None)
+    if source is None:
+        raise ConnectionUnavailable("That file is outside the folders this workspace allows.")
+
+    token = await get_access_token(db, workspace_id, M365)
+    metadata = await m365_item_metadata(token, drive_id=drive_id, item_id=item_id)
+    if "folder" in metadata:
+        raise ValueError(f"item_ref {item_ref!r} names a folder, not a file")
+
+    name = metadata.get("name") or item_id
+    etag = metadata.get("eTag")
+    size = metadata.get("size")
+    web_url = metadata.get("webUrl")
+    modified = metadata.get("lastModifiedDateTime")
+    path = _humanize_path((metadata.get("parentReference") or {}).get("path") or "", name, source.label)
+
+    existing = await _find_existing_connected_document(db, project_id, item_id=item_id, etag=etag)
+    if existing is not None:
+        return existing
+
+    if isinstance(size, int) and size > IMPORT_MAX_BYTES:
+        raise DownloadTooLargeError(
+            f"{size // (1024 * 1024)}MB exceeds the {IMPORT_MAX_BYTES // (1024 * 1024)}MB import limit",
+            size_bytes=size,
+        )
+
+    data = await download_m365_file(token, drive_id=drive_id, item_id=item_id, max_bytes=IMPORT_MAX_BYTES)
+
+    filename = _safe_connected_filename(name)
+    content_type = _safe_connected_content_type((metadata.get("file") or {}).get("mimeType"))
+    sha = hashlib.sha256(data).hexdigest()
+    storage_dir = Path(get_settings().storage_dir).resolve()
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    storage_path = (storage_dir / f"{sha}-{filename}").resolve()
+    if storage_path.parent != storage_dir:
+        raise ValueError("Invalid filename")
+
+    # Same "xb" check-and-create race handling as `api/documents.py::
+    # _import_one` — see that function's own comment for the full reasoning.
+    # Same bytes (same sha) means another Document row already owns this
+    # file on disk; this call must not touch it either way.
+    try:
+        with storage_path.open("xb") as sink:
+            sink.write(data)
+        created = True
+    except FileExistsError:
+        created = False
+
+    try:
+        doc = await ingest_document(
+            project_id=project_id,
+            filename=filename,
+            content_type=content_type,
+            storage_path=storage_path,
+            sha256=sha,
+            byte_size=len(data),
+            data=data,
+            uploaded_by=uploaded_by,
+            source_kind=CONNECTED_SOURCE_KIND,
+            meta_extra={
+                "provider": M365,
+                "source_slug": source.slug,
+                "site_id": source.site_id,
+                "drive_id": drive_id,
+                "item_id": item_id,
+                "etag": etag,
+                "web_url": web_url,
+                "path": path,
+                "modified": modified,
+            },
+        )
+        # ingest_document does not commit or add to the session — the caller
+        # owns the transaction (see its own docstring). Without this, the
+        # returned Document has id=None: nothing is persisted, dedupe above
+        # never finds it on a later call, and callers that stash the id
+        # (e.g. engine/tools.py appending to ctx.document_ids) stash None.
+        # Mirrors tret/net/fetch/snapshot.py's own add+flush.
+        db.add(doc)
+        await db.flush()
+        return doc
+    except BaseException:
+        if created:
+            storage_path.unlink(missing_ok=True)
+        raise

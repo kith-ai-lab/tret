@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from tret.services.emission_factors import EmissionsOverrides, FactorSet
 
 from tret.db.engine import get_session_factory
-from tret.db.models import Document, Harness, Pack, Run
+from tret.db.models import Document, Harness, Pack, Project, Run
 from tret.adaptive import adaptive_of
 from tret.engine.compaction import (
     CompactionState,
@@ -46,11 +46,13 @@ from tret.engine.context import (
 from tret.engine.events import RunEvent, get_event_bus
 from tret.engine.extensions import get_extension_registry
 from tret.engine.tools import (
+    CONNECTOR_TOOL_NAMES,
     DELEGATION_DEPTH_KEY,
     WEB_TOOL_NAMES,
     RunContext,
     execute_tool,
     get_builtin_tools,
+    withheld_connector_tools,
     withheld_web_tools,
 )
 from tret.providers.base import (
@@ -679,6 +681,35 @@ class HarnessEngine:
                     },
                 ),
             )
+        # Connected-source tools (list_connected_sources/search_connected_files/
+        # read_connected_file) are withheld the same way, but per-workspace
+        # rather than per-deployment: the connection has to exist and still be
+        # usable. Resolved from the run's project — a run carries project_id,
+        # not workspace_id directly — and reused below for RunContext, so this
+        # is the one place that lookup happens. `withheld_connector_tools` does
+        # a DB round-trip, so it's only called when there's a connector tool to
+        # check in the first place.
+        project = await db.get(Project, run.project_id)
+        workspace_id = project.workspace_id if project else None
+        if set(enabled_names) & CONNECTOR_TOOL_NAMES:
+            withheld_connector, connector_reason = await withheld_connector_tools(
+                db, workspace_id, enabled_names
+            )
+            if withheld_connector:
+                enabled_names = [n for n in enabled_names if n not in withheld_connector]
+                await self.bus.publish(
+                    run.id,
+                    RunEvent(
+                        "tools_withheld",
+                        {
+                            "tools": sorted(withheld_connector),
+                            "reason": "connection_unavailable",
+                            "detail": connector_reason
+                            or "No usable connected source for this workspace. These tools "
+                            "were not offered to the model; the run continues without them.",
+                        },
+                    ),
+                )
         tool_specs = [builtins[n] for n in enabled_names]
 
         # ── context, accounted ───────────────────────────────────────────────
@@ -748,6 +779,7 @@ class HarnessEngine:
             doctrine_sha=run.doctrine_sha,
             model_used=run.model_used,
             document_ids=list(run.document_ids or []),
+            workspace_id=workspace_id,
             output_schemas=output_schemas,
             pack_manifest=pack.manifest if pack else None,
             pack_dir=pack.source_path if pack else None,

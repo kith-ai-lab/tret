@@ -106,6 +106,67 @@ client id/secret set, the feature is simply absent from the UI.
   but if you want it invalidated at Microsoft too, do that from the
   account's own security settings.
 
+## Live access in runs
+
+Beyond the one-time import above, a run can be given **live** access to
+a workspace's Microsoft 365 connection — reaching SharePoint/OneDrive
+mid-run rather than only through files a person picked up front. Three
+pieces, all m365-only (see [Read allowlist](#read-allowlist) for why
+Google isn't part of this):
+
+- **Listing sources** — the drives a run is allowed to read from at
+  all: an admin's [read allowlist](#read-allowlist) when one is set,
+  otherwise every site's default document library plus the connected
+  account's own OneDrive.
+- **Search** — full-text search across those drives (Microsoft's
+  tenant-wide Search API when the connected account supports it,
+  falling back to a per-drive search for a personal Microsoft
+  account, which the Search API does not cover).
+- **Materialize** — pulling one search result into the project's
+  documents on demand, through the same ingestion path an import
+  uses. A file already pulled in at its current version is recognized
+  and not re-downloaded; a newer version at the same location
+  downloads again.
+
+A file pulled in this way is recorded with its own document
+`source_kind`, `"connected"` — distinct from an upload (a person put
+it there) and a fetched web page (never a source of numbers, per
+`engine/validation.py`'s cited-values check): a connected document
+came from a specific drive the workspace explicitly allowed a run to
+read, mid-run, without a person having picked that exact file.
+
+Live access is gated exactly like browsing and importing: the
+connection must be `active`, the workspace's plan gate
+(`connections.use`) must allow it, and the deployment's own egress
+switch (`TRET_EGRESS`) must be on. All three checks are bundled into
+one place a run consults before it is even offered these tools, so a
+workspace that loses any of the three loses live access on its very
+next run — nothing to reconnect once the underlying condition clears.
+
+## Read allowlist
+
+By default, once an m365 connection is active, everything in [Live
+access in runs](#live-access-in-runs) can see and search **every**
+site's document library plus the connected account's own OneDrive —
+"everything the connected account can see," same breadth as the
+`Sites.Read.All`/`Files.Read.All` scopes themselves grant (see
+[Security notes](#security-notes) below for why that matters more for
+Microsoft than for Google).
+
+A workspace admin can narrow that from Settings → Connections: picking
+specific sites/drives sets an explicit read allowlist, and from then
+on live access only ever sees drives on that list — search and
+materialize refuse anything outside it, the same as a request for a
+file Graph itself would resolve but this workspace was never allowed
+to read. Clearing the allowlist (an empty selection) goes back to
+"everything the account can see." The settings page shows which case
+is in effect — restricted to specific locations, or full account
+access — before you ever run something that would touch it.
+
+The allowlist is read-only for now: it scopes what a run may read, not
+what it may write. A write allowlist is a later phase's concern, once
+tret gains anything that writes back to a connected provider at all.
+
 ## Security notes
 
 - **Encryption at rest.** Refresh tokens are encrypted with the same
@@ -135,12 +196,17 @@ client id/secret set, the feature is simply absent from the UI.
     provision) an account whose own SharePoint/OneDrive access already
     matches what you're comfortable the whole workspace reaching.
 - **Whole-workspace access, one account.** Every member of the
-  workspace can trigger an import using the connected account's
-  access — there's no per-user delegation. Anyone who can invite
-  themselves into (or already has a role in) the workspace can browse
-  and pull in anything the connected account can see, so treat
-  connecting an account the way you'd treat sharing that account's
-  drive with the whole team.
+  workspace can trigger an import (or, for m365, a run's live search/
+  materialize — see [Live access in runs](#live-access-in-runs)) using
+  the connected account's access — there's no per-user delegation.
+  Anyone who can invite themselves into (or already has a role in) the
+  workspace can browse and pull in anything the connected account can
+  see, so treat connecting an account the way you'd treat sharing that
+  account's drive with the whole team. For m365, an admin can narrow
+  what that "anything" actually covers with the [read
+  allowlist](#read-allowlist) — worth setting up front for an account
+  whose own SharePoint/OneDrive access is broader than what you want
+  every workspace member (and every run) reaching.
 - **Revocation surfaces as an error, not a silent failure.** If the
   provider invalidates the connection outside of tret — the connected
   user changes their password, an org admin revokes the app, the

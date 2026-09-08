@@ -21,10 +21,18 @@ Trust-doctrine notes:
   only on a web page still fails the cited-values check. They are also the only
   tools an operator can switch off (`TRET_EGRESS_RESEARCH`), in which case the
   engine withholds them from the run and says so in an event.
+- `list_connected_sources` / `search_connected_files` / `read_connected_file`
+  read live from a workspace's connected SharePoint/OneDrive, one tier apart
+  from both an uploaded document and a web page: a `source_kind='connected'`
+  Document, banner-marked the same way, never registered in
+  ctx.retrieved_values. Availability is per-workspace (a connection has to
+  exist and be usable), checked once per run and withheld — same pattern as
+  the web tools — when it is not.
 """
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -48,6 +56,7 @@ from tret.net.fetch import (
 )
 from tret.net.search import SearchUnavailable, get_search_provider
 from tret.providers.base import ToolSpec
+from tret.services import connections as connections_service
 from tret.services.emissions import energy_wh_field
 
 
@@ -61,6 +70,14 @@ class RunContext:
     model_used: str | None
     document_ids: list[uuid.UUID]
     output_schemas: dict[str, dict]  # schema_slug -> JSON Schema (from the pack)
+    # The run's project's workspace — resolved once by the engine (harness.py,
+    # from run.project_id) and carried here because the connected-source tools
+    # need it on every call and have no other way to reach it. None for a
+    # RunContext built without that lookup (most test fixtures, and any run
+    # whose project has somehow gone missing): connected-source tools then have
+    # nothing to check a connection against, so they report unavailable rather
+    # than guessing a workspace.
+    workspace_id: uuid.UUID | None = None
     pack_manifest: dict | None = None  # stored manifest (methods, task types)
     pack_dir: str | None = None
     terminal_tool: str | None = None
@@ -87,6 +104,19 @@ class RunContext:
     # mode the result caps below exist for — with an outbound request attached.
     web_fetches: int = 0
     web_bytes: int = 0
+    # Connected-source budget (list_connected_sources / search_connected_files /
+    # read_connected_file), spent independently of the web budget above — a
+    # connected read pulls a file through the workspace's own OAuth grant, not a
+    # URL a model chose, but it is still an unbounded resource a tool loop could
+    # hammer, so it gets the same per-run ceiling treatment.
+    connected_reads: int = 0
+    connected_bytes: int = 0
+    connected_searches: int = 0
+    # Once-per-run cache of ensure_connection_usable, read by every connector
+    # tool call so a run with no usable connection fails the same way on every
+    # call (and only pays for the check once) instead of re-asking on each one.
+    connection_checked: bool = False
+    connection_unavailable_reason: str | None = None
 
 
 ToolHandler = Callable[..., Awaitable[str]]
@@ -155,6 +185,15 @@ def _truncation_marker(shown: int, total: int, narrow: str) -> str:
     )
 
 
+# Third value of Document.source_kind, alongside 'upload' and SOURCE_KIND_WEB
+# ('web'): a file materialized from a workspace's connected SharePoint/OneDrive
+# by materialize_connected_file. Mirrors
+# tret.services.connections.CONNECTED_SOURCE_KIND — a literal here rather than
+# an attribute read off that module at import time, so this file still imports
+# cleanly whichever of the two modules happens to land its changes first.
+CONNECTED_SOURCE_KIND = "connected"
+
+
 # ── document tools ────────────────────────────────────────────────────────────
 @builtin(
     "read_document",
@@ -190,6 +229,12 @@ async def read_document(ctx: RunContext, document_id: str, offset: int = 0, limi
     if doc.source_kind == SOURCE_KIND_WEB:
         meta = doc.meta or {}
         banner = f"[{UNVERIFIED_NOTICE} Source: {meta.get('url')}]\n\n"
+    elif doc.source_kind == CONNECTED_SOURCE_KIND:
+        meta = doc.meta or {}
+        banner = (
+            f"[CONNECTED SOURCE: {_frame_safe(meta.get('path') or doc.filename)}, "
+            f"from {_frame_safe(meta.get('source_slug'))}, modified {meta.get('modified')}]\n\n"
+        )
     return (
         f"# {doc.filename} (chars {offset}-{offset + len(chunk)} of {len(text)})\n\n"
         f"{banner}{chunk}{suffix}"
@@ -225,7 +270,12 @@ async def search_documents(ctx: RunContext, query: str, max_results: int = 8) ->
             if i == -1:
                 break
             s, e = max(0, i - 150), min(len(text), i + len(query) + 150)
-            tier = " UNVERIFIED WEB SOURCE" if doc.source_kind == SOURCE_KIND_WEB else ""
+            if doc.source_kind == SOURCE_KIND_WEB:
+                tier = " UNVERIFIED WEB SOURCE"
+            elif doc.source_kind == CONNECTED_SOURCE_KIND:
+                tier = " CONNECTED SOURCE"
+            else:
+                tier = ""
             snippets.append(f"[{doc.id} {doc.filename}{tier}] ...{text[s:e]}...")
             start = i + len(query)
     if not snippets:
@@ -489,6 +539,273 @@ def _fetch_result_text(doc: Document, *, replayed: bool) -> str:
         else ""
     )
     return f"{header}\n\n{UNVERIFIED_NOTICE}\n\n{preview}{tail}"
+
+
+# ── connected sources: live SharePoint/OneDrive, read-only ───────────────────
+# A workspace can link a Microsoft 365 (or Google Drive) account via
+# tret/services/connections.py's OAuth flow; the three tools below let a run
+# search and read files through that link. They sit in a different trust tier
+# from both the web tools above and an uploaded document: a connected file was
+# neither vetted by a human who attached it to this project nor chosen off the
+# open internet by a model — it is whatever the connected account can see,
+# fetched live at the model's request. So it gets its own banner
+# (CONNECTED_SOURCE_KIND, above) rather than either the plain "attached
+# document" treatment or the web tools' UNVERIFIED_NOTICE, and — like the web
+# tools — it never touches ctx.retrieved_values: a number seen only in a
+# connected file still fails the cited-values check the same way a number from
+# a web page does.
+#
+# Availability is an operator-and-workspace question, not a deployment-wide
+# switch like TRET_EGRESS_RESEARCH: a workspace with no connection, or one
+# whose connection has gone stale, simply cannot use these tools right now.
+# `withheld_connector_tools` is the connected-source analogue of
+# `withheld_web_tools`, checked from the engine the same way.
+
+CONNECTOR_TOOL_NAMES = frozenset(
+    {"list_connected_sources", "search_connected_files", "read_connected_file"}
+)
+
+_FRAME_UNSAFE_RE = re.compile(r"[\s\x00-\x1f\x7f]+")
+
+
+def _frame_safe(s: str | None, limit: int = 200) -> str:
+    """A Graph-supplied string (filename, path, snippet, source label) made
+    safe to interpolate into a `[CONNECTED SOURCE: ...]`-style banner. A
+    connected file's name and path are chosen by whoever put the file in
+    SharePoint/OneDrive, not by tret — a name containing a newline or a `]`
+    could otherwise forge banner-looking text (a fake second banner, a fake
+    end-of-banner) that a model reads as trusted framing rather than an
+    untrusted field's content. Whitespace and control characters collapse to
+    a single space each, `[`/`]` become `(`/`)` so they can't mimic the
+    banner's own brackets, and the result is capped at `limit` characters so
+    one hostile field can't blow out the whole tool result."""
+    if not s:
+        return ""
+    collapsed = _FRAME_UNSAFE_RE.sub(" ", s).strip()
+    collapsed = collapsed.replace("[", "(").replace("]", ")")
+    return collapsed[:limit]
+
+
+async def _require_connection(ctx: RunContext) -> None:
+    """Once per run: confirm the workspace has a usable connection, caching
+    the outcome (good or bad) on `ctx` so every connector tool call after the
+    first is a dict lookup rather than another `ensure_connection_usable`
+    round-trip. Raises ToolError — the same "error-flagged tool result"
+    treatment `execute_tool` gives every other tool failure — when there is
+    none to use."""
+    if not ctx.connection_checked:
+        ctx.connection_checked = True
+        if ctx.workspace_id is None:
+            ctx.connection_unavailable_reason = (
+                "This run has no workspace to check for a connection, so connected "
+                "sources are unavailable."
+            )
+        else:
+            try:
+                await connections_service.ensure_connection_usable(ctx.db, ctx.workspace_id)
+            except connections_service.ConnectionUnavailable as e:
+                ctx.connection_unavailable_reason = e.reason
+    if ctx.connection_unavailable_reason:
+        raise ToolError(ctx.connection_unavailable_reason)
+
+
+@builtin(
+    "list_connected_sources",
+    "List the workspace's connected SharePoint/OneDrive sources (site document libraries and "
+    "personal drives). Use a source's slug to narrow search_connected_files.",
+    {"type": "object", "properties": {}},
+)
+async def list_connected_sources(ctx: RunContext) -> str:
+    await _require_connection(ctx)
+    try:
+        sources = await connections_service.list_connected_sources(ctx.db, ctx.workspace_id)
+    except connections_service.ConnectionUnavailable as e:
+        raise ToolError(e.reason) from e
+    if not sources:
+        return "No connected sources are available for this workspace."
+    return "\n".join(f"{s.slug} — {s.label} ({s.kind})" for s in sources)
+
+
+@builtin(
+    "search_connected_files",
+    "Search the workspace's connected SharePoint/OneDrive sources for files matching a query. "
+    "Returns numbered hits, each with an item_ref you pass to read_connected_file.",
+    {
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+            "query": {"type": "string", "description": "What to search for"},
+            "source": {
+                "type": ["string", "null"],
+                "description": "Optional source slug from list_connected_sources to narrow the search",
+            },
+            "max_results": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+        },
+    },
+)
+async def search_connected_files(
+    ctx: RunContext, query: str, source: str | None = None, max_results: int = 8
+) -> str:
+    await _require_connection(ctx)
+    settings = get_settings()
+    max_searches = int(settings.connections_max_searches_per_run)
+    if ctx.connected_searches >= max_searches:
+        raise ToolError(
+            f"This run has already made {ctx.connected_searches} connected-source searches, "
+            f"which is the per-run limit (TRET_CONNECTIONS_MAX_SEARCHES_PER_RUN={max_searches}). "
+            "Work with what you have already found."
+        )
+    # Spent before the call, not after: a search that fails partway through
+    # (Graph 5xx, egress denial) still made a request against the provider
+    # and must count against the run's search budget — a caller retrying a
+    # failing search must not get it for free.
+    ctx.connected_searches += 1
+    try:
+        hits = await connections_service.search_connected_files(
+            ctx.db, ctx.workspace_id, query, source_slug=source, max_results=int(max_results)
+        )
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    except connections_service.ConnectionUnavailable as e:
+        raise ToolError(e.reason) from e
+    except RuntimeError as e:
+        raise ToolError(f"Connected-source search failed: {e}") from e
+    if not hits:
+        return f"No connected-source matches for '{query}'."
+    lines = [
+        f"{i}. {_frame_safe(h.name)}\n"
+        f"   path: {_frame_safe(h.path)}\n"
+        f"   modified: {h.modified}\n"
+        f"   size: {h.size} bytes\n"
+        f"   snippet: {_frame_safe(h.snippet)}\n"
+        f"   item_ref: {h.item_ref}"
+        for i, h in enumerate(hits[: int(max_results)], start=1)
+    ]
+    return f"Connected-source results for '{query}':\n\n" + "\n\n".join(lines)
+
+
+@builtin(
+    "read_connected_file",
+    "Materialize and read a file found by search_connected_files, given its item_ref. The file "
+    "is fetched and recorded as a document for this run, then read like read_document — use "
+    "offset/limit to page through it, and read_document/search_documents by document id "
+    "afterwards.",
+    {
+        "type": "object",
+        "required": ["item_ref"],
+        "properties": {
+            "item_ref": {"type": "string", "description": "item_ref from search_connected_files"},
+            "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Character offset"},
+            "limit": {"type": "integer", "minimum": 100, "maximum": 40000, "default": 40000},
+        },
+    },
+)
+async def read_connected_file(
+    ctx: RunContext, item_ref: str, offset: int = 0, limit: int = 40000
+) -> str:
+    await _require_connection(ctx)
+    settings = get_settings()
+    max_reads = int(settings.connections_max_reads_per_run)
+    max_bytes = int(settings.connections_max_bytes_per_run)
+    # Checked with nothing but the counters, before any download: the size of
+    # *this* file isn't known yet, so the byte cap can only refuse once the
+    # run has already crossed it, not pre-empt crossing it.
+    if ctx.connected_reads >= max_reads:
+        raise ToolError(
+            f"This run has already read {ctx.connected_reads} connected files, which is the "
+            f"per-run limit (TRET_CONNECTIONS_MAX_READS_PER_RUN={max_reads}). Work with what "
+            "you have already read."
+        )
+    if ctx.connected_bytes >= max_bytes:
+        raise ToolError(
+            f"This run has already read {ctx.connected_bytes} bytes of connected files, which "
+            f"is at the per-run limit (TRET_CONNECTIONS_MAX_BYTES_PER_RUN={max_bytes}). Work "
+            "with what you have already read."
+        )
+    # Spent before the call, not after: a materialize that fails partway
+    # through (a metadata fetch, then a download, both against a live
+    # provider) still made requests and must count against the run's read
+    # budget rather than being free to retry indefinitely.
+    ctx.connected_reads += 1
+    try:
+        doc = await connections_service.materialize_connected_file(
+            ctx.db,
+            workspace_id=ctx.workspace_id,
+            project_id=ctx.project_id,
+            item_ref=item_ref,
+        )
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    except connections_service.ConnectionUnavailable as e:
+        raise ToolError(e.reason) from e
+    except connections_service.DownloadTooLargeError as e:
+        # The bytes still count against the run's budget: either the
+        # declared size that got the download refused before it started, or
+        # the actual bytes streamed before the cap cut it off mid-transfer
+        # (see DownloadTooLargeError.size_bytes).
+        if e.size_bytes:
+            ctx.connected_bytes += e.size_bytes
+        raise ToolError(f"Connected file too large to read: {e}") from e
+    except RuntimeError as e:
+        raise ToolError(f"Connected-source read failed: {e}") from e
+
+    if doc.id not in ctx.document_ids:
+        ctx.document_ids.append(doc.id)
+    ctx.connected_bytes += doc.byte_size
+
+    meta = doc.meta or {}
+    banner = (
+        f"[CONNECTED SOURCE: {_frame_safe(meta.get('path') or doc.filename)} — "
+        f"modified {meta.get('modified')} — document {doc.id}]\n"
+        f"This file is now attached to the run as document {doc.id} — read further with "
+        "read_document, or find it again with search_documents.\n"
+    )
+    if ctx.connected_bytes > max_bytes:
+        banner += (
+            f"[Note: this file's {doc.byte_size} bytes pushed the run's connected-source byte "
+            f"budget to {ctx.connected_bytes}, over the TRET_CONNECTIONS_MAX_BYTES_PER_RUN cap "
+            f"of {max_bytes}. Further connected reads will be refused.]\n"
+        )
+
+    text = doc.extracted_text or ""
+    chunk = text[offset : offset + limit]
+    remaining = max(0, len(text) - offset - limit)
+    suffix = (
+        f"\n\n[... {remaining} more characters; call again with offset={offset + limit}]"
+        if remaining
+        else ""
+    )
+    return (
+        f"# {doc.filename} (chars {offset}-{offset + len(chunk)} of {len(text)})\n\n"
+        f"{banner}\n{chunk}{suffix}"
+    )
+
+
+async def withheld_connector_tools(
+    db: AsyncSession, workspace_id: uuid.UUID | None, enabled_names: list[str]
+) -> tuple[set[str], str | None]:
+    """Which of `enabled_names` this run cannot use right now, and why —
+    the connected-source analogue of `withheld_web_tools`. Unlike that
+    function this one needs a DB round-trip (`ensure_connection_usable`), so
+    it stays cheap only if the caller checks `enabled_names` against
+    `CONNECTOR_TOOL_NAMES` before calling it (harness.py does).
+
+    Returns `(set(), None)` when nothing need be withheld — either none of
+    `enabled_names` are connector tools, or the workspace's connection is
+    usable. Otherwise returns every connector tool name in `enabled_names`
+    (there is one connection per workspace, so the reason is the same for all
+    three) alongside the reason the connection was unusable.
+    """
+    names = {n for n in enabled_names if n in CONNECTOR_TOOL_NAMES}
+    if not names:
+        return set(), None
+    if workspace_id is None:
+        return names, "This run has no workspace, so connected sources are unavailable."
+    try:
+        await connections_service.ensure_connection_usable(db, workspace_id)
+    except connections_service.ConnectionUnavailable as e:
+        return names, e.reason
+    return set(), None
 
 
 # ── the deterministic lane ────────────────────────────────────────────────────

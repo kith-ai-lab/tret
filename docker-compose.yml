@@ -72,6 +72,14 @@ services:
       TRET_EGRESS_RESEARCH_MAX_BYTES: ${TRET_EGRESS_RESEARCH_MAX_BYTES:-2000000}
       TRET_EGRESS_RESEARCH_TIMEOUT_SECONDS: ${TRET_EGRESS_RESEARCH_TIMEOUT_SECONDS:-20.0}
       TRET_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN: ${TRET_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN:-10}
+      # Per-run budgets for the connected-source tools (list_connected_sources /
+      # search_connected_files / read_connected_file), which read live from a
+      # workspace's linked SharePoint/OneDrive. Separate from the research
+      # limits above — a connected read uses the workspace's own OAuth grant,
+      # not a model-chosen URL — but still needs a per-run ceiling.
+      TRET_CONNECTIONS_MAX_READS_PER_RUN: ${TRET_CONNECTIONS_MAX_READS_PER_RUN:-20}
+      TRET_CONNECTIONS_MAX_BYTES_PER_RUN: ${TRET_CONNECTIONS_MAX_BYTES_PER_RUN:-104857600}
+      TRET_CONNECTIONS_MAX_SEARCHES_PER_RUN: ${TRET_CONNECTIONS_MAX_SEARCHES_PER_RUN:-30}
       # An app-level allowlist is a deterrent; a proxy the workload cannot
       # bypass is a boundary. Point this at yours for anything internet-facing.
       TRET_EGRESS_PROXY: ${TRET_EGRESS_PROXY:-}

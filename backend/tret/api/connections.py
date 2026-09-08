@@ -54,10 +54,12 @@ import logging
 import secrets
 import uuid
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -68,10 +70,13 @@ from tret.db.engine import get_db
 from tret.db.models import User, WorkspaceConnection, WorkspaceMember
 from tret.engine.extensions import get_extension_registry
 from tret.services.connections import (
+    CONNECT_ACTION,
     GDRIVE,
     M365,
     PROVIDER_SPECS,
+    USE_ACTION,
     ConnectionAuthError,
+    ConnectionUnavailable,
     authorize_url as build_authorize_url,
     browse_m365,
     exchange_code,
@@ -79,6 +84,8 @@ from tret.services.connections import (
     get_connection,
     get_oauth_client,
     invalidate_access_token,
+    invalidate_connected_sources,
+    list_connected_sources,
     revoke_token,
 )
 from tret.services.credentials import get_fernet
@@ -102,26 +109,17 @@ _CALLBACK_PATH = "/api/connections/callback"
 # query param it reads (see docstring / GET /callback below).
 _CONNECTIONS_PAGE = "/settings/connections"
 
-# The two workspace-gate actions this router (and `api/documents.py`'s import
-# endpoint) ask `check_workspace_gate` about. `CONNECT_ACTION` is the front
-# door — asked once, in `authorize`, at the moment a workspace is about to
-# gain a new connection. `USE_ACTION` is asked on every route that exercises
-# a connection *already on file* (the token mint below, m365 browsing, and
-# `api/documents.py::import_documents`): a plan gate registered for
-# `CONNECT_ACTION` alone would only ever stop a workspace from connecting in
-# the first place, and once connected the row just sits there working
-# forever, plan or no plan. Asking `USE_ACTION` on every such route means a
-# workspace whose plan lapses loses the connection's usefulness on its very
-# next call to this API. (One bounded exception: a gdrive Picker token
-# already handed to the browser stays valid client-side until Google expires
-# it, about an hour later — that window is the ceiling on how stale
-# enforcement can be.) No code here needs to revoke the provider token or
-# mutate the stored `WorkspaceConnection` row to make that happen, and none
-# of it does; the row is left exactly as it was. If the plan comes back,
-# `check_workspace_gate` starts returning `allowed=True` again and the same
-# row works again, with nothing to reconnect.
-CONNECT_ACTION = "connections.connect"  # asked once, when a connection is established
-USE_ACTION = "connections.use"  # asked every time a stored connection is exercised
+# `CONNECT_ACTION`/`USE_ACTION` — the two workspace-gate actions this router
+# (and `api/documents.py`'s import endpoint) ask `check_workspace_gate`
+# about — now live in `services/connections.py`, imported above rather than
+# defined here: `ensure_connection_usable` (that module) needs the exact
+# same `USE_ACTION` string this router's own routes use below, and a
+# service must not import back into the API package that imports it. Both
+# names still resolve as `tret.api.connections.CONNECT_ACTION`/`USE_ACTION`
+# via this module's own namespace, so `api/documents.py`'s existing `from
+# tret.api.connections import USE_ACTION` keeps working unchanged. See that
+# module's definitions for the full "front door vs. every exercising call"
+# reasoning.
 
 
 async def require_connections_gate(db: AsyncSession, workspace_id: uuid.UUID, action: str) -> None:
@@ -169,6 +167,16 @@ def _connection_out(conn: WorkspaceConnection) -> dict:
         "connected_at": conn.created_at,
         "refreshed_at": conn.refreshed_at,
         "error_detail": conn.error_detail,
+        # The read allowlist (`{"read": [...]}`) an admin has narrowed this
+        # connection to, if any — `{}` (its default) for a connection no one
+        # has ever restricted. The frontend's connections settings page
+        # needs this to render the current allowlist; `sources` (the
+        # resolved list of drives it actually names, or every drive when
+        # it's empty) is a separate call, `GET /m365/sources`, since
+        # resolving it costs a Graph round trip this list endpoint has never
+        # made and must not start making just to answer "is this
+        # restricted".
+        "selected_resources": conn.selected_resources,
     }
 
 
@@ -459,3 +467,100 @@ async def m365_browse(
     except RuntimeError as exc:
         raise HTTPException(502, str(exc)) from exc
     return {"items": items}
+
+
+# ── live SharePoint/OneDrive access in runs (Phase 2) ────────────────────────
+def _source_out(source) -> dict:
+    return {
+        "slug": source.slug,
+        "provider": source.provider,
+        "kind": source.kind,
+        "label": source.label,
+        "site_id": source.site_id,
+        "drive_id": source.drive_id,
+        "web_url": source.web_url,
+    }
+
+
+@router.get("/m365/sources")
+async def m365_sources(
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """The m365 drives this workspace's runs are allowed to read live from —
+    `services/connections.py::list_connected_sources`, resolved (an admin's
+    `selected_resources["read"]` allowlist, or everything the connected
+    account can see) and reported as `sources`. `restricted` tells the
+    frontend whether that allowlist is actually narrowing anything, so it
+    can render "restricted to N locations" vs. "full account access"
+    without re-deriving the same fact from `sources` itself.
+
+    Any workspace member, same as `m365_browse` above: this reads through
+    the connection, it does not touch or mutate it, so no admin gate. The
+    plan-gate check itself now lives inside `list_connected_sources` (via
+    `ensure_connection_usable`) rather than being asked separately here —
+    unlike `require_connections_gate`'s 403 shape, a refusal surfaces as
+    `ConnectionUnavailable` and is mapped to 409 below, the same status
+    every other "this connection cannot be used right now" case in this
+    router already returns.
+    """
+    try:
+        sources = await list_connected_sources(db, ctx.id)
+    except ConnectionUnavailable as exc:
+        raise HTTPException(409, detail=exc.reason) from exc
+    conn = await get_connection(db, ctx.id, M365)
+    restricted = bool(conn and (conn.selected_resources or {}).get("read"))
+    return {"sources": [_source_out(s) for s in sources], "restricted": restricted}
+
+
+class ResourceEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    site_id: str | None = None
+    drive_id: str = Field(min_length=1)
+    label: str
+    kind: Literal["site_drive", "onedrive"]
+    web_url: str | None = None
+
+
+class ResourcesBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    read: list[ResourceEntry] = Field(default_factory=list, max_length=50)
+
+
+@router.put("/m365/resources")
+async def update_m365_resources(
+    body: ResourcesBody,
+    ctx: WorkspaceContext = Depends(require_workspace_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set (or clear) this workspace's m365 read allowlist —
+    `selected_resources["read"]` on the stored connection row. Workspace
+    admin only, the same role every other connection-mutating route in this
+    router requires (`authorize`, `disconnect`): this changes what a run can
+    read, not merely reads through the connection the way browsing or
+    sources listing does.
+
+    An empty `read` list clears the restriction — `list_connected_sources`
+    treats an empty (or absent) list identically, falling back to "every
+    drive the account can see" — so `PUT` with `{"read": []}` is exactly how
+    a workspace goes back to unrestricted. Other keys already on
+    `selected_resources` (a future `"write"` allowlist) are preserved:
+    `read` is the only key this route ever writes.
+
+    Requires a connection to already exist (404 if not — there is nothing
+    to scope an allowlist onto) but does not itself call `ensure_connection_
+    usable`/the plan gate: this is an admin narrowing what a *future*
+    successful use of the connection may read, not a use of the connection
+    itself.
+    """
+    conn = await get_connection(db, ctx.id, M365)
+    if conn is None:
+        raise HTTPException(404, "workspace has no m365 connection")
+    resources = dict(conn.selected_resources or {})
+    resources["read"] = [entry.model_dump() for entry in body.read]
+    conn.selected_resources = resources
+    await db.commit()
+    invalidate_connected_sources(ctx.id, M365)
+    return _connection_out(conn)

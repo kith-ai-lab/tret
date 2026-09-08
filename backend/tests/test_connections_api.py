@@ -35,7 +35,7 @@ from tret.db.models import Base, User, Workspace, WorkspaceConnection, Workspace
 from tret.engine import extensions as extensions_module
 from tret.engine.extensions import ExtensionAPI, GateResult
 from tret.services import connections as connections_module
-from tret.services.connections import clear_access_token_cache
+from tret.services.connections import GRAPH_API_BASE, clear_access_token_cache
 from tret.services.credentials import get_fernet
 
 HASHER = PasswordHasher()
@@ -43,6 +43,8 @@ PASSWORD = "correct-horse-battery-1"
 
 GDRIVE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GDRIVE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
+M365_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+GRAPH = GRAPH_API_BASE
 APP_URL = "https://tret.example.test"
 
 
@@ -66,6 +68,18 @@ def _configured_gdrive_client(monkeypatch):
     monkeypatch.setenv("TRET_GDRIVE_CLIENT_ID", "gdrive-cid")
     monkeypatch.setenv("TRET_GDRIVE_CLIENT_SECRET", "gdrive-secret")
     monkeypatch.setenv("TRET_APP_URL", APP_URL)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def _configured_m365_client(monkeypatch):
+    """m365 configured too — only the `m365/sources` and `m365/resources`
+    tests below need this; every other test in this file deliberately
+    leaves m365 unset (see `_configured_gdrive_client`)."""
+    monkeypatch.setenv("TRET_M365_CLIENT_ID", "m365-cid")
+    monkeypatch.setenv("TRET_M365_CLIENT_SECRET", "m365-secret")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -150,6 +164,12 @@ def make_connection(
 async def login(client: httpx.AsyncClient, email: str) -> None:
     response = await client.post("/api/auth/login", json={"email": email, "password": PASSWORD})
     assert response.status_code == 200, response.text
+
+
+def mock_m365_refresh(mock: respx.MockRouter, *, access_token: str = "m365-access-token") -> None:
+    mock.post(M365_TOKEN_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": access_token, "expires_in": 3600})
+    )
 
 
 def _b64(obj: dict) -> str:
@@ -793,3 +813,314 @@ async def test_token_passes_the_use_action_when_the_gate_allows(client, seed):
 
     assert response.status_code == 200, response.text
     assert asked_actions == ["connections.use"]
+
+
+# ── GET /api/connections: now carries selected_resources ────────────────────
+async def test_list_connections_includes_selected_resources(client, seed):
+    workspace = make_workspace("Alpha")
+    user = make_user("selected-resources-view@example.com")
+    conn = make_connection(workspace)
+    conn.selected_resources = {"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]}
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    body = (await client.get("/api/connections")).json()
+    entry = body["connections"][0]
+    assert entry["selected_resources"] == {
+        "read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]
+    }
+
+
+# ── GET /api/connections/m365/sources ────────────────────────────────────────
+async def test_m365_sources_reports_restricted_true_for_an_explicit_allowlist(
+    client, seed, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    user = make_user("sources-restricted@example.com")
+    conn = make_connection(workspace, provider="m365")
+    conn.selected_resources = {
+        "read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive", "site_id": "site-1"}]
+    }
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    response = await client.get("/api/connections/m365/sources")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["restricted"] is True
+    assert body["sources"] == [
+        {
+            "slug": body["sources"][0]["slug"],
+            "provider": "m365",
+            "kind": "site_drive",
+            "label": "Finance",
+            "site_id": "site-1",
+            "drive_id": "drive-1",
+            "web_url": None,
+        }
+    ]
+
+
+async def test_m365_sources_derives_and_reports_unrestricted(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    user = make_user("sources-derived@example.com")
+    conn = make_connection(workspace, provider="m365")  # selected_resources default {}
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), conn)
+    await login(client, user.email)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/sites", params={"search": "*"}).mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        mock.get(f"{GRAPH}/me/drive").mock(
+            return_value=httpx.Response(200, json={"id": "drive-me", "webUrl": None})
+        )
+        mock.get(f"{GRAPH}/me").mock(
+            return_value=httpx.Response(200, json={"userPrincipalName": "person@tenant.onmicrosoft.com"})
+        )
+        response = await client.get("/api/connections/m365/sources")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["restricted"] is False
+    assert len(body["sources"]) == 1
+    assert body["sources"][0]["kind"] == "onedrive"
+    assert body["sources"][0]["label"] == "OneDrive (person@tenant.onmicrosoft.com)"
+
+
+async def test_m365_sources_with_no_connection_is_409(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    user = make_user("sources-no-conn@example.com")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"))
+    await login(client, user.email)
+
+    response = await client.get("/api/connections/m365/sources")
+    assert response.status_code == 409
+    assert "no" in response.json()["detail"].lower()
+
+
+async def test_m365_sources_requires_no_admin_role(client, seed, _configured_m365_client):
+    """Any workspace member, same as `m365_browse` — reading the source list
+    does not mutate the connection."""
+    workspace = make_workspace("Alpha")
+    member = make_user("sources-any-member@example.com", role="analyst")
+    conn = make_connection(workspace, provider="m365")
+    conn.selected_resources = {"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]}
+    await seed(workspace, member, make_member(member, workspace, role="analyst"), conn)
+    await login(client, member.email)
+
+    response = await client.get("/api/connections/m365/sources")
+    assert response.status_code == 200, response.text
+
+
+# ── PUT /api/connections/m365/resources ──────────────────────────────────────
+async def test_update_m365_resources_requires_admin(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    analyst = make_user("resources-analyst@example.com", role="analyst")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, analyst, make_member(analyst, workspace, role="analyst"), conn)
+    await login(client, analyst.email)
+
+    response = await client.put(
+        "/api/connections/m365/resources",
+        json={"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]},
+    )
+    assert response.status_code == 403
+
+
+async def test_update_m365_resources_sets_the_allowlist_and_persists_it(
+    client, seed, session_factory, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("resources-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    response = await client.put(
+        "/api/connections/m365/resources",
+        json={
+            "read": [
+                {
+                    "site_id": "site-1",
+                    "drive_id": "drive-1",
+                    "label": "Finance",
+                    "kind": "site_drive",
+                    "web_url": "https://contoso.sharepoint.com/sites/finance",
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["selected_resources"]["read"][0]["drive_id"] == "drive-1"
+
+    async with session_factory() as db:
+        row = await db.get(WorkspaceConnection, conn.id)
+        assert row.selected_resources["read"][0]["label"] == "Finance"
+
+    # And GET /api/connections/m365/sources now reports the restricted view
+    # without any Graph call — the whole point of setting an allowlist.
+    with respx.mock(assert_all_called=False):
+        response = await client.get("/api/connections/m365/sources")
+    assert response.status_code == 200
+    assert response.json()["restricted"] is True
+    assert response.json()["sources"][0]["drive_id"] == "drive-1"
+
+
+async def test_update_m365_resources_empty_list_clears_the_restriction(
+    client, seed, session_factory, _configured_m365_client
+):
+    workspace = make_workspace("Alpha")
+    admin = make_user("resources-clear-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    conn.selected_resources = {"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]}
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    response = await client.put("/api/connections/m365/resources", json={"read": []})
+    assert response.status_code == 200, response.text
+
+    async with session_factory() as db:
+        row = await db.get(WorkspaceConnection, conn.id)
+        assert row.selected_resources["read"] == []
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/sites", params={"search": "*"}).mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        mock.get(f"{GRAPH}/me/drive").mock(return_value=httpx.Response(200, json={"id": "drive-me"}))
+        mock.get(f"{GRAPH}/me").mock(return_value=httpx.Response(200, json={}))
+        response = await client.get("/api/connections/m365/sources")
+    assert response.json()["restricted"] is False  # fell back to derived
+
+
+async def test_update_m365_resources_without_a_connection_is_404(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    admin = make_user("resources-no-conn-admin@example.com")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"))
+    await login(client, admin.email)
+
+    response = await client.put(
+        "/api/connections/m365/resources",
+        json={"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]},
+    )
+    assert response.status_code == 404
+
+
+async def test_update_m365_resources_rejects_unknown_fields(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    admin = make_user("resources-extra-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    response = await client.put(
+        "/api/connections/m365/resources",
+        json={"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive", "unexpected": "x"}]},
+    )
+    assert response.status_code == 422
+
+
+async def test_update_m365_resources_rejects_more_than_fifty_entries(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    admin = make_user("resources-too-many-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    entries = [
+        {"drive_id": f"drive-{i}", "label": f"Drive {i}", "kind": "site_drive"} for i in range(51)
+    ]
+    response = await client.put("/api/connections/m365/resources", json={"read": entries})
+    assert response.status_code == 422
+
+
+async def test_update_m365_resources_rejects_an_empty_drive_id(client, seed, _configured_m365_client):
+    workspace = make_workspace("Alpha")
+    admin = make_user("resources-empty-drive-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    response = await client.put(
+        "/api/connections/m365/resources",
+        json={"read": [{"drive_id": "", "label": "Finance", "kind": "site_drive"}]},
+    )
+    assert response.status_code == 422
+
+
+async def test_update_m365_resources_invalidates_the_sources_cache(
+    client, seed, _configured_m365_client
+):
+    """A cached derived sources list from before the allowlist was set must
+    not survive the PUT — the very next `GET /m365/sources` reflects the new
+    allowlist, not up to 300s of staleness."""
+    workspace = make_workspace("Alpha")
+    admin = make_user("resources-cache-admin@example.com")
+    conn = make_connection(workspace, provider="m365")
+    await seed(workspace, admin, make_member(admin, workspace, role="admin"), conn)
+    await login(client, admin.email)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/sites", params={"search": "*"}).mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        mock.get(f"{GRAPH}/me/drive").mock(return_value=httpx.Response(200, json={"id": "drive-me"}))
+        mock.get(f"{GRAPH}/me").mock(return_value=httpx.Response(200, json={}))
+        first = await client.get("/api/connections/m365/sources")
+    assert first.json()["restricted"] is False
+
+    put_response = await client.put(
+        "/api/connections/m365/resources",
+        json={"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]},
+    )
+    assert put_response.status_code == 200
+
+    with respx.mock(assert_all_called=False):
+        # No Graph route registered: the restricted branch must not call
+        # Graph at all, and the stale derived-list cache entry must not be
+        # served instead.
+        second = await client.get("/api/connections/m365/sources")
+    assert second.json()["restricted"] is True
+    assert second.json()["sources"][0]["drive_id"] == "drive-1"
+
+
+# ── workspace isolation: m365 sources/resources ──────────────────────────────
+async def test_m365_sources_and_resources_are_isolated_per_workspace(
+    client, seed, session_factory, _configured_m365_client
+):
+    a = make_workspace("Alpha")
+    b = make_workspace("Bravo")
+    admin_a = make_user("iso-sources-a@example.com")
+    admin_b = make_user("iso-sources-b@example.com")
+    conn_a = make_connection(a, provider="m365")
+    conn_a.selected_resources = {"read": [{"drive_id": "drive-a", "label": "A", "kind": "site_drive"}]}
+    conn_b = make_connection(b, provider="m365")
+    await seed(
+        a, b, admin_a, admin_b,
+        make_member(admin_a, a, role="admin"),
+        make_member(admin_b, b, role="admin"),
+        conn_a, conn_b,
+    )
+    await login(client, admin_b.email)
+
+    # B's admin narrowing B's own allowlist must never touch A's row.
+    response = await client.put(
+        "/api/connections/m365/resources",
+        json={"read": [{"drive_id": "drive-b", "label": "B", "kind": "site_drive"}]},
+    )
+    assert response.status_code == 200, response.text
+
+    async with session_factory() as db:
+        row_a = await db.get(WorkspaceConnection, conn_a.id)
+        row_b = await db.get(WorkspaceConnection, conn_b.id)
+    assert row_a.selected_resources["read"][0]["drive_id"] == "drive-a"  # untouched
+    assert row_b.selected_resources["read"][0]["drive_id"] == "drive-b"
+
+    # B's sources view never sees A's allowlist.
+    sources_response = await client.get("/api/connections/m365/sources")
+    assert sources_response.json()["sources"][0]["drive_id"] == "drive-b"

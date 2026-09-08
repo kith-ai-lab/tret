@@ -8,8 +8,10 @@ import {
   gateRefusalDetail,
   type ConnectionProvider,
   type ConnectionProviderInfo,
+  type M365ReadEntry,
   type WorkspaceConnection,
 } from '../api/client'
+import { M365ReadAccessPicker } from '../components/connections/M365ReadAccessPicker'
 import { formatDateTime } from '../components/shared/format'
 import { Modal } from '../components/shared/Modal'
 import { QueryError } from '../components/shared/MonoTable'
@@ -221,6 +223,10 @@ function ProviderCard({
         </div>
       )}
 
+      {connection?.status === 'active' && info.provider === 'm365' && (
+        <M365ReadAccessSection connection={connection} isAdmin={isAdmin} onChanged={invalidate} />
+      )}
+
       {!connection && (
         <div style={{ marginTop: 12 }}>
           {!info.configured ? (
@@ -318,6 +324,164 @@ function DisconnectButton({
         {disconnectError && (
           <div className="error-text" style={{ marginTop: 10 }}>
             {disconnectError.message}
+          </div>
+        )}
+      </Modal>
+    </>
+  )
+}
+
+// ── m365 read-access allowlist ───────────────────────────────────────────
+// `connection.selected_resources.read` is the source of truth for both
+// whether the connection is restricted and what it's restricted to — no
+// separate fetch needed to render the card itself. The picker (which does
+// call the m365 browse endpoint) only opens once someone chooses to change
+// the allowlist.
+
+function M365ReadAccessSection({
+  connection,
+  isAdmin,
+  onChanged,
+}: {
+  connection: WorkspaceConnection
+  isAdmin: boolean
+  onChanged: () => void
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const entries = connection.selected_resources?.read ?? []
+  const restricted = entries.length > 0
+
+  const removeMutation = useMutation({
+    mutationFn: (entry: M365ReadEntry) =>
+      api.setM365ReadAccess(entries.filter((e) => e.drive_id !== entry.drive_id)),
+    onSuccess: onChanged,
+  })
+  const removeError = removeMutation.error as ApiError | null
+
+  return (
+    <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border-subtle)' }}>
+      <div className="mono-label" style={{ marginBottom: 4 }}>
+        Read access in runs
+      </div>
+      <div className="mono-body" style={{ color: 'var(--text-muted)', marginBottom: 10 }}>
+        Runs and chats can search and read files from these locations. With no locations chosen,
+        everything the connected account can see is searchable.
+      </div>
+
+      {!restricted ? (
+        <>
+          <div className="mono-body" style={{ color: 'var(--amber)', marginBottom: 10 }}>
+            Everything the connected account can see is searchable by every workspace member.
+          </div>
+          {isAdmin && (
+            <button type="button" className="btn btn-sm" onClick={() => setPickerOpen(true)}>
+              Choose locations
+            </button>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="stack" style={{ gap: 6, marginBottom: 10 }}>
+            {entries.map((entry) => (
+              <div
+                key={entry.drive_id}
+                className="row"
+                style={{ justifyContent: 'space-between', gap: 8 }}
+              >
+                <div className="row" style={{ gap: 8, minWidth: 0 }}>
+                  <span className="mono-body">{entry.label}</span>
+                  <span className="chip">{entry.kind === 'onedrive' ? 'OneDrive' : 'Site'}</span>
+                </div>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={removeMutation.isPending}
+                    onClick={() => removeMutation.mutate(entry)}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          {isAdmin && (
+            <div className="row" style={{ gap: 8 }}>
+              <button type="button" className="btn btn-sm" onClick={() => setPickerOpen(true)}>
+                Add location
+              </button>
+              <AllowEverythingButton onDone={onChanged} />
+            </div>
+          )}
+        </>
+      )}
+
+      {removeError && (
+        <div className="error-text" style={{ marginTop: 8 }}>
+          {removeError.message}
+        </div>
+      )}
+
+      {isAdmin && (
+        <M365ReadAccessPicker
+          open={pickerOpen}
+          onClose={() => setPickerOpen(false)}
+          initialEntries={entries}
+          onSaved={onChanged}
+        />
+      )}
+    </div>
+  )
+}
+
+function AllowEverythingButton({ onDone }: { onDone: () => void }) {
+  const [open, setOpen] = useState(false)
+  const allowMutation = useMutation({
+    mutationFn: () => api.setM365ReadAccess([]),
+    onSuccess: () => {
+      setOpen(false)
+      onDone()
+    },
+  })
+  const allowError = allowMutation.error as ApiError | null
+
+  return (
+    <>
+      <button type="button" className="btn btn-sm" onClick={() => setOpen(true)}>
+        Allow everything
+      </button>
+      <Modal
+        open={open}
+        onClose={() => (allowMutation.isPending ? undefined : setOpen(false))}
+        title="Allow everything?"
+        footer={
+          <>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => setOpen(false)}
+              disabled={allowMutation.isPending}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-danger"
+              disabled={allowMutation.isPending}
+              onClick={() => allowMutation.mutate()}
+            >
+              {allowMutation.isPending ? 'Clearing…' : 'Allow everything'}
+            </button>
+          </>
+        }
+      >
+        <div className="mono-body">
+          Clears the read-access allowlist. Runs and chats will be able to search and read
+          everything the connected account can see, workspace-wide.
+        </div>
+        {allowError && (
+          <div className="error-text" style={{ marginTop: 10 }}>
+            {allowError.message}
           </div>
         )}
       </Modal>

@@ -213,9 +213,20 @@ async def _seed_chat_harness(db: AsyncSession, workspace_id) -> None:
             )
         )
     ).scalars().first()
+    # Tools added to the seed after a workspace's chat harness already exists
+    # are backfilled here, one `if` per tool, so an upgrade gives existing
+    # workspaces the same defaults a fresh one gets rather than only new
+    # workspaces going forward.
     if chat_harness is not None:
         if "run_method" not in (chat_harness.tool_names or []):
             chat_harness.tool_names = [*chat_harness.tool_names, "run_method"]
+        missing_connector_tools = [
+            n
+            for n in ("list_connected_sources", "search_connected_files", "read_connected_file")
+            if n not in (chat_harness.tool_names or [])
+        ]
+        if missing_connector_tools:
+            chat_harness.tool_names = [*chat_harness.tool_names, *missing_connector_tools]
         return
     db.add(
         Harness(
@@ -230,6 +241,9 @@ async def _seed_chat_harness(db: AsyncSession, workspace_id) -> None:
                 "run_method",
                 "read_document",
                 "search_documents",
+                "list_connected_sources",
+                "search_connected_files",
+                "read_connected_file",
                 "lookup_dataset",
                 "list_prior_findings",
                 "file_data_request",

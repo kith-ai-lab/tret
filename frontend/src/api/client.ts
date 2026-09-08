@@ -1859,6 +1859,40 @@ export interface LedgerEntry {
 
 export type CheckoutKind = 'credits_small' | 'credits_large' | 'solo' | 'team'
 
+/** One entry in the emissions-factor change log — GET /api/billing/emissions/history,
+ *  admin/owner only (403 otherwise), 404 when tret-cloud is not loaded. `before`/`after`
+ *  are the full overrides document as it stood before/after the change (null for a
+ *  `put` with nothing prior, or a `delete` that cleared everything); any
+ *  `grid.tables[*].csv` inside them is replaced server-side by `{ chars, sha256 }` so
+ *  the log never carries a full CSV blob. */
+export interface EmissionsFactorHistoryEntry {
+  id: string
+  created_at: string
+  action: 'put' | 'delete'
+  user_id: string | null
+  user_email: string | null
+  changed_keys: string[]
+  before: Record<string, unknown> | null
+  after: Record<string, unknown> | null
+}
+
+/** GET /api/billing/footprint — a billing period's emissions rollup plus what it
+ *  cost in credits. Same totals shape as the Emissions page (`EmissionsTotals`),
+ *  including the basis-mixed-window rule: `carbon_is_summable: false` nulls the
+ *  carbon figures and `by_basis` carries the per-basis subtotals instead. Any
+ *  member may read it; 404s when tret-cloud is not loaded, 422 on a malformed
+ *  `period`. */
+export interface BillingFootprint {
+  period: string
+  from: string
+  to: string
+  runs: number
+  totals: EmissionsTotals
+  by_basis?: EmissionsByBasis[]
+  credits_usd_consumed: number
+  basis: string
+}
+
 // ── Connections (Google Drive / Microsoft 365 workspace integrations) ──────
 // backend: api/connections.py, mounted under /api/connections. Provider keys
 // are the two exact strings the backend and OAuth config use throughout:
@@ -1878,6 +1912,57 @@ export interface WorkspaceConnection {
   connected_at: string | null
   refreshed_at: string | null
   error_detail: string | null
+  /** Per-capability resource narrowing (read-access allowlist picker, m365
+   *  only for now). Optional because a connection fetched before this landed
+   *  carries no such field at all — read it the same way as an empty `read`:
+   *  both mean "everything the connected account can see", never "nothing". */
+  selected_resources?: SelectedResources
+}
+
+/** Per-capability resource narrowing on a connection. `read` is the only key
+ *  this frontend acts on today; a missing key and an empty array both mean
+ *  "everything the connected account can see" (unrestricted) — neither may
+ *  ever be read as an allowlist that blocks everything. Other keys are
+ *  reserved for capabilities this frontend does not yet narrow. */
+export interface SelectedResources {
+  read?: M365ReadEntry[]
+  [key: string]: unknown
+}
+
+/** One location an m365 connection's read-access allowlist can name — a
+ *  SharePoint site's document library drive, or the connected account's
+ *  OneDrive. Exactly what PUT /api/connections/m365/resources's `read` array
+ *  takes, and what `WorkspaceConnection.selected_resources.read` echoes back.
+ *  `site_id` is null for `kind: 'onedrive'` (OneDrive has no site); `web_url`
+ *  is the Graph-reported link, null wherever the source item lacked one. */
+export interface M365ReadEntry {
+  site_id: string | null
+  drive_id: string
+  label: string
+  kind: 'site_drive' | 'onedrive'
+  web_url: string | null
+}
+
+/** GET /api/connections/m365/sources — the read side of what the allowlist
+ *  picker ultimately writes back through PUT .../resources: every location
+ *  available to restrict to, keyed by a stable `slug` this frontend does not
+ *  otherwise use. `restricted` mirrors whether `selected_resources.read` is
+ *  currently non-empty. Unused by the picker itself (which drives its tree
+ *  off the existing m365 browse endpoint instead), kept here because it is
+ *  part of the read-access contract other frontend code may draw on. */
+export interface M365Source {
+  slug: string
+  provider: 'm365'
+  kind: 'site_drive' | 'onedrive'
+  label: string
+  site_id: string | null
+  drive_id: string
+  web_url: string | null
+}
+
+export interface M365SourcesResult {
+  sources: M365Source[]
+  restricted: boolean
 }
 
 /** The Google Picker's own client-side credentials — present only for gdrive,
@@ -1929,6 +2014,11 @@ export interface M365BrowseItem {
   modified_at?: string | null
   site_id?: string | null
   drive_id?: string | null
+  /** Graph's own link to the item — populated on `kind: 'site'` rows for the
+   *  read-access picker (`M365ReadAccessPicker`), which threads a site's
+   *  `web_url` onto the `M365ReadEntry` it builds for that site's drives.
+   *  Absent/null elsewhere, and on a backend predating this field. */
+  web_url?: string | null
 }
 
 export interface M365BrowseResult {
@@ -2564,6 +2654,12 @@ export const api = {
       `/billing/usage?${qs.toString()}`,
     )
   },
+  getEmissionsFactorHistory: (limit = 50) =>
+    request<{ entries: EmissionsFactorHistoryEntry[] }>(
+      `/billing/emissions/history?limit=${limit}`,
+    ),
+  getBillingFootprint: (period: string) =>
+    request<BillingFootprint>(`/billing/footprint?period=${encodeURIComponent(period)}`),
 
   // connections (Google Drive / Microsoft 365 workspace integrations)
   listConnections: () => request<{ connections: WorkspaceConnection[] }>('/connections'),
@@ -2592,6 +2688,16 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : ''
     return request<M365BrowseResult>(`/connections/m365/browse${suffix}`)
   },
+  // m365 read-access allowlist (Connections view). sources() is the read side
+  // of the contract, kept here even though the picker itself walks the browse
+  // tree above; setM365ReadAccess() is what the picker's Save and the card's
+  // remove/"Allow everything" controls all funnel through — an empty array
+  // clears the restriction. Admin only; a non-admin PUT 403s. 409s (and, until
+  // the backend lands, 404s) on a connection that isn't usable — callers show
+  // `ApiError.message` inline rather than treating either as "unrestricted".
+  m365Sources: () => request<M365SourcesResult>('/connections/m365/sources'),
+  setM365ReadAccess: (read: M365ReadEntry[]) =>
+    request<WorkspaceConnection>('/connections/m365/resources', { method: 'PUT', body: { read } }),
   importDocuments: (projectId: string, provider: ConnectionProvider, items: ImportItem[]) =>
     request<ImportDocumentsResult>(`/projects/${projectId}/documents/import`, {
       method: 'POST',
