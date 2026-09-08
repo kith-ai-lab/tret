@@ -62,6 +62,7 @@ import {
 } from '../shared/emissions'
 import { formatDateTime } from '../shared/format'
 import { QueryError } from '../shared/MonoTable'
+import { EmissionsHistory } from './EmissionsHistory'
 
 const GRID_BASIS_OPTIONS: EmissionsGridBasisValue[] = ['location_based', 'market_based', 'unspecified']
 const LOCAL_PROFILE_OPTIONS: EmissionsPueLocalProfile[] = ['workstation', 'onprem_datacenter']
@@ -1429,6 +1430,8 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
           the offending field and save, or clear the overrides.
         </div>
       )}
+
+      <EmissionsHistory />
     </div>
   )
 }

@@ -233,6 +233,7 @@ class Router:
         system: str | None = None,
         max_tokens: int = 4096,
         factors: "FactorSet | None" = None,
+        measured_energy_wh: float | None = None,
     ) -> RunResult:
         """Route `task` to a model, run it once, and return its `Receipt`.
 
@@ -243,6 +244,19 @@ class Router:
         `None` (the default, and every caller before this parameter existed),
         `energy_accounting` resolves its own from `Settings` alone, exactly as
         it always has.
+
+        `measured_energy_wh` — a caller's own metered IT-load figure for this
+        one call, in Wh — is passed straight through to `energy_accounting`'s
+        own `measured_energy_wh` parameter: it replaces the per-token
+        estimate for `energy_wh`, keeps the estimate as `energy_wh_estimated`,
+        and flips `energy_source` to `"measured"` on the returned `Receipt`.
+        See `energy_accounting`'s own docstring and
+        docs/emissions-methodology.md's "Measured energy" section for exactly
+        what changes and what does not (PUE, grid intensity and embodied
+        hardware still apply on top, unchanged). Left `None` (the default),
+        this call prices from tokens exactly as it always has. Must be `>=
+        0`; a negative value raises `ValueError`, same as `energy_accounting`
+        itself.
         """
         router = self._ensure_wired()
         assert self._catalog is not None and self._registry is not None  # set by _ensure_wired
@@ -299,7 +313,13 @@ class Router:
         # nothing honest to price or weigh — see the Receipt docstring.
         usage_reported = turn_complete_seen and not _usage_is_empty(usage)
         receipt = _build_receipt(
-            model, usage, decision, self._catalog, usage_reported, factors=factors
+            model,
+            usage,
+            decision,
+            self._catalog,
+            usage_reported,
+            factors=factors,
+            measured_energy_wh=measured_energy_wh,
         )
         return RunResult(
             text="".join(text_parts),
@@ -318,10 +338,18 @@ class Router:
         system: str | None = None,
         max_tokens: int = 4096,
         factors: "FactorSet | None" = None,
+        measured_energy_wh: float | None = None,
     ) -> RunResult:
-        """Synchronous `arun()` — see its docstring for `factors`."""
+        """Synchronous `arun()` — see its docstring for `factors` and
+        `measured_energy_wh`."""
         return _run_sync(
-            lambda: self.arun(task, system=system, max_tokens=max_tokens, factors=factors)
+            lambda: self.arun(
+                task,
+                system=system,
+                max_tokens=max_tokens,
+                factors=factors,
+                measured_energy_wh=measured_energy_wh,
+            )
         )
 
 
@@ -344,6 +372,7 @@ def _build_receipt(
     *,
     estimated: bool = False,
     factors: "FactorSet | None" = None,
+    measured_energy_wh: float | None = None,
 ) -> Receipt:
     # `raw` is computed either way — even on a zero/unreported usage it is a
     # faithful account of exactly the tokens the provider gave us, and stays
@@ -357,6 +386,7 @@ def _build_receipt(
         usage.cache_write_tokens,
         catalog=catalog,
         factors=factors,
+        measured_energy_wh=measured_energy_wh,
     )
     if usage_reported:
         # Computed directly from the model's own price table — the exact figure

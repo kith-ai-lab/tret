@@ -353,6 +353,47 @@ what does not:
 `measured_energy_wh` must be `>= 0`; a negative value raises `ValueError`
 rather than silently producing a negative energy figure.
 
+#### How a measurement reaches a run
+
+Two paths supply `measured_energy_wh`, for the two shapes a real meter
+takes (`tret/services/energy_meter.py`):
+
+- **`TRET_LOCAL_ENERGY_METER=nvidia_smi`** turns on automatic metering for
+  every local (self-hosted) model segment a run passes through. Off by
+  default — a run stays priced from tokens exactly as before. When on,
+  `engine/harness.py` starts an `NvidiaSmiMeter` the moment a local segment
+  begins and stops it the moment the segment ends (a model switch, or the
+  run itself finishing), sampling `nvidia-smi --query-gpu=power.draw` every
+  `TRET_LOCAL_ENERGY_METER_INTERVAL_S` (default 1.0s, floor 0.2s) and
+  integrating watts x seconds into Wh. This is **host-level** power, not a
+  per-process figure — `nvidia-smi` has no notion of "this one request's
+  share" — so on a box running anything besides the one model server it
+  **overstates** this run's actual draw; every such reading is recorded
+  `shared_device: true` on the run's `energy_meter` block and carries the
+  additive `shared_device_measurement` caveat (`direction: "overstates"`)
+  saying so. It needs an NVIDIA GPU and driver reachable from the process
+  that runs the harness — the NVIDIA Container Toolkit runtime, for Ollama
+  running inside Docker — and is not supported on macOS at all (Apple
+  Silicon's own `powermetrics` needs `sudo`, which a server process has no
+  business asking an operator for). A missing binary, a parse failure, or
+  the meter failing to start or stop never fails or measurably delays the
+  run: it is logged once and the segment falls back to the per-token
+  estimate, exactly as if metering were off.
+- **An external reading**, for everything automatic metering cannot reach —
+  a Mac's `powermetrics`, a smart PDU, a cluster's own accounting. Pass the
+  Wh figure straight in: `tret.sdk.Router.run`/`arun(measured_energy_wh=…)`
+  from the SDK, or `tret run --measured-wh <WH>` from the headless CLI
+  (`tret/local_run.py`). Either way it reaches the same
+  `energy_accounting(measured_energy_wh=…)` call described above — there is
+  no meter object in the loop, just the number.
+
+Both paths measure **IT-load only**. PUE, grid intensity and embodied
+hardware still apply on top exactly as they do to an estimate — a
+measurement replaces the per-token guess for compute energy; it is not a
+substitute for facility overhead or hardware amortization, and it does not
+change which deployment (and therefore which PUE profile and GHG Protocol
+scope) a run is accounted under.
+
 ## Regions, hourly tables, hardware profiles, and a band that responds to evidence
 
 Four small, independent additions to the override document described under
@@ -1354,6 +1395,17 @@ The `workspace` layer above is managed through three routes, all under
   removes the key and returns the same shape `GET` does, with `overrides` back
   to `{}`.
 
+Past the gate, every successful PUT and DELETE also notifies
+`run_workspace_settings_hooks` (`tret/engine/extensions.py`) with the
+workspace id, `"emissions"`, the document as it was stored immediately
+before the change (`None` on a first write) and immediately after (`None` on
+a DELETE), and the caller's user id — the same fail-open extension seam a
+post-run hook uses, so an extension may observe every change without the
+open-source engine knowing or caring what it does with it. tret_cloud
+registers one of these to keep a change history; core itself keeps only the
+current document plus its own `updated_by`/`updated_at`, and a broken or
+raising hook can never turn a successful write into an error response.
+
 **The runner snapshots the factor set at run start, not per call.**
 `HarnessEngine.execute()` loads a run's workspace document and any managed
 layer once, as soon as the run's workspace is known, and turns each into a
@@ -1434,14 +1486,21 @@ in the database and the request's own `factors`. Verified by
 which snapshots a run before and after a scenario call and asserts they are
 byte-for-byte identical.
 
-**`measured_energy_wh` has no product ingestion path yet.** `energy_accounting`
-accepts a `measured_energy_wh` keyword for a run's own operator-metered figure
-(see [Measured energy](#measured-energy-an-operators-own-meter-on-top-of-everything-else)
-above), but nothing in the harness, the settings API, or this what-if endpoint
-ever supplies one — it is a library parameter for a workspace's own tooling or
-a future product surface to call, not something the running product can set
-today. A what-if scenario recomputes every run's *estimate*; it does not, and
-today cannot, recompute a measured figure.
+**This endpoint recomputes estimates, never a measurement.** A self-hosted run
+can now genuinely carry `energy_source: "measured"` — see [How a measurement
+reaches a run](#how-a-measurement-reaches-a-run) above for the two paths
+(`TRET_LOCAL_ENERGY_METER=nvidia_smi`, or an external reading through the SDK
+or `tret run --measured-wh`) — but this what-if endpoint still only ever
+recomputes the *estimate* a run's tokens would produce under different
+factors. A run whose stored `energy_accounting["energy_source"]` is
+`"measured"` or `"mixed"` is recomputed the same as any other: `scenario`
+reprices its token counts through the requested factors exactly as `recorded`
+reflects what was actually persisted, so the two blocks answer different
+questions for such a run (what was actually measured, vs. what the estimate
+alone would have said) rather than the same question under two configurations.
+Nothing here recomputes a meter reading, because there is nothing to
+recompute it from — the Wh figure a meter or an external reading produced is
+not a function of this endpoint's `factors` input at all.
 
 ## Where the numbers live in the API
 

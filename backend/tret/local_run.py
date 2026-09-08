@@ -642,6 +642,7 @@ async def arun(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     max_tokens: int = 4096,
     temperature: float = 0.2,
+    measured_energy_wh: float | None = None,
     on_route: Callable[[RoutingDecision], None] | None = None,
     on_tool_call: Callable[[ToolCall], None] | None = None,
 ) -> LocalRunResult:
@@ -652,6 +653,13 @@ async def arun(
     them to print to stderr; offline tests and library callers can ignore
     them. `path` omitted means no file tools are offered: the loop then
     behaves like `tret.sdk.Router.arun` (one turn, no tools), plus the ledger.
+
+    `measured_energy_wh` — an operator's own metered IT-load figure (Wh) for
+    this whole run — is passed straight through to `_build_receipt`'s
+    `energy_accounting` call, exactly as `tret.sdk.Router.arun`'s own
+    parameter of the same name is. It replaces the per-token estimate for
+    `energy_wh`; `--measured-wh` on the CLI is this parameter. Must be `>=
+    0`; a negative value raises `ValueError`.
     """
     if max_cost_tier not in TIER_ORDER:
         valid = ", ".join(sorted(TIER_ORDER, key=TIER_ORDER.__getitem__))
@@ -659,6 +667,8 @@ async def arun(
     if objective not in OBJECTIVES:
         valid = ", ".join(OBJECTIVES)
         raise ValueError(f"objective={objective!r} is not valid; choose one of: {valid}")
+    if measured_energy_wh is not None and measured_energy_wh < 0:
+        raise ValueError(f"measured_energy_wh must be >= 0, got {measured_energy_wh!r}")
 
     root: Path | None = None
     if path is not None:
@@ -727,7 +737,13 @@ async def arun(
     # weighted-token energy estimate are linear in tokens (see
     # tret.services.emissions and ModelInfo.cost_usd).
     receipt = _build_receipt(
-        model_info, usage, decision, catalog, usage_reported, estimated=usage_estimated
+        model_info,
+        usage,
+        decision,
+        catalog,
+        usage_reported,
+        estimated=usage_estimated,
+        measured_energy_wh=measured_energy_wh,
     )
 
     entry = _ledger_entry(

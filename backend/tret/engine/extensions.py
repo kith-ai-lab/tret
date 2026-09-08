@@ -48,6 +48,21 @@ run's accounting. Read-only and side-effect-free by contract, so it runs
 against the same kind of isolated, freshly-opened session the gates and hooks
 above use, opened only when at least one provider is registered.
 
+A seventh seam, `add_workspace_settings_hook` / `run_workspace_settings_hooks`,
+is a post-run hook for a different kind of event: not a completed run, but a
+change to one of a workspace's own stored settings documents (today, just the
+emissions overrides `api/emissions_settings.py`'s PUT and DELETE read and
+write). It is asked `(workspace_id, key, before, after, user_id)` — `key`
+names which stored setting changed (`"emissions"` is the only one today),
+`before`/`after` are the document as stored immediately before and
+immediately after the change (either may be `None`: `before` on a first
+write, `after` on a DELETE), and `user_id` is the caller who made it.
+tret_cloud registers one of these to keep a change history core itself never
+persists — core keeps only the current document plus its own
+`updated_by`/`updated_at`. Same fail-open, own-session, no-verdict-to-enforce
+contract as a post-run hook: every hook runs, a raising hook is logged and
+never propagates, and no session is opened when nothing is registered.
+
 With no extensions loaded, `get_extension_registry()` returns a default
 `ExtensionAPI` that allows everything and does nothing — the whole surface is
 inert when `TRET_EXTENSIONS` is unset, which is the open-source deployment.
@@ -121,6 +136,20 @@ OAuthClientProvider = Callable[[str], "OAuthClientConfig | None"]
 # or the settings API needs to know what the "managed" layer contributes for a
 # workspace.
 FactorLayerProvider = Callable[[AsyncSession, uuid.UUID], Awaitable["dict | None"]]
+# (db, workspace_id, key, before, after, user_id) -> None. Fired whenever a
+# workspace's own settings document changes through a settings API route
+# (today, only `api/emissions_settings.py`'s PUT and DELETE, with `key`
+# always `"emissions"`). `before`/`after` are the raw stored document
+# immediately before and immediately after the change — either may be `None`
+# (no prior document on a first write, no document at all after a DELETE) —
+# and `user_id` is the caller who made the change. Same fail-open, own-
+# session, no-verdict-to-enforce contract as `PostRunHook`: tret_cloud
+# registers one of these to keep a change history core itself never
+# persists (core keeps only the current document plus its own
+# `updated_by`/`updated_at`).
+WorkspaceSettingsHook = Callable[
+    [AsyncSession, uuid.UUID, str, dict | None, dict | None, uuid.UUID | None], Awaitable[None]
+]
 
 
 class ExtensionAPI:
@@ -138,6 +167,7 @@ class ExtensionAPI:
         self._workspace_gates: list[WorkspaceGate] = []
         self._oauth_client_providers: list[OAuthClientProvider] = []
         self._factor_layer_providers: list[FactorLayerProvider] = []
+        self._workspace_settings_hooks: list[WorkspaceSettingsHook] = []
 
     def include_router(self, router: APIRouter) -> None:
         if self._app is not None:
@@ -160,6 +190,9 @@ class ExtensionAPI:
 
     def add_factor_layer_provider(self, fn: FactorLayerProvider) -> None:
         self._factor_layer_providers.append(fn)
+
+    def add_workspace_settings_hook(self, fn: WorkspaceSettingsHook) -> None:
+        self._workspace_settings_hooks.append(fn)
 
     async def run_startup_tasks(self) -> None:
         """Await every registered startup task, in registration order."""
@@ -345,6 +378,38 @@ class ExtensionAPI:
                 except Exception:
                     await ext_db.rollback()
                     log.exception("post-run hook %r raised", hook)
+
+    async def run_workspace_settings_hooks(
+        self,
+        db: AsyncSession,
+        workspace_id: uuid.UUID,
+        key: str,
+        before: dict | None,
+        after: dict | None,
+        user_id: uuid.UUID | None,
+    ) -> None:
+        """Run every workspace-settings hook; a hook's exception never propagates.
+
+        Same contract as `run_post_run_hooks`, fired on a different event: a
+        workspace's own settings document changing (`api/emissions_settings.py`'s
+        PUT and DELETE, today) rather than a run finishing. `db` is accepted
+        for contract stability but is never handed to a hook — each hook runs
+        against its own fresh session opened from tret's own session factory,
+        for the identical Postgres-transaction-poisoning reason every other
+        seam in this class isolates its session (see the module docstring).
+        No session is opened when no hooks are registered.
+        """
+        if not self._workspace_settings_hooks:
+            return
+        from tret.db.engine import get_session_factory
+
+        async with get_session_factory()() as ext_db:
+            for hook in self._workspace_settings_hooks:
+                try:
+                    await hook(ext_db, workspace_id, key, before, after, user_id)
+                except Exception:
+                    await ext_db.rollback()
+                    log.exception("workspace settings hook %r raised", hook)
 
 
 _registry: ExtensionAPI | None = None

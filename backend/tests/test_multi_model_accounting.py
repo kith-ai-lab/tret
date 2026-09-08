@@ -154,3 +154,53 @@ def test_a_factor_every_segment_agreed_on_is_kept():
     a, b = _blocks()
     combined = combine_accountings([_block(a), _block(b)])
     assert combined["pue"] is not None  # both cloud
+
+
+def test_combined_uncertainty_band_sums_across_segments():
+    """A run that switched models carries the band of the *whole* run, not the
+    first segment's — every per-model block contributes its own low/high."""
+    from tret.services.emissions import combine_accountings
+
+    def block(co2e, low, high, ewh, basis="location_based"):
+        return {
+            "co2e_g": co2e,
+            "energy_wh": ewh,
+            "energy_wh_total": ewh * 1.2,
+            "grid_co2e_basis": basis,
+            "scopes": {"scope1_g": 0.0, "scope2_g": 0.0, "scope3_g": co2e},
+            "uncertainty": {
+                "kind": "judgment_band",
+                "is_confidence_interval": False,
+                "band_factor_low": 2.5,
+                "band_factor_high": 2.5,
+                "co2e_g_low": low,
+                "co2e_g_high": high,
+                "energy_wh_low": ewh / 2.5,
+                "energy_wh_high": ewh * 2.5,
+                "energy_wh_total_low": ewh * 1.2 / 2.5,
+                "energy_wh_total_high": ewh * 1.2 * 2.5,
+            },
+        }
+
+    a = block(10.0, 4.0, 25.0, 1.0)
+    b = block(30.0, 12.0, 75.0, 3.0)
+    combined = combine_accountings([a, b])
+    band = combined["uncertainty"]
+    assert band["co2e_g_low"] == 16.0
+    assert band["co2e_g_high"] == 100.0
+    assert band["energy_wh_low"] == 4.0 / 2.5
+    assert band["energy_wh_high"] == 4.0 * 2.5
+    assert band["band_factor_low"] == 2.5
+    assert band["is_confidence_interval"] is False
+
+    # Mixed bases: the carbon edges are nulled like every other carbon figure,
+    # the energy edges still add.
+    mixed = combine_accountings([a, block(30.0, 12.0, 75.0, 3.0, basis="market_based")])
+    assert mixed["uncertainty"]["co2e_g_low"] is None
+    assert mixed["uncertainty"]["co2e_g_high"] is None
+    assert mixed["uncertainty"]["energy_wh_low"] == 4.0 / 2.5
+
+    # Segments that disagree on the band factor report no single factor.
+    c = block(30.0, 12.0, 75.0, 3.0)
+    c["uncertainty"]["band_factor_low"] = 2.0
+    assert combine_accountings([a, c])["uncertainty"]["band_factor_low"] is None

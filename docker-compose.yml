@@ -90,6 +90,17 @@ services:
       TRET_SEARXNG_BASE_URL: ${TRET_SEARXNG_BASE_URL:-}
       TRET_LOCAL_DISPLAY_NAME: ${TRET_LOCAL_DISPLAY_NAME:-Local}
       TRET_LOCAL_PROBE_TOOLS: ${TRET_LOCAL_PROBE_TOOLS:-true}
+      # Measure a local run's own energy instead of pricing it from tokens —
+      # off (default) | nvidia_smi. See docs/emissions-methodology.md.
+      # nvidia_smi needs the NVIDIA Container Toolkit installed on the host
+      # AND a `deploy.resources.reservations.devices` entry (or `runtime:
+      # nvidia`) on the backend service below so this container can see the
+      # GPU at all — without one, `nvidia-smi` is simply not there, and the
+      # meter falls back to the per-token estimate with a single log line
+      # rather than failing the run.
+      TRET_LOCAL_ENERGY_METER: ${TRET_LOCAL_ENERGY_METER:-off}
+      TRET_LOCAL_ENERGY_METER_INTERVAL_S: ${TRET_LOCAL_ENERGY_METER_INTERVAL_S:-1.0}
+      TRET_LOCAL_ENERGY_METER_GPU_INDEX: ${TRET_LOCAL_ENERGY_METER_GPU_INDEX:-}
       # Eco accounting — docs/eco-accounting.md, docs/emissions-methodology.md.
       # 470 gCO2e/kWh is the IEA 2024 global power-sector average.
       TRET_GRID_CO2E_G_PER_KWH: ${TRET_GRID_CO2E_G_PER_KWH:-470.0}

@@ -459,6 +459,92 @@ async def test_factor_layer_provider_receives_the_workspace_id():
     assert seen == [workspace_id]
 
 
+# ── workspace settings hooks (change history for e.g. emissions overrides) ──
+async def test_with_no_workspace_settings_hooks_registered_opens_no_session(monkeypatch):
+    import tret.db.engine as db_engine_module
+
+    def _must_not_be_called():
+        raise AssertionError("must not open a session when nothing is registered")
+
+    monkeypatch.setattr(db_engine_module, "get_session_factory", _must_not_be_called)
+    ext = ExtensionAPI(None)
+    # Must not raise, and must not touch the database.
+    await ext.run_workspace_settings_hooks(
+        None, uuid.uuid4(), "emissions", {"a": 1}, {"a": 2}, uuid.uuid4()
+    )
+
+
+async def test_every_workspace_settings_hook_runs_even_if_an_earlier_one_raises():
+    ext = ExtensionAPI(None)
+    called = []
+
+    async def raises(db, workspace_id, key, before, after, user_id):
+        called.append("first")
+        raise RuntimeError("boom")
+
+    async def records(db, workspace_id, key, before, after, user_id):
+        called.append("second")
+
+    ext.add_workspace_settings_hook(raises)
+    ext.add_workspace_settings_hook(records)
+    await ext.run_workspace_settings_hooks(
+        None, uuid.uuid4(), "emissions", None, {"a": 1}, uuid.uuid4()
+    )
+    assert called == ["first", "second"]
+
+
+async def test_a_workspace_settings_hook_exception_never_propagates(caplog):
+    ext = ExtensionAPI(None)
+
+    async def raises(db, workspace_id, key, before, after, user_id):
+        raise RuntimeError("boom")
+
+    ext.add_workspace_settings_hook(raises)
+    with caplog.at_level(logging.ERROR, logger="tret.extensions"):
+        await ext.run_workspace_settings_hooks(
+            None, uuid.uuid4(), "emissions", None, {"a": 1}, uuid.uuid4()
+        )  # must not raise
+    assert "raised" in caplog.text
+
+
+async def test_workspace_settings_hook_receives_the_full_call_shape():
+    ext = ExtensionAPI(None)
+    seen = []
+    workspace_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    before = {"grid": {"default": {"g_per_kwh": 42, "label": "old"}}}
+    after = {"grid": {"default": {"g_per_kwh": 55, "label": "new"}}}
+
+    async def records(db, wid, key, before_doc, after_doc, uid):
+        seen.append((wid, key, before_doc, after_doc, uid))
+
+    ext.add_workspace_settings_hook(records)
+    await ext.run_workspace_settings_hooks(None, workspace_id, "emissions", before, after, user_id)
+    assert seen == [(workspace_id, "emissions", before, after, user_id)]
+
+
+async def test_workspace_settings_hook_sees_none_before_and_none_after():
+    """A first write has no prior document; a DELETE leaves no document at
+    all — both are valid, and distinct from each other and from `{}`."""
+    ext = ExtensionAPI(None)
+    seen = []
+
+    async def records(db, wid, key, before, after, uid):
+        seen.append((before, after))
+
+    ext.add_workspace_settings_hook(records)
+    await ext.run_workspace_settings_hooks(None, uuid.uuid4(), "emissions", None, {"a": 1}, uuid.uuid4())
+    await ext.run_workspace_settings_hooks(None, uuid.uuid4(), "emissions", {"a": 1}, None, uuid.uuid4())
+    assert seen == [(None, {"a": 1}), ({"a": 1}, None)]
+
+
+async def test_with_no_workspace_settings_hooks_at_all_does_not_raise():
+    ext = ExtensionAPI(None)
+    await ext.run_workspace_settings_hooks(
+        None, uuid.uuid4(), "emissions", None, None, None
+    )
+
+
 # ── startup tasks ──────────────────────────────────────────────────────────────
 async def test_startup_tasks_run_in_registration_order():
     ext = ExtensionAPI(None)

@@ -2673,6 +2673,17 @@ _SUMMABLE_NESTED = {
     # below.
     "baseline": ("energy_wh", "energy_wh_total"),
     "cost": ("usd", "baseline_usd", "avoided_usd"),
+    # The band's *energy* edges add like energy does. Its carbon edges are
+    # carbon and follow the basis rule below. Everything else in the block
+    # (band factors, kind, derivation, contributions) is kept only where the
+    # segments agree — a run that ran half at one band and half at another has
+    # no single band factor to report, and `_agreed` nulls it.
+    "uncertainty": (
+        "energy_wh_low",
+        "energy_wh_high",
+        "energy_wh_total_low",
+        "energy_wh_total_high",
+    ),
 }
 
 # ── carbon may only be summed within one GHG Protocol basis ──────────────────
@@ -2696,6 +2707,7 @@ _CARBON_TOP = ("co2e_g", "co2e_g_low", "co2e_g_high")
 _CARBON_NESTED = {
     "scopes": ("scope1_g", "scope2_g", "scope3_g"),
     "baseline": ("co2e_g", "avoided_co2e_g"),
+    "uncertainty": ("co2e_g_low", "co2e_g_high"),
 }
 
 
@@ -2834,7 +2846,10 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
         | {"embodied_g"}
     )
     for key in set(combined) - handled:
-        if key in ("estimated", "basis", "factors", "caveats", "factor_layers", "energy_source"):
+        if key in (
+            "estimated", "basis", "factors", "caveats", "factor_layers", "energy_source",
+            "energy_meter",
+        ):
             continue
         combined[key] = _agreed([b.get(key) for b in blocks])
 
@@ -2843,13 +2858,46 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
     # cleanly measured nor cleanly estimated); "estimated" otherwise. A block
     # from before this key existed reads as "estimated", same as
     # `energy_accounting` itself has always defaulted.
-    sources = [b.get("energy_source", "estimated") for b in blocks]
+    # A segment that did no work (a model the run switched to and then never
+    # used, or an aborted first turn) has nothing to be measured or estimated
+    # and must not turn a fully metered run "mixed"; only segments that spent
+    # energy count. If none did, the run reads as "estimated".
+    worked = [b for b in blocks if (b.get("energy_wh") or 0) > 0]
+    sources = [b.get("energy_source", "estimated") for b in (worked or blocks)]
     if all(s == "measured" for s in sources):
         combined["energy_source"] = "measured"
     elif any(s == "measured" for s in sources):
         combined["energy_source"] = "mixed"
     else:
         combined["energy_source"] = "estimated"
+
+    # `energy_meter` (engine/harness.py, tret/services/energy_meter.py): only
+    # present on a segment whose model actually got metered. Additive, and
+    # combined the same spirit as everything above — sum what is genuinely
+    # additive (samples taken, seconds spent sampling), keep `kind`/
+    # `interval_s` only where every metered segment agrees, and
+    # `shared_device` is `True` if it was true for ANY segment: one shared
+    # host-level reading in the mix is enough for the caveat it carries to
+    # apply to the run as a whole.
+    metered = [b.get("energy_meter") for b in blocks if b.get("energy_meter")]
+    if metered:
+        # `note` is unioned, not agreed: a short-segment note from one leg
+        # ("fewer than 2 periodic samples...") and a clean `None` from another
+        # are not a disagreement to be nulled out — both, if present, are
+        # genuinely true of their own segment. Distinct non-empty notes are
+        # joined in encounter order; an all-`None` mix joins to `None`, same
+        # as `_agreed` would have.
+        notes = list(
+            dict.fromkeys(m.get("note") for m in metered if m.get("note"))
+        )
+        combined["energy_meter"] = {
+            "kind": _agreed([m.get("kind") for m in metered]),
+            "samples": _sum_or_none([m.get("samples") for m in metered]),
+            "duration_s": _sum_or_none([m.get("duration_s") for m in metered]),
+            "interval_s": _agreed([m.get("interval_s") for m in metered]),
+            "shared_device": any(m.get("shared_device") for m in metered),
+            "note": "; ".join(notes) if notes else None,
+        }
 
     combined["models"] = [b.get("model") for b in blocks]
     combined["grid_bases"] = bases

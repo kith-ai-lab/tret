@@ -299,7 +299,7 @@ async def test_none_carbon_propagates_and_str_omits_it(wired, monkeypatch):
     def _null_carbon_accounting(model, input_tokens, output_tokens,
                                  cache_read_tokens=0, cache_write_tokens=0,
                                  grid_g_per_kwh=None, *, settings=None, catalog=None,
-                                 factors=None):
+                                 factors=None, measured_energy_wh=None):
         return {
             "model": model.id,
             "co2e_g": None,
@@ -456,3 +456,47 @@ async def test_raw_and_overhead_are_deep_copies_not_aliases(wired):
     receipt2 = sdk_module._build_receipt(TARGET_MODEL, usage, decision, catalog, True)
     assert receipt2.overhead["cost_usd"] == original_cost
     assert receipt2.raw["co2e_g"] != -999
+
+
+# ── 12. measured_energy_wh: an operator's own reading replaces the estimate ──
+
+
+async def test_arun_measured_energy_wh_replaces_the_estimate(wired):
+    catalog, registry, provider = wired
+    router = Router()
+
+    result = await router.arun("summarize this document for me", measured_energy_wh=42.5)
+
+    assert result.receipt.energy_wh == pytest.approx(42.5)
+    assert result.receipt.raw["energy_source"] == "measured"
+    # The per-token estimate is kept alongside the measurement, not lost.
+    assert result.receipt.raw["energy_wh_estimated"] != pytest.approx(42.5)
+    expected_accounting = energy_accounting(
+        TARGET_MODEL, 123, 45, 0, 0, catalog=catalog, measured_energy_wh=42.5
+    )
+    assert result.receipt.co2e_g == expected_accounting["co2e_g"]
+
+
+def test_run_measured_energy_wh_passes_through_the_sync_wrapper(wired):
+    router = Router()
+    result = router.run("summarize x", measured_energy_wh=10.0)
+    assert result.receipt.raw["energy_source"] == "measured"
+
+
+async def test_measured_energy_wh_defaults_to_unmeasured(wired):
+    router = Router()
+    result = await router.arun("summarize x")
+    assert result.receipt.raw["energy_source"] == "estimated"
+
+
+async def test_build_receipt_rejects_a_negative_measured_energy_wh(wired):
+    catalog, registry, provider = wired
+    usage = Usage(input_tokens=10, output_tokens=5)
+    decision = await Router().aroute("x")
+
+    # A negative figure is rejected by `energy_accounting` itself; the SDK adds
+    # no separate validation, so the same ValueError surfaces here.
+    with pytest.raises(ValueError, match="measured_energy_wh"):
+        sdk_module._build_receipt(
+            TARGET_MODEL, usage, decision, catalog, True, measured_energy_wh=-1.0
+        )

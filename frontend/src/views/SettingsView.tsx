@@ -14,6 +14,7 @@ import {
 } from '../api/client'
 import { BillingSection } from '../components/shared/BillingSection'
 import { EmissionsFactorsPanel } from '../components/settings/EmissionsFactorsPanel'
+import { FootprintCard } from '../components/settings/FootprintCard'
 import { formatDateTime } from '../components/shared/format'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { ProviderKeyForm } from '../components/shared/ProviderKeyForm'
@@ -34,6 +35,7 @@ export function SettingsView() {
       <ProviderKeys />
       <ConnectionsTeaser />
       <BillingSection />
+      <FootprintCard />
       <EmissionsFactorsSection />
       <RouterInfo />
       <NetworkAccess />

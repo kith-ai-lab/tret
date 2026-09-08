@@ -39,6 +39,20 @@ def _at_least_one(value: str) -> int:
     return n
 
 
+def _non_negative_float(value: str) -> float:
+    try:
+        n = float(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from e
+    if n < 0:
+        # A negative watt-hour figure is not a measurement of anything;
+        # `local_run.arun`/`energy_accounting` would reject it too, but
+        # catching it at the argparse boundary gives a clean usage error
+        # instead of a stack trace out of the routed run.
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return n
+
+
 def _validate(path: Path) -> None:
     from tret.packs.loader import validate_pack
 
@@ -228,6 +242,7 @@ def _run_command(args: argparse.Namespace) -> None:
                 max_cost_tier=args.max_cost_tier,
                 model=args.model,
                 max_iterations=args.max_iterations,
+                measured_energy_wh=args.measured_wh,
                 on_route=on_route,
                 on_tool_call=on_tool_call,
             )
@@ -371,6 +386,16 @@ def main() -> None:
         type=_at_least_one,
         default=_RUN_DEFAULT_MAX_ITERATIONS,
         help="Cap on agent-loop iterations (at least 1)",
+    )
+    run_cmd.add_argument(
+        "--measured-wh",
+        dest="measured_wh",
+        type=_non_negative_float,
+        default=None,
+        help=(
+            "IT-load watt-hours you metered for this run; recorded as a "
+            "measurement, replaces the estimate"
+        ),
     )
     run_cmd.add_argument(
         "--json", action="store_true", help="Emit machine-readable JSON to stdout"

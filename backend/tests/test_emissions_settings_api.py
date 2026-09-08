@@ -471,3 +471,168 @@ async def test_a_workspace_value_beats_the_managed_layer(client, seed):
     grid = put.json()["effective"]["anthropic"]["grid"]
     assert grid["layer"] == "workspace"
     assert grid["value"] == 90.0
+
+
+# ── workspace settings hooks (extension change-history seam) ────────────────
+async def test_put_notifies_a_registered_workspace_settings_hook(client, seed):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner16@example.com")
+    await seed(team, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    ext = ExtensionAPI(None)
+    calls = []
+
+    async def hook(db, workspace_id, key, before, after, user_id):
+        calls.append((workspace_id, key, before, after, user_id))
+
+    ext.add_workspace_settings_hook(hook)
+    extensions_module._registry = ext
+
+    response = await client.put("/api/workspace/settings/emissions", json=VALID_DOC)
+    assert response.status_code == 200, response.text
+
+    assert len(calls) == 1
+    workspace_id, key, before, after, user_id = calls[0]
+    assert workspace_id == team.id
+    assert key == "emissions"
+    assert before is None
+    assert after["grid"]["providers"]["anthropic"]["g_per_kwh"] == 120
+    assert after["updated_by"] == owner.email
+    assert user_id == owner.id
+
+
+async def test_a_second_put_reports_the_previous_document_as_before(client, seed):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner17@example.com")
+    await seed(team, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    first = await client.put("/api/workspace/settings/emissions", json=VALID_DOC)
+    assert first.status_code == 200, first.text
+    first_doc = first.json()["overrides"]
+
+    ext = ExtensionAPI(None)
+    calls = []
+
+    async def hook(db, workspace_id, key, before, after, user_id):
+        calls.append((before, after))
+
+    ext.add_workspace_settings_hook(hook)
+    extensions_module._registry = ext
+
+    second_body = {
+        "grid": {"default": {"g_per_kwh": 90, "basis": "location_based", "label": "our own meter"}}
+    }
+    second = await client.put("/api/workspace/settings/emissions", json=second_body)
+    assert second.status_code == 200, second.text
+
+    assert len(calls) == 1
+    before, after = calls[0]
+    assert before == first_doc
+    assert after["grid"]["default"]["g_per_kwh"] == 90
+
+
+async def test_delete_notifies_the_hook_with_none_after(client, seed):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner18@example.com")
+    await seed(team, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    put = await client.put("/api/workspace/settings/emissions", json=VALID_DOC)
+    assert put.status_code == 200, put.text
+    stored_doc = put.json()["overrides"]
+
+    ext = ExtensionAPI(None)
+    calls = []
+
+    async def hook(db, workspace_id, key, before, after, user_id):
+        calls.append((workspace_id, key, before, after, user_id))
+
+    ext.add_workspace_settings_hook(hook)
+    extensions_module._registry = ext
+
+    response = await client.delete("/api/workspace/settings/emissions")
+    assert response.status_code == 200, response.text
+
+    assert len(calls) == 1
+    workspace_id, key, before, after, user_id = calls[0]
+    assert workspace_id == team.id
+    assert key == "emissions"
+    assert before == stored_doc
+    assert after is None
+    assert user_id == owner.id
+
+
+async def test_a_raising_workspace_settings_hook_does_not_break_the_put_response(client, seed):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner19@example.com")
+    await seed(team, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    ext = ExtensionAPI(None)
+
+    async def raises(db, workspace_id, key, before, after, user_id):
+        raise RuntimeError("boom")
+
+    ext.add_workspace_settings_hook(raises)
+    extensions_module._registry = ext
+
+    response = await client.put("/api/workspace/settings/emissions", json=VALID_DOC)
+    assert response.status_code == 200, response.text
+    assert response.json()["overrides"]["grid"]["providers"]["anthropic"]["g_per_kwh"] == 120
+
+
+async def test_a_raising_workspace_settings_hook_does_not_break_the_delete_response(client, seed):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner20@example.com")
+    await seed(team, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    put = await client.put("/api/workspace/settings/emissions", json=VALID_DOC)
+    assert put.status_code == 200, put.text
+
+    ext = ExtensionAPI(None)
+
+    async def raises(db, workspace_id, key, before, after, user_id):
+        raise RuntimeError("boom")
+
+    ext.add_workspace_settings_hook(raises)
+    extensions_module._registry = ext
+
+    response = await client.delete("/api/workspace/settings/emissions")
+    assert response.status_code == 200, response.text
+    assert response.json()["overrides"] == {}
+
+
+async def test_a_dispatcher_bug_does_not_break_the_put_response(client, seed, monkeypatch):
+    """Even a bug in `run_workspace_settings_hooks` itself (not just a hook)
+    must not turn a successful write into an error — the call site in
+    `emissions_settings.py` wraps the dispatch call, not just relies on the
+    dispatcher's own per-hook try/except."""
+    team = make_workspace("Climate Co")
+    owner = make_user("owner21@example.com")
+    await seed(team, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    async def broken_dispatcher(self, db, workspace_id, key, before, after, user_id):
+        raise RuntimeError("dispatcher itself is broken")
+
+    monkeypatch.setattr(ExtensionAPI, "run_workspace_settings_hooks", broken_dispatcher)
+
+    response = await client.put("/api/workspace/settings/emissions", json=VALID_DOC)
+    assert response.status_code == 200, response.text
+    assert response.json()["overrides"]["grid"]["providers"]["anthropic"]["g_per_kwh"] == 120
+
+
+async def test_with_no_hook_registered_put_and_delete_are_unaffected(client, seed):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner22@example.com")
+    await seed(team, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    put = await client.put("/api/workspace/settings/emissions", json=VALID_DOC)
+    assert put.status_code == 200, put.text
+
+    delete = await client.delete("/api/workspace/settings/emissions")
+    assert delete.status_code == 200, delete.text

@@ -6,6 +6,7 @@ persists the transcript/cost after every iteration, and publishes RunEvents.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from sqlalchemy import select
 
 if TYPE_CHECKING:
     from tret.services.emission_factors import EmissionsOverrides, FactorSet
+    from tret.services.energy_meter import EnergyMeter, MeterReading
 
 from tret.db.engine import get_session_factory
 from tret.db.models import Document, Harness, Pack, Project, Run
@@ -79,13 +81,17 @@ from tret.engine.supervisor import (
     assess,
     normalize_for_provider,
 )
+from tret.config import get_settings
 from tret.services.emission_settings import factor_set_for, workspace_emissions_layers
 from tret.services.emissions import (
+    DEPLOYMENT_LOCAL,
     combine_accountings,
+    deployment_for,
     overhead_block,
     emission_event_fields,
     energy_wh_field,
 )
+from tret.services.energy_meter import meter_for_settings
 from tret.services.outcomes import record_outcome
 from tret.services.transcript import (
     ENGINE_NUDGE_KEY,
@@ -191,6 +197,24 @@ class ModelSegment:
     # providers/catalog.py: pricing that 10x too high, straight into
     # `reported_cost_usd`, the billing column).
     last_reported_cache_read_tokens: int | None = None
+    # Set only for a segment whose model is on a local deployment
+    # (`deployment_for`) AND a meter is configured (`TRET_LOCAL_ENERGY_METER`):
+    # the running `EnergyMeter` while the segment is live (`HarnessEngine.
+    # _start_meter`/`_stop_meter`), and — once the segment ends, a model
+    # switch or the run itself finishing — the `MeterReading` `stop()`
+    # produced. `meter` and `meter_reading` are never both set: the meter is
+    # cleared the moment it is stopped. Neither ever appears on a cloud
+    # segment or an unmetered local one; `accounting()` below reads
+    # `meter_reading` being present as "this segment was measured", exactly
+    # the same way `energy_accounting`'s own `measured_energy_wh` parameter
+    # does for a single call.
+    meter: "EnergyMeter | None" = field(default=None, repr=False, compare=False)
+    meter_reading: "MeterReading | None" = field(default=None, repr=False, compare=False)
+    # `meter.describe()`, captured once when the meter is constructed — kept
+    # separately from `meter` itself because `meter` is cleared the moment
+    # `stop()` returns, but `accounting()` still needs `interval_s` for the
+    # `energy_meter` block on every call after that.
+    meter_describe: dict | None = field(default=None, repr=False, compare=False)
 
     def add(self, usage: Usage, iteration: int, *, estimated: bool = False) -> None:
         if not self.from_iteration:
@@ -211,14 +235,48 @@ class ModelSegment:
             self.last_reported_cache_read_tokens = usage.cache_read_tokens
 
     def accounting(self) -> dict:
-        return energy_accounting(
+        accounting = energy_accounting(
             self.model,
             self.usage.input_tokens,
             self.usage.output_tokens,
             self.usage.cache_read_tokens,
             self.usage.cache_write_tokens,
             factors=self.factors,
+            measured_energy_wh=(
+                float(self.meter_reading.wh) if self.meter_reading is not None else None
+            ),
         )
+        # Additive, on top of everything `energy_accounting` itself already
+        # did with `measured_energy_wh` (energy_source: "measured", the
+        # `unbatched_local_inference`/`prompt_shape_residual` caveat flips —
+        # see its own docstring). This is the metering *provenance* —
+        # which meter, how many samples, over how long — that a run-level
+        # library call has no way to know about on its own.
+        if self.meter_reading is not None:
+            reading = self.meter_reading
+            accounting["energy_meter"] = {
+                "kind": reading.kind,
+                "samples": reading.samples,
+                "duration_s": reading.duration_s,
+                "interval_s": (self.meter_describe or {}).get("interval_s"),
+                "shared_device": reading.shared_device,
+                "note": reading.note,
+            }
+            if reading.shared_device:
+                accounting["caveats"] = [
+                    *accounting["caveats"],
+                    {
+                        "key": "shared_device_measurement",
+                        "label": "Measured energy is host-level, not per-process",
+                        "direction": "overstates",
+                        "applies": True,
+                        "note": (
+                            "Host-level power includes other processes on the same "
+                            "accelerator."
+                        ),
+                    },
+                ]
+        return accounting
 
     def to_json(self) -> dict:
         accounting = self.accounting()
@@ -294,6 +352,12 @@ class _EmissionsContext:
     _factor_sets: dict[tuple[str | None, str | None], "FactorSet | None"] = field(
         default_factory=dict, repr=False
     )
+    # The segment whose meter is currently running, if any — set by
+    # `_start_meter` and cleared by `_stop_meter` once it has stopped it.
+    # `execute()`'s own `finally` reads this to stop whatever segment was
+    # live when `_execute_inner` raised or its task was cancelled, without
+    # `_execute_inner` needing its own try/finally around the run loop.
+    current_segment: "ModelSegment | None" = field(default=None, repr=False)
 
 
 class HarnessEngine:
@@ -372,6 +436,86 @@ class HarnessEngine:
                 factors = None
         emissions._factor_sets[key] = factors
         return factors
+
+    async def _start_meter(
+        self, segment: ModelSegment, settings, emissions: "_EmissionsContext"
+    ) -> None:
+        """Start measuring `segment`, if — and only if — its model is on a
+        local deployment and a meter is configured. A cloud segment never
+        even calls `meter_for_settings`: `deployment_for` is checked first,
+        so a run with no local model in it costs nothing here, and a spy
+        patched onto `meter_for_settings` in a test never sees a call for a
+        cloud-only run.
+
+        Never raises and never leaves `segment.meter` set to something that
+        failed to start: any exception constructing or starting the meter is
+        logged and swallowed, and the segment falls back to the ordinary
+        per-token estimate exactly as if metering were off.
+        """
+        if deployment_for(segment.model.provider) != DEPLOYMENT_LOCAL:
+            return
+        try:
+            meter = meter_for_settings(settings)
+        except Exception:
+            log.exception(
+                "failed to construct an energy meter for a local segment (%s); "
+                "this segment will fall back to the per-token estimate",
+                segment.model.id,
+            )
+            return
+        if meter is None:
+            return
+        segment.meter_describe = meter.describe()
+        try:
+            await meter.start()
+        except Exception:
+            log.exception(
+                "energy meter failed to start for a local segment (%s); falling back "
+                "to the per-token estimate",
+                segment.model.id,
+            )
+            return
+        segment.meter = meter
+        # Recorded so `execute()`'s own `finally` can stop this segment on an
+        # exception or cancellation out of `_execute_inner`'s run loop, without
+        # that loop needing its own try/finally around it.
+        emissions.current_segment = segment
+
+    async def _stop_meter(self, segment: ModelSegment, emissions: "_EmissionsContext") -> None:
+        """Stop `segment`'s meter, if it has one running, and record what it
+        read. A no-op on a segment that was never metered (`segment.meter is
+        None`) — cloud segments, and local segments with metering off, both
+        take this path. A meter that raises while stopping is logged and
+        treated the same as one that returns `None`: this segment keeps its
+        per-token estimate rather than lose the run over a metering failure.
+        """
+        meter, segment.meter = segment.meter, None
+        if meter is None:
+            return
+        # Bounded: a meter must never hold the run up waiting for it. Twice
+        # the sampling interval (floor 2s) is generous for what `stop()`
+        # actually has to do — cancel a background task and, at most, take
+        # one more sample — while still catching a meter that hangs instead
+        # of returning.
+        interval_s = (segment.meter_describe or {}).get("interval_s") or 1.0
+        timeout_s = max(2.0, interval_s * 2)
+        try:
+            reading = await asyncio.wait_for(meter.stop(), timeout=timeout_s)
+        except Exception:
+            log.exception(
+                "energy meter failed to stop for a local segment (%s); falling back "
+                "to the per-token estimate",
+                segment.model.id,
+            )
+            reading = None
+        if reading is not None:
+            segment.meter_reading = reading
+        # This segment is no longer the one `execute()`'s `finally` needs to
+        # stop on its way out — guarded by identity so a stale call (this
+        # segment was already superseded by a later `_start_meter`) never
+        # clobbers the segment that actually is current.
+        if emissions.current_segment is segment:
+            emissions.current_segment = None
 
     def _is_cancelled(self, run_id: uuid.UUID) -> bool:
         """True if `run_id`, or any run it was delegated from, is cancelled.
@@ -552,6 +696,22 @@ class HarnessEngine:
                 # reached the normal finish path.
                 await get_extension_registry().run_post_run_hooks(db, run, workspace_id)
             finally:
+                # `_execute_inner`'s run loop no longer wraps itself in its own
+                # try/finally for this: `_start_meter` records whichever
+                # segment is live on `emissions.current_segment`, so an
+                # exception above (already caught by the `except` above it)
+                # or a cancellation of this task (`CancelledError`, a
+                # `BaseException` the `except Exception` above never sees)
+                # both still reach here, and this stops that segment's meter
+                # on their way out — otherwise its background sampling task
+                # (tret/services/energy_meter.py) would outlive the run,
+                # forking a subprocess forever. `_stop_meter` is idempotent
+                # (a no-op on a segment already stopped), so this never
+                # conflicts with the stop `_execute_inner` already did on its
+                # own normal-completion path.
+                seg = emissions.current_segment
+                if seg is not None:
+                    await self._stop_meter(seg, emissions)
                 # Every path out of this method — the normal finish inside
                 # `_execute_inner`, `_fail_before_start`'s early return from it
                 # (still inside the `try` above, since it never raises), and
@@ -816,7 +976,24 @@ class HarnessEngine:
             )
         ]
         segment = segments[0]
-
+        # Read once per run, same as the workspace/managed emissions layers
+        # above — a local segment's meter (tret/services/energy_meter.py) is
+        # started here, stopped and restarted around every model switch
+        # (`_switch_model`, below), and stopped one final time once the loop
+        # ends, whichever way it ends (see the `_stop_meter` call right
+        # before this run's status is finalized). A cloud segment never
+        # starts one at all: `_start_meter` checks `deployment_for` first.
+        settings = get_settings()
+        await self._start_meter(segment, settings, emissions)
+        # `_start_meter` records the live segment on `emissions.current_segment`;
+        # `execute()`'s own `finally` around its `_execute_inner` call stops
+        # that segment's meter on any exception out of the loop below (a
+        # provider/engine bug) or a cancellation of this task (CancelledError,
+        # a BaseException that `execute()`'s `except Exception` does not catch)
+        # — so this method no longer needs its own try/finally for it.
+        # `_stop_meter` is idempotent (a no-op on a segment already stopped),
+        # so that stop, the explicit stop-before-switch call inside the loop,
+        # and the explicit stop right after the loop below never conflict.
         # Chat turns carry prior conversation turns as history.
         history = [Msg.from_json(m) for m in run.task_input.get("_history", [])]
         if context_limit and adaptive.compaction != "off":
@@ -1263,6 +1440,13 @@ class HarnessEngine:
             )
             if intervention.switching:
                 switches_used += 1
+                # The old segment's meter (if any) stops the moment its
+                # segment stops accumulating turns — the new one starts its
+                # own the moment `_switch_model` appends it. Order matters:
+                # stop before switching so a metered old segment's final
+                # reading is in hand before `_switch_model` builds the new
+                # `ModelSegment` that becomes the loop's `segment`.
+                await self._stop_meter(segment, emissions)
                 model_info, provider, segment = self._switch_model(
                     run=run,
                     intervention=intervention,
@@ -1270,6 +1454,7 @@ class HarnessEngine:
                     iteration=iteration,
                     emissions=emissions,
                 )
+                await self._start_meter(segment, settings, emissions)
                 context_limit = context_budget(
                     model_info.context_window, max_output_tokens, adaptive.context_headroom
                 )
@@ -1325,6 +1510,28 @@ class HarnessEngine:
             else:
                 run.status = "failed"
                 run.error = f"max_iterations ({max_iterations}) reached without completion"
+        # The CURRENT segment — `segment` is reassigned on every model
+        # switch inside the loop, so this always stops whichever one was
+        # live when the loop exited normally (an exception or cancellation
+        # out of the loop above skips straight past this to `execute()`'s
+        # own `finally`, which stops it from there instead).
+        await self._stop_meter(segment, emissions)
+        # Any segment's meter having produced a reading (not just the final
+        # one) means at least part of this run was measured, not merely
+        # estimated — e.g. a local segment that was metered, then switched to
+        # cloud and the run was cancelled before that cloud segment booked a
+        # turn. Recomputing from every segment, not just gating on the last
+        # one, is what keeps that measurement from being silently discarded.
+        if any(seg.meter_reading is not None for seg in segments):
+            accounting = combine_accountings([seg.accounting() for seg in segments])
+            run.energy_wh = Decimal(str(accounting["energy_wh"]))
+            run.energy_accounting = accounting
+            # Rewritten unconditionally on a recompute — the same way
+            # `_switch_model` always rewrites it — rather than only once
+            # `len(segments) > 1`: a single-segment run that was measured
+            # deserves a `model_timeline` that agrees with `energy_accounting`
+            # too, not just the multi-segment case.
+            run.model_timeline = [seg.to_json() for seg in segments]
 
         # ── finish ───────────────────────────────────────────────────────────
         if run.status == "running":

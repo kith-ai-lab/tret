@@ -565,6 +565,32 @@ class Settings(BaseSettings):
     local_display_name: str = "Local"
     local_probe_tools: bool = True  # probe each discovered model for real tool support
 
+    # Measured energy for a local model segment (tret/services/energy_meter.py,
+    # engine/harness.py). off (default) keeps today's behaviour — every local
+    # run priced from the per-token estimate, same as a cloud run. nvidia_smi
+    # samples `nvidia-smi --query-gpu=power.draw` on an interval and integrates
+    # it into Wh for the run's own `energy_wh`, replacing the estimate exactly
+    # as `energy_accounting(measured_energy_wh=...)` always has. It reports
+    # HOST-LEVEL power, not a per-process figure, so on a box running anything
+    # else besides the one model server it OVERSTATES this run's own share —
+    # every reading is recorded `shared_device: true` and carries the
+    # `shared_device_measurement` caveat because of it. Ollama running inside
+    # Docker needs the NVIDIA Container Toolkit runtime for nvidia-smi to see
+    # the GPU at all; without it (or on a CPU-only box) this degrades to the
+    # per-token estimate, logged once, never a failed run. macOS is NOT
+    # supported here — `powermetrics` needs sudo, which a server process has
+    # no business asking for — meter externally instead and pass the reading
+    # through `Router.run`/`arun(measured_energy_wh=...)` or `tret run
+    # --measured-wh`.
+    local_energy_meter: str = "off"  # off | nvidia_smi
+    # Sampling interval for nvidia_smi, in seconds. Clamped to a 0.2s floor —
+    # see MIN_INTERVAL_S in energy_meter.py for why.
+    local_energy_meter_interval_s: float = 1.0
+    # Restrict nvidia_smi to one accelerator's power draw rather than summing
+    # every GPU the host reports — set this on a shared multi-GPU box where
+    # only one card serves this deployment's model.
+    local_energy_meter_gpu_index: int | None = None
+
     @field_validator(
         "egress", "egress_provider", "egress_catalog", "egress_local", "egress_research", mode="before"
     )
@@ -604,18 +630,22 @@ class Settings(BaseSettings):
             return [name.strip() for name in value.split(",") if name.strip()]
         return value
 
-    @field_validator("local_grid_co2e_g_per_kwh", mode="before")
+    @field_validator(
+        "local_grid_co2e_g_per_kwh", "local_energy_meter_gpu_index", mode="before"
+    )
     @classmethod
     def _blank_means_unset(cls, value):
-        """An empty value means "not set" — fall back to grid_co2e_g_per_kwh.
+        """An empty value means "not set" — fall back to the field's own default
+        (grid_co2e_g_per_kwh for the grid factor; every GPU summed for the meter's
+        `gpu_index`).
 
         Environment variables have no way to say None: a blank line in .env, or a
         `${VAR:-}` interpolation in docker-compose.yml for a knob the operator
         never set, both arrive as "". Without this, that empty string is a float
-        parse error and the backend refuses to boot — and hardcoding a number in
-        compose instead would silently break the documented fallback (local
-        inference would keep reporting 400 g/kWh after the operator set their own
-        `TRET_GRID_CO2E_G_PER_KWH`).
+        (or int) parse error and the backend refuses to boot — and hardcoding a
+        number in compose instead would silently break the documented fallback
+        (local inference would keep reporting 400 g/kWh after the operator set
+        their own `TRET_GRID_CO2E_G_PER_KWH`).
         """
         return None if isinstance(value, str) and not value.strip() else value
 

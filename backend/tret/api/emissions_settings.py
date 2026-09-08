@@ -12,6 +12,8 @@ subsection for the contract this router implements.
 """
 from __future__ import annotations
 
+import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -36,12 +38,38 @@ from tret.services.emission_settings import (
 )
 from tret.services.emissions import LOCAL_PROVIDER
 
+log = logging.getLogger("tret.emissions_settings")
+
 router = APIRouter(prefix="/api", tags=["emissions-settings"])
 
 # The workspace-gate action a registered extension may veto a write on — the
 # same string on both the PUT and DELETE routes, since clearing the document
 # is as much an edit as setting it.
 GATE_ACTION = "emissions_factors_edit"
+
+
+async def _notify_settings_hooks(
+    db: AsyncSession,
+    workspace_id: uuid.UUID,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    user_id: uuid.UUID | None,
+) -> None:
+    """Fire `run_workspace_settings_hooks` without letting it turn a
+    successful write into an error response.
+
+    `run_workspace_settings_hooks` already catches and logs whatever an
+    individual hook raises (see `tret/engine/extensions.py`), but this call
+    site guards against a bug in the dispatcher itself (or in
+    `get_extension_registry()`) the same way — a broken extension seam must
+    never take down a PUT or DELETE that already committed successfully.
+    """
+    try:
+        await get_extension_registry().run_workspace_settings_hooks(
+            db, workspace_id, EMISSIONS_SETTINGS_KEY, before, after, user_id
+        )
+    except Exception:
+        log.exception("run_workspace_settings_hooks raised; ignoring")
 
 
 def _response(
@@ -150,9 +178,12 @@ async def put_emissions_settings(
     # JSONB column on assignment, and an in-place `workspace.settings[...] = `
     # would silently fail to commit.
     settings = dict(workspace.settings or {})
+    before = settings.get(EMISSIONS_SETTINGS_KEY)
     settings[EMISSIONS_SETTINGS_KEY] = doc
     workspace.settings = settings
     await db.commit()
+
+    await _notify_settings_hooks(db, ctx.id, before, doc, caller.id)
 
     workspace_doc, managed_doc = await workspace_emissions_layers(db, ctx.id)
     return _response(workspace_doc, managed_doc)
@@ -161,6 +192,7 @@ async def put_emissions_settings(
 @router.delete("/workspace/settings/emissions")
 async def delete_emissions_settings(
     ctx: WorkspaceContext = Depends(require_workspace_admin),
+    caller: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ):
     gate = await get_extension_registry().check_workspace_gate(db, ctx.id, GATE_ACTION)
@@ -169,9 +201,12 @@ async def delete_emissions_settings(
 
     workspace = await db.get(Workspace, ctx.id)
     settings = dict(workspace.settings or {})
+    before = settings.get(EMISSIONS_SETTINGS_KEY)
     settings.pop(EMISSIONS_SETTINGS_KEY, None)
     workspace.settings = settings
     await db.commit()
+
+    await _notify_settings_hooks(db, ctx.id, before, None, caller.id)
 
     workspace_doc, managed_doc = await workspace_emissions_layers(db, ctx.id)
     return _response(workspace_doc, managed_doc)

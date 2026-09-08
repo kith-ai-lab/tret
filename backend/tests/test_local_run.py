@@ -937,3 +937,69 @@ def test_cli_max_iterations_zero_rejected_at_argparse(monkeypatch, capsys):
         cli_module.main()
     assert exc.value.code == 2
     assert "at least 1" in capsys.readouterr().err
+
+
+# ── 7. --measured-wh / measured_energy_wh: an operator's own reading ────────
+
+
+async def test_arun_measured_energy_wh_replaces_the_estimate(tmp_path, monkeypatch):
+    provider = StubProvider(turns=[ScriptedTurn(text_chunks=("Done.",))])
+    catalog, registry = _wire(monkeypatch, provider)
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
+
+    result = await local_run.arun(
+        "summarize x", model=TARGET_MODEL.id, measured_energy_wh=7.5
+    )
+
+    assert result.receipt.energy_wh == pytest.approx(7.5)
+    assert result.receipt.raw["energy_source"] == "measured"
+    expected_accounting = energy_accounting(
+        TARGET_MODEL, 10, 5, 0, 0, catalog=catalog, measured_energy_wh=7.5
+    )
+    assert result.receipt.co2e_g == expected_accounting["co2e_g"]
+
+
+async def test_arun_negative_measured_energy_wh_raises_value_error(tmp_path, monkeypatch):
+    provider = StubProvider(turns=[ScriptedTurn(text_chunks=("Done.",))])
+    _wire(monkeypatch, provider)
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
+
+    with pytest.raises(ValueError, match="measured_energy_wh"):
+        await local_run.arun("summarize x", model=TARGET_MODEL.id, measured_energy_wh=-1.0)
+
+    assert not provider.stream_calls  # rejected before ever calling the model
+
+
+def test_cli_measured_wh_flag_is_recorded_as_measured(tmp_path, monkeypatch, capsys):
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
+    provider = StubProvider(turns=[ScriptedTurn(text_chunks=("metered answer",))])
+    _wire(monkeypatch, provider)
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tret", "run", "summarize this",
+            "--model", TARGET_MODEL.id,
+            "--measured-wh", "5.0",
+            "--json", "--quiet",
+        ],
+    )
+    cli_module.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["receipt"]["energy_wh"] == pytest.approx(5.0)
+    assert payload["receipt"]["raw"]["energy_source"] == "measured"
+
+
+def test_cli_negative_measured_wh_rejected_at_argparse(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "sys.argv", ["tret", "run", "task", "--measured-wh", "-1"]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli_module.main()
+    assert exc.value.code == 2
+    err = capsys.readouterr().err.lower()
+    assert "measured-wh" in err or ">= 0" in err
