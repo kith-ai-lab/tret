@@ -243,6 +243,15 @@ class Harness(Base):
         default=lambda: {"max_iterations": 24, "max_output_tokens": 8192, "temperature": 0.2},
     )
     is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Set once — the moment `services.workspace._seed_chat_harness` first
+    # links any pack to this harness (on creation, or on a one-time
+    # backfill) — and never touched again after that. Its presence, not the
+    # harness's current link count, is what tells the seed "the default has
+    # already been applied here": a NULL means it never has (backfill it),
+    # a set value means an operator's own link state — including a
+    # deliberate unlink-all — must be left alone. Only meaningful for a
+    # `task_profile == "chat"` harness; NULL forever on every other one.
+    packs_linked_at: Mapped[datetime | None] = mapped_column()
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = created_at_col()
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)

@@ -288,12 +288,19 @@ async def delete_pack(
     (`PUT /api/harnesses/{id}` with `is_archived: true`) and then deletes the
     pack — the harness's own doctrine/task-type dependency on the pack is
     gone the moment it is archived (it can never run again), so there is
-    nothing left for the delete to protect. A harness's packs are `harness_packs`
-    link rows, not a column on `Harness` (one harness may link several packs),
-    so archived harnesses still linked to this pack have those link rows
-    deleted below rather than left dangling on a `pack_id` that is about to
-    not exist — left as a real FK, deleting the pack out from under one would
-    be an integrity violation, not merely a semantic concern.
+    nothing left for the delete to protect. Nor does the chat front door
+    (`Harness.task_profile == "chat"`): it links every installed pack by
+    default (`services.workspace._seed_chat_harness`), and that default link
+    is advisory, not load-bearing — the chat harness never fails to run for
+    lacking a pack (`api/chat.py::send_message` falls back to `pack_id=None`),
+    so treating it as a blocker would make a pack it happened to auto-link
+    permanently undeletable. A harness's packs are `harness_packs` link rows,
+    not a column on `Harness` (one harness may link several packs), so
+    archived harnesses (and the chat harness) still linked to this pack have
+    those link rows deleted below rather than left dangling on a `pack_id`
+    that is about to not exist — left as a real FK, deleting the pack out
+    from under one would be an integrity violation, not merely a semantic
+    concern.
 
     Pack-seeded datasets are deliberately left in place (ship minimal
     uninstall; the plan's own resolved judgment call) — deleting the pack
@@ -323,12 +330,17 @@ async def delete_pack(
     ):
         if model is Harness:
             # A harness references a pack via `harness_packs`, not a column
-            # on Harness itself. Archived harnesses don't count — see this
+            # on Harness itself. Archived harnesses don't count, and neither
+            # does the chat front door's own default link — see this
             # endpoint's docstring.
             query = (
                 select(Harness)
                 .join(HarnessPack, HarnessPack.harness_id == Harness.id)
-                .where(HarnessPack.pack_id == pack_id, Harness.is_archived.is_(False))
+                .where(
+                    HarnessPack.pack_id == pack_id,
+                    Harness.is_archived.is_(False),
+                    Harness.task_profile != "chat",
+                )
             )
         else:
             query = select(model).where(model.pack_id == pack_id)
@@ -347,9 +359,10 @@ async def delete_pack(
             )
 
     await db.execute(update(Dataset).where(Dataset.pack_id == pack_id).values(pack_id=None))
-    # Only archived harnesses can still be linked to this pack at this point
-    # (an active one would have 409'd above) — delete their `harness_packs`
-    # rows explicitly, for the same FK reason Dataset is severed just above.
+    # Only archived harnesses and/or the chat harness can still be linked to
+    # this pack at this point (any other active harness would have 409'd
+    # above) — delete their `harness_packs` rows explicitly, for the same FK
+    # reason Dataset is severed just above.
     # Explicit delete rather than an ON DELETE CASCADE on
     # `harness_packs.pack_id` (see `HarnessPack`'s docstring), so this is the
     # one place orphaned links are prevented rather than relying on the DB to

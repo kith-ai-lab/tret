@@ -28,7 +28,13 @@ from sqlalchemy.pool import StaticPool
 from tests.evals.golden_world import install_sqlite_type_shims
 from tret.api import auth
 from tret.api import chat as chat_api
-from tret.api.chat import SendMessageBody, _assistant_message, _run_task_input, _validate_objective
+from tret.api.chat import (
+    SendMessageBody,
+    _assistant_message,
+    _capability_catalog,
+    _run_task_input,
+    _validate_objective,
+)
 from tret.db.engine import get_db
 from tret.db.models import (
     Base,
@@ -313,14 +319,19 @@ def make_member(user: User, workspace: Workspace, *, role: str) -> WorkspaceMemb
     return WorkspaceMember(user_id=user.id, workspace_id=workspace.id, role=role)
 
 
-def make_pack(workspace: Workspace, *, slug: str) -> Pack:
+def make_pack(workspace: Workspace, *, slug: str, task_types: list[dict] | None = None) -> Pack:
     return Pack(
         id=uuid.uuid4(),
         workspace_id=workspace.id,
         slug=slug,
         version="1.0.0",
         doctrine_sha="deadbeef",
-        manifest={"pack": slug, "version": "1.0.0", "display_name": slug.title(), "task_types": []},
+        manifest={
+            "pack": slug,
+            "version": "1.0.0",
+            "display_name": slug.title(),
+            "task_types": task_types or [],
+        },
         source_path=f"/tmp/{slug}",
     )
 
@@ -375,7 +386,9 @@ async def test_a_chat_turn_on_a_pack_linked_harness_resolves_to_the_primary_pack
 async def test_a_chat_turn_on_the_default_pack_less_harness_leaves_pack_id_none(
     client, seed, session_factory
 ):
-    """The seeded, pack-less Chat Assistant must resolve to `pack_id=None`,
+    """A chat harness with no linked packs — built directly here rather than
+    through workspace seeding, which by default links every installed pack
+    (see test_workspace_service.py) — must resolve to `pack_id=None`,
     byte-identical to before a harness could link any pack at all."""
     team = make_workspace("Co")
     project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
@@ -447,3 +460,83 @@ async def test_an_archived_harness_id_falls_back_to_the_default_chat_harness(
     created = await client.post("/api/chat", json={"harness_id": str(archived_id)})
     assert created.status_code == 200, created.text
     assert created.json()["harness_id"] == str(default_id)
+
+
+# ── _capability_catalog excludes the chat front door as a delegation target ──
+
+
+async def test_capability_catalog_lists_a_task_type_only_under_its_specialist_harness(
+    session_factory, seed
+):
+    """A pack linked to both the seeded Chat Assistant (every pack, by
+    default — see test_workspace_service.py) and a specialist harness must
+    show up in the catalog only under the specialist — never also as
+    `[harness: Chat Assistant]`, which would advertise chat itself as a
+    delegation target `run_harness_task` refuses to honor."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    pack = make_pack(
+        team,
+        slug="climate-risk",
+        task_types=[{"slug": "assess_risk", "display_name": "Assess Risk"}],
+    )
+    await seed(team, project, pack)
+
+    async with session_factory() as db:
+        chat_harness = Harness(
+            workspace_id=team.id,
+            name="Chat Assistant",
+            task_profile="chat",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+        )
+        specialist = Harness(
+            workspace_id=team.id,
+            name="Climate Analyst",
+            task_profile="assess_risk",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+        )
+        db.add_all([chat_harness, specialist])
+        await db.flush()
+        await set_harness_packs(db, chat_harness, [pack.id])
+        await set_harness_packs(db, specialist, [pack.id])
+        await db.commit()
+
+    async with session_factory() as db:
+        catalog = await _capability_catalog(db, team.id, project.id)
+
+    assert "[harness: Climate Analyst]" in catalog
+    assert "[harness: Chat Assistant]" not in catalog
+
+
+async def test_capability_catalog_with_only_a_chat_harness_reports_no_specialist_tasks(
+    session_factory, seed
+):
+    """A workspace whose only harness is the chat front door reports no
+    delegatable task types, even though the chat harness itself is linked to
+    a pack that declares one."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    pack = make_pack(
+        team, slug="climate-risk", task_types=[{"slug": "assess_risk", "display_name": "Assess Risk"}]
+    )
+    await seed(team, project, pack)
+
+    async with session_factory() as db:
+        chat_harness = Harness(
+            workspace_id=team.id,
+            name="Chat Assistant",
+            task_profile="chat",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+        )
+        db.add(chat_harness)
+        await db.flush()
+        await set_harness_packs(db, chat_harness, [pack.id])
+        await db.commit()
+
+    async with session_factory() as db:
+        catalog = await _capability_catalog(db, team.id, project.id)
+
+    assert "(no specialist tasks installed)" in catalog

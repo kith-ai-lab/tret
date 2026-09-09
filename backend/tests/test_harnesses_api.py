@@ -22,7 +22,7 @@ from tests.evals.golden_world import install_sqlite_type_shims
 from tret.api import auth
 from tret.api import harnesses as harnesses_api
 from tret.db.engine import get_db
-from tret.db.models import Base, Pack, Project, User, Workspace, WorkspaceMember
+from tret.db.models import Base, Harness, Pack, Project, User, Workspace, WorkspaceMember
 
 HASHER = PasswordHasher()
 PASSWORD = "correct-horse-battery-1"
@@ -420,3 +420,112 @@ async def test_analyst_can_still_list_and_get_harnesses(client, seed):
 
     detail = await client.get(f"/api/harnesses/{harness_id}")
     assert detail.status_code == 200
+
+
+# ── task_profile 'chat' is reserved for the seeded chat front door ──────────
+
+
+async def test_create_harness_with_task_profile_chat_is_422(client, seed):
+    """`task_profile: 'chat'` is only ever valid on the seeded Chat
+    Assistant — a hand-authored harness naming it must 422, closing the gap
+    `packs.loader.validate_pack` leaves open (that guard only covers pack
+    presets, not this endpoint)."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+    await login(client, admin.email)
+
+    response = await client.post(
+        "/api/harnesses",
+        json={"name": "Second Chat Front Door", "task_profile": "chat", "tool_names": []},
+    )
+    assert response.status_code == 422, response.text
+
+
+async def test_update_harness_cannot_promote_another_harness_to_chat(client, seed):
+    """The reverse of the guard below: PUTting an ordinary harness with
+    `task_profile: 'chat'` would create a second chat front door, so it 422s."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+    await login(client, admin.email)
+
+    created = await client.post(
+        "/api/harnesses", json={"name": "Plain", "task_profile": "freeform", "tool_names": []}
+    )
+    assert created.status_code == 200, created.text
+    response = await client.put(
+        f"/api/harnesses/{created.json()['id']}",
+        json={"name": "Plain", "task_profile": "chat", "tool_names": []},
+    )
+    assert response.status_code == 422, response.text
+
+
+async def test_update_harness_cannot_change_the_chat_harness_task_profile(client, seed, session_factory):
+    """The seeded Chat Assistant's `task_profile` cannot be edited away from
+    "chat" — that is what makes it the chat front door
+    (`packs.links.chat_harness_for_workspace`)."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+
+    async with session_factory() as db:
+        chat_harness = Harness(
+            workspace_id=team.id,
+            name="Chat Assistant",
+            task_profile="chat",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+        )
+        db.add(chat_harness)
+        await db.commit()
+        chat_harness_id = chat_harness.id
+
+    await login(client, admin.email)
+    response = await client.put(
+        f"/api/harnesses/{chat_harness_id}",
+        json={"name": "Chat Assistant", "task_profile": "freeform", "tool_names": []},
+    )
+    assert response.status_code == 422, response.text
+
+
+async def test_update_harness_keeping_chat_task_profile_can_still_change_pack_ids(
+    client, seed, session_factory
+):
+    """The 422 above only blocks changing *away* from "chat" — editing the
+    chat harness's linked packs while keeping `task_profile: "chat"` must
+    still work, otherwise the harness editor could never manage its packs at
+    all."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    pack = make_pack(team, slug="pack-a")
+    await seed(team, project, admin, make_member(admin, team, role="admin"), pack)
+
+    async with session_factory() as db:
+        chat_harness = Harness(
+            workspace_id=team.id,
+            name="Chat Assistant",
+            task_profile="chat",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+        )
+        db.add(chat_harness)
+        await db.commit()
+        chat_harness_id = chat_harness.id
+
+    await login(client, admin.email)
+    response = await client.put(
+        f"/api/harnesses/{chat_harness_id}",
+        json={
+            "name": "Chat Assistant",
+            "task_profile": "chat",
+            "pack_ids": [str(pack.id)],
+            "tool_names": [],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["pack_ids"] == [str(pack.id)]

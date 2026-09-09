@@ -1410,10 +1410,23 @@ async def run_harness_task(
     harnesses = (
         (
             await ctx.db.execute(
-                select(Harness).where(
+                select(Harness)
+                .where(
                     Harness.is_archived.is_(False),
                     Harness.workspace_id == workspace_id,
+                    # The chat front door links every installed pack by
+                    # default (services.workspace._seed_chat_harness) but is
+                    # not a valid delegation target — its model policy and
+                    # loop limits are tuned for a conversational turn, not a
+                    # specialist task, and `run_harness_task` above already
+                    # refuses task_type "chat" outright. Excluded here so a
+                    # delegation can never silently land on it.
+                    Harness.task_profile != "chat",
                 )
+                # Deterministic candidate order (earliest-created first) so a
+                # tie between two harnesses declaring the same task_type
+                # always resolves the same way, run to run.
+                .order_by(Harness.created_at)
             )
         )
         .scalars()

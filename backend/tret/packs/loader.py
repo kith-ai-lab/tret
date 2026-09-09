@@ -233,7 +233,12 @@ async def install_pack(
     from sqlalchemy import select
 
     from tret.db.models import Dataset, DatasetRow, Harness, Pack
-    from tret.packs.links import packs_for_harness, set_harness_packs
+    from tret.packs.links import (
+        chat_harness_for_workspace,
+        link_pack_to_harness,
+        packs_for_harness,
+        set_harness_packs,
+    )
 
     pack_dir = pack_dir.resolve()
     manifest, schemas, errors = validate_pack(pack_dir)
@@ -284,6 +289,7 @@ async def install_pack(
             source_path=str(pack_dir),
         )
         db.add(pack)
+    is_new_pack = existing is None
     await db.flush()
 
     for ds_spec in manifest.datasets:
@@ -383,6 +389,24 @@ async def install_pack(
         db.add(preset_harness)
         await db.flush()  # populate preset_harness.id for the link below
         await set_harness_packs(db, preset_harness, [pack.id])
+
+    # Link a newly created pack to the workspace's Chat Assistant so a fresh
+    # install is immediately usable from chat, not just from its own preset
+    # harness(es) above. Deliberately gated on `is_new_pack` (the `else`
+    # branch above, a genuinely new `(workspace, slug, version)` row) rather
+    # than run unconditionally: `_install_configured_packs` re-runs
+    # `install_pack` over every pack on every self-host boot, and a plain
+    # re-install of the same version hits the `existing`-refresh branch
+    # instead — re-linking on *that* path would silently undo an operator
+    # who had deliberately unlinked this pack from Chat Assistant since the
+    # first install. A version bump (same slug, new version) is still a new
+    # Pack row, so it does link here — and, via `link_pack_to_harness`'s
+    # same-slug rule, replaces the prior version's link in place rather than
+    # appending a second entry for the same pack.
+    if is_new_pack:
+        chat_harness = await chat_harness_for_workspace(db, workspace_id)
+        if chat_harness is not None:
+            await link_pack_to_harness(db, chat_harness, pack)
 
     await db.commit()
     return pack

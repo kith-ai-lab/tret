@@ -875,6 +875,55 @@ async def test_delete_succeeds_once_the_referencing_harness_is_archived(
     assert links == []  # severed, not left pointing at a deleted row
 
 
+async def test_delete_succeeds_for_a_pack_only_referenced_by_the_chat_harnesss_default_link(
+    client, seed, storage, session_factory
+):
+    """F1: a preset-less pack installed into a workspace that already has a
+    chat harness gets auto-linked to it by default
+    (`packs.loader.install_pack`) — that link must never block an uninstall
+    the way an active, hand-linked harness's would. The pack has no preset
+    harness of its own here, so the chat harness's default link is the only
+    reference to it."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+
+    chat_harness_id = uuid.uuid4()
+    async with session_factory() as db:
+        chat_harness = Harness(
+            id=chat_harness_id,
+            workspace_id=team.id,
+            name="Chat Assistant",
+            task_profile="chat",
+            model_policy={"mode": "auto"},
+            tool_names=[],
+        )
+        db.add(chat_harness)
+        await db.commit()
+
+    await login(client, admin.email)
+    pack = await _install_via_archive(client)  # a minimal, preset-less pack
+    pack_id = uuid.UUID(pack["id"])
+
+    async with session_factory() as db:
+        links = (
+            await db.execute(select(HarnessPack).where(HarnessPack.pack_id == pack_id))
+        ).scalars().all()
+    assert [link.harness_id for link in links] == [chat_harness_id]  # auto-linked, as expected
+
+    response = await client.delete(f"/api/packs/{pack_id}")
+    assert response.status_code == 200, response.text
+
+    async with session_factory() as db:
+        chat_harness = await db.get(Harness, chat_harness_id)
+        assert chat_harness is not None  # the chat harness itself survives
+        links = (
+            await db.execute(select(HarnessPack).where(HarnessPack.pack_id == pack_id))
+        ).scalars().all()
+    assert links == []  # the default link is gone, not left dangling
+
+
 async def test_delete_409s_message_names_archiving_when_an_active_harness_references_the_pack(
     client, seed, storage, session_factory
 ):

@@ -232,18 +232,31 @@ function HarnessEditor({
   // Task types offered on "Task profile" are the union across every linked
   // pack, deduped by slug — if two packs declare the same slug, save will
   // 422 and surface the server's own message rather than this list silently
-  // picking one.
+  // picking one. The seeded Chat Assistant's profile is fixed at "chat" (the
+  // server 422s any attempt to change it) — listed first, ahead of
+  // "freeform", only on that one harness, so its own select still shows a
+  // sensible current value while disabled below.
+  const isChatHarness = form.task_profile === 'chat'
   const taskProfiles = [
+    ...(isChatHarness ? ['chat'] : []),
     'freeform',
     ...new Set(linkedPacks.flatMap((p) => p.task_types.map((t) => t.slug))),
   ]
 
   const addPack = (id: string) => {
     if (!id || form.pack_ids.includes(id)) return
-    setForm((f) => ({ ...f, pack_ids: [...f.pack_ids, id], task_profile: 'freeform' }))
+    setForm((f) => ({
+      ...f,
+      pack_ids: [...f.pack_ids, id],
+      task_profile: f.task_profile === 'chat' ? 'chat' : 'freeform',
+    }))
   }
   const removePack = (id: string) => {
-    setForm((f) => ({ ...f, pack_ids: f.pack_ids.filter((pid) => pid !== id), task_profile: 'freeform' }))
+    setForm((f) => ({
+      ...f,
+      pack_ids: f.pack_ids.filter((pid) => pid !== id),
+      task_profile: f.task_profile === 'chat' ? 'chat' : 'freeform',
+    }))
   }
 
   const costTier = form.model_policy.max_cost_tier ?? DEFAULT_MAX_COST_TIER
@@ -391,6 +404,7 @@ function HarnessEditor({
           <label className="mono-label">Task profile</label>
           <select
             value={form.task_profile}
+            disabled={isChatHarness}
             onChange={(e) => setForm((f) => ({ ...f, task_profile: e.target.value }))}
           >
             {taskProfiles.map((slug) => (
@@ -399,6 +413,9 @@ function HarnessEditor({
               </option>
             ))}
           </select>
+          {isChatHarness && (
+            <div style={{ ...HINT, marginTop: 6 }}>Chat front door — profile is fixed</div>
+          )}
         </div>
       </div>
 

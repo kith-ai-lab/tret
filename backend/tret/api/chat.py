@@ -48,12 +48,23 @@ def _conversation_out(c: Conversation, full: bool = False) -> dict:
 
 async def _capability_catalog(db: AsyncSession, workspace_id, project_id) -> str:
     """Snapshot of this workspace's installed pack task types, persisted with
-    each chat run."""
+    each chat run.
+
+    Excludes chat-front-door harnesses (`task_profile == "chat"`): the chat
+    harness now links every installed pack by default
+    (`services.workspace._seed_chat_harness`), so without this filter every
+    specialist task type would also be listed as reachable `[harness: Chat
+    Assistant]` — a delegation target that both duplicates the real
+    specialist harness's entry and is wrong besides (`run_harness_task`
+    itself refuses `task_type in ("chat", "freeform")`, and a chat harness is
+    not a valid delegation target — see `engine/tools.py`)."""
     harnesses = (
         (
             await db.execute(
                 select(Harness).where(
-                    Harness.workspace_id == workspace_id, Harness.is_archived.is_(False)
+                    Harness.workspace_id == workspace_id,
+                    Harness.is_archived.is_(False),
+                    Harness.task_profile != "chat",
                 )
             )
         )
@@ -220,11 +231,13 @@ async def create_conversation(
         harness = (
             (
                 await db.execute(
-                    select(Harness).where(
+                    select(Harness)
+                    .where(
                         Harness.workspace_id == ctx.id,
                         Harness.task_profile == "chat",
                         Harness.is_archived.is_(False),
                     )
+                    .order_by(Harness.created_at)
                 )
             )
             .scalars()
@@ -280,8 +293,11 @@ async def send_message(
     ]
 
     # A pack-linked harness's primary pack loads its doctrine into this chat
-    # turn — deliberate: the seeded, pack-less Chat Assistant still resolves
-    # to None here, byte-identical to before this harness could carry a pack.
+    # turn — deliberate: the seeded Chat Assistant is linked to every
+    # installed pack by default (`services.workspace._seed_chat_harness`), so
+    # a workspace with packs resolves its primary pack here, while a
+    # workspace with no packs installed still resolves to None, byte-identical
+    # to before this harness could carry a pack.
     harness = await db.get(Harness, conv.harness_id)
     pack = resolve_pack_for_task(await packs_for_harness(db, harness), "chat") if harness else None
 

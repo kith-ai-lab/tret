@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import select
@@ -33,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.config import get_settings
 from tret.db.models import Harness, Project, User, Workspace, WorkspaceMember
 from tret.engine.extensions import GateResult, get_extension_registry
+from tret.packs.links import link_all_workspace_packs
 from tret.packs.loader import PackValidationError, install_pack
 
 log = logging.getLogger("tret.workspace")
@@ -205,12 +207,37 @@ async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) 
 
 
 async def _seed_chat_harness(db: AsyncSession, workspace_id) -> None:
-    """The conversational front door. Every workspace gets exactly one."""
+    """The conversational front door. Every workspace gets exactly one, and
+    by default it is linked to every pack installed in its workspace (see
+    `tret.packs.links.link_all_workspace_packs`) rather than shipping
+    pack-less — so a workspace that has packs gets a Chat Assistant that can
+    already resolve a primary pack (`api/chat.py::send_message`), with no
+    separate step required to link one by hand. A workspace with no packs
+    installed still ends up with none linked.
+
+    When several packs end up linked, only the *primary* one (position 0 —
+    the earliest-installed pack; see `link_all_workspace_packs`'s own
+    docstring, which for a fresh boot means `TRET_PACKS_DIR`'s directory sort
+    order) has its doctrine loaded into a chat turn, via
+    `resolve_pack_for_task` (`api/chat.py::send_message`). The other links
+    still matter — they are what makes those packs' task types and methods
+    show up in the chat harness's capability catalog / `run_method` surface
+    — just not for doctrine.
+
+    `Harness.packs_linked_at` is the one-time marker that makes the default
+    link a *default*, not a standing rule the seed keeps re-imposing: it is
+    set the moment this function links anything (on first creation, or on
+    the backfill below), and from then on an operator's own edits — including
+    unlinking everything — are left alone no matter how many more times
+    seeding runs. Without it, "linked to zero packs" would be indistinguishable
+    from "never linked", and a deliberate unlink-all would silently come back
+    at the next boot.
+    """
     chat_harness = (
         await db.execute(
-            select(Harness).where(
-                Harness.workspace_id == workspace_id, Harness.task_profile == "chat"
-            )
+            select(Harness)
+            .where(Harness.workspace_id == workspace_id, Harness.task_profile == "chat")
+            .order_by(Harness.created_at)
         )
     ).scalars().first()
     # Tools added to the seed after a workspace's chat harness already exists
@@ -227,30 +254,42 @@ async def _seed_chat_harness(db: AsyncSession, workspace_id) -> None:
         ]
         if missing_connector_tools:
             chat_harness.tool_names = [*chat_harness.tool_names, *missing_connector_tools]
+        # Pack-link backfill: only for a chat harness that has never been
+        # defaulted before (`packs_linked_at is None`) — e.g. one seeded by
+        # an older boot, before this default existed. An operator's own
+        # choice, once made (including unlinking everything), is marked by
+        # `packs_linked_at` being set and is never touched again — link
+        # *count* is deliberately not consulted here (a curated list can be
+        # legitimately empty).
+        if chat_harness.packs_linked_at is None and not chat_harness.is_archived:
+            await link_all_workspace_packs(db, chat_harness)
+            chat_harness.packs_linked_at = datetime.now(timezone.utc)
         return
-    db.add(
-        Harness(
-            workspace_id=workspace_id,
-            name="Chat Assistant",
-            description="Conversational front door: answers directly from documents and "
-            "datasets, and delegates structured work to specialist harnesses.",
-            task_profile="chat",
-            model_policy={"mode": "auto", "max_cost_tier": "standard"},
-            tool_names=[
-                "run_harness_task",
-                "run_method",
-                "read_document",
-                "search_documents",
-                "list_connected_sources",
-                "search_connected_files",
-                "read_connected_file",
-                "lookup_dataset",
-                "list_prior_findings",
-                "file_data_request",
-            ],
-            loop_config={"max_iterations": 16, "max_output_tokens": 4096, "temperature": 0.3},
-        )
+    new_chat_harness = Harness(
+        workspace_id=workspace_id,
+        name="Chat Assistant",
+        description="Conversational front door: answers directly from documents and "
+        "datasets, and delegates structured work to specialist harnesses.",
+        task_profile="chat",
+        model_policy={"mode": "auto", "max_cost_tier": "standard"},
+        tool_names=[
+            "run_harness_task",
+            "run_method",
+            "read_document",
+            "search_documents",
+            "list_connected_sources",
+            "search_connected_files",
+            "read_connected_file",
+            "lookup_dataset",
+            "list_prior_findings",
+            "file_data_request",
+        ],
+        loop_config={"max_iterations": 16, "max_output_tokens": 4096, "temperature": 0.3},
     )
+    db.add(new_chat_harness)
+    await db.flush()  # populate new_chat_harness.id for the pack links below
+    await link_all_workspace_packs(db, new_chat_harness)
+    new_chat_harness.packs_linked_at = datetime.now(timezone.utc)
 
 
 async def _seed_default_harnesses(db: AsyncSession, workspace_id) -> None:

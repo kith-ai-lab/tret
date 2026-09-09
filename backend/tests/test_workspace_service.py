@@ -13,6 +13,7 @@ failure) are exactly the kind a hand-rolled fake session gets subtly wrong.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -24,8 +25,9 @@ from sqlalchemy.pool import StaticPool
 from tests.evals.golden_world import install_sqlite_type_shims
 from tret.config import get_settings
 from tret.db.models import Base, Harness, Pack, User, Workspace, WorkspaceMember
+from tret.packs.links import packs_for_harness, set_harness_packs
 from tret.services import workspace as workspace_module
-from tret.services.workspace import create_workspace
+from tret.services.workspace import create_workspace, seed_workspace_content
 
 PACKS_DIR = Path(__file__).resolve().parents[2] / "packs"
 CLIMATE_PACK = PACKS_DIR / "climate-risk"
@@ -85,6 +87,32 @@ async def _harness_names(db, workspace_id) -> set[str]:
         await db.execute(select(Harness).where(Harness.workspace_id == workspace_id))
     ).scalars().all()
     return {h.name for h in rows}
+
+
+async def _chat_harness(db, workspace_id) -> Harness:
+    return (
+        await db.execute(
+            select(Harness).where(
+                Harness.workspace_id == workspace_id, Harness.task_profile == "chat"
+            )
+        )
+    ).scalars().first()
+
+
+def make_pack(workspace_id, *, slug: str) -> Pack:
+    """A bare Pack row, not routed through `install_pack` — enough to
+    exercise `_seed_chat_harness`'s own pack-linking logic, which only reads
+    the `packs` table, without needing a real pack directory on disk. Empty
+    `task_types` so linking never trips `task_slug_collision`."""
+    return Pack(
+        id=uuid.uuid4(),
+        workspace_id=workspace_id,
+        slug=slug,
+        version="1.0.0",
+        doctrine_sha="deadbeef",
+        manifest={"pack": slug, "version": "1.0.0", "display_name": slug.title(), "task_types": []},
+        source_path=f"/tmp/{slug}",
+    )
 
 
 # ── pack installation follows TRET_SEED_DEFAULT_PACKS, not TRET_MULTI_TENANT ──
@@ -331,3 +359,138 @@ async def test_a_harness_seeding_failure_rolls_back_the_whole_creation_when_pack
 
         memberships = (await fresh.execute(select(WorkspaceMember))).scalars().all()
         assert memberships == []
+
+
+# ── the seeded Chat Assistant is linked to every installed pack by default ──
+async def test_fresh_workspace_chat_assistant_is_linked_to_every_installed_pack(db):
+    """The finding this section pins: the seeded Chat Assistant used to ship
+    pack-less. On a brand-new workspace, `_install_configured_packs` runs
+    before `_seed_chat_harness` (see `seed_workspace_content`), so by the
+    time the Chat Assistant is created, the workspace's pack(s) already
+    exist — it must come out linked to all of them, not empty."""
+    owner = make_user("packed@example.com")
+    db.add(owner)
+    await db.flush()
+
+    workspace = await create_workspace(db, "Acme", kind="team", owner=owner)
+
+    pack = await _pack(db, workspace.id)
+    assert pack is not None
+    chat_harness = await _chat_harness(db, workspace.id)
+    linked = await packs_for_harness(db, chat_harness)
+    assert [p.id for p in linked] == [pack.id]
+
+
+async def test_workspace_with_seed_default_packs_off_has_no_chat_links(db, monkeypatch):
+    """The flip side: with `TRET_SEED_DEFAULT_PACKS` off, no pack ever exists
+    in the workspace, so the Chat Assistant has nothing to link — it stays
+    exactly as pack-less as it always was."""
+    monkeypatch.setenv("TRET_SEED_DEFAULT_PACKS", "false")
+    get_settings.cache_clear()
+
+    owner = make_user("unpacked@example.com")
+    db.add(owner)
+    await db.flush()
+
+    workspace = await create_workspace(db, "Acme", kind="team", owner=owner)
+
+    chat_harness = await _chat_harness(db, workspace.id)
+    assert await packs_for_harness(db, chat_harness) == []
+
+
+async def test_rerunning_seeding_links_packs_into_an_existing_zero_link_chat_harness(
+    db, monkeypatch
+):
+    """A chat harness that already exists but has never been linked to
+    anything (e.g. seeded by an older boot, before this default existed) gets
+    backfilled the next time `seed_workspace_content` runs — same as the
+    tool-name backfill right above it in `_seed_chat_harness`."""
+    monkeypatch.setenv("TRET_SEED_DEFAULT_PACKS", "false")
+    get_settings.cache_clear()
+
+    workspace = Workspace(id=uuid.uuid4(), name="Acme", kind="team")
+    db.add(workspace)
+    await db.flush()
+    pack_a = make_pack(workspace.id, slug="pack-a")
+    pack_b = make_pack(workspace.id, slug="pack-b")
+    db.add_all([pack_a, pack_b])
+    chat_harness = Harness(
+        workspace_id=workspace.id,
+        name="Chat Assistant",
+        task_profile="chat",
+        model_policy={"mode": "auto"},
+        tool_names=[],
+    )
+    db.add(chat_harness)
+    await db.flush()
+    assert await packs_for_harness(db, chat_harness) == []
+
+    await seed_workspace_content(db, workspace.id, uuid.uuid4())
+
+    linked_ids = {p.id for p in await packs_for_harness(db, chat_harness)}
+    assert linked_ids == {pack_a.id, pack_b.id}
+
+
+async def test_rerunning_seeding_preserves_a_curated_partial_link_list(db, monkeypatch):
+    """The other side of the backfill rule: a chat harness whose default has
+    already been applied (`packs_linked_at` set — "already defaulted", per
+    the marker's own semantics) is left exactly as an operator set it — even
+    when a second pack exists in the workspace that isn't linked. Re-running
+    seeding must never silently add to a list someone has curated."""
+    monkeypatch.setenv("TRET_SEED_DEFAULT_PACKS", "false")
+    get_settings.cache_clear()
+
+    workspace = Workspace(id=uuid.uuid4(), name="Acme", kind="team")
+    db.add(workspace)
+    await db.flush()
+    pack_a = make_pack(workspace.id, slug="pack-a")
+    pack_b = make_pack(workspace.id, slug="pack-b")
+    db.add_all([pack_a, pack_b])
+    chat_harness = Harness(
+        workspace_id=workspace.id,
+        name="Chat Assistant",
+        task_profile="chat",
+        model_policy={"mode": "auto"},
+        tool_names=[],
+        packs_linked_at=datetime.now(timezone.utc),
+    )
+    db.add(chat_harness)
+    await db.flush()
+    await set_harness_packs(db, chat_harness, [pack_a.id])
+    await db.flush()
+
+    await seed_workspace_content(db, workspace.id, uuid.uuid4())
+
+    linked = await packs_for_harness(db, chat_harness)
+    assert [p.id for p in linked] == [pack_a.id]
+
+
+async def test_rerunning_seeding_after_a_deliberate_unlink_all_stays_empty(db, monkeypatch):
+    """The finding F3 pins: unlinking everything from the chat harness must
+    survive a reboot. A harness whose default was already applied
+    (`packs_linked_at` set) and now has zero links — an operator's own
+    "unlink all" — must come back from `seed_workspace_content` still
+    linked to nothing, not re-defaulted."""
+    monkeypatch.setenv("TRET_SEED_DEFAULT_PACKS", "false")
+    get_settings.cache_clear()
+
+    workspace = Workspace(id=uuid.uuid4(), name="Acme", kind="team")
+    db.add(workspace)
+    await db.flush()
+    pack = make_pack(workspace.id, slug="pack-a")
+    db.add(pack)
+    chat_harness = Harness(
+        workspace_id=workspace.id,
+        name="Chat Assistant",
+        task_profile="chat",
+        model_policy={"mode": "auto"},
+        tool_names=[],
+        packs_linked_at=datetime.now(timezone.utc),
+    )
+    db.add(chat_harness)
+    await db.flush()
+    assert await packs_for_harness(db, chat_harness) == []  # already unlinked, marker already set
+
+    await seed_workspace_content(db, workspace.id, uuid.uuid4())
+
+    assert await packs_for_harness(db, chat_harness) == []

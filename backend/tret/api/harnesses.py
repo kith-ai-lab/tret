@@ -260,6 +260,12 @@ async def create_harness(
     ctx: WorkspaceContext = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
+    if body.task_profile == "chat":
+        raise HTTPException(
+            422,
+            "task_profile 'chat' is reserved for the chat front door, which is seeded per "
+            "workspace and cannot be created by hand.",
+        )
     _validate_policy(body.model_policy)
     _validate_tool_names(body.tool_names)
     pack_ids = await _resolve_pack_ids(db, ctx, body)
@@ -300,6 +306,21 @@ async def update_harness(
     h = await db.get(Harness, harness_id)
     if h is None or h.workspace_id != ctx.id:
         raise HTTPException(404, "Harness not found")
+    if h.task_profile == "chat" and body.task_profile != "chat":
+        raise HTTPException(
+            422,
+            "The seeded Chat Assistant's task profile cannot be changed; it is what makes it "
+            "the chat front door.",
+        )
+    if h.task_profile != "chat" and body.task_profile == "chat":
+        # The reverse direction: promoting any other harness to "chat" would
+        # create a second chat front door, and the seeded one is what
+        # `chat_harness_for_workspace` / `create_conversation` resolve.
+        raise HTTPException(
+            422,
+            "The chat front door is seeded once per workspace; another harness cannot be "
+            "switched to task_profile 'chat'.",
+        )
     _validate_policy(body.model_policy)
     _validate_tool_names(body.tool_names)
     pack_ids = await _resolve_pack_ids(db, ctx, body)
