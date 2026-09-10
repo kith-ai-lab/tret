@@ -644,3 +644,111 @@ async def test_cancelling_a_run_that_fails_before_start_still_clears_cancelled(w
     assert provider.calls == []  # refused before the first token, as ever
 
     assert engine._cancelled == set()
+
+
+# ── (g) document_ids: every document a run touches, not just what it started
+# with ───────────────────────────────────────────────────────────────────────
+async def test_a_document_materialised_mid_run_lands_on_the_persisted_run(
+    world, tmp_path, monkeypatch
+):
+    """`ctx.document_ids` grows as tools pull new documents in mid-run
+    (`read_connected_file`, `fetch_url`'s `store_snapshot`) but nothing ever
+    wrote that back onto `run.document_ids` itself — `GET /api/runs/{id}`
+    kept reporting only the run's initial attachments, silently dropping
+    every document a tool materialised along the way. Drives
+    `read_connected_file` through the real engine (real OAuth refresh, real
+    Graph calls, respx-mocked) and checks the document it pulls in lands in
+    the *persisted* run's `document_ids`, not just `ctx`'s in-memory copy.
+    """
+    import httpx
+    import respx
+
+    from tret.config import get_settings
+    from tret.db.models import Document, WorkspaceConnection
+    from tret.engine import extensions as extensions_module
+    from tret.net import guard as net_guard
+    from tret.services.connections import GRAPH_API_BASE
+    from tret.services.credentials import get_fernet
+
+    graph = GRAPH_API_BASE
+    token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+
+    extensions_module._registry = None  # a stray registered gate must not leak in from another test
+    monkeypatch.setenv("TRET_M365_CLIENT_ID", "m365-cid")
+    monkeypatch.setenv("TRET_M365_CLIENT_SECRET", "m365-secret")
+    get_settings.cache_clear()
+    monkeypatch.setattr(get_settings(), "storage_dir", str(tmp_path / "storage"))
+
+    async def _fake_resolve(host):
+        return ("8.8.8.8",)
+
+    monkeypatch.setattr(net_guard, "_resolve", _fake_resolve)
+
+    async with world.session_factory() as db:
+        db.add(
+            WorkspaceConnection(
+                workspace_id=world.workspace_id,
+                provider="m365",
+                account_label="person@example.com",
+                encrypted_refresh_token=get_fernet().encrypt(b"stored-refresh-token"),
+                granted_scopes=["offline_access", "Files.Read.All"],
+                selected_resources={
+                    "read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]
+                },
+                status="active",
+            )
+        )
+        await db.commit()
+
+    harness_id = await world.create_harness(tool_names=["read_connected_file"], with_pack=False)
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Reading the connected budget file.",
+                tool_calls=[ScriptedCall("read_connected_file", {"item_ref": "m365:drive-1:item-1"})],
+            ),
+            ScriptedTurn(text="The Q3 budget is on file, as read from the connected drive."),
+        ]
+    )
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.post(token_url).mock(
+            return_value=httpx.Response(200, json={"access_token": "m365-access-token", "expires_in": 3600})
+        )
+        mock.get(f"{graph}/drives/drive-1/items/item-1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "item-1",
+                    "name": "Q3 Budget.csv",
+                    "size": 8,
+                    "eTag": '"etag-1"',
+                    "webUrl": "https://contoso.sharepoint.com/Q3%20Budget.csv",
+                    "lastModifiedDateTime": "2026-08-01T00:00:00Z",
+                    "file": {"mimeType": "text/csv"},
+                    "parentReference": {"driveId": "drive-1", "path": "/drives/drive-1/root:/Reports"},
+                },
+            )
+        )
+        mock.get(f"{graph}/drives/drive-1/items/item-1/content").mock(
+            return_value=httpx.Response(200, content=b"a,b\n1,2\n")
+        )
+        result = await world.run(
+            provider=provider,
+            harness_id=harness_id,
+            task_type="freeform",
+            task_input={"message": "Summarise the Q3 budget from the connected drive."},
+        )
+
+    assert result.run.status == "completed", result.run.error
+    async with world.session_factory() as db:
+        doc = (
+            (await db.execute(select(Document).where(Document.project_id == world.project_id)))
+            .scalars()
+            .one()
+        )
+    assert doc.source_kind == "connected"
+    # The run started with no attachments (`create_run`'s default
+    # `document_ids=[]`) — this document was only ever known to
+    # `ctx.document_ids` until the harness wrote it back at completion.
+    assert doc.id in result.run.document_ids

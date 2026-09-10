@@ -197,10 +197,17 @@ def hits(monkeypatch, connection_ok):
         source_slug="site-finance",
     )
 
-    async def _search(db, workspace_id, query, *, source_slug=None, max_results=20):
+    async def _search(db, workspace_id, query, *, source_slug=None, max_results=20, actor_run_id=None):
         if not query:
             raise ValueError("query must not be empty")
-        calls.append({"query": query, "source_slug": source_slug, "max_results": max_results})
+        calls.append(
+            {
+                "query": query,
+                "source_slug": source_slug,
+                "max_results": max_results,
+                "actor_run_id": actor_run_id,
+            }
+        )
         return [item]
 
     monkeypatch.setattr(tools_module.connections_service, "search_connected_files", _search, raising=False)
@@ -213,11 +220,18 @@ def materialize(monkeypatch, connection_ok, db):
     real service would) and returns it, remembering call kwargs."""
     calls: list[dict] = []
 
-    async def _materialize(db_, *, workspace_id, project_id, item_ref, uploaded_by=None):
+    async def _materialize(
+        db_, *, workspace_id, project_id, item_ref, uploaded_by=None, actor_run_id=None
+    ):
         if item_ref == "bad-ref":
             raise ValueError(f"'{item_ref}' is not a recognized connected-file reference")
         calls.append(
-            {"workspace_id": workspace_id, "project_id": project_id, "item_ref": item_ref}
+            {
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "item_ref": item_ref,
+                "actor_run_id": actor_run_id,
+            }
         )
         doc = Document(
             project_id=project_id,
@@ -370,6 +384,16 @@ async def test_search_connected_files_passes_source_and_max_results(ctx, hits):
     assert hits[0]["max_results"] == 3
 
 
+async def test_search_connected_files_passes_the_run_id_as_actor(ctx, hits):
+    """The connection_activity row this search writes must be attributable
+    to the run that made it — see services/connections.py::record_
+    connection_activity. Before this, the tool never passed ctx.run_id
+    through, so every search-side activity row recorded actor_run_id=NULL
+    regardless of which run made the call."""
+    await search_connected_files(ctx, query="budget")
+    assert hits[0]["actor_run_id"] == ctx.run_id
+
+
 async def test_search_connected_files_wraps_value_error_as_tool_error(ctx, hits):
     with pytest.raises(ToolError):
         await search_connected_files(ctx, query="")
@@ -411,7 +435,7 @@ async def test_search_connected_files_spends_the_budget_even_when_the_call_raise
     counter is spent before the call, not after, so a caller retrying a
     failing search does not get it for free."""
 
-    async def _boom(db, workspace_id, query, *, source_slug=None, max_results=20):
+    async def _boom(db, workspace_id, query, *, source_slug=None, max_results=20, actor_run_id=None):
         raise RuntimeError("could not reach Microsoft Graph: 503 from Graph")
 
     monkeypatch.setattr(tools_module.connections_service, "search_connected_files", _boom, raising=False)
@@ -442,6 +466,10 @@ async def test_read_connected_file_attaches_the_document_and_returns_the_banner(
     assert materialize[0]["item_ref"] == "m365:site-finance:drive1:item42"
     assert materialize[0]["workspace_id"] == ctx.workspace_id
     assert materialize[0]["project_id"] == ctx.project_id
+    # The connection_activity row this read writes must be attributable to
+    # the run that made it — before this, the tool never passed ctx.run_id
+    # through, so every read-side activity row recorded actor_run_id=NULL.
+    assert materialize[0]["actor_run_id"] == ctx.run_id
 
 
 async def test_read_connected_file_does_not_duplicate_an_already_attached_document(ctx, materialize):
@@ -514,7 +542,7 @@ async def test_read_connected_file_spends_the_budget_even_when_materialize_raise
     free. A RuntimeError (a Graph 5xx, an egress denial) must become an
     error-flagged tool result, not an exception that kills the run."""
 
-    async def _boom(db_, *, workspace_id, project_id, item_ref, uploaded_by=None):
+    async def _boom(db_, *, workspace_id, project_id, item_ref, uploaded_by=None, actor_run_id=None):
         raise RuntimeError("could not reach Microsoft Graph: 503 from Graph")
 
     monkeypatch.setattr(tools_module.connections_service, "materialize_connected_file", _boom, raising=False)
@@ -537,7 +565,7 @@ async def test_read_connected_file_charges_the_declared_size_when_the_download_i
     run's byte budget — a refused-for-size attempt is not free either."""
     from tret.services.connections import DownloadTooLargeError
 
-    async def _too_big(db_, *, workspace_id, project_id, item_ref, uploaded_by=None):
+    async def _too_big(db_, *, workspace_id, project_id, item_ref, uploaded_by=None, actor_run_id=None):
         raise DownloadTooLargeError("42MB exceeds the 25MB import limit", size_bytes=42 * 1024 * 1024)
 
     monkeypatch.setattr(tools_module.connections_service, "materialize_connected_file", _too_big, raising=False)
@@ -675,7 +703,7 @@ async def test_search_connected_files_frame_safes_hostile_hit_fields(ctx, connec
         source_slug="site-finance",
     )
 
-    async def _search(db, workspace_id, query, *, source_slug=None, max_results=20):
+    async def _search(db, workspace_id, query, *, source_slug=None, max_results=20, actor_run_id=None):
         return [hostile]
 
     monkeypatch.setattr(tools_module.connections_service, "search_connected_files", _search, raising=False)
@@ -690,7 +718,7 @@ async def test_search_connected_files_frame_safes_hostile_hit_fields(ctx, connec
 
 
 async def test_read_connected_file_banner_is_safe_against_a_hostile_path(ctx, connection_ok, monkeypatch):
-    async def _materialize(db_, *, workspace_id, project_id, item_ref, uploaded_by=None):
+    async def _materialize(db_, *, workspace_id, project_id, item_ref, uploaded_by=None, actor_run_id=None):
         doc = Document(
             project_id=project_id,
             filename="evil.txt",

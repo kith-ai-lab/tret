@@ -1537,6 +1537,14 @@ class HarnessEngine:
         # ── finish ───────────────────────────────────────────────────────────
         if run.status == "running":
             run.status = self._completion_status(ctx)
+        # `ctx.document_ids` started as a copy of `run.document_ids` (the
+        # run's initial attachments) and grew as tools materialised more of
+        # them mid-run — `fetch_url`/`store_snapshot` and `read_connected_
+        # file` both append to it (see engine/tools.py), but neither ever
+        # wrote back to `run` itself. Without this, GET /api/runs/{id} kept
+        # reporting only what the run started with, silently dropping every
+        # document a tool pulled in along the way.
+        run.document_ids = list(ctx.document_ids)
         run.messages = [m.to_json() for m in messages]
         run.overhead = overhead_block(overhead_calls)
         run.finished_at = _utcnow()

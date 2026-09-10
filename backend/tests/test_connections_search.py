@@ -1044,6 +1044,35 @@ async def test_search_records_a_search_activity_row(configured_m365, session_fac
     assert row.actor_user_id is None  # no caller-supplied actor for this call
 
 
+async def test_search_records_the_actor_run_id_when_the_caller_passes_one(
+    configured_m365, session_factory, seed
+):
+    """The engine tool wrapper (`engine/tools.py::search_connected_files`)
+    passes `ctx.run_id` through as `actor_run_id` — the activity row must
+    carry it so a search made by a run is attributable to that run, not
+    recorded with actor_run_id=NULL the way it was before the tool threaded
+    this through."""
+    workspace = make_workspace()
+    conn = make_connection(
+        workspace, selected_resources={"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]}
+    )
+    await seed(workspace, conn)
+    run_id = uuid.uuid4()
+
+    body = _search_query_response(drive_id="drive-1", item_id="item-1", name="a.txt", summary=None)
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.post(f"{GRAPH}/search/query").mock(return_value=httpx.Response(200, json=body))
+        async with session_factory() as db:
+            await search_connected_files(db, workspace.id, "quarterly budget", actor_run_id=run_id)
+            await db.commit()
+
+    rows = await _activity_rows(session_factory, workspace.id)
+    search_rows = [r for r in rows if r.action == "search"]
+    assert len(search_rows) == 1
+    assert search_rows[0].actor_run_id == run_id
+
+
 async def test_search_truncates_the_recorded_query_to_two_hundred_chars(
     configured_m365, session_factory, seed
 ):
@@ -1100,6 +1129,46 @@ async def test_materialize_records_a_read_activity_row_for_a_fresh_download(
     assert row.target == "Finance/Reports/Q3 Budget.xlsx"
     assert row.bytes == doc.byte_size
     assert row.detail is None  # not a dedupe hit
+
+
+async def test_materialize_records_the_actor_run_id_when_the_caller_passes_one(
+    configured_m365, storage, resolves_public, session_factory, seed
+):
+    """The engine tool wrapper (`engine/tools.py::read_connected_file`)
+    passes `ctx.run_id` through as `actor_run_id` — the activity row must
+    carry it, the same as `search_connected_files` — so a fresh download
+    made by a run is attributable to that run rather than recorded with
+    actor_run_id=NULL."""
+    workspace = make_workspace()
+    project = make_project(workspace)
+    conn = make_connection(
+        workspace, selected_resources={"read": [{"drive_id": "drive-1", "label": "Finance", "kind": "site_drive"}]}
+    )
+    await seed(workspace, project, conn)
+    run_id = uuid.uuid4()
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/item-1").mock(
+            return_value=httpx.Response(200, json=_item_metadata())
+        )
+        mock.get(f"{GRAPH}/drives/drive-1/items/item-1/content").mock(
+            return_value=httpx.Response(200, content=b"a,b\n1,2\n")
+        )
+        async with session_factory() as db:
+            await materialize_connected_file(
+                db,
+                workspace_id=workspace.id,
+                project_id=project.id,
+                item_ref="m365:drive-1:item-1",
+                actor_run_id=run_id,
+            )
+            await db.commit()
+
+    rows = await _activity_rows(session_factory, workspace.id)
+    read_rows = [r for r in rows if r.action == "read"]
+    assert len(read_rows) == 1
+    assert read_rows[0].actor_run_id == run_id
 
 
 async def test_materialize_records_detail_cached_on_a_dedupe_hit(

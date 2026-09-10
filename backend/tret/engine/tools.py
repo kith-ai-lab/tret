@@ -670,7 +670,12 @@ async def search_connected_files(
     ctx.connected_searches += 1
     try:
         hits = await connections_service.search_connected_files(
-            ctx.db, ctx.workspace_id, query, source_slug=source, max_results=int(max_results)
+            ctx.db,
+            ctx.workspace_id,
+            query,
+            source_slug=source,
+            max_results=int(max_results),
+            actor_run_id=ctx.run_id,
         )
     except ValueError as e:
         raise ToolError(str(e)) from e
@@ -741,6 +746,7 @@ async def read_connected_file(
             workspace_id=ctx.workspace_id,
             project_id=ctx.project_id,
             item_ref=item_ref,
+            actor_run_id=ctx.run_id,
         )
     except ValueError as e:
         raise ToolError(str(e)) from e

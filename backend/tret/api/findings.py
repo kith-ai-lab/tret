@@ -225,6 +225,7 @@ async def _upload_connected_write(
             data=data,
             content_type=content_type,
             actor_user_id=actor_user_id,
+            actor_run_id=finding.run_id,
         )
         status_ = "uploaded"
         item_id, web_url = result.item_id, result.web_url

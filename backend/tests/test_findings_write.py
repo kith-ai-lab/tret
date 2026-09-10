@@ -253,6 +253,7 @@ def upload_ok(monkeypatch):
                 "data": data,
                 "content_type": content_type,
                 "actor_user_id": actor_user_id,
+                "actor_run_id": actor_run_id,
             }
         )
         return FakeUploadResult(
@@ -419,6 +420,11 @@ def test_approving_uploads_with_the_right_bytes_and_content_type(client, db, peo
     assert call["target_slug"] == "site-finance"
     assert call["workspace_id"] == WORKSPACE.id
     assert call["actor_user_id"] == people["approver"].id
+    # The approver is who authorized the upload; the proposing run is who
+    # asked for it. `_upload_connected_write` must pass both — the row
+    # links the upload back to the run that proposed it, not just the
+    # human who approved it.
+    assert call["actor_run_id"] == connected_write.run_id
 
 
 def test_a_successful_upload_is_recorded_on_the_finding(client, db, people, connected_write, upload_ok):
