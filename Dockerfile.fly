@@ -37,10 +37,21 @@ ENV HOME=/app
 
 WORKDIR /app
 COPY backend/pyproject.toml ./
+COPY backend/constraints.txt ./
 COPY backend/tret ./tret
 COPY backend/alembic ./alembic
 COPY backend/alembic.ini ./
-RUN pip install --no-cache-dir ".[server]"
+# `-c constraints.txt` pins every version pip resolves here, direct and
+# transitive, to the set the test suite and CI are green against. Without it the
+# image resolves the loose `>=` floors in pyproject.toml to whatever is newest on
+# PyPI at build time, so two builds of the same commit can ship different
+# dependency trees and the running stack can drift from what the tests actually
+# validated. CONTRIBUTING calls the unconstrained install "the mistake this
+# exists to prevent"; that applies to an image build more than anywhere, because
+# nothing re-runs the suite against the result. Constraints only narrow versions
+# -- they never add a package -- so the dev-only pins in the file are simply
+# unused by this `.[server]` install.
+RUN pip install --no-cache-dir ".[server]" -c constraints.txt
 
 COPY packs /packs
 # Reference documentation, served read-only by GET /api/docs/{slug} — the
