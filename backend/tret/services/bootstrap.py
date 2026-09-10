@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.api.auth import bootstrap_admin
 from tret.config import get_settings
 from tret.db.models import Project, User, Workspace, WorkspaceMember
-from tret.services.workspace import create_workspace, seed_workspace_content
+from tret.services.workspace import create_workspace, seed_chat_harness, seed_workspace_content
 
 log = logging.getLogger("tret.bootstrap")
 
@@ -63,6 +63,39 @@ async def bootstrap(db: AsyncSession) -> None:
             await db.commit()
         await seed_workspace_content(db, workspace.id, project.id)
         await db.commit()
+
+    # Multi-tenant carries the chat-harness backfill above to every OTHER
+    # workspace too — the oldest-workspace reseed above only ever touches the
+    # one workspace found at line 36, but a default added to
+    # `seed_chat_harness` after a tenant's workspace was created (a new
+    # builtin tool, or the default-pack-links behavior itself) still needs to
+    # reach that tenant's existing Chat Assistant. `seed_workspace_content`
+    # is deliberately NOT called per-workspace here: it would install packs
+    # and seed harnesses into every tenant's workspace on every boot, and
+    # that already happened once, at each workspace's own creation
+    # (`create_workspace`). Only the chat-harness step reruns. That is cheap
+    # (one harness lookup per workspace) and safe to repeat every boot for
+    # every workspace, forever, because it is idempotent on its own: the
+    # builtin-tool backfill is a per-tool `if not in` check, and the
+    # pack-link backfill is gated on `Harness.packs_linked_at`. Each
+    # workspace's attempt runs in its own SAVEPOINT so one workspace's
+    # failure can't abort boot for the rest, or leave the session unusable
+    # for the next iteration — see workspace.py's `_install_configured_packs`
+    # docstring for why a plain `db.rollback()` would be wrong here.
+    other_workspaces = (
+        await db.execute(
+            select(Workspace).where(Workspace.id != workspace.id).order_by(Workspace.created_at)
+        )
+    ).scalars().all()
+    for other in other_workspaces:
+        try:
+            async with db.begin_nested():
+                await seed_chat_harness(db, other.id)
+        except Exception:  # noqa: BLE001 - one workspace's failure must not abort boot
+            log.exception(
+                "chat-harness backfill failed for workspace %s and was skipped", other.id
+            )
+    await db.commit()
 
     # Self-host only: in multi-tenant mode this backstop must never run. Its
     # job is to catch a database that predates workspaces (or a hand-inserted

@@ -107,7 +107,7 @@ async def create_workspace(
     # lives there instead, immediately before the one step it actually
     # protects against. Everything created so far (workspace, owner
     # membership, project) stays uncommitted until then, which is what makes
-    # a failure in the *unprotected* steps below — `_seed_chat_harness` /
+    # a failure in the *unprotected* steps below — `seed_chat_harness` /
     # `_seed_default_harnesses`, which run after packs and have no per-step
     # savepoint of their own — roll back the whole creation instead of
     # leaving a half-seeded workspace sitting around counting against a
@@ -146,7 +146,7 @@ async def seed_workspace_content(db: AsyncSession, workspace_id, project_id) -> 
     `_install_configured_packs`'s own SAVEPOINT protection, unchanged). When
     `seed_default_packs` is off, nothing here commits at all: there is
     nothing pack-related to protect against, so a failure in
-    `_seed_chat_harness` / `_seed_default_harnesses` below is left free to
+    `seed_chat_harness` / `_seed_default_harnesses` below is left free to
     roll back everything, including whatever the caller had pending. Callers
     that need their own writes durable before *that* case (there are none
     today) would need their own commit first.
@@ -154,7 +154,7 @@ async def seed_workspace_content(db: AsyncSession, workspace_id, project_id) -> 
     if get_settings().seed_default_packs:
         await db.commit()
         await _install_configured_packs(db, workspace_id, project_id)
-    await _seed_chat_harness(db, workspace_id)
+    await seed_chat_harness(db, workspace_id)
     await _seed_default_harnesses(db, workspace_id)
 
 
@@ -206,7 +206,7 @@ async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) 
                 )
 
 
-async def _seed_chat_harness(db: AsyncSession, workspace_id) -> None:
+async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
     """The conversational front door. Every workspace gets exactly one, and
     by default it is linked to every pack installed in its workspace (see
     `tret.packs.links.link_all_workspace_packs`) rather than shipping

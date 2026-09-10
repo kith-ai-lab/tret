@@ -243,7 +243,7 @@ class Harness(Base):
         default=lambda: {"max_iterations": 24, "max_output_tokens": 8192, "temperature": 0.2},
     )
     is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # Set once — the moment `services.workspace._seed_chat_harness` first
+    # Set once — the moment `services.workspace.seed_chat_harness` first
     # links any pack to this harness (on creation, or on a one-time
     # backfill) — and never touched again after that. Its presence, not the
     # harness's current link count, is what tells the seed "the default has

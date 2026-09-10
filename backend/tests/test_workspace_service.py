@@ -101,7 +101,7 @@ async def _chat_harness(db, workspace_id) -> Harness:
 
 def make_pack(workspace_id, *, slug: str) -> Pack:
     """A bare Pack row, not routed through `install_pack` — enough to
-    exercise `_seed_chat_harness`'s own pack-linking logic, which only reads
+    exercise `seed_chat_harness`'s own pack-linking logic, which only reads
     the `packs` table, without needing a real pack directory on disk. Empty
     `task_types` so linking never trips `task_slug_collision`."""
     return Pack(
@@ -326,7 +326,7 @@ async def test_a_harness_seeding_failure_rolls_back_the_whole_creation_when_pack
     were even attempted, whether or not `TRET_SEED_DEFAULT_PACKS` was even on.
     With packs off there was nothing that commit protected against, only a
     downside: a failure in the unprotected harness-seeding steps right after
-    it (`_seed_chat_harness` / `_seed_default_harnesses`, neither wrapped in a
+    it (`seed_chat_harness` / `_seed_default_harnesses`, neither wrapped in a
     savepoint) left a committed, half-seeded workspace sitting around — no
     harnesses, still counting against a workspace cap. Now the commit only
     happens immediately before `_install_configured_packs` runs, so with
@@ -340,7 +340,7 @@ async def test_a_harness_seeding_failure_rolls_back_the_whole_creation_when_pack
     async def _boom(db, workspace_id):
         raise RuntimeError("simulated harness seeding failure")
 
-    monkeypatch.setattr(workspace_module, "_seed_chat_harness", _boom)
+    monkeypatch.setattr(workspace_module, "seed_chat_harness", _boom)
 
     async with session_factory() as db:
         owner = make_user("rollback@example.com")
@@ -365,7 +365,7 @@ async def test_a_harness_seeding_failure_rolls_back_the_whole_creation_when_pack
 async def test_fresh_workspace_chat_assistant_is_linked_to_every_installed_pack(db):
     """The finding this section pins: the seeded Chat Assistant used to ship
     pack-less. On a brand-new workspace, `_install_configured_packs` runs
-    before `_seed_chat_harness` (see `seed_workspace_content`), so by the
+    before `seed_chat_harness` (see `seed_workspace_content`), so by the
     time the Chat Assistant is created, the workspace's pack(s) already
     exist — it must come out linked to all of them, not empty."""
     owner = make_user("packed@example.com")
@@ -404,7 +404,7 @@ async def test_rerunning_seeding_links_packs_into_an_existing_zero_link_chat_har
     """A chat harness that already exists but has never been linked to
     anything (e.g. seeded by an older boot, before this default existed) gets
     backfilled the next time `seed_workspace_content` runs — same as the
-    tool-name backfill right above it in `_seed_chat_harness`."""
+    tool-name backfill right above it in `seed_chat_harness`."""
     monkeypatch.setenv("TRET_SEED_DEFAULT_PACKS", "false")
     get_settings.cache_clear()
 
