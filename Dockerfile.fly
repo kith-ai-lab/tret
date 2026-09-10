@@ -38,9 +38,6 @@ ENV HOME=/app
 WORKDIR /app
 COPY backend/pyproject.toml ./
 COPY backend/constraints.txt ./
-COPY backend/tret ./tret
-COPY backend/alembic ./alembic
-COPY backend/alembic.ini ./
 # `-c constraints.txt` pins every version pip resolves here, direct and
 # transitive, to the set the test suite and CI are green against. Without it the
 # image resolves the loose `>=` floors in pyproject.toml to whatever is newest on
@@ -51,7 +48,29 @@ COPY backend/alembic.ini ./
 # nothing re-runs the suite against the result. Constraints only narrow versions
 # -- they never add a package -- so the dev-only pins in the file are simply
 # unused by this `.[server]` install.
-RUN pip install --no-cache-dir ".[server]" -c constraints.txt
+#
+# The install is split in two so that editing source does not re-resolve and
+# re-download the whole dependency tree. This layer's only inputs are
+# pyproject.toml and constraints.txt, so it stays cached until a dependency
+# actually changes. hatchling cannot build tret without its package directory,
+# and the real source must not land in this layer or the caching would be
+# pointless -- so a stub stands in just long enough to resolve and install
+# everything tret depends on, and the stub's own install is then removed, leaving
+# the third-party tree behind.
+RUN mkdir -p tret && touch tret/__init__.py \
+    && pip install --no-cache-dir ".[server]" -c constraints.txt \
+    && pip uninstall -y tret \
+    && rm -rf tret
+
+# The source arrives only now, so every layer above survives a source edit.
+COPY backend/tret ./tret
+COPY backend/alembic ./alembic
+COPY backend/alembic.ini ./
+
+# Adds tret itself and its `tret` console script, nothing else: the dependencies
+# are installed and pinned above, and --no-deps stops pip re-resolving them. This
+# is the only pip layer a source-only change has to rebuild.
+RUN pip install --no-cache-dir --no-deps .
 
 COPY packs /packs
 # Reference documentation, served read-only by GET /api/docs/{slug} — the
