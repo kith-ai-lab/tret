@@ -74,6 +74,66 @@ TRET_OPENROUTER_API_KEY=... python arm_b.py --model <model-id> --out results/arm
 python scoring.py results/*.jsonl --labels labels.yaml --report results/report.md
 ```
 
+## Arm Routing — the router against pinned models
+
+A third arm, orthogonal to A/B above: it holds the harness fixed and asks
+whether *routing itself* is earning what it costs. For every case it drives
+the real engine through the API (same as Arm A) under a matrix of temporary
+harness configurations built on the `Climate Analyst` base harness — `auto`
+routing under each objective the router supports (`quality`, `balanced`,
+`token_conservation`, `eco`) and `pinned` routing to specific models (default:
+the catalog's cheapest economy-tier model and its most expensive premium-tier
+model). Every configuration is its own harness (same pack/tools/task profile,
+only `model_policy` differs), created or updated through
+`POST`/`PUT /api/harnesses` so a rerun reuses rather than duplicates it.
+
+```
+# Needs the tret stack up (docker compose up) and admin credentials, same as Arm A.
+TRET_URL=http://localhost:8000 python arm_routing.py --cases cases.yaml \
+    --out results/routing.jsonl
+
+# Pin specific models instead of the catalog-derived defaults, and/or send
+# each case as a multi-turn conversation to exercise the prompt cache:
+python arm_routing.py --pins openrouter/openai/gpt-5-mini,anthropic/claude-opus-5 \
+    --turns 3 --out results/routing.jsonl
+
+python scoring_routing.py results/routing*.jsonl --labels labels.yaml \
+    --summary results/routing_summary.json
+```
+
+**Row schema** (one JSON line per case × configuration × turn — see
+`arm_routing.py`'s own docstring for the full field list): `case_id`,
+`config` (`"auto:<objective>"` or `"pinned:<model_id>"`), `config_kind`,
+`objective`, `pin`, `turn`, `turns_total`, `run_id`, `status`, `chosen_model`,
+`effort`, `context_fit_mode`, `fallback_used`, `switches_count`,
+`switches_reasons`, `effort_changes_count`, `provider_ignore`, `served_by`
+(one entry per `model_timeline` segment), `cost_usd`, `reported_cost_usd`,
+`router_overhead_usd`, token totals (`input_tokens`/`output_tokens`/
+`cache_read_tokens`/`cache_write_tokens`), `cache_ledger` (null when the run
+carries no `model_timeline` to sum it from), `compactions_count`,
+`iterations`, `verdict_payload`, `validation_error_count`, `wall_ms`, `error`.
+`arm`/`model` are also set (to `"routing"`/`config`) purely so
+`scoring.score_case` can score a routing row exactly like an Arm A/B one.
+
+**What the columns mean**: `chosen_model`/`effort`/`context_fit_mode`/
+`fallback_used`/`provider_ignore` are read straight off the run's persisted
+`routing` decision; `switches_count`/`effort_changes_count` count mid-run
+interventions (the supervisor changing model or raising reasoning effort);
+`router_overhead_usd` is the router's *own* LLM call cost (`run.overhead`),
+kept separate from `cost_usd` because it runs on a different model. The
+scoring side (`scoring_routing.py`) turns these into a per-configuration table
+(delivered rate, verdict agreement, mean cost, cache hit ratio, switch rate,
+effort mix) and a router-vs-pinned table: for each `auto:<objective>`
+configuration, cost (with router overhead folded in) and agreement relative
+to whichever pinned configuration in the same result set had the best
+agreement and whichever was cheapest.
+
+**Caveat: this arm costs real money, multiplicatively.** Each case runs once
+per configuration (objectives + pins) per turn — a 28-case set, the default 4
+objectives plus 2 pins, and `--turns 1` is already 168 real model calls (times
+`--turns` for a multi-turn run). Start with `--only` on a handful of cases
+before a full sweep.
+
 ## Stated limitations (these travel with any published result)
 
 - Same-model comparison only. This measures what the harness adds, not whether

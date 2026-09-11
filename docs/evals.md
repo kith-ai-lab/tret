@@ -234,3 +234,17 @@ Deliberately not covered yet:
   JSON **process-wide** for the test session. That is invisible today because
   no other test exercises Postgres array behaviour; a test that needs real
   `ARRAY` SQL will need a Postgres fixture instead.
+
+## Routing benchmark
+
+The golden runs above lock in *correctness* under a scripted model; they say
+nothing about whether the router's own choices are worth what they cost. That
+question lives in `backend/benchmark/arm_routing.py`, a third benchmark arm
+alongside Arm A/B (`backend/benchmark/README.md`): it drives the real engine
+through the API under `auto` routing at each objective and `pinned` routing to
+specific models, and `scoring_routing.py` turns the results into a
+per-configuration table plus a router-vs-pinned cost/agreement comparison.
+Like the golden runs and Arm A/B, it costs real money to run and is not part
+of the offline test gate (`backend/tests/test_benchmark_routing_scoring.py`
+covers only the scoring math, on hand-built rows, with no engine or network
+involved).
