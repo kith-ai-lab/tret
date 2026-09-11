@@ -6,16 +6,20 @@ from __future__ import annotations
 import hashlib
 
 from tret.providers.catalog import ModelInfo
-from tret.router_llm.objectives import DEFAULT_OBJECTIVE
+from tret.router_llm.objectives import DEFAULT_OBJECTIVE, default_effort
 
-# route-v4 adds the TRACK RECORD section below. Note what the bump does *not*
-# mean: with no recorded outcomes the section is omitted entirely and the
-# rendered prompt is byte-identical to v3's. The version records that an
-# evidence-capable renderer produced the prompt, which is the fact an auditor
-# reading an old decision needs — "could this run have seen a track record?" is a
-# different question from "did it?", and the answer to the second is in the
-# decision's own `evidence` field.
-ROUTING_PROMPT_VERSION = "route-v4"
+# route-v4 added the TRACK RECORD section. With no recorded outcomes the
+# section was omitted entirely and the rendered prompt was byte-identical to
+# v3's — the version recorded that an evidence-capable renderer produced the
+# prompt, which is the fact an auditor reading an old decision needs.
+#
+# route-v5 adds the EFFORT section below and a required `effort` property on
+# `choose_model_schema()`. Unlike the v4 bump, this one is NOT byte-identical
+# on a cold start: the EFFORT section is unconditional (every task has an
+# objective and a shape, so there is always a default to state), so every
+# route-v5 prompt differs from what route-v4 would have rendered for the same
+# call, evidence or no evidence.
+ROUTING_PROMPT_VERSION = "route-v5"
 
 ROUTER_SYSTEM = """\
 You are a model-selection router for an analyst workbench. Pick the single best \
@@ -147,13 +151,36 @@ def prompt_sha256(prompt: str) -> str:
 def choose_model_schema(candidate_ids: list[str]) -> dict:
     return {
         "type": "object",
-        "required": ["model_id", "reasoning", "confidence"],
+        "required": ["model_id", "reasoning", "confidence", "effort"],
         "properties": {
             "model_id": {"type": "string", "enum": candidate_ids},
             "reasoning": {"type": "string", "maxLength": 600},
             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+            "effort": {"type": "string", "enum": ["low", "medium", "high"]},
         },
     }
+
+
+def effort_block(objective: str, task_shape: str) -> list[str]:
+    """The EFFORT section: what the control does, and this task's default.
+
+    Unconditional — every call has an objective and a shape, so there is
+    always a default to state, unlike OBJECTIVE (which is silent for
+    `balanced`) or TRACK RECORD (which is silent with no history). That is
+    what makes the route-v5 bump not byte-identical to v4 even on a cold
+    start; see the version comment above `ROUTING_PROMPT_VERSION`.
+    """
+    default = default_effort(objective, task_shape)
+    return [
+        "",
+        "EFFORT",
+        "  Effort scales how much thinking and output the chosen model spends "
+        "on this call — low is fastest and cheapest, high spends the most to "
+        "get the best result.",
+        f"  Default for this objective and task shape: {default}.",
+        "  Choose low unless the task shape needs multi-step judgment; never "
+        "exceed the default under token_conservation or eco.",
+    ]
 
 
 def render_router_prompt(
@@ -195,6 +222,7 @@ def render_router_prompt(
             f"ctx: {m.context_window} | strengths: {strengths}{energy}"
         )
     lines += ["", "CONSTRAINTS", f"  max_cost_tier: {max_cost_tier}"]
+    lines += effort_block(objective, task_shape)
     lines += objective_block(objective)
 
     recorded = {mid: p for mid, p in (priors or {}).items() if mid in {m.id for m in candidates}}

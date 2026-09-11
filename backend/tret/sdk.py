@@ -22,7 +22,10 @@ import copy
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
+from uuid import uuid4
 
+from tret.adaptive import adaptive_of
+from tret.engine.compaction import required_context_window
 from tret.providers.base import Msg, Provider, TextDelta, ToolCallComplete, TurnComplete, Usage
 from tret.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry, get_catalog
 from tret.router_llm.objectives import DEFAULT_MAX_COST_TIER, DEFAULT_OBJECTIVE, OBJECTIVES
@@ -224,6 +227,10 @@ class Router:
             output_contract="free text",
             n_documents=0,
             est_input_tokens=max(1, len(task) // 4),
+            # No `max_output_tokens` at this call site — routing-only, nothing
+            # is ever executed here — so there is nothing to size a window
+            # against; the context-fit filter is skipped (`min_context_window`
+            # left None), same as every caller before this parameter existed.
         )
 
     async def arun(
@@ -267,6 +274,7 @@ class Router:
         # `aroute()`-then-`arun()` and a bare `arun()` see the same catalog.
         await self._catalog.warm_once()
 
+        est_input_tokens = max(1, len(task) // 4)
         decision = await router.route(
             model_policy=self._model_policy(),
             task_type="freeform",
@@ -274,7 +282,14 @@ class Router:
             task_description=task[:_TASK_DESCRIPTION_CHARS],
             output_contract="free text",
             n_documents=0,
-            est_input_tokens=max(1, len(task) // 4),
+            est_input_tokens=est_input_tokens,
+            # `max_tokens` (this call's own output reservation) and the
+            # policy's headroom are both known here — unlike `aroute()`,
+            # which never executes anything — so the router can be told the
+            # smallest window this call needs, same as harness.py.
+            min_context_window=required_context_window(
+                est_input_tokens, max_tokens, adaptive_of(self._model_policy()).context_headroom
+            ),
         )
 
         model = self._catalog.get(decision.chosen_model)
@@ -295,6 +310,16 @@ class Router:
             tools=[],  # exactly one call, no tool loop
             max_tokens=max_tokens,
             temperature=self._temperature,
+            # Recorded on every decision (`RoutingDecision.effort`) but only
+            # sent when this model's own catalog entry says it accepts the
+            # control — same gate `engine/harness.py` applies before its own
+            # `provider.stream()` call.
+            effort=decision.effort if model.supports_effort else None,
+            # One id per call: this path has no run/ledger id to reuse (it is
+            # a single untracked call, unlike `local_run.arun`'s ledger entry
+            # or a server run's `run.id`), so a fresh one stands in — enough
+            # for a provider with sticky routing (OpenRouter) to key on.
+            session_id=str(uuid4()),
         ):
             if isinstance(event, TextDelta):
                 text_parts.append(event.text)

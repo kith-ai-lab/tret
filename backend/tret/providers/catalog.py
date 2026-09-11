@@ -11,7 +11,8 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from decimal import Decimal
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import httpx
@@ -91,6 +92,55 @@ def _probe_answered(result) -> bool:
 CACHE_READ_MULTIPLIER = Decimal("0.1")
 CACHE_WRITE_MULTIPLIER = Decimal("1.25")
 
+
+def _today() -> date:
+    """Today's date (UTC) — the one place dated pricing reads the clock.
+
+    `ModelInfo.prices_at()` reads this itself (via its `at=None` default) on
+    every call, and `cost_usd` calls `prices_at` on every invocation — so
+    freezing "today" for scheduled pricing is one `monkeypatch.setattr(this
+    module, "_today", ...)` away, and it takes effect immediately against a
+    `ModelCatalog`/`ModelInfo` built long before the freeze, no reload
+    needed. Production code should never need to call this directly.
+    """
+    return datetime.now(timezone.utc).date()
+
+
+@dataclass(frozen=True)
+class PricingTier:
+    """A whole-request price step once the prompt crosses a size threshold.
+
+    Some 2026-era frontier models (GPT-6 Astra is the first in this catalog)
+    bill the *entire* request at a different rate above a prompt-size cutoff,
+    rather than only the tokens past it — closer to a tax bracket that taxes
+    the whole amount at the top rate than one that only taxes the marginal
+    slice. `ModelInfo.cost_usd` picks the tier whose `above_prompt_tokens` is
+    the largest one still strictly below the request's prompt size.
+    """
+
+    above_prompt_tokens: int
+    input_multiplier: Decimal
+    output_multiplier: Decimal
+
+
+@dataclass(frozen=True)
+class PriceChange:
+    """A scheduled price change, kept for both billing and display.
+
+    `ModelInfo.input_price_per_mtok`/`output_price_per_mtok` are always the
+    model's *base* (models.yaml) price — this schedule never overwrites them.
+    `ModelInfo.prices_at()` resolves whichever entry here is due as of a given
+    date (default: `_today()`), and `cost_usd` calls it fresh on every
+    invocation, so a long-running process bills a scheduled change correctly
+    the day it takes effect, with no reload. The raw list still lives on
+    `ModelInfo.price_changes` so a picker can show "$0.75 now, $1.50 from
+    2027-01-01" rather than just one number.
+    """
+
+    effective: date
+    input_price_per_mtok: Decimal
+    output_price_per_mtok: Decimal
+
 # ── ecological accounting ────────────────────────────────────────────────────
 # The energy/carbon model itself now lives in tret/services/emissions.py, which
 # also owns PUE, the GHG Protocol scope split and the frontier-baseline
@@ -115,6 +165,8 @@ __all__ = [
     "LocalDiscovery",
     "ModelCatalog",
     "ModelInfo",
+    "PriceChange",
+    "PricingTier",
     "ProviderRegistry",
     "ProviderSpec",
     "co2e_grams",
@@ -141,6 +193,17 @@ class ModelInfo:
     cost_tier: str  # economy | standard | premium | local (always allowed, see TIER_ORDER)
     strengths: list[str] = field(default_factory=list)
     supports_tools: bool = True
+    # Does this model's provider API accept a reasoning-effort control at all?
+    # Anthropic's `output_config.effort` and OpenRouter's unified `reasoning.
+    # effort` are two different wire shapes for the same idea, and neither is
+    # universal even within a provider — see models.yaml for the per-model
+    # calls. The router (router_llm/router.py) records an effort level on
+    # every `RoutingDecision` regardless of this flag (it documents intent);
+    # this flag is read only by the harness/provider layer, which decides
+    # whether to actually send it (a model with supports_effort=False gets
+    # `effort=None` in the stream() call, so the provider never sends the
+    # field at all rather than sending one the model would reject or ignore).
+    supports_effort: bool = False
     curated: bool = True
     released: str | None = None  # YYYY-MM; feeds the router's prefer-newer rule
     # S | M | L | XL | R — calibrated energy bucket (see ENERGY_CLASS_WH_PER_MTOK).
@@ -167,6 +230,22 @@ class ModelInfo:
     # checking `is not None` there made it fire for every model, explicit or
     # not, and the active-parameter branch below it unreachable).
     energy_wh_per_mtok_explicit: bool = False
+    # Per-model overrides of the module-default cache ratios above. Anthropic
+    # cut Claude Fable 5.1's cache reads to 0.025x input price while every
+    # other model (including Fable 5 a point release back) stays at 0.1x, so a
+    # single module constant can no longer speak for the whole catalog.
+    # Defaulting to the module constants keeps every existing entry's billing
+    # unchanged.
+    cache_read_multiplier: Decimal = CACHE_READ_MULTIPLIER
+    cache_write_multiplier: Decimal = CACHE_WRITE_MULTIPLIER
+    # Whole-request price steps above a prompt-size threshold. Empty for every
+    # model that bills a flat rate (i.e. almost all of them) — see PricingTier.
+    pricing_tiers: list[PricingTier] = field(default_factory=list)
+    # Scheduled price changes, raw — see PriceChange. input_price_per_mtok/
+    # output_price_per_mtok above are always the base (models.yaml) price;
+    # call `prices_at()` (or `cost_usd`, which does this internally on every
+    # call) for whichever price is actually in effect on a given date.
+    price_changes: list[PriceChange] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.energy_class not in ENERGY_CLASS_WH_PER_MTOK:
@@ -177,6 +256,46 @@ class ModelInfo:
             raise ValueError(
                 f"active_params_b must be positive and finite, got {self.active_params_b!r}"
             )
+        prev_threshold = -1
+        for tier in self.pricing_tiers:
+            if tier.above_prompt_tokens <= prev_threshold:
+                raise ValueError(
+                    f"{self.id}: pricing_tiers thresholds must be strictly ascending, "
+                    f"got {[t.above_prompt_tokens for t in self.pricing_tiers]!r}"
+                )
+            if tier.input_multiplier <= 0 or tier.output_multiplier <= 0:
+                raise ValueError(
+                    f"{self.id}: pricing_tiers multipliers must be positive, got {tier!r}"
+                )
+            prev_threshold = tier.above_prompt_tokens
+        prev_effective: date | None = None
+        for change in self.price_changes:
+            if change.input_price_per_mtok <= 0 or change.output_price_per_mtok <= 0:
+                raise ValueError(
+                    f"{self.id}: price_changes prices must be positive, got {change!r}"
+                )
+            if prev_effective is not None and change.effective <= prev_effective:
+                raise ValueError(
+                    f"{self.id}: price_changes must be sorted strictly ascending by "
+                    f"effective date, got "
+                    f"{[c.effective.isoformat() for c in self.price_changes]!r}"
+                )
+            prev_effective = change.effective
+            # A scheduled price is a *replacement* rate, not a tweak — if it
+            # would silently move the model into a different cost_tier band
+            # than the one curators actually assigned it, that is a data bug,
+            # not a scheduling decision, and must fail loudly at load rather
+            # than mis-tier the model the day the change takes effect. Checked
+            # against the same `_tier_from_price` a live OpenRouter fetch uses
+            # to classify an uncurated entry.
+            new_tier = _tier_from_price(change.output_price_per_mtok)
+            if new_tier != self.cost_tier:
+                raise ValueError(
+                    f"{self.id}: price_changes entry effective "
+                    f"{change.effective.isoformat()} prices output at "
+                    f"${change.output_price_per_mtok}/Mtok, which is '{new_tier}' tier, "
+                    f"not this model's declared cost_tier {self.cost_tier!r}"
+                )
         self.energy_wh_per_mtok_explicit = self.energy_wh_per_mtok is not None
         if self.energy_wh_per_mtok is None:
             # Via the emissions seam rather than the class table directly, so a
@@ -230,6 +349,44 @@ class ModelInfo:
             cache_write_tokens,
         )
 
+    def _pricing_tier_for(self, prompt_tokens: int) -> PricingTier | None:
+        """The tier whose threshold is the largest one still below `prompt_tokens`.
+
+        "Strictly below", i.e. `above_prompt_tokens < prompt_tokens`: a prompt
+        sitting exactly on the threshold has not yet crossed it. This matches
+        GPT-6 Astra both ways — OpenAI's own pricing bills "requests over 272K
+        input tokens" (exclusive, not "at or over"), and the live OpenRouter
+        catalog entry (https://openrouter.ai/api/v1/models, id
+        "openai/gpt-6-astra") applies its `pricing.overrides[0]`
+        (`min_prompt_tokens: 272000`) the same way: a 272,000-token prompt
+        still bills at the base rate, and 272,001 is the first count that gets
+        the override. `above_prompt_tokens: 272000` in models.yaml is
+        therefore correct as written — see the comment on that entry.
+        """
+        applicable = [t for t in self.pricing_tiers if t.above_prompt_tokens < prompt_tokens]
+        return max(applicable, key=lambda t: t.above_prompt_tokens) if applicable else None
+
+    def prices_at(self, at: date | None = None) -> tuple[Decimal, Decimal]:
+        """The (input, output) price per Mtok actually in effect on `at`.
+
+        `input_price_per_mtok`/`output_price_per_mtok` are always this
+        model's *base* (models.yaml) price; `price_changes` is a schedule of
+        future adjustments. This is the one place that reconciles them, and
+        it does so at *call* time rather than once at catalog-load time —
+        `cost_usd` calls it fresh on every invocation with `at=None` (today),
+        so a long-running process bills a scheduled change correctly the day
+        it takes effect, with no reload. `at=None` resolves to `_today()`,
+        the same injectable seam every other dated-pricing read in this
+        module uses.
+        """
+        if at is None:
+            at = _today()
+        due = [pc for pc in self.price_changes if pc.effective <= at]
+        if not due:
+            return self.input_price_per_mtok, self.output_price_per_mtok
+        current = max(due, key=lambda pc: pc.effective)
+        return current.input_price_per_mtok, current.output_price_per_mtok
+
     def cost_usd(
         self,
         input_tokens: int,
@@ -237,28 +394,64 @@ class ModelInfo:
         cache_read_tokens: int = 0,
         cache_write_tokens: int = 0,
         *,
-        cache_read_multiplier: Decimal = CACHE_READ_MULTIPLIER,
-        cache_write_multiplier: Decimal = CACHE_WRITE_MULTIPLIER,
+        cache_read_multiplier: Decimal | None = None,
+        cache_write_multiplier: Decimal | None = None,
     ) -> Decimal:
-        """Cost of one turn. `input_tokens` must exclude the cache buckets."""
+        """Cost of one turn. `input_tokens` must exclude the cache buckets.
+
+        `cache_read_multiplier`/`cache_write_multiplier` default to this
+        model's own fields — CACHE_READ_MULTIPLIER/CACHE_WRITE_MULTIPLIER
+        unless the catalog entry overrides them (Claude Fable 5.1's 0.025x
+        cache reads) — so per-model billing works without every caller having
+        to know the override exists. An explicit value here still wins, for a
+        caller deliberately pricing a hypothetical rate.
+
+        Some models bill the *whole* request at a different rate once the
+        prompt crosses a size threshold (see `pricing_tiers`): the tier's
+        `input_multiplier` scales the input, cache-read and cache-write terms,
+        and `output_multiplier` scales the output term. `prompt_tokens` for
+        that decision is `input + cache_read + cache_write` — the provider's
+        own definition of "how big is this request", not input alone.
+
+        Reads `prices_at(_today())` rather than `input_price_per_mtok`/
+        `output_price_per_mtok` directly, so a scheduled `price_changes`
+        entry that has come due since this `ModelInfo` was constructed still
+        bills correctly — no catalog reload required.
+        """
+        if cache_read_multiplier is None:
+            cache_read_multiplier = self.cache_read_multiplier
+        if cache_write_multiplier is None:
+            cache_write_multiplier = self.cache_write_multiplier
+
+        input_price, output_price = self.prices_at(_today())
+        prompt_tokens = input_tokens + cache_read_tokens + cache_write_tokens
+        tier = self._pricing_tier_for(prompt_tokens)
+        input_mult = tier.input_multiplier if tier else Decimal(1)
+        output_mult = tier.output_multiplier if tier else Decimal(1)
+
         return (
-            self.input_price_per_mtok * input_tokens
-            + self.output_price_per_mtok * output_tokens
-            + self.input_price_per_mtok * cache_read_multiplier * cache_read_tokens
-            + self.input_price_per_mtok * cache_write_multiplier * cache_write_tokens
+            input_price * input_mult * input_tokens
+            + output_price * output_mult * output_tokens
+            + input_price * input_mult * cache_read_multiplier * cache_read_tokens
+            + input_price * input_mult * cache_write_multiplier * cache_write_tokens
         ) / Decimal(1_000_000)
 
     def to_json(self) -> dict:
+        # The price a picker should show as "now" is the *effective* one, not
+        # the base models.yaml figure — same resolution cost_usd uses, so the
+        # UI and the bill it is about to run up always agree.
+        input_price, output_price = self.prices_at()
         return {
             "id": self.id,
             "provider": self.provider,
             "display_name": self.display_name,
             "context_window": self.context_window,
-            "input_price_per_mtok": float(self.input_price_per_mtok),
-            "output_price_per_mtok": float(self.output_price_per_mtok),
+            "input_price_per_mtok": float(input_price),
+            "output_price_per_mtok": float(output_price),
             "cost_tier": self.cost_tier,
             "strengths": self.strengths,
             "supports_tools": self.supports_tools,
+            "supports_effort": self.supports_effort,
             "curated": self.curated,
             "released": self.released,
             "energy_class": self.energy_class,
@@ -273,6 +466,24 @@ class ModelInfo:
                 self.energy_wh_per_mtok * ENERGY_TOKEN_WEIGHT_OUTPUT
             ),
             "reasoning_tier": self.is_reasoning_tier,
+            "cache_read_multiplier": float(self.cache_read_multiplier),
+            "cache_write_multiplier": float(self.cache_write_multiplier),
+            "pricing_tiers": [
+                {
+                    "above_prompt_tokens": t.above_prompt_tokens,
+                    "input_multiplier": float(t.input_multiplier),
+                    "output_multiplier": float(t.output_multiplier),
+                }
+                for t in self.pricing_tiers
+            ],
+            "price_changes": [
+                {
+                    "effective": pc.effective.isoformat(),
+                    "input_price_per_mtok": float(pc.input_price_per_mtok),
+                    "output_price_per_mtok": float(pc.output_price_per_mtok),
+                }
+                for pc in self.price_changes
+            ],
         }
 
 
@@ -312,6 +523,33 @@ def _tier_from_price(output_price: Decimal) -> str:
     if output_price >= Decimal("4"):
         return "standard"
     return "economy"
+
+
+def _parse_price_change_date(model_id: str, pc: dict) -> date:
+    """A `price_changes` entry's `effective` value, as a clear ValueError on
+    anything that is not an ISO `YYYY-MM-DD` date — `date.fromisoformat` on a
+    malformed yaml value raises one already; this just names the model."""
+    raw = pc.get("effective")
+    try:
+        return date.fromisoformat(str(raw))
+    except ValueError as exc:
+        raise ValueError(
+            f"{model_id}: price_changes effective date {raw!r} is not a valid "
+            "ISO date (YYYY-MM-DD)"
+        ) from exc
+
+
+def _parse_price_change_price(model_id: str, pc: dict, field: str) -> Decimal:
+    """A `price_changes` entry's price field, as a clear ValueError on
+    anything `Decimal` cannot parse — a bad numeric yaml value otherwise
+    raises `decimal.InvalidOperation`, which is not a `ValueError`."""
+    raw = pc.get(field)
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError(
+            f"{model_id}: price_changes {field} {raw!r} is not a valid number"
+        ) from exc
 
 
 class ModelCatalog:
@@ -373,17 +611,56 @@ class ModelCatalog:
         for m in raw["models"]:
             wh_override = m.get("energy_wh_per_mtok")
             active_params_b = m.get("active_params_b")
+
+            # input_price_per_mtok/output_price_per_mtok stay the model's base
+            # (yaml) price — never baked against "today" here. `prices_at()`
+            # (which `cost_usd` calls on every invocation) resolves whichever
+            # `price_changes` entry is actually due, at read time, so a
+            # long-running process bills a scheduled change correctly without
+            # this catalog ever being reloaded. `ModelInfo.__post_init__`
+            # validates the schedule itself (positive prices, strictly
+            # ascending dates, each entry's tier matching cost_tier); parsing
+            # errors below are just about turning a malformed yaml value into
+            # a clear ValueError instead of a raw date/decimal exception.
+            price_changes = [
+                PriceChange(
+                    effective=_parse_price_change_date(m["id"], pc),
+                    input_price_per_mtok=_parse_price_change_price(
+                        m["id"], pc, "input_price_per_mtok"
+                    ),
+                    output_price_per_mtok=_parse_price_change_price(
+                        m["id"], pc, "output_price_per_mtok"
+                    ),
+                )
+                for pc in m.get("price_changes") or []
+            ]
+            input_price = Decimal(str(m["input_price_per_mtok"]))
+            output_price = Decimal(str(m["output_price_per_mtok"]))
+
+            pricing_tiers = [
+                PricingTier(
+                    above_prompt_tokens=int(t["above_prompt_tokens"]),
+                    input_multiplier=Decimal(str(t["input_multiplier"])),
+                    output_multiplier=Decimal(str(t["output_multiplier"])),
+                )
+                for t in m.get("pricing_tiers") or []
+            ]
+
+            cache_read_mult = m.get("cache_read_multiplier")
+            cache_write_mult = m.get("cache_write_multiplier")
+
             info = ModelInfo(
                 id=m["id"],
                 provider=m["provider"],
                 wire_id=m["wire_id"],
                 display_name=m["display_name"],
                 context_window=m["context_window"],
-                input_price_per_mtok=Decimal(str(m["input_price_per_mtok"])),
-                output_price_per_mtok=Decimal(str(m["output_price_per_mtok"])),
+                input_price_per_mtok=input_price,
+                output_price_per_mtok=output_price,
                 cost_tier=m["cost_tier"],
                 strengths=m.get("strengths", []),
                 supports_tools=m.get("supports_tools", True),
+                supports_effort=m.get("supports_effort", False),
                 curated=True,
                 released=str(m["released"]) if m.get("released") else None,
                 # Unclassified curated entries fall back to their cost tier's
@@ -391,6 +668,18 @@ class ModelCatalog:
                 energy_class=m.get("energy_class") or energy_class_for_tier(m["cost_tier"]),
                 energy_wh_per_mtok=Decimal(str(wh_override)) if wh_override else None,
                 active_params_b=float(active_params_b) if active_params_b is not None else None,
+                cache_read_multiplier=(
+                    Decimal(str(cache_read_mult))
+                    if cache_read_mult is not None
+                    else CACHE_READ_MULTIPLIER
+                ),
+                cache_write_multiplier=(
+                    Decimal(str(cache_write_mult))
+                    if cache_write_mult is not None
+                    else CACHE_WRITE_MULTIPLIER
+                ),
+                pricing_tiers=pricing_tiers,
+                price_changes=price_changes,
             )
             out[info.id] = info
         return out
@@ -455,10 +744,22 @@ class ModelCatalog:
             released = None
             if created:
                 try:
-                    from datetime import datetime, timezone
-
                     released = datetime.fromtimestamp(int(created), tz=timezone.utc).strftime("%Y-%m")
                 except (ValueError, OSError):
+                    pass
+            # Cheap enrichment: OpenRouter publishes its own cache-read price per
+            # entry (`pricing.input_cache_read`), so an uncurated model gets its
+            # real ratio instead of silently inheriting the Anthropic-shaped
+            # default. Any malformed figure just falls back to that default —
+            # this is a nice-to-have, not something worth failing the fetch over.
+            cache_kwargs: dict = {}
+            cache_read_raw = pricing.get("input_cache_read")
+            if cache_read_raw is not None and in_price > 0:
+                try:
+                    cache_read_price = Decimal(str(cache_read_raw)) * Decimal(1_000_000)
+                    if _usable_price(cache_read_price):
+                        cache_kwargs["cache_read_multiplier"] = cache_read_price / in_price
+                except Exception:  # noqa: BLE001 - enrichment only, never fatal
                     pass
             dynamic[tret_id] = ModelInfo(
                 id=tret_id,
@@ -471,11 +772,16 @@ class ModelCatalog:
                 cost_tier=_tier_from_price(out_price),
                 strengths=[],
                 supports_tools=True,
+                # Same source as supports_tools above: OpenRouter's unified
+                # `reasoning.effort` shows up as "reasoning" in this entry's
+                # own supported_parameters when the model accepts it.
+                supports_effort="reasoning" in supported,
                 curated=False,
                 released=released,
                 # Nobody has classified these by hand: estimate from the price
                 # tier (economy→M, standard→L, premium→XL).
                 energy_class=energy_class_for_tier(_tier_from_price(out_price)),
+                **cache_kwargs,
             )
         self._dynamic = dynamic
         self._dynamic_fetched_at = time.monotonic()
@@ -680,7 +986,10 @@ PROVIDER_SPECS: tuple[ProviderSpec, ...] = (
         name="openrouter",
         env_key_attr="openrouter_api_key",
         factory=lambda key, settings: OpenRouterProvider(
-            key, referer=settings.openrouter_referer, title=settings.openrouter_title
+            key,
+            referer=settings.openrouter_referer,
+            title=settings.openrouter_title,
+            provider_prefs=settings.openrouter_provider_prefs,
         ),
     ),
     # "local" is deliberately key-optional: a configured base URL *is* the

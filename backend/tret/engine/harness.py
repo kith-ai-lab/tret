@@ -31,6 +31,7 @@ from tret.engine.compaction import (
     estimate_wire_tokens,
     over_budget,
     plan_compaction,
+    required_context_window,
     summarize,
     trim_history,
     wire_view,
@@ -180,6 +181,15 @@ class ModelSegment:
     # loading them failed; `energy_accounting` falls back to `settings` alone
     # in that case, exactly as it always has.
     factors: "FactorSet | None" = None
+    # Reasoning-effort level this segment's calls were made at, or None when
+    # either nothing was requested (a decision from before effort existed) or
+    # this segment's model doesn't accept the control (`ModelInfo.
+    # supports_effort` was False when the segment was created — see
+    # `HarnessEngine._execute_inner` and `_switch_model`). Recorded on the
+    # segment, not just read off the live `RoutingDecision`, because a
+    # supervisor switch creates a new segment for a different model whose
+    # `supports_effort` may disagree with the one the run started on.
+    effort: str | None = None
     # True once any turn folded into this segment was an ESTIMATE rather than a
     # provider-reported figure — a turn whose stream died mid-way (see
     # `HarnessEngine._book_usage`). The segment's totals stay one running sum
@@ -187,6 +197,16 @@ class ModelSegment:
     # but this says so, so analytics can tell a metered receipt from a guessed
     # one instead of reading both as equally certain.
     estimated_usage: bool = False
+    # The most recent TurnComplete's `served_by` for this segment — the
+    # upstream provider OpenRouter actually routed the call to (Anthropic
+    # reports the constant "anthropic"; Kimi and other OpenAI-compatible
+    # servers report nothing). Updated on every real TurnComplete, so a
+    # session-affinity switch mid-run (rare, but OpenRouter's fallback path can
+    # do it) is reflected rather than frozen at the first turn's answer. Never
+    # touched by the ProviderError estimate path below — a dying turn has no
+    # TurnComplete to read a served_by off, so the segment just keeps whatever
+    # its last metered turn reported.
+    served_by: str | None = None
     # The most recent *metered* (non-estimated) turn's cache_read_tokens for
     # this model in this run, or None if this model has not yet completed a
     # metered turn. A mid-stream death's estimate (see the `ProviderError`
@@ -292,6 +312,8 @@ class ModelSegment:
             "cache_read_tokens": self.usage.cache_read_tokens,
             "cache_write_tokens": self.usage.cache_write_tokens,
             "cost_usd": float(self.cost_usd),
+            "effort": self.effort,
+            "served_by": self.served_by,
             "energy_wh": accounting["energy_wh"],
             # The full per-model derivation, kept segment by segment. The
             # run-level roll-up nulls whatever the segments disagreed on, so this
@@ -900,6 +922,36 @@ class HarnessEngine:
 
         # ── route ────────────────────────────────────────────────────────────
         est_input_tokens = composition["total_est_tokens"]
+        # Read here rather than after routing (where the context-budget code
+        # below has always read it) because `min_context_window` needs
+        # `context_headroom` before a model is chosen, not after —
+        # `adaptive_of` is pure over `model_policy` alone, so reading it early
+        # changes nothing about what it returns later.
+        adaptive = adaptive_of(model_policy)
+        # The floor a model must clear is not always `est_input_tokens` itself.
+        # `trim_history` (below, in the context-budget section) runs *after* a
+        # model is chosen and exists specifically to shrink the
+        # `conversation_history` block — so sizing the floor off the untrimmed
+        # total makes a long chat's history exclude a model (a 128k-window Kimi,
+        # say) that trimming would have made perfectly viable. When adaptive
+        # compaction can actually run, the floor is computed off the
+        # non-trimmable remainder instead: the total minus that block. With
+        # compaction off there is nothing to trim it down later, so the floor
+        # stays the untrimmed total, exactly as before. Either way
+        # `est_input_tokens` itself — used below for the router's own
+        # accounting (priors size-band, the router prompt) — still reflects
+        # what was actually composed.
+        if adaptive.compaction != "off":
+            context_fit_basis = "prompt_without_history"
+            floor_input_tokens = est_input_tokens - composition["by_kind"].get(
+                "conversation_history", 0
+            )
+        else:
+            context_fit_basis = "full_prompt"
+            floor_input_tokens = est_input_tokens
+        min_context_window = required_context_window(
+            floor_input_tokens, max_output_tokens, adaptive.context_headroom
+        )
         try:
             decision = await self.router.route(
                 model_policy=model_policy,
@@ -913,10 +965,13 @@ class HarnessEngine:
                 emissions_workspace_doc=emissions.workspace_doc,
                 emissions_managed_doc=emissions.managed_doc,
                 emissions_at=emissions.at,
+                min_context_window=min_context_window,
             )
         except RoutingUnavailable as e:
             await self._fail_before_start(db, run, str(e), workspace_id=harness.workspace_id)
             return
+        if decision.context_fit is not None:
+            decision.context_fit["basis"] = context_fit_basis
 
         model_info = self.catalog.get(decision.chosen_model)
         run.routing = decision.to_json()
@@ -952,8 +1007,9 @@ class HarnessEngine:
         # The chosen model's window is known only now, which is why the history
         # trim below lives here rather than in api/chat.py: that endpoint hands
         # over the last N turns with no idea how large they are or which model
-        # will have to hold them.
-        adaptive = adaptive_of(model_policy)
+        # will have to hold them. `adaptive` itself was read earlier, above the
+        # routing call, so `min_context_window` could be computed before a
+        # model was chosen.
         context_limit = context_budget(
             model_info.context_window, max_output_tokens, adaptive.context_headroom
         )
@@ -974,6 +1030,11 @@ class HarnessEngine:
                 model_info,
                 reason="initial",
                 factors=self._factors_for(model_info.provider, model_info.id, emissions),
+                # Recorded regardless of intent — the decision always carries
+                # one (see `RoutingDecision.effort`) — but only sent to the
+                # provider, via `provider.stream()` below, when this model's
+                # own catalog entry says it accepts the control.
+                effort=decision.effort if model_info.supports_effort else None,
             )
         ]
         segment = segments[0]
@@ -1100,6 +1161,18 @@ class HarnessEngine:
                     tools=tool_specs,
                     max_tokens=max_output_tokens,
                     temperature=temperature,
+                    # Already gated by `supports_effort` when the segment was
+                    # created (initially above, or in `_switch_model` on a
+                    # mid-run switch) — reading it off the live segment here
+                    # rather than the run's own `decision.effort` means both
+                    # cases go through one gate instead of two.
+                    effort=segment.effort,
+                    # The run's own id: every call in this run's tool loop
+                    # shares one session id, so OpenRouter's sticky routing
+                    # keeps them on the same upstream provider instead of a
+                    # cold cache on every turn. Providers without session
+                    # affinity ignore it.
+                    session_id=str(run.id),
                 ):
                     if isinstance(event, TextDelta):
                         assistant_text.append(event.text)
@@ -1179,6 +1252,8 @@ class HarnessEngine:
                 break
 
             usage = turn.usage if turn else Usage()
+            if turn is not None and turn.served_by:
+                segment.served_by = turn.served_by
             self._book_usage(
                 run=run,
                 total_usage=total_usage,
@@ -1681,11 +1756,21 @@ class HarnessEngine:
         sequence is in `model_timeline`.
         """
         target = intervention.target
+        # Carry the run's original effort intent forward rather than
+        # recomputing it: `run.routing["effort"]` is the same field the run
+        # started with (see `RoutingDecision.effort`), so a switch never
+        # invents a different level than the one this run was routed under —
+        # only whether it is actually sent changes, re-gated by the *new*
+        # model's own `supports_effort` (a switch can move onto a model that
+        # does, or does not, accept the control, independent of the model it
+        # is leaving).
+        effort = (run.routing or {}).get("effort")
         segments.append(
             ModelSegment(
                 target,
                 reason=intervention.reason,
                 factors=self._factors_for(target.provider, target.id, emissions),
+                effort=effort if target.supports_effort else None,
             )
         )
         record = {

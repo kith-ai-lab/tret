@@ -5,7 +5,38 @@
 # Prices are USD per million tokens and drive run cost accounting — keep them
 # roughly current; they are estimates, not billing. `released` (YYYY-MM) feeds
 # the router's prefer-newer rule. Verified against the live OpenRouter catalog
-# 2026-07.
+# 2026-07, and again 2026-09 for the entries added that month (see their
+# individual source comments).
+#
+# ── optional cost-model fields (all default to "none of this applies") ───────
+# cache_read_multiplier / cache_write_multiplier: override the module defaults
+#   (0.1x / 1.25x of input price) for a model whose provider prices its cache
+#   differently — e.g. claude-fable-5-1's 0.025x cache reads.
+# pricing_tiers: a list of {above_prompt_tokens, input_multiplier,
+#   output_multiplier} steps. Above the threshold the *whole* request (not
+#   just the excess) bills at the multiplied rate — GPT-6 Astra doubles
+#   input/cache and adds 50% to output once the prompt passes 272K tokens.
+#   Thresholds must be strictly ascending and multipliers must be positive.
+# price_changes: a list of {effective: "YYYY-MM-DD", input_price_per_mtok,
+#   output_price_per_mtok}, sorted ascending by effective date. The
+#   input_price_per_mtok/output_price_per_mtok keys above are always the
+#   model's base price — this schedule never overwrites them. ModelInfo.
+#   prices_at() (which cost_usd calls fresh on every invocation, using
+#   today's date) resolves whichever entry is due as of a given date, so a
+#   long-running process bills a scheduled change correctly the day it takes
+#   effect, with no restart (e.g. gemini-3.8-flash's introductory rate
+#   through 2026, then the higher standard rate from 2027-01-01). Each
+#   entry's prices must be positive, and must keep the model inside its
+#   declared cost_tier band (checked against _tier_from_price) — a change
+#   that would silently cross a tier boundary fails the whole catalog load.
+# supports_effort: does this model's provider API accept a reasoning-effort
+#   control at all? Verified 2026-09-10 against
+#   https://platform.claude.com/docs/en/build-with-claude/effort (Anthropic's
+#   `output_config.effort`, supported models listed by name) and
+#   https://openrouter.ai/docs/guides/best-practices/reasoning-tokens plus the
+#   live https://openrouter.ai/api/v1/models `supported_parameters` per entry
+#   (OpenRouter's unified `reasoning.effort`). True only where one of those two
+#   sources explicitly confirms it — see each entry's own comment below.
 #
 # ── energy_class: CALIBRATED ESTIMATES, STILL NOT MEASUREMENTS ────────────────
 # Each class is Wh per million **output-equivalent** tokens (an output token
@@ -66,6 +97,37 @@ models:
     energy_class: R
     strengths: [deep reasoning, doctrine-following, long-form drafting, hardest verdicts]
     supports_tools: true
+    # supports_effort: true — claude-fable-5 is named in the effort doc's
+    # supported-models list.
+    supports_effort: true
+
+  # Verified 2026-09-10 via https://platform.claude.com/docs/en/about-claude/pricing
+  # (model pricing table: $10/$50 base) and
+  # https://platform.claude.com/docs/en/build-with-claude/prompt-caching (cache
+  # multiplier footnote: "Cache hits and refreshes on Claude Fable 5.1 and
+  # Claude Mythos 5.1 are priced at 0.025x the base input price" — every other
+  # model here, Fable 5 included, stays at the module default 0.1x).
+  - id: anthropic/claude-fable-5-1
+    provider: anthropic
+    wire_id: claude-fable-5-1
+    display_name: Claude Fable 5.1
+    released: 2026-09
+    context_window: 1000000
+    input_price_per_mtok: 10.0
+    output_price_per_mtok: 50.0
+    cache_read_multiplier: 0.025
+    cache_write_multiplier: 1.25
+    cost_tier: premium
+    # R (reasoning): same thinking-first positioning as claude-fable-5, one
+    # point release on, at the same $10/$50 price point. Anthropic still
+    # publishes no energy data or active parameter count for it — this is
+    # product positioning, not measurement, same caveat as claude-fable-5.
+    energy_class: R
+    strengths: [deep reasoning, doctrine-following, long-form drafting, hardest verdicts]
+    supports_tools: true
+    # supports_effort: true — claude-fable-5-1 is named in the effort doc's
+    # supported-models list.
+    supports_effort: true
 
   - id: anthropic/claude-opus-4-8
     provider: anthropic
@@ -83,6 +145,32 @@ models:
     energy_class: XL
     strengths: [deep reasoning, long-form drafting, nuanced judgment]
     supports_tools: true
+    # supports_effort: true — claude-opus-4-8 is named in the effort doc's
+    # supported-models list.
+    supports_effort: true
+
+  # Verified 2026-09-10 via https://platform.claude.com/docs/en/about-claude/pricing
+  # (model pricing table): $5/$25 — half of Fable 5's $10/$50, matching the
+  # "roughly half of Fable" positioning.
+  - id: anthropic/claude-opus-5
+    provider: anthropic
+    wire_id: claude-opus-5
+    display_name: Claude Opus 5
+    released: 2026-07
+    context_window: 1000000
+    input_price_per_mtok: 5.0
+    output_price_per_mtok: 25.0
+    cost_tier: premium
+    # XL: the same non-reasoning frontier tier as Opus 4.8 — its direct
+    # successor at the same price point, not sold as thinking-first. Same
+    # "least defensible number in the catalog" caveat as Opus 4.8: XL has no
+    # measured anchor.
+    energy_class: XL
+    strengths: [deep reasoning, long-form drafting, nuanced judgment]
+    supports_tools: true
+    # supports_effort: true — claude-opus-5 is named in the effort doc's
+    # supported-models list.
+    supports_effort: true
 
   - id: anthropic/claude-sonnet-5
     provider: anthropic
@@ -99,6 +187,9 @@ models:
     energy_class: L
     strengths: [structured extraction, doctrine-following, balanced quality/cost, tool reliability]
     supports_tools: true
+    # supports_effort: true — claude-sonnet-5 is named in the effort doc's
+    # supported-models list.
+    supports_effort: true
 
   - id: anthropic/claude-haiku-4-5
     provider: anthropic
@@ -115,6 +206,9 @@ models:
     energy_class: M
     strengths: [fast classification, QA grading, routing, short summaries]
     supports_tools: true
+    # supports_effort: false — claude-haiku-4-5 is NOT in the effort doc's
+    # supported-models list (checked by name; absent).
+    supports_effort: false
 
   - id: kimi/kimi-k2
     provider: kimi
@@ -131,6 +225,10 @@ models:
     energy_class: M
     strengths: [agentic tool use, long documents, cost-efficient extraction]
     supports_tools: true
+    # supports_effort: false — this is Moonshot's own native API, not
+    # OpenRouter, and nothing confirms an effort-style control there. Leave
+    # false per spec until confirmed.
+    supports_effort: false
 
   - id: kimi/kimi-latest
     provider: kimi
@@ -145,6 +243,9 @@ models:
     energy_class: M
     strengths: [general assistant tasks, long documents]
     supports_tools: true
+    # supports_effort: false — same native Moonshot API as kimi-k2, same
+    # reasoning.
+    supports_effort: false
 
   - id: openrouter/moonshotai/kimi-k3
     provider: openrouter
@@ -161,6 +262,15 @@ models:
     energy_class: L
     strengths: [agentic tool use, very long context, strong reasoning]
     supports_tools: true
+    # supports_effort: true — re-checked 2026-09-10 directly against the live
+    # https://openrouter.ai/api/v1/models: this entry's top-level
+    # supported_parameters is ["frequency_penalty", "include_reasoning",
+    # "logit_bias", "logprobs", "max_tokens", "min_p", "presence_penalty",
+    # "reasoning", "reasoning_effort", "repetition_penalty", "response_format",
+    # "seed", "stop", "structured_outputs", "temperature", "tool_choice",
+    # "tools", "top_k", "top_logprobs", "top_p"] — "reasoning" is present, which
+    # is the firmer, by-name confirmation the earlier `false` was waiting for.
+    supports_effort: true
 
   - id: openrouter/openai/gpt-5.6-terra
     provider: openrouter
@@ -176,6 +286,11 @@ models:
     energy_class: L
     strengths: [structured extraction, schema adherence, long context, instruction following]
     supports_tools: true
+    # supports_effort: true — the live OpenRouter catalog lists "reasoning"
+    # and "reasoning_effort" in this entry's supported_parameters, matching
+    # the reasoning-tokens doc's statement that GPT-5.6 accepts
+    # `reasoning.effort`.
+    supports_effort: true
 
   - id: openrouter/openai/gpt-5.6-luna
     provider: openrouter
@@ -191,6 +306,10 @@ models:
     energy_class: M
     strengths: [fast general assistant, reliable tool calls, routing, summaries]
     supports_tools: true
+    # supports_effort: true — same GPT-5.6 generation as Terra; the live
+    # OpenRouter catalog lists "reasoning"/"reasoning_effort" for this entry
+    # too.
+    supports_effort: true
 
   - id: openrouter/google/gemini-3.6-flash
     provider: openrouter
@@ -208,6 +327,10 @@ models:
     energy_class: M
     strengths: [very long context, fast drafting, data analysis]
     supports_tools: true
+    # supports_effort: true — checked against the live
+    # https://openrouter.ai/api/v1/models: this entry's supported_parameters
+    # includes "reasoning" (and "reasoning_effort").
+    supports_effort: true
 
   - id: openrouter/google/gemini-3.5-flash-lite
     provider: openrouter
@@ -223,6 +346,10 @@ models:
     energy_class: S
     strengths: [cheap summaries, classification, long documents]
     supports_tools: true
+    # supports_effort: true — checked against the live
+    # https://openrouter.ai/api/v1/models: this entry's supported_parameters
+    # includes "reasoning" (and "reasoning_effort").
+    supports_effort: true
 
   - id: openrouter/x-ai/grok-4.5
     provider: openrouter
@@ -239,6 +366,14 @@ models:
     energy_class: L
     strengths: [reasoning, current-events knowledge, drafting]
     supports_tools: true
+    # supports_effort: true — re-checked 2026-09-10 directly against the live
+    # https://openrouter.ai/api/v1/models: this entry's top-level
+    # supported_parameters is ["include_reasoning", "logprobs", "max_tokens",
+    # "reasoning", "reasoning_effort", "response_format", "seed",
+    # "structured_outputs", "temperature", "tool_choice", "tools",
+    # "top_logprobs", "top_p"] — "reasoning" is present, the firmer,
+    # by-name confirmation the earlier `false` was waiting for.
+    supports_effort: true
 
   - id: openrouter/deepseek/deepseek-v4-pro
     provider: openrouter
@@ -259,3 +394,88 @@ models:
     energy_class: R
     strengths: [open-weights, cost-efficient reasoning, extraction]
     supports_tools: true
+    # supports_effort: true — re-checked 2026-09-10 directly against the live
+    # https://openrouter.ai/api/v1/models: this entry's top-level
+    # supported_parameters is ["frequency_penalty", "include_reasoning",
+    # "logit_bias", "logprobs", "max_completion_tokens", "max_tokens", "min_p",
+    # "presence_penalty", "reasoning", "reasoning_effort",
+    # "repetition_penalty", "response_format", "seed", "stop",
+    # "structured_outputs", "temperature", "tool_choice", "tools", "top_k",
+    # "top_logprobs", "top_p"] — "reasoning" is present, the firmer, by-name
+    # confirmation the earlier `false` was waiting for.
+    supports_effort: true
+
+  # Verified 2026-09-10 against the live OpenRouter catalog
+  # (https://openrouter.ai/api/v1/models, id "openai/gpt-6-astra"): base
+  # pricing prompt=0.00001/completion=0.00005 per token ($10/$50 per Mtok),
+  # with a `pricing.overrides[0]` entry (`min_prompt_tokens: 272000`) that
+  # doubles prompt/cache pricing (0.00002) and raises completion 1.5x
+  # (0.000075) for the whole request once prompt tokens exceed 272,000 —
+  # exclusive, not inclusive: OpenAI's own pricing page bills "requests over
+  # 272K input tokens", so a 272,000-token prompt still bills at the base
+  # rate and 272,001 is the first count that gets the override. Modeled below
+  # via pricing_tiers with above_prompt_tokens: 272000, which ModelInfo's
+  # `_pricing_tier_for` applies with a strict "<" comparison — exactly that
+  # boundary (see its docstring in catalog.py). "tools" is in
+  # supported_parameters.
+  - id: openrouter/openai/gpt-6-astra
+    provider: openrouter
+    wire_id: openai/gpt-6-astra
+    display_name: GPT-6 Astra (OpenRouter)
+    released: 2026-09
+    context_window: 1050000
+    input_price_per_mtok: 10.0
+    output_price_per_mtok: 50.0
+    pricing_tiers:
+      - above_prompt_tokens: 272000
+        input_multiplier: 2.0
+        output_multiplier: 1.5
+    cost_tier: premium
+    # R (reasoning): OpenRouter marks `reasoning.mandatory: true` and
+    # `default_enabled: true` for this model, with real effort levels
+    # (max/xhigh/high/medium/low) — a thinking-first flagship, same tier as
+    # claude-fable-5/5.1.
+    energy_class: R
+    strengths: [advanced analysis, software engineering, deep research, long-horizon agentic work]
+    supports_tools: true
+    # supports_effort: true — confirmed both ways: the reasoning-tokens doc
+    # names GPT-6 Astra explicitly, and the live OpenRouter catalog lists
+    # "reasoning"/"reasoning_effort" in this entry's supported_parameters.
+    supports_effort: true
+
+  # Verified 2026-09-10 against the live OpenRouter catalog
+  # (https://openrouter.ai/api/v1/models, id "google/gemini-3.8-flash"):
+  # prompt=0.00000075/completion=0.00000375 per token ($0.75/$3.75 per Mtok).
+  # "tools" is in supported_parameters. context_length there is 1048576, not
+  # the round 1,000,000 given in the task spec — using the verified figure to
+  # match the convention of the other Gemini entries above (also 1048576).
+  # Google's own announcement
+  # (https://blog.google/innovation-and-ai/models-and-research/gemini-models/3-8-flash-and-3-8-flash-cyber/)
+  # confirms this is introductory pricing expiring 2026-12-31, with $1.50/$7.50
+  # from 2027-01-01 — modeled below via price_changes. Note a discrepancy: that
+  # announcement's own text states the introductory *output* price as
+  # $3.50/Mtok, not the $3.75 OpenRouter is actually charging; using the live
+  # OpenRouter number since that is what this catalog bills against for
+  # openrouter-routed traffic.
+  - id: openrouter/google/gemini-3.8-flash
+    provider: openrouter
+    wire_id: google/gemini-3.8-flash
+    display_name: Gemini 3.8 Flash (OpenRouter)
+    released: 2026-09
+    context_window: 1048576
+    input_price_per_mtok: 0.75
+    output_price_per_mtok: 3.75
+    price_changes:
+      - effective: "2027-01-01"
+        input_price_per_mtok: 1.5
+        output_price_per_mtok: 7.5
+    cost_tier: standard
+    # M: Flash-tier successor to gemini-3.6-flash at the same price point —
+    # same size-class reasoning as the existing Flash entries above.
+    energy_class: M
+    strengths: [very long context, fast drafting, data analysis]
+    supports_tools: true
+    # supports_effort: true — checked against the live
+    # https://openrouter.ai/api/v1/models: this entry's supported_parameters
+    # includes "reasoning" (and "reasoning_effort").
+    supports_effort: true

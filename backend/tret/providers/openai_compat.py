@@ -121,6 +121,34 @@ def _reported_cost_usd(usage: dict) -> Decimal | None:
         return None
 
 
+def _served_by_from_openai(data: dict) -> str | None:
+    """The upstream provider that actually served this response, if named.
+
+    OpenRouter does not put this at the top level of the response — there is
+    no top-level `provider` string on either the non-streaming completion or a
+    streaming chunk (verified against
+    https://openrouter.ai/docs/api-reference/chat-completion: the
+    ChatCompletionResponse/ChatStreamChunk schemas list only choices, created,
+    id, model, object, openrouter_metadata, service_tier, system_fingerprint
+    and usage). The served endpoint is named inside
+    `openrouter_metadata.endpoints.available[]`, in the entry with
+    `selected: true` — the schema's own example is
+    `{"endpoints": {"available": [{"model": "openai/gpt-4o", "provider":
+    "OpenAI", "selected": true}]}}`. Kimi and other OpenAI-compatible servers
+    send neither key, so this reads as None for them.
+    """
+    metadata = data.get("openrouter_metadata")
+    if not isinstance(metadata, dict):
+        return None
+    endpoints = metadata.get("endpoints")
+    if not isinstance(endpoints, dict):
+        return None
+    for entry in endpoints.get("available") or []:
+        if isinstance(entry, dict) and entry.get("selected") and entry.get("provider"):
+            return str(entry["provider"])
+    return None
+
+
 def _usage_from_openai(usage: dict) -> Usage:
     """Translate an OpenAI-style usage object into canonical Usage.
 
@@ -195,6 +223,40 @@ class OpenAICompatProvider(Provider):
         upstream honors Anthropic-style `cache_control` override this.
         """
 
+    def _effort_body(self, effort: str | None) -> dict:
+        """Hook: the request-body fragment for a reasoning-effort level.
+
+        `{}` by default — most OpenAI-compatible servers (Kimi included) have
+        no such control, so a harness that passes `effort` to one gets a
+        request unchanged from before this parameter existed. OpenRouter
+        overrides this with its unified `reasoning.effort`.
+        """
+        return {}
+
+    def _session_body(self, session_id: str | None) -> dict:
+        """Hook: the request-body fragment for provider-side cache affinity.
+
+        `{}` by default — most OpenAI-compatible servers (Kimi included) have
+        no such control. OpenRouter overrides this with its top-level
+        `session_id`, which the router uses as a sticky routing key so a
+        run's whole tool loop lands on the same upstream provider.
+        """
+        return {}
+
+    def _provider_body(self, tools_present: bool) -> dict:
+        """Hook: the `provider` object (OpenRouter's provider-selection block).
+
+        `{}` by default — most OpenAI-compatible servers (Kimi included) have
+        no such field. OpenRouter overrides this to build
+        `{"require_parameters": True}` when tools are present (so a provider
+        that would otherwise silently drop tool calling or the JSON schema is
+        excluded from routing instead) plus whatever an operator configured
+        via `TRET_OPENROUTER_PROVIDER_PREFS`. An empty return means "omit the
+        `provider` key entirely" — sending `{}` is not the same as sending
+        nothing on some upstreams.
+        """
+        return {}
+
     async def stream(
         self,
         *,
@@ -204,6 +266,8 @@ class OpenAICompatProvider(Provider):
         tools: list[ToolSpec],
         max_tokens: int,
         temperature: float,
+        effort: str | None = None,
+        session_id: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         body: dict = {
             "model": model,
@@ -213,9 +277,14 @@ class OpenAICompatProvider(Provider):
             "stream": True,
             "stream_options": {"include_usage": True},
             **self._extra_body,
+            **self._effort_body(effort),
+            **self._session_body(session_id),
         }
         if tools:
             body["tools"] = _to_openai_tools(tools)
+        provider_body = self._provider_body(bool(tools))
+        if provider_body:
+            body["provider"] = provider_body
         self._apply_cache_control(body)
 
         # Aggregate tool-call deltas per (choice, tool index). The tool index is
@@ -229,6 +298,12 @@ class OpenAICompatProvider(Provider):
         primary_choice: int | None = None
         usage = Usage()
         finish_reason = "end_turn"
+        # The last non-empty value seen across chunks: OpenRouter's routing
+        # decision (and so which endpoint is `selected`) is settled once the
+        # upstream is picked, but nothing guarantees which chunk first carries
+        # `openrouter_metadata` — taking the last keeps this correct even if
+        # an earlier chunk arrives before the decision is final.
+        served_by: str | None = None
 
         async with open_client(
             self.egress_class, timeout=httpx.Timeout(300.0, connect=15.0)
@@ -252,6 +327,9 @@ class OpenAICompatProvider(Provider):
                             continue
                         if chunk.get("usage"):
                             usage = _usage_from_openai(chunk["usage"])
+                        chunk_served_by = _served_by_from_openai(chunk)
+                        if chunk_served_by:
+                            served_by = chunk_served_by
                         for choice in chunk.get("choices", []):
                             choice_idx = _index_of(choice)
                             if primary_choice is None:
@@ -296,7 +374,7 @@ class OpenAICompatProvider(Provider):
             )
 
         stop = "tool_use" if (pending and finish_reason in ("tool_calls", "tool_use")) else finish_reason
-        yield TurnComplete(usage=usage, stop_reason=stop)
+        yield TurnComplete(usage=usage, stop_reason=stop, served_by=served_by)
 
     async def complete_json(
         self,
@@ -329,6 +407,12 @@ class OpenAICompatProvider(Provider):
             "max_tokens": max_tokens,
             **self._extra_body,
         }
+        # A forced tool call always carries `tools`, so this is unconditionally
+        # the "tools present" case — the router's own JSON call benefits from
+        # `require_parameters` exactly as much as a tool-calling agent turn.
+        provider_body = self._provider_body(True)
+        if provider_body:
+            body["provider"] = provider_body
         async with open_client(self.egress_class, timeout=timeout) as client:
             try:
                 resp = await client.post(
@@ -340,6 +424,7 @@ class OpenAICompatProvider(Provider):
             raise ProviderError(self.name, resp.text[:2000], resp.status_code)
         data = resp.json()
         usage = _usage_from_openai(data.get("usage") or {})
+        served_by = _served_by_from_openai(data)
         try:
             calls = data["choices"][0]["message"].get("tool_calls") or []
             for call in calls:
@@ -348,6 +433,7 @@ class OpenAICompatProvider(Provider):
                         payload=json.loads(call["function"]["arguments"]),
                         usage=usage,
                         model=model,
+                        served_by=served_by,
                     )
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             raise ProviderError(self.name, f"Malformed structured completion: {e}") from e
@@ -373,13 +459,56 @@ class OpenRouterProvider(OpenAICompatProvider):
     name = "openrouter"
     max_cache_breakpoints = 4  # Anthropic's per-request limit, which OpenRouter inherits
 
-    def __init__(self, api_key: str, referer: str = "", title: str = "tret"):
+    def __init__(
+        self,
+        api_key: str,
+        referer: str = "",
+        title: str = "tret",
+        provider_prefs: dict | None = None,
+    ):
         headers = {}
         if referer:
             headers["HTTP-Referer"] = referer
         if title:
             headers["X-Title"] = title
         super().__init__(api_key, base_url="https://openrouter.ai/api/v1", default_headers=headers)
+        # Operator overrides for the `provider` request object — order, ignore,
+        # quantizations, data_collection, zdr, sort — merged on top of
+        # `_provider_body`'s own `require_parameters` default. See
+        # TRET_OPENROUTER_PROVIDER_PREFS (config.py) for where this is parsed.
+        self._provider_prefs = provider_prefs or {}
+
+    def _effort_body(self, effort: str | None) -> dict:
+        """OpenRouter's unified `reasoning.effort`, forwarded to whichever
+        upstream the request lands on. See
+        https://openrouter.ai/docs/guides/best-practices/reasoning-tokens.
+        """
+        return {"reasoning": {"effort": effort}} if effort else {}
+
+    def _session_body(self, session_id: str | None) -> dict:
+        """OpenRouter's top-level `session_id`: a sticky routing key so every
+        request in the session (here, one run's whole tool loop) lands on the
+        same upstream provider, maximizing prompt-cache hits. Verified against
+        https://openrouter.ai/docs/api-reference/chat-completion — the
+        CreateChatCompletionRequest schema documents `session_id` as a
+        top-level string field (max 256 characters), not something nested
+        under `provider` or `metadata`.
+        """
+        return {"session_id": session_id} if session_id else {}
+
+    def _provider_body(self, tools_present: bool) -> dict:
+        """The `provider` object: https://openrouter.ai/docs/guides/routing/provider-selection.
+
+        `require_parameters: true` only when tools are present — it guarantees
+        tool calling and JSON schema are honored instead of silently dropped by
+        a provider that would otherwise still be routed to — then
+        `provider_prefs` is shallow-merged on top so an operator's own
+        `order`/`ignore`/`quantizations`/`data_collection`/`zdr`/`sort` always
+        wins over this default.
+        """
+        body: dict = {"require_parameters": True} if tools_present else {}
+        body.update(self._provider_prefs)
+        return body
 
     def _apply_cache_control(self, body: dict) -> None:
         messages = body.get("messages") or []

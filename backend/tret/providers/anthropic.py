@@ -37,6 +37,13 @@ MAX_CACHE_BREAKPOINTS = 4
 SYSTEM_CACHE_BREAKPOINTS = 1
 MESSAGE_CACHE_BREAKPOINTS = MAX_CACHE_BREAKPOINTS - SYSTEM_CACHE_BREAKPOINTS
 
+# There is only ever one upstream behind this provider — unlike OpenRouter,
+# which can route the same request to any of several — so `served_by` is a
+# constant rather than something read off the response. Recorded anyway so the
+# field is uniform across providers instead of "populated for OpenRouter,
+# absent everywhere else".
+SERVED_BY = "anthropic"
+
 
 def _as_blocks(content) -> list[dict]:
     """A message body as a block list, promoting a plain string."""
@@ -156,6 +163,8 @@ class AnthropicProvider(Provider):
         tools: list[ToolSpec],
         max_tokens: int,
         temperature: float,
+        effort: str | None = None,
+        session_id: str | None = None,  # no equivalent on the Anthropic API; ignored
     ) -> AsyncIterator[ProviderEvent]:
         system_blocks = [
             {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
@@ -171,6 +180,14 @@ class AnthropicProvider(Provider):
         )
         if tools:
             kwargs["tools"] = _to_anthropic_tools(tools)
+        if effort:
+            # `output_config` is a first-class keyword on the installed SDK's
+            # `messages.stream()` (anthropic>=0.117, verified against this
+            # repo's pinned version) — not an unsupported field that has to
+            # go through `extra_body`. The harness has already decided this
+            # model accepts effort (`ModelInfo.supports_effort`) before
+            # calling; this provider only forwards what it is given.
+            kwargs["output_config"] = {"effort": effort}
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:
@@ -206,6 +223,7 @@ class AnthropicProvider(Provider):
                 yield TurnComplete(
                     usage=_usage_of(final.usage),
                     stop_reason=final.stop_reason or "end_turn",
+                    served_by=SERVED_BY,
                 )
         except anthropic.APIError as e:
             raise ProviderError("anthropic", str(e), getattr(e, "status_code", None)) from e
@@ -240,5 +258,6 @@ class AnthropicProvider(Provider):
                     payload=dict(block.input),
                     usage=_usage_of(getattr(msg, "usage", None)),
                     model=model,
+                    served_by=SERVED_BY,
                 )
         raise ProviderError("anthropic", "No tool_use block in structured completion")

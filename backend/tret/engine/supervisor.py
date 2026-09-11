@@ -156,7 +156,7 @@ def affordable(state: TurnState, target: ModelInfo) -> bool:
     if remaining <= 0:
         return False
     resend = (
-        Decimal(state.est_wire_tokens) / Decimal(1_000_000) * target.input_price_per_mtok
+        Decimal(state.est_wire_tokens) / Decimal(1_000_000) * target.prices_at()[0]
     )
     return resend * SWITCH_COST_SAFETY <= remaining
 
@@ -211,9 +211,9 @@ def choose_target(
     stronger = [
         m
         for m in others
-        if m.id not in priors and m.output_price_per_mtok > current.output_price_per_mtok
+        if m.id not in priors and m.prices_at()[1] > current.prices_at()[1]
     ]
-    return min(stronger, key=lambda m: (m.output_price_per_mtok, m.id)) if stronger else None
+    return min(stronger, key=lambda m: (m.prices_at()[1], m.id)) if stronger else None
 
 
 def assess(

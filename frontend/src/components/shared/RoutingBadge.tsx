@@ -8,6 +8,19 @@ export function shortModelName(id: string): string {
   return i >= 0 ? id.slice(i + 1) : id
 }
 
+/** The context-window row's value: what a reader needs to know is whether the
+ *  chosen model can actually hold this call, in one line. Missing/null (a
+ *  decision from before this field existed) reads the same as "unchecked" —
+ *  neither one means a check ran and passed. */
+function contextFitLabel(routing: RoutingDecision): string {
+  const fit = routing.context_fit
+  if (!fit || fit.mode === 'unchecked') return 'unchecked'
+  if (fit.mode === 'best_effort') {
+    return `best effort — needs ~${fit.required}, nothing in policy fits`
+  }
+  return `fits (needs ~${fit.required} tokens)`
+}
+
 function tierOf(routing: RoutingDecision): string | null {
   // The decision itself doesn't carry the tier; show override/fallback context
   // instead when present.
@@ -97,6 +110,12 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
             <span>{routing.chosen_model}</span>
             <span className="k">Router model</span>
             <span>{routing.router_model ?? '— (no router call)'}</span>
+            {routing.router_served_by && (
+              <>
+                <span className="k">Served by</span>
+                <span>{routing.router_served_by}</span>
+              </>
+            )}
             <span className="k">Prompt version</span>
             <span>{routing.routing_prompt_version}</span>
             <span className="k">Objective</span>
@@ -109,12 +128,16 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
             <span>{routing.fallback_used ? 'yes' : 'no'}</span>
             <span className="k">Confidence</span>
             <span>{routing.confidence ?? '—'}</span>
+            <span className="k">Effort</span>
+            <span>{routing.effort ?? '—'}</span>
             <span className="k">Latency</span>
             <span>{routing.latency_ms} ms</span>
             <span className="k">Decided at</span>
             <span>{routing.decided_at}</span>
             <span className="k">Candidates</span>
             <span>{routing.candidates.length ? routing.candidates.join(', ') : '—'}</span>
+            <span className="k">Context</span>
+            <span>{contextFitLabel(routing)}</span>
           </div>
           {routing.evidence && (
             <>

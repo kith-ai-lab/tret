@@ -29,7 +29,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tret.adaptive import adaptive_of
 from tret.config import get_settings
+from tret.engine.compaction import required_context_window
 from tret.providers.base import (
     Msg,
     Provider,
@@ -404,6 +406,8 @@ async def _run_agentic_loop(
     max_tokens: int,
     temperature: float,
     max_iterations: int,
+    effort: str | None = None,
+    session_id: str | None = None,
     on_tool_call: Callable[[ToolCall], None] | None = None,
 ) -> tuple[str, str, Usage, str, int, bool, bool, str | None]:
     """route → stream → execute tool calls → append messages → repeat.
@@ -455,6 +459,12 @@ async def _run_agentic_loop(
                 tools=tool_specs,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                # Gated on this model's own catalog entry, same as
+                # engine/harness.py — `effort` here is the run's recorded
+                # intent (`RoutingDecision.effort`) regardless of whether this
+                # model accepts the control.
+                effort=effort if model.supports_effort else None,
+                session_id=session_id,
             ):
                 if isinstance(event, TextDelta):
                     assistant_text.append(event.text)
@@ -688,6 +698,7 @@ async def arun(
         "allowed": None,
         "max_cost_tier": max_cost_tier,
     }
+    est_input_tokens = max(1, len(task) // 4)
     decision = await router.route(
         model_policy=model_policy,
         task_type="freeform",
@@ -695,7 +706,14 @@ async def arun(
         task_description=task[:_TASK_DESCRIPTION_CHARS],
         output_contract="free text",
         n_documents=n_documents,
-        est_input_tokens=max(1, len(task) // 4),
+        est_input_tokens=est_input_tokens,
+        # `max_tokens` (this run's own output reservation) and the policy's
+        # headroom are both known here, so the router can be told the
+        # smallest window this run needs — same as harness.py and
+        # tret.sdk.Router.arun.
+        min_context_window=required_context_window(
+            est_input_tokens, max_tokens, adaptive_of(model_policy).context_headroom
+        ),
     )
     if on_route is not None:
         on_route(decision)
@@ -710,6 +728,11 @@ async def arun(
     tool_ctx = _ToolCtx(root=root) if root is not None else None
     tool_specs = _tool_specs() if root is not None else []
 
+    # No ledger id exists yet — `_ledger_entry` mints its own only after the
+    # run finishes — so this call gets a fresh id of its own, same as
+    # `tret.sdk.Router.arun`, to give a provider with sticky routing
+    # (OpenRouter) something to key every turn of this run's loop on.
+    session_id = str(uuid.uuid4())
     (
         text,
         stop_reason,
@@ -729,6 +752,11 @@ async def arun(
         max_tokens=max_tokens,
         temperature=temperature,
         max_iterations=max_iterations,
+        # Recorded on every decision (`RoutingDecision.effort`); gated on
+        # `model.supports_effort` inside `_run_agentic_loop` itself, same as
+        # engine/harness.py.
+        effort=decision.effort,
+        session_id=session_id,
         on_tool_call=on_tool_call,
     )
 

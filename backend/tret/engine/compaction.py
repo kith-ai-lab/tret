@@ -33,6 +33,7 @@ rather than defaulting it.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from tret.engine.context import estimate_tokens
@@ -173,6 +174,53 @@ def budget(context_window: int, max_output_tokens: int, headroom: float) -> int:
         # exactly where it was before this module existed.
         return 0
     return max(0, int(context_window * headroom) - max_output_tokens)
+
+
+def required_context_window(est_input_tokens: int, max_output_tokens: int, headroom: float) -> int:
+    """The inverse of `budget()`: the smallest window that can hold this call.
+
+    Where `budget(W, ...)` answers "how much input can a window of size W take",
+    this answers the question a router has to ask before a model is chosen —
+    "how big does W have to be to take this much input". Returns the smallest
+    non-negative `W` for which `budget(W, max_output_tokens, headroom) >=
+    est_input_tokens`.
+
+    `headroom <= 0` guards against a policy value that would make every window
+    fail regardless of size (dividing by it would otherwise raise or return a
+    nonsensical answer) — 0 is returned, the same "unknown/unenforceable"
+    signal `budget()` itself gives for an unreported context window.
+
+    `est_input_tokens <= 0` gets the same 0 for a different reason: `budget()`
+    floors its result at 0 rather than going negative, so with no input to
+    hold, `budget(w, ...) >= est_input_tokens` (<= 0) is already true for
+    every `w >= 0` — the smallest such window is 0, not something to search
+    for. Returning early here also sidesteps what searching for it used to
+    cost: the downward nudge below walks one window at a time, and with
+    `est_input_tokens <= 0` its stopping condition never turned false, so it
+    walked every integer from the initial estimate down to 1 — a call with a
+    small `headroom` and a large `max_output_tokens` looped roughly
+    `max_output_tokens / headroom` times over nothing.
+    """
+    if headroom <= 0 or est_input_tokens <= 0:
+        return 0
+    target = est_input_tokens + max(0, max_output_tokens)
+    # A direct ceiling-division estimate, then nudged to exactly match what
+    # `budget()` itself would say — `budget()` truncates `window * headroom`
+    # toward zero, so a purely algebraic answer can land one token short or
+    # one window too high at the boundary. The nudge is capped at a handful of
+    # steps rather than left as an open-ended walk: correctness only ever
+    # needs one step either way (float error in the division/ceiling above),
+    # and an unbounded walk is exactly what turned pathological above.
+    window = math.ceil(target / headroom)
+    for _ in range(4):
+        if budget(window, max_output_tokens, headroom) >= est_input_tokens:
+            break
+        window += 1
+    for _ in range(4):
+        if window <= 1 or budget(window - 1, max_output_tokens, headroom) < est_input_tokens:
+            break
+        window -= 1
+    return window
 
 
 def over_budget(est_tokens: int, limit: int) -> bool:

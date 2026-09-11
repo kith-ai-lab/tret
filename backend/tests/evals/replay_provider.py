@@ -74,6 +74,11 @@ class ScriptedTurn:
     # came back from a provider that does report actuals — including Decimal(0)
     # for a genuine free (":free") turn.
     reported_cost_usd: Decimal | None = None
+    # None (the default) means "this turn's provider named no serving upstream" —
+    # true of every real provider except OpenRouter (and Anthropic, which always
+    # reports the constant "anthropic" rather than None). Set it to script a turn
+    # as if OpenRouter routed it to a specific upstream.
+    served_by: str | None = None
 
 
 @dataclass
@@ -86,6 +91,7 @@ class ProviderCall:
     tool_names: list[str]
     max_tokens: int
     temperature: float
+    effort: str | None = None
 
     @property
     def last_message(self) -> Msg | None:
@@ -123,6 +129,8 @@ class ReplayProvider(Provider):
         tools: list[ToolSpec],
         max_tokens: int,
         temperature: float,
+        effort: str | None = None,
+        session_id: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         index = len(self.calls)
         offered = [t.name for t in tools]
@@ -134,6 +142,7 @@ class ReplayProvider(Provider):
                 tool_names=offered,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                effort=effort,
             )
         )
         if index >= len(self.turns):
@@ -179,6 +188,7 @@ class ReplayProvider(Provider):
                 reported_cost_usd=turn.reported_cost_usd,
             ),
             stop_reason=turn.stop_reason or ("tool_use" if calls else "end_turn"),
+            served_by=turn.served_by,
         )
 
     async def complete_json(

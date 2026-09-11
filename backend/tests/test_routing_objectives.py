@@ -16,17 +16,21 @@ from tret.api.harnesses import _validate_policy
 from tret.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
 from tret.engine.harness import effective_model_policy
 from tret.router_llm.fallback import fallback_model
+from tret.providers.base import JsonCompletion, Provider, Usage
 from tret.router_llm.objectives import (
     DEFAULT_OBJECTIVE,
+    EFFORT_LEVELS,
     OBJECTIVES,
     THRIFT_OBJECTIVES,
     candidate_sort_key,
+    default_effort,
     objective_of,
     released_rank,
 )
 from tret.router_llm.prompts import (
     OBJECTIVE_RULES,
     ROUTING_PROMPT_VERSION,
+    choose_model_schema,
     render_router_prompt,
 )
 from tret.router_llm.router import ModelRouter, RoutingDecision
@@ -141,7 +145,10 @@ def test_eco_orders_by_estimated_energy_then_price():
     energies = [catalog.get(i).energy_wh_per_mtok for i in ids]
     assert energies == sorted(energies)
     assert ids[0] == ECO_MODEL
-    assert ids[-1] in ("anthropic/claude-fable-5", "anthropic/claude-opus-4-8")
+    # GPT-6 Astra joined the catalog as an R-class model priced level with the
+    # other R-class flagships ($50/Mtok output, tied with claude-fable-5 and
+    # claude-fable-5-1) — among that price tie, the id sorts last of the three.
+    assert ids[-1] == "openrouter/openai/gpt-6-astra"
     # Within one energy class, the cheaper model comes first.
     same_class = [i for i in ids if catalog.get(i).energy_class == "M"]
     prices = [catalog.get(i).output_price_per_mtok for i in same_class]
@@ -161,7 +168,10 @@ def test_quality_orders_most_capable_first_within_the_tier_cap():
     ids = _candidates("quality", catalog)
     prices = [catalog.get(i).output_price_per_mtok for i in ids]
     assert prices == sorted(prices, reverse=True)
-    assert ids[0] == "anthropic/claude-fable-5"
+    # claude-fable-5-1, claude-fable-5 and gpt-6-astra all tie at $50/Mtok
+    # output (the most expensive in the catalog); recency breaks the tie, and
+    # fable-5-1 (2026-09) is newer than fable-5 (2026-06) in the same tier.
+    assert ids[0] == "anthropic/claude-fable-5-1"
 
     # The cost ceiling still wins: quality cannot climb past it.
     router = ModelRouter(catalog, _all_keys())
@@ -243,11 +253,15 @@ def _prompt(objective: str | None = None, n: int = 3) -> str:
 
 
 def test_prompt_version_was_bumped():
-    assert ROUTING_PROMPT_VERSION == "route-v4"
+    assert ROUTING_PROMPT_VERSION == "route-v5"
 
 
-def test_the_default_objective_renders_the_historical_prompt_bytes():
-    """A balanced harness must not see a single changed byte."""
+def test_the_default_objective_renders_the_historical_prompt_plus_effort():
+    """route-v5 is NOT byte-identical to v4 (see the version comment on
+    ROUTING_PROMPT_VERSION): the EFFORT section is unconditional, so it
+    appears even for the `balanced` objective with no priors. What still
+    holds from the v4 invariant is that nothing *else* changed — no OBJECTIVE
+    section, no energy figures, no TRACK RECORD."""
     candidates = ModelCatalog().all(curated_only=True)[:3]
     legacy_lines = [
         "TASK",
@@ -265,11 +279,27 @@ def test_the_default_objective_renders_the_historical_prompt_bytes():
             f"ctx: {m.context_window} | strengths: {', '.join(m.strengths)}"
         )
     legacy_lines += ["", "CONSTRAINTS", "  max_cost_tier: premium"]
+    # Inlined as literals, not built via `effort_block(...)`: that call would
+    # make this test track prompts.py's wording automatically, so a wording
+    # change there would pass silently instead of failing until
+    # ROUTING_PROMPT_VERSION is bumped — the same guard the rest of this
+    # prompt-bytes test exists to give every other section.
+    legacy_lines += [
+        "",
+        "EFFORT",
+        "  Effort scales how much thinking and output the chosen model spends "
+        "on this call — low is fastest and cheapest, high spends the most to "
+        "get the best result.",
+        "  Default for this objective and task shape: high.",  # balanced + verdict
+        "  Choose low unless the task shape needs multi-step judgment; never "
+        "exceed the default under token_conservation or eco.",
+    ]
     legacy = "\n".join(legacy_lines)
 
     assert _prompt("balanced") == legacy
     assert _prompt(None) == legacy  # the default argument, too
     assert "OBJECTIVE" not in legacy and "energy" not in legacy
+    assert "EFFORT" in legacy
 
 
 def test_each_non_default_objective_states_its_rules():
@@ -291,13 +321,295 @@ def test_objective_rules_say_what_each_objective_means():
 
 
 def test_energy_is_shown_only_where_the_objective_reasons_about_it():
+    # n=5 rather than the default 3: the catalog now opens with claude-fable-5,
+    # claude-fable-5-1, claude-opus-4-8, claude-opus-5 (R/R/XL/XL) before
+    # claude-sonnet-5 (L) — the model this assertion anchors on — appears.
     for objective in ("eco", "token_conservation"):
-        prompt = _prompt(objective)
+        prompt = _prompt(objective, n=5)
         # L is the calibrated class fitted from Claude 3.7 Sonnet, in Wh per
         # million output-equivalent tokens (services/emissions.py).
         assert "| energy: L (~2600 Wh/Mtok, est.)" in prompt
     for objective in ("balanced", "quality"):
-        assert "Wh/Mtok" not in _prompt(objective)
+        assert "Wh/Mtok" not in _prompt(objective, n=5)
+
+
+# ── effort ───────────────────────────────────────────────────────────────────
+class _EffortProvider(Provider):
+    """Scripts only `complete_json` — the router's own call — with a fixed
+    tool-result payload. `stream()` is never exercised by anything in this
+    module (every test here routes and stops), so it just raises if reached.
+    """
+
+    name = "effort-stub"
+
+    def __init__(self, payload: dict, served_by: str | None = None):
+        self._payload = payload
+        self._served_by = served_by
+
+    async def complete_json(self, *, model: str, **kwargs) -> JsonCompletion:
+        return JsonCompletion(
+            payload=dict(self._payload), usage=Usage(), model=model, served_by=self._served_by
+        )
+
+    async def stream(self, **kwargs):
+        raise AssertionError("stream() should never be called: routing only")
+        yield  # pragma: no cover - unreachable; keeps this an async generator
+
+
+class _LLMRegistry(ProviderRegistry):
+    """Like `_Registry`, but `.get()` hands out a scripted provider so the LLM
+    router path can actually be exercised — every other fixture in this module
+    routes through the deterministic fallback on purpose (see the module
+    docstring); these tests are the exception."""
+
+    def __init__(self, providers: set[str], provider: Provider):
+        self._providers = providers
+        self._provider = provider
+
+    def has_key(self, provider: str) -> bool:
+        return provider in self._providers
+
+    def get(self, provider: str) -> Provider:
+        return self._provider
+
+
+def test_effort_levels_and_schema():
+    assert EFFORT_LEVELS == ("low", "medium", "high")
+    schema = choose_model_schema(["a", "b"])
+    assert "effort" in schema["required"]
+    assert schema["properties"]["effort"] == {"type": "string", "enum": list(EFFORT_LEVELS)}
+
+
+def test_default_effort_table():
+    # Thrift objectives ignore task shape entirely.
+    for objective in THRIFT_OBJECTIVES:
+        for shape in ("extraction", "drafting", "freeform", "verdict", "qa_review", "unknown"):
+            assert default_effort(objective, shape) == "low"
+    # Quality always climbs to high, regardless of shape.
+    for shape in ("extraction", "drafting", "freeform", "verdict", "qa_review", "unknown"):
+        assert default_effort("quality", shape) == "high"
+    # Balanced differentiates by shape; an unrecognized shape lands on medium.
+    assert default_effort("balanced", "extraction") == "low"
+    assert default_effort("balanced", "drafting") == "medium"
+    assert default_effort("balanced", "freeform") == "medium"
+    assert default_effort("balanced", "verdict") == "high"
+    assert default_effort("balanced", "qa_review") == "high"
+    assert default_effort("balanced", "some_shape_nobody_declared") == "medium"
+
+
+async def test_llm_chosen_effort_is_recorded():
+    provider = _EffortProvider(
+        {
+            "model_id": "anthropic/claude-sonnet-5",
+            "reasoning": "chosen for the test",
+            "confidence": "high",
+            "effort": "medium",
+        }
+    )
+    registry = _LLMRegistry({"anthropic", "kimi", "openrouter"}, provider)
+    router = ModelRouter(ModelCatalog(), registry)
+    decision = await router.route(
+        model_policy=_policy(objective="balanced"),
+        task_type="divergence_assessment",
+        task_shape="drafting",
+        task_description="Draft a report section.",
+        output_contract="markdown",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.fallback_used is False
+    assert decision.chosen_model == "anthropic/claude-sonnet-5"
+    assert decision.effort == "medium"
+
+
+async def test_llm_router_served_by_is_recorded():
+    """`RoutingDecision.router_served_by` is the router's own LLM call's
+    `JsonCompletion.served_by` — a separate thing from the model the router
+    *chose*: the router itself ran on TRET_ROUTER_MODEL, wherever OpenRouter
+    routed that particular call to."""
+    provider = _EffortProvider(
+        {
+            "model_id": "anthropic/claude-sonnet-5",
+            "reasoning": "chosen for the test",
+            "confidence": "high",
+            "effort": "medium",
+        },
+        served_by="Anthropic",
+    )
+    registry = _LLMRegistry({"anthropic", "kimi", "openrouter"}, provider)
+    router = ModelRouter(ModelCatalog(), registry)
+    decision = await router.route(
+        model_policy=_policy(objective="balanced"),
+        task_type="divergence_assessment",
+        task_shape="drafting",
+        task_description="Draft a report section.",
+        output_contract="markdown",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.router_served_by == "Anthropic"
+    assert decision.to_json()["router_served_by"] == "Anthropic"
+
+
+async def test_router_served_by_is_none_when_the_provider_reports_nothing():
+    provider = _EffortProvider(
+        {
+            "model_id": "anthropic/claude-sonnet-5",
+            "reasoning": "chosen for the test",
+            "confidence": "high",
+        }
+    )
+    registry = _LLMRegistry({"anthropic", "kimi", "openrouter"}, provider)
+    router = ModelRouter(ModelCatalog(), registry)
+    decision = await router.route(
+        model_policy=_policy(objective="balanced"),
+        task_type="divergence_assessment",
+        task_shape="drafting",
+        task_description="Draft a report section.",
+        output_contract="markdown",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.router_served_by is None
+    assert decision.to_json()["router_served_by"] is None
+
+
+async def test_llm_chosen_effort_missing_or_invalid_falls_back_to_the_default():
+    provider = _EffortProvider(
+        {
+            "model_id": "anthropic/claude-sonnet-5",
+            "reasoning": "chosen for the test",
+            "confidence": "high",
+            # No "effort" key at all — should read as the shape's default.
+        }
+    )
+    registry = _LLMRegistry({"anthropic", "kimi", "openrouter"}, provider)
+    router = ModelRouter(ModelCatalog(), registry)
+    decision = await router.route(
+        model_policy=_policy(objective="balanced"),
+        task_type="divergence_assessment",
+        task_shape="verdict",
+        task_description="Render a verdict.",
+        output_contract="verdict",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.effort == default_effort("balanced", "verdict") == "high"
+
+    provider_bad = _EffortProvider(
+        {
+            "model_id": "anthropic/claude-sonnet-5",
+            "reasoning": "chosen for the test",
+            "confidence": "high",
+            "effort": "extreme",  # not one of EFFORT_LEVELS
+        }
+    )
+    router_bad = ModelRouter(
+        ModelCatalog(), _LLMRegistry({"anthropic", "kimi", "openrouter"}, provider_bad)
+    )
+    decision_bad = await router_bad.route(
+        model_policy=_policy(objective="balanced"),
+        task_type="divergence_assessment",
+        task_shape="verdict",
+        task_description="Render a verdict.",
+        output_contract="verdict",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision_bad.effort == "high"
+
+
+async def test_llm_chosen_effort_is_clamped_under_thrift_objectives():
+    """The router prompt tells the router never to exceed the default under
+    token_conservation/eco — this is the enforcement of that rule, for a
+    router that answered anyway."""
+    provider = _EffortProvider(
+        {
+            "model_id": "anthropic/claude-sonnet-5",
+            "reasoning": "chosen for the test",
+            "confidence": "high",
+            "effort": "high",  # oversteps the "low" ceiling for eco
+        }
+    )
+    registry = _LLMRegistry({"anthropic", "kimi", "openrouter"}, provider)
+    router = ModelRouter(ModelCatalog(), registry)
+    decision = await router.route(
+        model_policy=_policy(objective="eco"),
+        task_type="divergence_assessment",
+        task_shape="verdict",
+        task_description="Render a verdict.",
+        output_contract="verdict",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.effort == "low"  # clamped down from the router's "high"
+
+
+async def test_llm_chosen_effort_within_the_thrift_ceiling_is_kept():
+    # The thrift default is already "low" for every shape, so a router that
+    # names "low" itself is not clamped to anything different.
+    provider = _EffortProvider(
+        {
+            "model_id": "anthropic/claude-sonnet-5",
+            "reasoning": "chosen for the test",
+            "confidence": "high",
+            "effort": "low",
+        }
+    )
+    registry = _LLMRegistry({"anthropic", "kimi", "openrouter"}, provider)
+    router = ModelRouter(ModelCatalog(), registry)
+    decision = await router.route(
+        model_policy=_policy(objective="token_conservation"),
+        task_type="divergence_assessment",
+        task_shape="verdict",
+        task_description="Render a verdict.",
+        output_contract="verdict",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.effort == "low"
+
+
+async def test_fallback_effort_matches_the_objective_default(monkeypatch):
+    monkeypatch.setattr(ModelRouter, "_resolve_router_model", lambda self, max_tier: None)
+    router = ModelRouter(ModelCatalog(), _Registry({"anthropic", "kimi", "openrouter"}))
+    decision = await router.route(
+        model_policy=_policy(objective="eco"),
+        task_type="divergence_assessment",
+        task_shape="verdict",
+        task_description="Signal divergence assessment",
+        output_contract="divergence_verdict",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.fallback_used is True
+    assert decision.effort == default_effort("eco", "verdict") == "low"
+
+
+async def test_override_and_pin_paths_record_the_objective_default_effort():
+    router = ModelRouter(ModelCatalog(), _all_keys())
+    pinned = await router.route(
+        model_policy={"mode": "pinned", "model": "anthropic/claude-sonnet-5", "objective": "quality"},
+        task_type="divergence_assessment",
+        task_shape="qa_review",
+        task_description="Grade a run.",
+        output_contract="verdict",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert pinned.effort == "high"  # quality's default, regardless of shape
+
+    single_candidate_router = ModelRouter(ModelCatalog(), _Registry({"kimi"}))
+    single = await single_candidate_router.route(
+        model_policy=_policy(objective="balanced", allowed=["kimi/kimi-k2"]),
+        task_type="divergence_assessment",
+        task_shape="extraction",
+        task_description="Pull fields from a filing.",
+        output_contract="json",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert single.effort == default_effort("balanced", "extraction") == "low"
 
 
 # ── deterministic fallback ────────────────────────────────────────────────────

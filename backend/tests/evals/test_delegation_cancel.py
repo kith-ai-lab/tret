@@ -102,7 +102,7 @@ class DelegationCancelProvider(Provider):
         self.child_stream_calls = 0
 
     async def stream(
-        self, *, model, system, messages, tools, max_tokens, temperature
+        self, *, model, system, messages, tools, max_tokens, temperature, effort=None, session_id=None
     ) -> AsyncIterator[ProviderEvent]:
         offered = [t.name for t in tools]
         self.calls.append(

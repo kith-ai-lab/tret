@@ -22,6 +22,13 @@ from tret.router_llm.priors_base import ModelPrior
 OBJECTIVES = ("quality", "balanced", "token_conservation", "eco")
 DEFAULT_OBJECTIVE = "balanced"
 
+# Provider-neutral reasoning-effort levels. Every provider tret speaks to
+# exposes its own effort control on a different wire shape (Anthropic's
+# `output_config.effort`, OpenRouter's unified `reasoning.effort`) but the same
+# three-way idea, so the router reasons in these and the provider layer
+# translates — see `providers/base.py` and `ModelInfo.supports_effort`.
+EFFORT_LEVELS = ("low", "medium", "high")
+
 # The harness cost ceiling, as a total order. Lives here rather than in
 # router.py because both the router and the deterministic fallback must apply
 # the *same* ceiling — a cap enforced on only one of the two paths is not a cap.
@@ -42,6 +49,44 @@ def within_cost_tier(model: ModelInfo, max_tier: str) -> bool:
 # uncurated entry really is cheaper or lower-energy, an objective that asks for
 # cheap or low-energy must be allowed to pick it.
 THRIFT_OBJECTIVES = ("token_conservation", "eco")
+
+
+# task_shape -> effort under the `balanced` objective. Only shapes with a
+# stated reason to differ from "medium" are listed; everything else — including
+# a shape this catalog does not recognize — falls through to "medium" below,
+# same as `released_rank`'s "unknown last" and the fallback table's own
+# `FALLBACK_TABLE.get(task_shape, FALLBACK_TABLE["freeform"])`.
+_BALANCED_SHAPE_EFFORT: dict[str, str] = {
+    "extraction": "low",  # pulling fields out of a document is not judgment
+    "drafting": "medium",
+    "freeform": "medium",
+    "verdict": "high",  # the hardest, most consequential call a run makes
+    "qa_review": "high",  # grading another run's output is itself a judgment
+}
+
+
+def default_effort(objective: str, task_shape: str) -> str:
+    """The effort level a policy gets when nothing more specific overrides it.
+
+    Read twice over: it is what the router prompt shows as *this* task's
+    default (see `prompts.render_router_prompt`'s EFFORT section), and it is
+    what every non-LLM path (override, single-candidate, fallback) records
+    outright, since none of those paths ask a router anything.
+
+    The thrift objectives ignore task shape entirely — `token_conservation`
+    and `eco` are optimizing for token/energy spend above all else, so the
+    hardest verdict gets the same "low" as the simplest extraction; `quality`
+    is the mirror image, always "high" regardless of shape, for the same
+    reason a quality-first policy always climbs to the most capable candidate
+    within its tier rather than reading the task shape as license to spend
+    less. Only `balanced` differentiates by shape, via
+    `_BALANCED_SHAPE_EFFORT`.
+    """
+    if objective == "quality":
+        return "high"
+    if objective in THRIFT_OBJECTIVES:
+        return "low"
+    return _BALANCED_SHAPE_EFFORT.get(task_shape, "medium")
 
 
 def objective_of(model_policy: dict | None) -> str:
@@ -66,22 +111,29 @@ def released_rank(model: ModelInfo) -> int:
         return 0
 
 
+def _out_price(m: ModelInfo):
+    # The price in effect today, not the yaml base price: a scheduled
+    # `price_changes` entry must reorder candidates the day it takes effect,
+    # the same way `cost_usd` bills it.
+    return m.prices_at()[1]
+
+
 def _quality_key(m: ModelInfo) -> tuple:
     # Most capable first, newer breaking ties. The cost-tier cap is applied
     # before sorting, so this can never climb past the harness ceiling.
-    return (not m.curated, -m.output_price_per_mtok, released_rank(m), m.id)
+    return (not m.curated, -_out_price(m), released_rank(m), m.id)
 
 
 def _token_conservation_key(m: ModelInfo) -> tuple:
-    return (m.output_price_per_mtok, m.energy_wh_per_mtok, not m.curated, m.id)
+    return (_out_price(m), m.energy_wh_per_mtok, not m.curated, m.id)
 
 
 def _eco_key(m: ModelInfo) -> tuple:
-    return (m.energy_wh_per_mtok, m.output_price_per_mtok, not m.curated, m.id)
+    return (m.energy_wh_per_mtok, _out_price(m), not m.curated, m.id)
 
 
 def _balanced_key(m: ModelInfo) -> tuple:
-    return (not m.curated, m.output_price_per_mtok)
+    return (not m.curated, _out_price(m))
 
 
 _OBJECTIVE_KEYS = {

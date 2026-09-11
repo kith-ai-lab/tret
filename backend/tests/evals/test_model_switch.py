@@ -297,3 +297,114 @@ async def test_an_ordinary_run_records_exactly_one_outcome(world):
     assert len(rows) == 1
     assert rows[0]["segment"] == 0
     assert rows[0]["model"] == result.run.model_used
+
+
+# ── a switch re-gates effort on the model actually being switched to ───────
+# `ModelSegment.effort` is set once when a segment is created (initial routing,
+# or `_switch_model` on a mid-run switch) — see engine/harness.py — and each
+# creation gates the run's recorded `RoutingDecision.effort` on *that
+# segment's own* `ModelInfo.supports_effort`. A switch landing on a model with
+# a different `supports_effort` than the one it left must flip what is
+# actually sent, not carry over whatever the first segment decided.
+_EFFORT_MODEL = "anthropic/claude-sonnet-5"  # supports_effort: true
+_NO_EFFORT_MODEL = "anthropic/claude-haiku-4-5"  # supports_effort: false
+
+
+async def _run_with_switch_between(world, model_a_id: str, model_b_id: str, *, switch_at: int = 2):
+    """`_run_with_switch`, but between two named models instead of "the first
+    two curated tool-capable models" — so the pair's `supports_effort` values
+    are chosen deliberately rather than whatever the catalog happens to order
+    first.
+    """
+    documents = [await world.create_document(filename="report.txt", text=BULK)]
+    harness_id = await world.create_harness(
+        name="Switching Analyst (effort)",
+        model_policy={"mode": "auto", "allowed": [model_a_id, model_b_id]},
+        tool_names=[
+            "read_document",
+            "search_documents",
+            "lookup_dataset",
+            "record_verdict",
+            "file_data_request",
+        ],
+        max_iterations=16,
+    )
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(text="Reading.", tool_calls=[_read(documents[0])]),
+            *divergence_happy_script(),
+        ]
+    )
+    switched = {"n": 0}
+
+    def fake_assess(state, *, candidates, priors=None):
+        switched["n"] += 1
+        other = next((m for m in candidates if m.id != state.model.id), None)
+        if switched["n"] == switch_at and other is not None:
+            return Intervention(
+                kind=KIND_SWITCH,
+                target=other,
+                reason="capability_stall",
+                detail="forced by the test",
+                evidence={"from": state.model.id, "to": other.id},
+            )
+        return Intervention()
+
+    with patch("tret.engine.harness.assess", side_effect=fake_assess):
+        result = await world.run(
+            provider=provider,
+            harness_id=harness_id,
+            task_type="divergence_assessment",
+            task_input={"site_id": SITE, "peril": PERIL},
+            document_ids=documents,
+        )
+    return result, provider
+
+
+def _assert_calls_match_their_segments_effort_gate(provider, timeline):
+    """Every call the replay provider actually received, matched back to
+    whichever segment (pre- or post-switch) was running at that iteration, and
+    checked against *that segment's own* model's `supports_effort`.
+
+    Which of the two allowed models the router picks first is the router's own
+    ordering (price, evidence, ...) to make, not something this test pins — so
+    the expectation is read off `model_timeline` itself rather than assumed
+    from the order the two model ids were passed in.
+    """
+    # `ModelSegment.add()` sets `from_iteration` on the first turn a segment
+    # actually ran (see engine/harness.py) — the switch itself is decided at
+    # the end of the prior iteration, so the new segment's `from_iteration` is
+    # one past the iteration where `assess()` returned the switch. Iterations
+    # are 1-indexed; `provider.calls` is 0-indexed, one entry per iteration.
+    switch_iteration = timeline[1]["from_iteration"]
+    for i, call in enumerate(provider.calls):
+        segment = timeline[0] if (i + 1) < switch_iteration else timeline[1]
+        # `ModelSegment.to_json()`'s own "effort" is the ground truth for what
+        # that segment believed it should send; cross-checking the call
+        # against it (rather than a hardcoded model->bool table) is what
+        # catches a segment created without re-gating on its own model.
+        assert call.effort == segment["effort"], (i, segment["model"])
+        if segment["model"] == _EFFORT_MODEL:
+            assert call.effort is not None, f"call {i} on {segment['model']} should carry an effort"
+        else:
+            assert call.effort is None, f"call {i} on {segment['model']} must never carry one"
+
+
+async def test_a_switch_re_gates_effort_on_the_new_models_own_support(world):
+    result, provider = await _run_with_switch_between(world, _EFFORT_MODEL, _NO_EFFORT_MODEL)
+
+    timeline = result.run.model_timeline
+    assert timeline is not None and len(timeline) == 2
+    assert set(seg["model"] for seg in timeline) == {_EFFORT_MODEL, _NO_EFFORT_MODEL}
+    _assert_calls_match_their_segments_effort_gate(provider, timeline)
+
+
+async def test_a_switch_the_other_direction_also_re_gates(world):
+    # Same scenario, models swapped — the gate follows the model actually
+    # running, not "whichever one happened to go first" in the prior test.
+    result, provider = await _run_with_switch_between(world, _NO_EFFORT_MODEL, _EFFORT_MODEL)
+
+    timeline = result.run.model_timeline
+    assert timeline is not None and len(timeline) == 2
+    assert set(seg["model"] for seg in timeline) == {_EFFORT_MODEL, _NO_EFFORT_MODEL}
+    _assert_calls_match_their_segments_effort_gate(provider, timeline)

@@ -38,10 +38,13 @@ from tret.adaptive import adaptive_of
 from tret.router_llm.objectives import (
     DEFAULT_MAX_COST_TIER,
     DEFAULT_OBJECTIVE,
+    EFFORT_LEVELS,
+    THRIFT_OBJECTIVES,
     TIER_ORDER,
     TIER_POOR,
     TIER_PROVEN,
     candidate_sort_key,
+    default_effort,
     evidence_tier,
     objective_of,
     within_cost_tier,
@@ -81,6 +84,81 @@ def _max_cost_tier(model_policy: dict) -> str:
     """
     tier = (model_policy or {}).get("max_cost_tier") or DEFAULT_MAX_COST_TIER
     return tier if tier in TIER_ORDER else DEFAULT_MAX_COST_TIER
+
+
+def _apply_context_fit(
+    candidates: list[ModelInfo],
+    min_context_window: int | None,
+    priors: dict[str, ModelPrior] | None = None,
+) -> tuple[list[ModelInfo], dict]:
+    """Narrow an already-ordered candidate list to those whose window can hold
+    the composed prompt, or fall back to best effort when none can.
+
+    `candidates` is assumed already filtered by `allowed`/provider-key/cost-tier
+    and sorted by the harness objective (or is a single override/pin model) —
+    this only ever narrows or reorders what the policy already permitted, the
+    same guarantee the evidence-based reordering above it keeps. A model with
+    an unreported window (`context_window` falsy — a freshly discovered local
+    model) is never excluded by this filter: there is nothing to compare
+    against, and `engine/compaction.budget` already treats an unknown window as
+    "no limit enforced" rather than guessing at one.
+
+    A local model (`cost_tier == "local"`) is exempt from this filter outright,
+    window known or not: it is very often chosen for confidentiality
+    (docs/local-models.md), not for capability, and a harness that picked it on
+    purpose should not have the router quietly hand the task to a cloud model
+    because the local one's window looked small. It keeps its ordering position
+    — the same treatment an unknown window already gets — and is reported under
+    `context_fit["exempt"]` rather than `excluded`, since it was never at risk
+    of exclusion. Compaction/trimming (`engine/compaction.py`) is what actually
+    absorbs the overflow for it, same as for any model that fails to fit.
+
+    `priors` steers the best-effort re-sort exactly the way it steers the
+    primary ordering (`candidate_sort_key`): a model with a poor track record
+    must not lead just because it advertises the biggest window.
+
+    Returns the list the caller should actually use, and the `context_fit`
+    record to persist on the `RoutingDecision` — see that dataclass's
+    docstring for the three `mode` values.
+    """
+    if min_context_window is None:
+        return candidates, {"required": 0, "mode": "unchecked", "excluded": [], "exempt": []}
+    exempt = [m.id for m in candidates if m.cost_tier == "local"]
+    fits = [
+        m
+        for m in candidates
+        if m.cost_tier == "local"
+        or not m.context_window
+        or m.context_window >= min_context_window
+    ]
+    if fits:
+        fit_ids = {m.id for m in fits}
+        excluded = [m.id for m in candidates if m.id not in fit_ids]
+        return fits, {
+            "required": min_context_window,
+            "mode": "fit",
+            "excluded": excluded,
+            "exempt": exempt,
+        }
+    # Nothing fits within what the policy already allowed (local models aside —
+    # `fits` above would already be non-empty if any survived). The cost
+    # ceiling still binds — this never reaches outside `candidates` for a
+    # bigger model, it only reorders what survived the ceiling, evidence tier
+    # first and window size second, and says on the decision that nothing
+    # actually fit.
+    best_effort = sorted(
+        candidates,
+        key=lambda m: (
+            evidence_tier(priors.get(m.id) if priors else None),
+            -m.context_window,
+        ),
+    )
+    return best_effort, {
+        "required": min_context_window,
+        "mode": "best_effort",
+        "excluded": [m.id for m in candidates if m.id not in exempt],
+        "exempt": exempt,
+    }
 
 
 def _evidence_snapshot(
@@ -132,6 +210,22 @@ class RoutingDecision:
     # mattered. Defaulted so a decision built without them still validates.
     task_shape: str = "freeform"
     max_cost_tier: str = DEFAULT_MAX_COST_TIER
+    # Reasoning-effort level for the chosen model, one of EFFORT_LEVELS.
+    # Recorded on every path, including the override/pin/fallback paths that
+    # never ask a router anything (see `default_effort`) — it documents
+    # *intent* even for a chosen model whose `ModelInfo.supports_effort` is
+    # False; the harness/provider layer is what actually decides whether to
+    # send it (`engine/harness.py` gates on `supports_effort` before passing
+    # it to `provider.stream()`). `None` only for a decision built before this
+    # field existed.
+    effort: str | None = None
+    # The upstream provider that actually served the router's own LLM call
+    # (`JsonCompletion.served_by`; see providers/base.py) — set only on the LLM
+    # path below, where a router model was actually contacted. Null on every
+    # other path (single candidate, deterministic fallback, override/pin) for
+    # the same reason `router_prompt` is null there: no router call happened to
+    # have a serving provider to report.
+    router_served_by: str | None = None
     # The track record this decision was made against, snapshotted. Null when no
     # evidence was read — a harness with learning off, an install with no
     # history, or an override, which skips the automatic paths entirely. Stored
@@ -139,6 +233,36 @@ class RoutingDecision:
     # them next month answers a different question than the one this decision
     # was answering.
     evidence: dict | None = None
+    # Whether the chosen model can actually hold this call, set on every path —
+    # including the override/pin paths, which are never blocked by it (see
+    # `_validated_override`). Shape: `{"required": int, "mode": "fit" |
+    # "best_effort" | "unchecked", "excluded": [model_id, ...], "exempt":
+    # [model_id, ...], "basis": "prompt_without_history" | "full_prompt"}`.
+    #   "fit"         the context-window floor was applied and at least one
+    #                 candidate (or the override/pin) met it.
+    #   "best_effort" nothing within the harness policy met the floor, so the
+    #                 candidate with the largest window was preferred instead —
+    #                 the cost ceiling still bound the search; `excluded` names
+    #                 everything that was dropped before that fallback (on the
+    #                 automatic paths, that is every candidate the policy
+    #                 allowed, minus `exempt`; on the override/pin path, just
+    #                 that one model).
+    #   "unchecked"   the caller passed no `min_context_window` (it does not yet
+    #                 know the prompt size, or is resolving a router model
+    #                 rather than sizing a run) — no filtering happened at all.
+    # `exempt` names local models (`cost_tier == "local"`): the filter never
+    # excludes one, window known or not (see `_apply_context_fit`), so they
+    # appear here rather than in `excluded` even when their window is too
+    # small — compaction/trimming is what absorbs that overflow instead.
+    # `basis` says which prompt size the floor itself (`required`) was computed
+    # against — set by `engine/harness.py`, which knows about compaction; every
+    # other caller (sdk.py, local_run.py) leaves it unset, since neither trims
+    # history before sending it. `"prompt_without_history"` means adaptive
+    # compaction is on and the floor already excludes the conversation-history
+    # block that `trim_history` will shrink after routing; `"full_prompt"`
+    # means compaction is off (or the caller has no history to trim), so the
+    # floor is the whole composed prompt.
+    context_fit: dict | None = None
     # What the router was actually asked, and its fingerprint. Null on every path
     # where no router was consulted — an override, a single candidate, or no
     # usable router model — which is the same thing `router_model` being null
@@ -191,8 +315,25 @@ class ModelRouter:
         self._priors = priors or NoPriors()
 
     def _candidates(
-        self, model_policy: dict, priors: dict[str, ModelPrior] | None = None
+        self,
+        model_policy: dict,
+        priors: dict[str, ModelPrior] | None = None,
+        min_context_window: int | None = None,
     ) -> list[ModelInfo]:
+        return self._candidates_with_fit(model_policy, priors, min_context_window)[0]
+
+    def _candidates_with_fit(
+        self,
+        model_policy: dict,
+        priors: dict[str, ModelPrior] | None = None,
+        min_context_window: int | None = None,
+    ) -> tuple[list[ModelInfo], dict]:
+        """`_candidates()` plus the `context_fit` record the caller needs to
+        persist on the `RoutingDecision`. Split out because `_candidates()` is
+        also called from `candidates_for()` (the supervisor's mid-run candidate
+        list), which has no `min_context_window` of its own and no decision to
+        record it on.
+        """
         allowed = model_policy.get("allowed") or None
         max_tier = _max_cost_tier(model_policy)
         objective = objective_of(model_policy)
@@ -213,7 +354,11 @@ class ModelRouter:
         # already been applied above, so evidence only ever reorders models the
         # policy had already permitted.
         out.sort(key=candidate_sort_key(objective, priors))
-        return out[:CANDIDATE_LIMIT]
+        # The context-window floor is applied last, and — like the cost ceiling
+        # before it — only ever narrows or reorders what survived the earlier
+        # filters. See `_apply_context_fit`.
+        out, context_fit = _apply_context_fit(out, min_context_window, priors)
+        return out[:CANDIDATE_LIMIT], context_fit
 
     async def candidates_for(
         self,
@@ -294,7 +439,7 @@ class ModelRouter:
             ]
         if not options:
             return None
-        return min(options, key=lambda m: (m.output_price_per_mtok, m.id))
+        return min(options, key=lambda m: (m.prices_at()[1], m.id))
 
     async def route(
         self,
@@ -323,6 +468,15 @@ class ModelRouter:
         # existed) means "annual" — same as `factor_set_for`/
         # `build_factor_set` themselves.
         emissions_at: datetime | None = None,
+        # The smallest window that can hold this call's composed prompt plus
+        # its output reservation — `engine.compaction.required_context_window`,
+        # computed by the caller because only it knows the prompt size and the
+        # harness's output/headroom settings. `None` (every caller before this
+        # parameter existed, and the router-model resolution path, which has no
+        # run to size) means the context filter is skipped entirely and the
+        # persisted decision says so (`context_fit.mode == "unchecked"`) rather
+        # than silently claiming a check that never happened.
+        min_context_window: int | None = None,
     ) -> RoutingDecision:
         objective = objective_of(model_policy)
         max_tier = _max_cost_tier(model_policy)
@@ -343,6 +497,7 @@ class ModelRouter:
                 model_policy=model_policy,
                 task_shape=task_shape,
                 max_cost_tier=max_tier,
+                min_context_window=min_context_window,
             )
         if model_policy.get("mode") == "pinned":
             return self._validated_override(
@@ -354,6 +509,7 @@ class ModelRouter:
                 # module docstring), so the tier recorded here is what the policy
                 # asked for, not a claim that the pinned model sits inside it.
                 max_cost_tier=max_tier,
+                min_context_window=min_context_window,
             )
 
         # Read once and reused for ordering, for the prompt, and for the
@@ -367,7 +523,9 @@ class ModelRouter:
                 size_band=size_band(est_input_tokens),
             )
 
-        candidates = self._candidates(model_policy, priors)
+        candidates, context_fit = self._candidates_with_fit(
+            model_policy, priors, min_context_window
+        )
         if not candidates:
             raise RoutingUnavailable(
                 "No candidate models: check provider API keys and the harness model policy."
@@ -383,7 +541,9 @@ class ModelRouter:
                 task_shape=task_shape,
                 max_cost_tier=max_tier,
                 evidence=_evidence_snapshot(priors, [candidates[0].id], est_input_tokens),
+                context_fit=context_fit,
                 fallback_used=False,
+                effort=default_effort(objective, task_shape),
             )
 
         settings = get_settings()
@@ -447,6 +607,28 @@ class ModelRouter:
                     )
                     chosen = result.get("model_id")
                     if chosen in candidate_ids:
+                        # The router's own answer, honored unless it is
+                        # unusable or it oversteps the objective's ceiling.
+                        # Missing/invalid falls back to the same default the
+                        # prompt itself showed the router (`effort_block`) —
+                        # a router that skipped the field gets what it was
+                        # told to assume by default, not an unrelated guess.
+                        # Under the thrift objectives the default is also a
+                        # hard ceiling: `default_effort` already returns
+                        # "low" for both, so a router that named anything
+                        # else there ignored the EFFORT section's explicit
+                        # "never exceed the default" rule, and this is the
+                        # enforcement of that rule rather than a suggestion.
+                        default = default_effort(objective, task_shape)
+                        chosen_effort = result.get("effort")
+                        if chosen_effort not in EFFORT_LEVELS:
+                            chosen_effort = default
+                        elif (
+                            objective in THRIFT_OBJECTIVES
+                            and EFFORT_LEVELS.index(chosen_effort)
+                            > EFFORT_LEVELS.index(default)
+                        ):
+                            chosen_effort = default
                         return RoutingDecision(
                             router_model=router_model_id,
                             routing_prompt_version=ROUTING_PROMPT_VERSION,
@@ -460,10 +642,13 @@ class ModelRouter:
                             evidence=_evidence_snapshot(
                                 priors, candidate_ids, est_input_tokens
                             ),
+                            context_fit=context_fit,
                             router_prompt=prompt,
                             router_prompt_sha256=prompt_fingerprint,
                             spend=spend,
                             latency_ms=int((time.monotonic() - start) * 1000),
+                            effort=chosen_effort,
+                            router_served_by=completion.served_by,
                         )
                 except ProviderError:
                     continue
@@ -480,6 +665,7 @@ class ModelRouter:
             objective=objective,
             max_cost_tier=max_tier,
             priors=priors,
+            min_context_window=min_context_window,
         )
         if chosen is None:
             raise RoutingUnavailable(
@@ -509,6 +695,7 @@ class ModelRouter:
             task_shape=task_shape,
             max_cost_tier=max_tier,
             evidence=_evidence_snapshot(priors, candidate_ids, est_input_tokens),
+            context_fit=context_fit,
             # Kept on the fallback path too, and this is where it earns its
             # place: the router was asked something and either failed or
             # answered with a model that was not on its own list. "What did we
@@ -517,6 +704,7 @@ class ModelRouter:
             router_prompt=prompt,
             router_prompt_sha256=prompt_fingerprint,
             fallback_used=True,
+            effort=default_effort(objective, task_shape),
         )
 
     def _assert_within_ceiling(self, model_id: str, max_tier: str) -> None:
@@ -581,6 +769,7 @@ class ModelRouter:
         model_policy: dict | None = None,
         task_shape: str = "freeform",
         max_cost_tier: str = DEFAULT_MAX_COST_TIER,
+        min_context_window: int | None = None,
     ) -> RoutingDecision:
         info = self._catalog.get(model_id)
         if info is None:
@@ -591,6 +780,13 @@ class ModelRouter:
             )
         if kind == "run_override":
             self._assert_override_within_policy(info, model_policy or {})
+        # An override or a pin is never blocked on context fit — it is the
+        # operator's or the caller's own explicit choice — but a pin that
+        # cannot hold the prompt is still worth recording as such: `mode`
+        # reads `best_effort` with the pinned model as its own `excluded`
+        # entry, exactly like `_apply_context_fit` reports a policy where
+        # nothing fit.
+        _, context_fit = _apply_context_fit([info], min_context_window)
         return RoutingDecision(
             router_model=None,
             routing_prompt_version=ROUTING_PROMPT_VERSION,
@@ -600,5 +796,7 @@ class ModelRouter:
             objective=objective,
             task_shape=task_shape,
             max_cost_tier=max_cost_tier,
+            context_fit=context_fit,
             override=kind,
+            effort=default_effort(objective, task_shape),
         )

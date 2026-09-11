@@ -125,10 +125,19 @@ class StubProvider(Provider):
         tools: list,
         max_tokens: int,
         temperature: float,
+        effort: str | None = None,
+        session_id: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         idx = len(self.stream_calls)
         self.stream_calls.append(
-            {"model": model, "system": system, "messages": list(messages), "tools": tools}
+            {
+                "model": model,
+                "system": system,
+                "messages": list(messages),
+                "tools": tools,
+                "effort": effort,
+                "session_id": session_id,
+            }
         )
         turn = self.turns[idx] if idx < len(self.turns) else self.turns[-1]
         for chunk in turn.text_chunks:
@@ -1003,3 +1012,65 @@ def test_cli_negative_measured_wh_rejected_at_argparse(monkeypatch, capsys):
     assert exc.value.code == 2
     err = capsys.readouterr().err.lower()
     assert "measured-wh" in err or ">= 0" in err
+
+
+# ── 8. effort/session_id: sent only when the model accepts effort ──────────
+
+
+async def test_arun_omits_effort_for_a_model_that_does_not_support_it(tmp_path, monkeypatch):
+    # TARGET_MODEL defaults to supports_effort=False.
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
+    provider = StubProvider(turns=[ScriptedTurn(text_chunks=("ok",))])
+    _wire(monkeypatch, provider)
+
+    decisions: list = []
+    await local_run.arun(
+        "task", model=TARGET_MODEL.id, on_route=decisions.append
+    )
+
+    assert decisions[0].effort is not None  # intent was recorded on the decision
+    assert provider.stream_calls[-1]["effort"] is None  # but never sent
+    # No run/ledger id exists yet at call time, so a fresh one is minted —
+    # still sent, even though effort itself is gated off.
+    assert provider.stream_calls[-1]["session_id"]
+
+
+async def test_arun_sends_effort_for_a_model_that_supports_it(tmp_path, monkeypatch):
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
+    effort_model = ModelInfo(
+        id="anthropic/claude-effort-model",
+        provider="anthropic",
+        wire_id="claude-effort-model",
+        display_name="anthropic/claude-effort-model",
+        context_window=200_000,
+        input_price_per_mtok=Decimal("3"),
+        output_price_per_mtok=Decimal("15"),
+        cost_tier="standard",
+        energy_class="M",
+        supports_effort=True,
+    )
+    provider = StubProvider(turns=[ScriptedTurn(text_chunks=("ok",))])
+    _wire(monkeypatch, provider, models=[effort_model])
+
+    decisions: list = []
+    await local_run.arun(
+        "task", model=effort_model.id, on_route=decisions.append
+    )
+
+    assert decisions[0].effort is not None
+    assert provider.stream_calls[-1]["effort"] == decisions[0].effort
+
+
+async def test_arun_uses_a_distinct_session_id_per_call(tmp_path, monkeypatch):
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
+    provider = StubProvider(turns=[ScriptedTurn(text_chunks=("ok",))])
+    _wire(monkeypatch, provider)
+
+    await local_run.arun("task one", model=TARGET_MODEL.id)
+    await local_run.arun("task two", model=TARGET_MODEL.id)
+
+    first, second = provider.stream_calls[-2]["session_id"], provider.stream_calls[-1]["session_id"]
+    assert first and second and first != second

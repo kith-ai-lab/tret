@@ -117,6 +117,9 @@ async def test_a_midstream_failure_books_an_estimated_cost_for_the_streamed_toke
     assert timeline and timeline[0]["estimated"] is True
     assert timeline[0]["output_tokens"] > 0  # PARTIAL_TEXT's own estimated size
     assert timeline[0]["cost_usd"] == float(result.run.cost_usd)
+    # The dying turn never produced a TurnComplete to read a served_by off, and
+    # nothing earlier in the segment did either — this is its only turn.
+    assert timeline[0]["served_by"] is None
 
     last = result.run.messages[-1]
     assert last["content"] == PARTIAL_TEXT
@@ -167,6 +170,7 @@ async def test_a_midstream_failure_after_a_metered_turn_carries_forward_cache_re
                 text="Reading the vendor score.",
                 tool_calls=[_lookup("hazard_scores", site_id=SITE, peril=PERIL)],
                 cache_read_tokens=900,
+                served_by="Anthropic",
             ),
             ScriptedTurn(text=PARTIAL_TEXT, provider_error="503 upstream connection reset"),
         ]
@@ -183,6 +187,12 @@ async def test_a_midstream_failure_after_a_metered_turn_carries_forward_cache_re
     last = result.run.messages[-1]
     est = last["meta"]["estimated_usage"]
     assert est["cache_read_tokens"] > 0, "the prior turn's metered cache reads must carry forward"
+
+    # The segment's served_by survives the estimate: the dying turn has no
+    # TurnComplete of its own to read one off, but the first turn's real
+    # TurnComplete already set it, and the ProviderError path never clears it.
+    timeline = result.run.model_timeline
+    assert timeline and timeline[0]["served_by"] == "Anthropic"
 
     # Same total wire estimate either way — only the split between
     # `input_tokens` and `cache_read_tokens` changes — so pricing the naive
@@ -371,7 +381,9 @@ class SelfDelegatingProvider(ReplayProvider):
     def __init__(self) -> None:
         super().__init__([])
 
-    async def stream(self, *, model, system, messages, tools, max_tokens, temperature):
+    async def stream(
+        self, *, model, system, messages, tools, max_tokens, temperature, effort=None, session_id=None
+    ):
         self.calls.append(
             ProviderCall(
                 model=model,

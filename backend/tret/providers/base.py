@@ -114,6 +114,12 @@ class JsonCompletion:
     payload: dict
     usage: Usage = field(default_factory=Usage)
     model: str = ""
+    # The upstream provider name that actually served this completion, when the
+    # provider reports one (OpenRouter; see `openai_compat._served_by_from_openai`).
+    # None for a provider that doesn't route across upstreams — Kimi, and every
+    # other OpenAI-compatible server — and for AnthropicProvider it is the
+    # constant "anthropic", so the field reads uniformly across providers.
+    served_by: str | None = None
 
 
 # ── prompt-cache breakpoints ──────────────────────────────────────────────────
@@ -161,6 +167,9 @@ class ToolCallComplete:
 class TurnComplete:
     usage: Usage
     stop_reason: str  # "end_turn" | "tool_use" | "max_tokens" | provider-specific
+    # See `JsonCompletion.served_by` — the same field, carried on the streaming
+    # path instead of the structured-completion one.
+    served_by: str | None = None
 
 
 ProviderEvent = TextDelta | ToolCallComplete | TurnComplete
@@ -188,6 +197,16 @@ class Provider(ABC):
         tools: list[ToolSpec],
         max_tokens: int,
         temperature: float,
+        # Reasoning-effort level ("low" | "medium" | "high"), or None to send
+        # nothing. The caller (engine/harness.py) has already gated this on
+        # the chosen model's `ModelInfo.supports_effort` before calling —
+        # every implementation is free to forward whatever it is given as-is.
+        effort: str | None = None,
+        # Opaque id for provider-side cache affinity; ignored by providers that
+        # lack it. engine/harness.py passes the run's own id so every call of
+        # one run's tool loop lands on the same upstream (OpenRouter's
+        # session-affinity routing) instead of hitting a cold cache each turn.
+        session_id: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         """Yield TextDelta / ToolCallComplete events, ending with one TurnComplete."""
         ...

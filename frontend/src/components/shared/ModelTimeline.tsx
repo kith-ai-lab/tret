@@ -52,6 +52,8 @@ export function ModelTimeline({ segments }: { segments: ModelSegment[] }) {
               {formatTokens(s.input_tokens)} in · {formatTokens(s.output_tokens)} out · $
               {s.cost_usd.toFixed(4)} · {s.energy_wh.toFixed(3)} Wh (est.) ·{' '}
               {s.energy_accounting?.energy_class ?? '—'}
+              {s.effort ? ` · effort ${s.effort}` : ''}
+              {s.served_by ? ` · via ${s.served_by}` : ''}
             </div>
           </div>
         ))}

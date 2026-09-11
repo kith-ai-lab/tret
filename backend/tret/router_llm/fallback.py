@@ -76,6 +76,7 @@ def fallback_model(
     objective: str = DEFAULT_OBJECTIVE,
     max_cost_tier: str = DEFAULT_MAX_COST_TIER,
     priors: dict[str, ModelPrior] | None = None,
+    min_context_window: int | None = None,
 ) -> str | None:
     """The model this shape falls back to, or None if the policy permits none.
 
@@ -86,11 +87,37 @@ def fallback_model(
     which is the documented contract for a capped harness with nothing to run —
     see docs/local-models.md. Escalating past the ceiling instead would send
     confidential work to a provider the operator excluded on purpose.
+
+    `min_context_window`, when given, drops models whose window cannot hold
+    the composed prompt (see `engine.compaction.required_context_window`) —
+    same predicate `ModelRouter._candidates` applies, and it is bound by the
+    same ceiling: a smaller window never justifies reaching outside
+    `max_cost_tier` for a bigger one. If it empties the usable set, the filter
+    is set aside and the usable model with the largest window is chosen
+    instead, skipping the shape table and objective ranking below — best
+    effort means giving the composed prompt the most room available, not
+    pretending the window still fits by falling through to whatever the table
+    would otherwise have preferred.
     """
     usable = _usable(catalog, registry, allowed, max_cost_tier)
     if not usable:
         return None
     usable = _drop_proven_poor(usable, priors)
+
+    if min_context_window is not None:
+        # Local-tier models are exempt, as in the router: they are usually
+        # chosen for confidentiality, and trimming/compaction handles overflow.
+        fits = [
+            m
+            for m in usable
+            if not m.context_window
+            or m.cost_tier == "local"
+            or m.context_window >= min_context_window
+        ]
+        if fits:
+            usable = fits
+        else:
+            return min(usable, key=lambda m: (-m.context_window, not m.curated, m.id)).id
 
     if objective in THRIFT_OBJECTIVES:
         # Ranking the whole usable catalog *is* the fallback here: walking the
@@ -105,7 +132,7 @@ def fallback_model(
         if objective == "quality":
             # Same shape table, climbed rather than walked: the most capable
             # entry the configured keys allow, not merely the first that works.
-            return max(prefs, key=lambda mid: catalog.get(mid).output_price_per_mtok)
+            return max(prefs, key=lambda mid: catalog.get(mid).prices_at()[1])
         return prefs[0]
 
     # Last resort: any available model at all — curated cloud models first, but

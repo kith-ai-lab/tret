@@ -149,9 +149,18 @@ class StubProvider(Provider):
         tools: list,
         max_tokens: int,
         temperature: float,
+        effort: str | None = None,
+        session_id: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         self.stream_calls.append(
-            {"model": model, "system": system, "messages": messages, "tools": tools}
+            {
+                "model": model,
+                "system": system,
+                "messages": messages,
+                "tools": tools,
+                "effort": effort,
+                "session_id": session_id,
+            }
         )
         for chunk in self.text_chunks:
             yield TextDelta(chunk)
@@ -500,3 +509,47 @@ async def test_build_receipt_rejects_a_negative_measured_energy_wh(wired):
         sdk_module._build_receipt(
             TARGET_MODEL, usage, decision, catalog, True, measured_energy_wh=-1.0
         )
+
+
+# ── 13. effort/session_id: sent when the model accepts effort, never else ──
+
+
+async def test_arun_omits_effort_for_a_model_that_does_not_support_it(wired):
+    # TARGET_MODEL (the stub router's pick) defaults to supports_effort=False.
+    catalog, registry, provider = wired
+    router = Router()
+
+    decision = await router.aroute("summarize x")
+    assert decision.effort is not None  # intent was recorded on the decision
+
+    await router.arun("summarize x")
+
+    assert provider.stream_calls[-1]["effort"] is None  # but never sent
+    # A session id is always sent, even when nothing else about the call is
+    # gated — every call gets a fresh one since this path has no run to reuse.
+    assert provider.stream_calls[-1]["session_id"]
+
+
+async def test_arun_sends_effort_for_a_model_that_supports_it(wired):
+    catalog, registry, provider = wired
+    effort_model = _model("anthropic/claude-effort-model", supports_effort=True)
+    catalog._static[effort_model.id] = effort_model
+    router = Router(model=effort_model.id)
+
+    decision = await router.aroute("summarize x")
+    assert decision.effort is not None
+
+    await router.arun("summarize x")
+
+    assert provider.stream_calls[-1]["effort"] == decision.effort
+
+
+async def test_arun_uses_a_distinct_session_id_per_call(wired):
+    catalog, registry, provider = wired
+    router = Router()
+
+    await router.arun("summarize x")
+    await router.arun("summarize x again")
+
+    first, second = provider.stream_calls[-2]["session_id"], provider.stream_calls[-1]["session_id"]
+    assert first and second and first != second

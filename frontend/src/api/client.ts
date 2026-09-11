@@ -173,6 +173,16 @@ export interface RoutingDecision {
   chosen_model: string
   reasoning: string
   confidence: string | null
+  /** "low" | "medium" | "high" | null (a decision from before effort existed).
+   *  Recorded on every path, including override/fallback — see
+   *  `default_effort` server-side — regardless of whether the chosen model
+   *  actually accepts the control. */
+  effort?: string | null
+  /** The upstream provider that served the router's own LLM call
+   *  (`JsonCompletion.served_by` server-side), e.g. "Anthropic". Null on every
+   *  path that never contacted a router: a single candidate, the deterministic
+   *  fallback, or an override/pin — the same cases `router_prompt` is null for. */
+  router_served_by?: string | null
   objective: string // quality | balanced | token_conservation | eco
   /** The shape the fallback table keys on, and the key evidence is grouped by. */
   task_shape?: string
@@ -187,6 +197,21 @@ export interface RoutingDecision {
    *  stored text, so it is verifiable from this object alone. */
   router_prompt?: string | null
   router_prompt_sha256?: string | null
+  /** Whether the chosen model can hold this call. "unchecked" when the caller
+   *  didn't know the prompt size yet (e.g. resolving a router model rather
+   *  than sizing a run); "best_effort" when nothing in the policy fit and the
+   *  largest-window candidate was preferred instead; "fit" otherwise.
+   *  `exempt` names local models, which this filter never excludes (see
+   *  backend router_llm/router.py `_apply_context_fit`). `basis` says which
+   *  prompt size `required` was computed against — set only by the server
+   *  harness, which knows about compaction; absent from every other caller. */
+  context_fit?: {
+    required: number
+    mode: 'fit' | 'best_effort' | 'unchecked'
+    excluded: string[]
+    exempt?: string[]
+    basis?: 'prompt_without_history' | 'full_prompt'
+  } | null
   fallback_used: boolean
   override: string | null // "user_pin" | "run_override" | null
   latency_ms: number
@@ -615,6 +640,15 @@ export interface ModelSegment {
   cache_read_tokens: number
   cache_write_tokens: number
   cost_usd: number
+  /** "low" | "medium" | "high" | null — null when this segment's model
+   *  doesn't accept the control (`ModelInfo.supports_effort` was false), or
+   *  on a segment from before effort existed. */
+  effort?: string | null
+  /** The upstream provider OpenRouter actually routed this segment's calls to
+   *  (e.g. "Anthropic", "Together"), the constant "anthropic" for
+   *  AnthropicProvider, or null — Kimi and other OpenAI-compatible servers
+   *  report nothing, and so does a segment from before this field existed. */
+  served_by?: string | null
   energy_wh: number
   energy_accounting: EnergyAccounting
 }

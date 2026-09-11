@@ -51,6 +51,9 @@ services:
       # so a fork or a private deployment is not announcing this repo's URL.
       TRET_OPENROUTER_REFERER: ${TRET_OPENROUTER_REFERER:-https://github.com/tret-platform/tret}
       TRET_OPENROUTER_TITLE: ${TRET_OPENROUTER_TITLE:-tret}
+      # Raw JSON `provider` object merged into every OpenRouter request; blank
+      # (the default) reads as "not set" rather than a JSON parse error.
+      TRET_OPENROUTER_PROVIDER_PREFS: ${TRET_OPENROUTER_PROVIDER_PREFS:-}
       TRET_LOGIN_MAX_ATTEMPTS: ${TRET_LOGIN_MAX_ATTEMPTS:-10}
       TRET_LOGIN_WINDOW_SECONDS: ${TRET_LOGIN_WINDOW_SECONDS:-300.0}
       TRET_METHODS_NETWORK_ISOLATION: ${TRET_METHODS_NETWORK_ISOLATION:-true}

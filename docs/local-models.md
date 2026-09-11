@@ -348,6 +348,19 @@ ever *restricts* how expensive a chosen model can be — `economy` <
 harness is configured with, a discovered-and-probed local model is never
 excluded by it.
 
+A separate filter — the context-window floor a chosen model has to clear for
+the composed prompt (`router_llm/router.py`'s `_apply_context_fit`) — gives a
+local model the same guarantee, for a different reason. A local model is very
+often picked for confidentiality, not for capability, so a harness that named
+one on purpose should not have the router quietly hand a long prompt to a
+cloud model just because the local one's window looks small next to it. The
+context-fit filter therefore never drops a local model on window size alone —
+window known or not, it keeps its ordering position and is listed under the
+persisted decision's `context_fit["exempt"]` rather than `"excluded"`.
+Whatever doesn't fit is left for compaction and history-trimming
+(`engine/compaction.py`) to handle at request time, the same way an oversized
+prompt is handled for any other model whose window falls short mid-run.
+
 Because the tier is genuinely at the bottom of that order, it also works as a
 ceiling. Set `max_cost_tier: local` and *every* cloud candidate is filtered out,
 leaving only local models:

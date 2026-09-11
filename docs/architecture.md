@@ -55,13 +55,19 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    floor below which a model has no prior at all: an untried model keeps its
    existing position rather than being ranked last for being untried. Evidence
    enters in three places of deliberately different strength — a `TRACK RECORD`
-   section in the router prompt (`route-v4`; omitted entirely when there is no
+   section in the router prompt (`route-v5`; omitted entirely when there is no
    evidence, so a fresh install renders the v3 bytes), an evidence tier ahead of
    the objective in candidate ordering, and demotion-only in the deterministic
    fallback. **Nothing derived from evidence can widen a policy**: it reorders
    within `allowed` and under `max_cost_tier`, never past them. Each decision
    snapshots what it read as `runs.routing.evidence`, because the aggregate moves
-   and a decision has to stay explicable after it has.
+   and a decision has to stay explicable after it has. Every decision also
+   carries `effort` (the reasoning-effort level it recorded, sent to the
+   provider only when the chosen model's own catalog entry accepts the
+   control) and `context_fit` (whether the chosen model's window can hold the
+   call, which local models are exempt from that check, and — when adaptive
+   compaction is on — whether the floor it was checked against already
+   excluded the history that trimming would shrink).
 
 5. **Adapting mid-run** (`engine/compaction.py`, `engine/supervisor.py`): the
    model is chosen once, but a run is not stuck with the consequences.

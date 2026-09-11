@@ -556,6 +556,14 @@ class Settings(BaseSettings):
     openrouter_catalog: bool = True
     openrouter_referer: str = "https://github.com/tret-platform/tret"
     openrouter_title: str = "tret"
+    # Optional provider-selection preferences, shallow-merged over
+    # OpenRouterProvider's own `{"require_parameters": True}` default (see
+    # `OpenRouterProvider._provider_body`) — a raw JSON object accepting
+    # OpenRouter's `provider` fields: order, ignore, only, quantizations,
+    # data_collection, zdr, sort. None (unset) sends just the default. Gates
+    # every OpenRouter call this deployment makes, so malformed JSON is
+    # warned about and treated as unset rather than refusing to boot.
+    openrouter_provider_prefs: dict | None = None
 
     # Local model server (Ollama, LM Studio, vLLM, llama.cpp server — anything
     # exposing an OpenAI-compat /v1). Enabled iff local_base_url is set; no API
@@ -648,6 +656,39 @@ class Settings(BaseSettings):
         their own `TRET_GRID_CO2E_G_PER_KWH`).
         """
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("openrouter_provider_prefs", mode="before")
+    @classmethod
+    def _parse_openrouter_provider_prefs(cls, value):
+        """Blank means "not set"; malformed JSON is warned about and ignored.
+
+        Deliberately softer than `_parse_grid_factors`: that field is read once
+        at startup and a typo there is worth refusing to boot over, but this one
+        gates every OpenRouter call the deployment ever makes — failing to boot
+        because an operator fat-fingered a provider-routing hint would be a
+        worse outage than the hint just not applying.
+        """
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                value = json.loads(text)
+            except ValueError:
+                log.warning(
+                    "TRET_OPENROUTER_PROVIDER_PREFS is not valid JSON; ignoring it. "
+                    'Expected a JSON object, e.g. \'{"order": ["anthropic"]}\'.'
+                )
+                return None
+        if not isinstance(value, dict):
+            log.warning(
+                "TRET_OPENROUTER_PROVIDER_PREFS must be a JSON object, got %s; ignoring it.",
+                type(value).__name__,
+            )
+            return None
+        return value
 
     @field_validator("grid_factors", mode="before")
     @classmethod
