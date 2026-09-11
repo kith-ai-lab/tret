@@ -20,6 +20,7 @@ from tret.api import (
     emissions_settings as emissions_settings_api,
     findings,
     harnesses,
+    lessons as lessons_api,
     pack_builder,
     packs,
     routing,
@@ -271,6 +272,10 @@ def create_app() -> FastAPI:
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)
     app.include_router(findings.router)
+    # Pack lessons (tret/api/lessons.py): list/review/retire, the same
+    # blessing-gate shape as findings above, applied to a pack's own
+    # per-workspace memory instead of a run's output.
+    app.include_router(lessons_api.router)
     # In-app pack builder (Plan Phase D): draft CRUD + validate/test-install/
     # export. Additive to the path-install and archive-install surfaces below,
     # never a replacement for either. Mounted *before* `packs.router`: FastAPI

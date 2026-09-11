@@ -3099,3 +3099,51 @@ export const budgetApi = {
   clearBudgetSettings: () =>
     request<BudgetStatusResponse>('/workspace/settings/budget', { method: 'DELETE' }),
 }
+
+/** One row of a pack's per-workspace "lessons" memory (backend:
+ *  api/lessons.py::_lesson_out). `status` moves proposed -> approved|rejected
+ *  (a human reviewer's one-time decision, `POST .../review`) and, only from
+ *  `approved`, -> retired (admin-only, `POST .../retire`) — never back.
+ *  Keyed on `pack_slug`, not `pack_id`: a lesson approved under one installed
+ *  version stays visible (and, if `in_effect`, still live in the prompt)
+ *  after the pack is upgraded to a new version/id — `pack_id` is only
+ *  provenance of which install first produced it and can be `null` once that
+ *  install is gone. Only `approved` lessons are ever read into a run's
+ *  prompt (`engine/context.py`'s `pack_lessons` block), and even among those
+ *  only the ones `in_effect` — the same 40-item/4,000-char cap
+ *  `services/lessons.py::approved_lessons` applies; an approved lesson past
+ *  the cap is stored and reviewable but silently never sent. This endpoint's
+ *  list is the full history, every status, for a human reviewing the memory
+ *  itself. */
+export interface PackLesson {
+  id: string
+  pack_id: string | null
+  pack_slug: string
+  ordinal: number
+  status: 'proposed' | 'approved' | 'rejected' | 'retired'
+  text: string
+  rationale: string
+  in_effect: boolean
+  proposed_by_run_id: string | null
+  reviewed_by_user_id: string | null
+  created_at: string | null
+  reviewed_at: string | null
+}
+
+export const lessonsApi = {
+  listLessons: (packId: string, status?: PackLesson['status']) =>
+    request<PackLesson[]>(`/packs/${packId}/lessons${status ? `?status=${status}` : ''}`),
+  // Approver role or higher, same gate as decideFinding. `approve: false` is
+  // "reject", not "delete" — the row (and the model's original wording)
+  // survives as a rejected lesson, visible in the full history above.
+  reviewLesson: (packId: string, lessonId: string, approve: boolean) =>
+    request<PackLesson>(`/packs/${packId}/lessons/${lessonId}/review`, {
+      method: 'POST',
+      body: { approve },
+    }),
+  // Admin-only, and only an `approved` lesson accepts it (409 otherwise) —
+  // see PackLesson's own doc comment on why retiring is a one-way exit from
+  // `approved` rather than a delete.
+  retireLesson: (packId: string, lessonId: string) =>
+    request<PackLesson>(`/packs/${packId}/lessons/${lessonId}/retire`, { method: 'POST' }),
+}

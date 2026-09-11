@@ -39,6 +39,7 @@ from tret.packs.links import (
     set_harness_packs,
     task_slug_collision,
 )
+from tret.services import lessons as lessons_service
 
 router = APIRouter(prefix="/api/harnesses", tags=["harnesses"])
 
@@ -198,6 +199,14 @@ async def get_harness(
         schemas,
         web_tools_enabled=any(
             name in WEB_TOOL_NAMES for name in run_tools if name not in withheld_web_tools(run_tools)
+        ),
+        # Preview must match a real run's prompt: a run resolves this the
+        # same way (`engine/harness.py`) whenever a pack is bound and the
+        # harness hasn't opted out via `loop_config.lessons: false`.
+        lessons=(
+            await lessons_service.approved_lessons(db, ctx.id, pack.slug)
+            if pack is not None and lessons_service.lessons_enabled(h.loop_config)
+            else None
         ),
     )
     # Union of every linked pack's task types, in link order, each entry

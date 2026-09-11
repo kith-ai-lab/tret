@@ -72,7 +72,13 @@ async def test_run_records_what_its_context_was_made_of(world):
     assert [b["label"] for b in doctrine] == world.pack_manifest["doctrine"]
     assert all(len(b["sha256"]) == 64 for b in doctrine)
     tools_block = next(b for b in composition["blocks"] if b["kind"] == "tool_specs")
-    assert set(tools_block["parts"]) == set(world.task_config("divergence_assessment")["tools"])
+    # The pack task's tools plus the two pack-lesson tools the engine adds to
+    # every pack-bound run (services/lessons.py).
+    assert set(tools_block["parts"]) == {
+        *world.task_config("divergence_assessment")["tools"],
+        "list_pack_lessons",
+        "propose_pack_lesson",
+    }
 
     # Published live too, so a watching analyst sees the cost before it is spent.
     event = result.events_of("context_composition")[0].data

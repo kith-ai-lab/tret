@@ -47,6 +47,7 @@ from tret.packs.links import packs_for_harness, resolve_pack_for_task
 from tret.providers.catalog import ProviderRegistry, get_catalog
 from tret.router_llm.objectives import DEFAULT_MAX_COST_TIER, OBJECTIVES, objective_of
 from tret.router_llm.router import TIER_ORDER, ModelRouter, RoutingUnavailable
+from tret.services import lessons as lessons_service
 from tret.services.credentials import load_db_keys
 
 logger = logging.getLogger(__name__)
@@ -438,6 +439,15 @@ async def preview_routing(
         body.task_type,
         output_schemas,
         web_tools_enabled=web_tools_enabled,
+        # Preview must match a real run's prompt — `harness` (the saved row,
+        # None on the no-harness_id branch) is where a real run's own
+        # `loop_config.lessons` opt-out would live too.
+        lessons=(
+            await lessons_service.approved_lessons(db, ctx.id, pack.slug)
+            if pack is not None
+            and lessons_service.lessons_enabled(harness.loop_config if harness else None)
+            else None
+        ),
     )
     # Minimal by design: this is the system-prompt assembly alone (platform
     # preamble + doctrine + task instructions/output contract [+ web-evidence

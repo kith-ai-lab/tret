@@ -301,9 +301,31 @@ packs remain future work.
 | `lookup_dataset` | retrieve stored numbers |
 | `run_method` | compute derived numbers via vetted pack methods |
 | `list_prior_findings` | reference earlier verdicts/extractions |
+| `list_pack_lessons` / `propose_pack_lesson` | read this pack's approved lessons for this workspace; propose a new one for review |
 | `record_verdict` / `record_finding` | schema-validated structured outputs |
 | `draft_section` | store a markdown deliverable section |
 | `file_data_request` | declare a gap instead of guessing |
+
+**Lessons memory** is on by default for every pack — no manifest field to
+set, and no `tools` entry to declare either. Unlike `list_prior_findings`
+(which a task or harness must list explicitly to get), `list_pack_lessons`
+and `propose_pack_lesson` are added to every run's tool list by the engine
+itself, unconditionally, unless `loop_config.lessons: false` withholds them —
+a pack author does nothing to receive them and nothing (short of that flag)
+to refuse them. A pack's approved lessons for the current workspace are read
+into the prompt automatically (the `pack_lessons` context block, after
+doctrine) the same unconditional way. Lessons follow the pack's *slug*, not
+one installed version's id — a lesson approved under 1.0.0 is still read into
+the prompt once the pack is upgraded to 1.1.0; see docs/architecture.md.
+`propose_pack_lesson` only ever creates a `proposed` row (at most 3 per run);
+a workspace approver has to bless it (Packs > your pack > Lessons) before it
+appears anywhere, and an approved lesson still doesn't ship if the workspace
+already has 40 (or ~4,000 characters worth) ahead of it in the queue — the
+Packs view marks those "over cap". If this pack should never accrue or read a
+lessons memory, set `loop_config.lessons: false` on the harness(es) that run
+it — this withholds both tools and the context block for runs on that
+harness, with no effect on prompt behavior otherwise (an empty lessons list
+already renders nothing).
 
 ## Connected sources (live SharePoint/OneDrive)
 

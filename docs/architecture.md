@@ -468,6 +468,31 @@ code sha, input summary, and output hash — which is what lets the agent cite a
 computed number the way it cites a dataset row. See docs/hardening.md for what
 is *not* isolated (the filesystem).
 
+A pack also accrues a **lessons memory**: durable, per-workspace notes on
+running that pack, distinct from doctrine (pack-authored, never compacted)
+and from `list_prior_findings` (this project's own recorded outputs). Rows
+live in `pack_lessons`, keyed on `(workspace_id, pack_slug, ordinal)` — the
+pack's *slug*, not the id of any one installed version — because a version
+bump installs a new `Pack` row and repoints a harness's link to it; keying on
+the id would silently drop a workspace's whole lessons memory on every
+upgrade. `pack_id` is kept only as nullable provenance (which install first
+produced a row; `SET NULL` on that pack's own deletion, never cascaded) and
+plays no part in how a lesson is found. Rows move through the same blessing
+gate as any other structured output — a run may only *propose* one
+(`propose_pack_lesson`), never approve its own proposal; a workspace approver
+decides (`api/lessons.py`), and an admin can later retire a lesson that no
+longer holds. `services/lessons.py::approved_lessons` reads the approved list
+into a `pack_lessons` context block (`engine/context.py`, placed after
+doctrine and before task instructions), capped at 40 items / ~4,000
+characters so the memory stays small and stable — that cap matters for
+prompt caching the same way doctrine's stable prefix does, and an empty list
+omits the block entirely rather than sending an empty heading, so a pack with
+no lessons yet produces the identical prompt it always has. An approved
+lesson past that cap is stored and reviewable like any other but is silently
+never sent to a run — `api/lessons.py`'s `in_effect` field on each row says
+whether it currently falls inside the cap, and the Packs view badges the ones
+that don't. A harness opts out entirely with `loop_config.lessons: false`.
+
 ## Schema and migrations
 
 **Alembic owns the schema.** `db/models.py` declares it, `alembic/versions/` is

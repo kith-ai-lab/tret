@@ -532,6 +532,71 @@ class Approval(Base):
     created_at: Mapped[datetime] = created_at_col()
 
 
+class PackLesson(Base):
+    """A pack's durable "lessons" memory, scoped per workspace: what an agent
+    learned running this pack here, curated by a human before it ever
+    reaches a prompt again — the same blessing gate `findings`/`approvals`
+    use, applied to the pack's own working notes instead of an output.
+
+    Written two ways: `propose_pack_lesson` (engine/tools.py) inserts a
+    `proposed` row tied to the run that suggested it; a workspace approver
+    (or higher) then reviews it via `api/lessons.py`, which is the only path
+    to `approved` or `rejected` — a model can never bless its own proposal.
+    `retired` is a separate, admin-only step for a lesson that was once
+    approved but no longer holds; it never reverts to `proposed`.
+
+    Keyed on `(workspace_id, pack_slug)`, not `(workspace_id, pack_id)`: a new
+    pack version is a new `Pack` row (`packs.slug`/`version` is the unique
+    key), and a harness's link is repointed to it on every install — a lesson
+    tied to the old row's id would silently vanish from every run's prompt on
+    the next version bump, which defeats the entire point of a *durable*
+    memory. `pack_slug` is what a lesson is actually about; `pack_id` is kept
+    only as provenance — which install first produced it — and is nullable
+    with `ondelete="SET NULL"` so deleting a superseded `Pack` row clears that
+    provenance without cascading away the lessons themselves.
+
+    `ordinal` is assignment order within a (workspace, pack_slug) — a
+    monotonic counter, not a priority — and is what
+    `services/lessons.py::approved_lessons` sorts and caps by, so the
+    numbered list a run sees is stable across reads even as later lessons are
+    proposed. `text` is capped at 600 characters (enforced in the service,
+    not here) to keep the whole memory small enough to stay in the doctrine
+    block's stable prefix — see that module's docstring for the cap on the
+    assembled list itself.
+    """
+
+    __tablename__ = "pack_lessons"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id", "pack_slug", "ordinal", name="uq_pack_lessons_workspace_slug_ordinal"
+        ),
+        Index("ix_pack_lessons_workspace_slug", "workspace_id", "pack_slug"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    pack_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    # Provenance only — see the class docstring. Never joined on to resolve
+    # "this pack's lessons"; `pack_slug` is what every query keys on.
+    pack_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("packs.id", ondelete="SET NULL")
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="proposed")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    proposed_by_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL")
+    )
+    reviewed_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = created_at_col()
+    reviewed_at: Mapped[datetime | None] = mapped_column()
+
+
 class RunOutcome(Base):
     """How a finished run turned out — the evidence the router learns from.
 

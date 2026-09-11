@@ -249,8 +249,36 @@ async def test_happy_path_context_carries_doctrine_schema_and_pack_tools(world):
     assert "## Output contract" in first.system
     assert '`"divergence_verdict"`' in first.system
 
-    # Tools offered come from the pack task definition, not from the harness.
+    # Tools offered come from the pack task definition, not from the harness —
+    # plus the two pack-lesson tools the engine adds to every pack-bound run
+    # (services/lessons.py; opt out with loop_config.lessons: false).
+    assert first.tool_names == [
+        *world.task_config("divergence_assessment")["tools"],
+        "list_pack_lessons",
+        "propose_pack_lesson",
+    ]
+    # No lesson has been approved in this world, so the block is omitted and the
+    # prompt is byte-identical to a pack with lessons disabled.
+    assert "Lessons recorded for this pack" not in first.system
+
+
+async def test_a_harness_that_opts_out_of_lessons_gets_neither_the_tools_nor_the_block(world):
+    """`loop_config.lessons: false` is subtractive: both lesson tools are
+    withheld even though the engine would otherwise add them, and the block
+    never renders. The rest of the prompt is unchanged."""
+    harness_id = await world.create_harness(loop_config_extra={"lessons": False})
+    provider = ReplayProvider(divergence_happy_script())
+    result = await world.run(
+        provider=provider,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+        harness_id=harness_id,
+    )
+    first = result.provider.calls[0]
+    assert result.run.status == "completed", result.run.error
     assert first.tool_names == world.task_config("divergence_assessment")["tools"]
+    assert "Lessons recorded for this pack" not in first.system
+    assert "## Current task: Signal divergence assessment" in first.system
     assert first.model == "claude-sonnet-5"  # provider wire id, resolved by the catalog
     assert first.temperature == 0.0 and first.max_tokens == 4096
     assert first.messages[0].role == "user"

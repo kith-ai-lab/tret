@@ -111,6 +111,28 @@ FREEFORM_PREAMBLE = """\
 Assist the analyst with their request, using the available tools and honoring \
 all platform rules."""
 
+# Rendered only when the pack has at least one approved lesson in this
+# workspace (`services/lessons.py::approved_lessons`) — an empty list omits
+# the block entirely rather than sending this heading with nothing under it,
+# so a pack with no lessons yet produces a byte-identical prompt to before
+# this feature existed. That matters twice over: prompt caching keys off the
+# stable prefix staying stable, and the golden-run suite asserts exact
+# prompts for packs that have (and will keep having) no lessons.
+PACK_LESSONS_HEADING = (
+    "## Lessons recorded for this pack (approved by a reviewer; follow them "
+    "unless the task says otherwise)"
+)
+
+
+def pack_lessons_block(lessons: list[str]) -> ContextBlock:
+    numbered = "\n".join(f"{i}. {text}" for i, text in enumerate(lessons, start=1))
+    rendered = f"{PACK_LESSONS_HEADING}\n\n{numbered}"
+    # Hashed like a doctrine block (see `doctrine_blocks`) so `runs.context_
+    # composition` records exactly what lessons text a run's prompt carried,
+    # not just how many bytes it cost.
+    rendered_sha = hashlib.sha256(rendered.encode()).hexdigest()
+    return block_for("pack_lessons", f"{len(lessons)} lessons", rendered, sha256=rendered_sha)
+
 
 # ── composition accounting ────────────────────────────────────────────────────
 @dataclass
@@ -378,8 +400,16 @@ def assemble_context(
     output_schemas: dict[str, dict],
     extra_context: str | None = None,
     web_tools_enabled: bool = False,
+    lessons: list[str] | None = None,
 ) -> AssembledContext:
-    """Build the system prompt and its per-component token accounting."""
+    """Build the system prompt and its per-component token accounting.
+
+    `lessons` is the pack's already-resolved approved list for this run's
+    workspace (`services/lessons.py::approved_lessons`) — resolved by the
+    caller, not here, the same way `output_schemas` is: this function stays a
+    pure function of its arguments, with no DB access of its own. Omitted or
+    empty, the `pack_lessons` block is skipped entirely.
+    """
     blocks: list[ContextBlock] = [
         block_for("platform_preamble", "platform_preamble", PLATFORM_PREAMBLE)
     ]
@@ -387,6 +417,9 @@ def assemble_context(
     task = task_config(pack, task_type)
     if pack is not None:
         blocks.extend(doctrine_blocks(pack, task))
+
+    if lessons:
+        blocks.append(pack_lessons_block(lessons))
 
     if task:
         instructions = (
@@ -430,12 +463,16 @@ def assemble_system_prompt(
     output_schemas: dict[str, dict],
     extra_context: str | None = None,
     web_tools_enabled: bool = False,
+    lessons: list[str] | None = None,
 ) -> str:
     """The system prompt alone (harness preview endpoint, and back-compat).
 
     The preview is meant to be the prompt a run will actually send, so callers
     pass `web_tools_enabled` the same way the engine derives it — a preview
-    missing a block the run includes is worse than no preview.
+    missing a block the run includes is worse than no preview. `lessons`
+    defaults to None like `assemble_context`'s own default: a caller that
+    hasn't been updated to resolve and pass the approved list simply previews
+    without that block, rather than failing.
     """
     return assemble_context(
         harness,
@@ -444,6 +481,7 @@ def assemble_system_prompt(
         output_schemas,
         extra_context=extra_context,
         web_tools_enabled=web_tools_enabled,
+        lessons=lessons,
     ).system
 
 

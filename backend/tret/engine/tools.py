@@ -65,6 +65,7 @@ from tret.net.fetch import (
 from tret.net.search import SearchUnavailable, get_search_provider
 from tret.providers.base import ToolSpec
 from tret.services import connections as connections_service
+from tret.services import lessons as lessons_service
 from tret.services import retrieval as retrieval_service
 from tret.services.emissions import energy_wh_field
 
@@ -126,6 +127,13 @@ class RunContext:
     # call (and only pays for the check once) instead of re-asking on each one.
     connection_checked: bool = False
     connection_unavailable_reason: str | None = None
+    # Pack-lessons budget, spent by `propose_pack_lesson` — see
+    # `MAX_LESSON_PROPOSALS_PER_RUN` below. Counted on every call that gets
+    # past the empty-text/rationale check, whether it succeeds, is rejected,
+    # or turns out to be a duplicate: the cap is on how many times a run may
+    # spend a human reviewer's attention on this run's proposals, not just on
+    # how many rows land.
+    lessons_proposed: int = 0
 
 
 ToolHandler = Callable[..., Awaitable[str]]
@@ -1207,6 +1215,141 @@ async def list_prior_findings(ctx: RunContext, schema_slug: str | None = None, l
             "with a pack method via run_method.",
         )
     return body
+
+
+# ── pack lessons ────────────────────────────────────────────────────────────
+# A pack's durable, per-workspace memory (services/lessons.py) — a read tool
+# plus a propose-then-approve write, the same shape as the connected-source
+# read trio and `propose_connected_write` above: `propose_pack_lesson` never
+# makes a lesson live by itself, only `api/lessons.py`'s review endpoint does,
+# and only for a workspace approver or higher. Available to every pack by
+# default; a harness opts out with `loop_config.lessons: false`
+# (`lessons_service.lessons_enabled` — see docs/pack-authoring.md).
+LESSON_TOOL_NAMES = frozenset({"list_pack_lessons", "propose_pack_lesson"})
+
+# A run may propose only this many lessons before `propose_pack_lesson`
+# refuses further attempts (`ctx.lessons_proposed`, counted regardless of
+# outcome — see that field's own comment). A run that has genuinely spotted
+# this many durable gotchas in one pass is more likely looping on the same
+# insight worded differently than surfacing real new ones, and each proposal
+# already spends a human reviewer's attention whether or not it is approved.
+MAX_LESSON_PROPOSALS_PER_RUN = 3
+
+
+def _pack_slug(ctx: RunContext) -> str | None:
+    """The slug lessons are keyed on (`db/models.py::PackLesson`), read off
+    the run's own stored pack manifest rather than carried as a separate
+    RunContext field — `manifest["pack"]` is the slug for exactly the same
+    reason `packs/loader.py` matches an install on it, so this stays the one
+    place that fact is looked up rather than a second copy of it."""
+    return (ctx.pack_manifest or {}).get("pack")
+
+
+@builtin(
+    "list_pack_lessons",
+    "List this pack's lessons memory for this workspace: durable notes a human reviewer has "
+    "approved from earlier runs, plus any proposals THIS run has made that are still awaiting "
+    "review. Lessons are advisory context the pack has accrued over time, not doctrine — the "
+    "pack's doctrine files remain authoritative if the two ever disagree.",
+    {"type": "object", "properties": {}},
+)
+async def list_pack_lessons(ctx: RunContext) -> str:
+    pack_slug = _pack_slug(ctx)
+    if ctx.workspace_id is None or ctx.pack_id is None or pack_slug is None:
+        return "No lessons memory: this run has no workspace or no installed pack."
+    approved = await lessons_service.approved_lessons(ctx.db, ctx.workspace_id, pack_slug)
+    pending = await lessons_service.own_pending_proposals(
+        ctx.db, ctx.workspace_id, pack_slug, ctx.run_id
+    )
+    body = json.dumps(
+        {
+            "approved": approved,
+            "your_pending_proposals": [
+                {"id": str(p.id), "text": p.text, "rationale": p.rationale} for p in pending
+            ],
+        }
+    )
+    if not approved and not pending:
+        return "No lessons recorded for this pack in this workspace yet. " + body
+    return body
+
+
+@builtin(
+    "propose_pack_lesson",
+    "Propose a durable lesson for this pack's memory in this workspace: something worth "
+    "remembering the next time this pack runs here — a recurring data quirk, a gotcha this run "
+    "hit, a rule of thumb the doctrine doesn't already state. This records a PROPOSED entry "
+    "awaiting human review; you can never approve your own proposal, and it has no effect on "
+    "this or any other run unless and until a workspace approver blesses it.",
+    {
+        "type": "object",
+        "required": ["text", "rationale"],
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": (
+                    "The lesson itself, plain language, at most "
+                    f"{lessons_service.MAX_LESSON_CHARS} characters. No Markdown headings, "
+                    "fenced code blocks, or doctrine-tag-shaped markup — plain prose only."
+                ),
+            },
+            "rationale": {
+                "type": "string",
+                "description": (
+                    "Why this is worth remembering — what happened this run that makes it "
+                    "durable advice."
+                ),
+            },
+        },
+    },
+)
+async def propose_pack_lesson(ctx: RunContext, text: str, rationale: str) -> str:
+    pack_slug = _pack_slug(ctx)
+    if ctx.workspace_id is None or ctx.pack_id is None or pack_slug is None:
+        raise ToolError(
+            "This run has no workspace or no installed pack, so there is nowhere to record a "
+            "pack lesson."
+        )
+    if ctx.lessons_proposed >= MAX_LESSON_PROPOSALS_PER_RUN:
+        raise ToolError(
+            f"This run has already proposed {MAX_LESSON_PROPOSALS_PER_RUN} lessons, the limit "
+            "per run. Finish the task with what has already been proposed rather than "
+            "proposing more."
+        )
+    text = text.strip()
+    rationale = rationale.strip()
+    if not text:
+        raise ToolError("text must not be empty.")
+    if not rationale:
+        raise ToolError("rationale must not be empty.")
+    ctx.lessons_proposed += 1
+    try:
+        lesson = await lessons_service.propose_lesson(
+            ctx.db,
+            ctx.workspace_id,
+            pack_slug,
+            text=text,
+            rationale=rationale,
+            run_id=ctx.run_id,
+            pack_id=ctx.pack_id,
+        )
+    except lessons_service.LessonTextTooLong as e:
+        raise ToolError(f"{e} Shorten it and try again.") from e
+    except lessons_service.LessonRejected as e:
+        raise ToolError(f"{e} Rephrase it as plain prose and try again.") from e
+    except lessons_service.DuplicateLesson as e:
+        return (
+            f"Not recorded: this duplicates an existing {e.existing.status} lesson "
+            f'({e.existing.id}): "{e.existing.text}". Nothing new was proposed.'
+        )
+    await get_event_bus().publish(
+        ctx.run_id,
+        RunEvent("lesson_proposed", {"lesson_id": str(lesson.id), "text": lesson.text}),
+    )
+    return (
+        f"Proposed lesson {lesson.id} — awaiting review by a workspace approver. It has no "
+        "effect on this or any future run until approved."
+    )
 
 
 # ── structured outputs ────────────────────────────────────────────────────────

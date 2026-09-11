@@ -51,6 +51,7 @@ from tret.engine.extensions import get_extension_registry
 from tret.engine.tools import (
     CONNECTOR_TOOL_NAMES,
     DELEGATION_DEPTH_KEY,
+    LESSON_TOOL_NAMES,
     WEB_TOOL_NAMES,
     WRITE_CONNECTOR_TOOL_NAMES,
     RunContext,
@@ -96,6 +97,7 @@ from tret.services.emissions import (
     energy_wh_field,
 )
 from tret.services.energy_meter import meter_for_settings
+from tret.services.lessons import approved_lessons, lessons_enabled
 from tret.services.outcomes import record_outcome
 from tret.services.transcript import (
     ENGINE_NUDGE_KEY,
@@ -1085,6 +1087,20 @@ class HarnessEngine:
                         },
                     ),
                 )
+        # Pack lessons (services/lessons.py): on for every pack-bound run unless
+        # the harness opts out, so the model can read what reviewers approved
+        # and propose more. Sorted, and never duplicated if a pack task already
+        # names one of the tools: the tools block sits ahead of `system` in the
+        # cached prefix, so its order must be stable across processes.
+        lessons_on = (
+            lessons_enabled(loop_cfg) and workspace_id is not None and pack is not None
+        )
+        if lessons_on:
+            enabled_names += [n for n in sorted(LESSON_TOOL_NAMES) if n not in enabled_names]
+        else:
+            # Opting out withholds the tools even when a pack task names them,
+            # the same way the web and connector filters above subtract theirs.
+            enabled_names = [n for n in enabled_names if n not in LESSON_TOOL_NAMES]
         tool_specs = [builtins[n] for n in enabled_names]
 
         # ── context, accounted ───────────────────────────────────────────────
@@ -1095,6 +1111,9 @@ class HarnessEngine:
             output_schemas,
             extra_context=run.task_input.get("_capabilities"),
             web_tools_enabled=any(n in WEB_TOOL_NAMES for n in enabled_names),
+            lessons=(
+                await approved_lessons(db, workspace_id, pack.slug) if lessons_on else None
+            ),
         )
         system = assembled.system
         user_message = build_user_message(run, pack, documents)

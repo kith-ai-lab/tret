@@ -169,6 +169,7 @@ class GoldenWorld:
         system_prompt_extra: str | None = None,
         max_run_output_tokens: int | None = None,
         model_policy: dict | None = None,
+        loop_config_extra: dict | None = None,
     ) -> uuid.UUID:
         # Pinned by default: golden runs assert on output quality, not on
         # routing, and a pin also means the run can never be re-routed mid-flight
@@ -198,6 +199,7 @@ class GoldenWorld:
                     "max_iterations": max_iterations,
                     "max_output_tokens": 4096,
                     "temperature": 0.0,
+                    **(loop_config_extra or {}),
                 },
                 created_by=self.user_id,
             )

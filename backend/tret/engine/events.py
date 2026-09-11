@@ -50,7 +50,7 @@ class RunEvent:
     #            finding_recorded|usage|budget_warning|budget_alert|
     #            tools_withheld|context_pressure|compaction|model_switch|
     #            switch_refused|delegation_started|delegation_finished|
-    #            done|error
+    #            lesson_proposed|done|error
     data: dict = field(default_factory=dict)
     ts: float = field(default_factory=time.time)
 

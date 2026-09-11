@@ -69,6 +69,10 @@ ELIDABLE_TOOLS = frozenset(
         "list_connected_sources",
         "search_connected_files",
         "read_connected_file",
+        # A pack's approved lessons are also in the doctrine-adjacent context
+        # block every iteration (engine/context.py), so an elided read here
+        # costs nothing a re-call couldn't recover cheaply.
+        "list_pack_lessons",
     }
 )
 # Never elided, for two distinct reasons:
@@ -91,6 +95,9 @@ PROTECTED_TOOLS = frozenset(
         # may need to see again — an elided proposal is one the model could
         # accidentally re-propose or contradict.
         "propose_connected_write",
+        # Same reasoning again: a proposed lesson a later turn can no longer
+        # see is one it might propose a second time or contradict.
+        "propose_pack_lesson",
     }
 )
 
