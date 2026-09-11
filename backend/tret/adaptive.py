@@ -27,7 +27,24 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 COMPACTION_MODES = ("auto", "off")
-ESCALATION_MODES = ("off", "on_stall")
+# What the supervisor (engine/supervisor.py) is allowed to do about a run that
+# is not going well, from least to most willing to act:
+#
+# * **off**       — never touch the model. A stuck run stays stuck.
+# * **on_stall**  — switch model, but only once a run is *definitely* stuck:
+#                   the repair budget exhausted (3 terminal-validation
+#                   failures), a retrieval loop confirmed twice, or most of the
+#                   iteration budget burned with nothing recorded. Every trigger
+#                   here is a point of no return the engine has already reached
+#                   on its own account, not a prediction.
+# * **on_quality**— everything `on_stall` does, plus an earlier, cheaper signal
+#                   (2 terminal-validation failures, or one retrieval-loop
+#                   trip) that raises reasoning effort on the *same* model
+#                   before ever paying for a switch's transcript re-send. Only
+#                   escalates to a switch if effort is already maxed, the
+#                   model does not accept the control, or it was already
+#                   raised once this run.
+ESCALATION_MODES = ("off", "on_stall", "on_quality")
 
 # A run may not spend more than this share of a model's context window before the
 # engine intervenes. The remainder has to hold the turn's own output, so the
@@ -39,6 +56,13 @@ MAX_CONTEXT_HEADROOM = 0.95
 # Changing model mid-run voids the prompt cache and re-sends the transcript, so
 # it is worth doing once when a run is genuinely stuck and rarely worth doing
 # twice.
+#
+# `max_switches: 0` disables switching, not `on_quality`'s effort rung: raising
+# reasoning effort on the model already running (engine/supervisor.py's Rung 1)
+# spends no switch, so a harness that wants the cheap same-model rescue but
+# never wants a full model change sets this to 0 rather than turning escalation
+# off outright — `assess()` still returns `KIND_EFFORT` in that case and only
+# refuses `KIND_SWITCH`.
 DEFAULT_MAX_SWITCHES = 1
 MAX_MAX_SWITCHES = 3
 
@@ -48,7 +72,7 @@ class AdaptivePolicy:
     learn_from_outcomes: bool = True
     context_headroom: float = DEFAULT_CONTEXT_HEADROOM
     compaction: str = "auto"
-    escalation: str = "on_stall"
+    escalation: str = "on_quality"
     max_switches: int = DEFAULT_MAX_SWITCHES
 
     def to_json(self) -> dict:

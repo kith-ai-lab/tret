@@ -88,16 +88,70 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    It makes no model call of its own — the priors above supply the judgment. Every
    switch is bounded: within the same policy, never away from a pinned or
    overridden model, never when the forced transcript re-send would not fit the
-   remaining cost cap, and at most `max_switches` (default 1) times. Refusals are
-   published as `switch_refused`. `runs.model_timeline` records each model's own
-   spend and its own energy accounting; `runs.energy_accounting` becomes a
-   roll-up whose per-model factors are null wherever the segments disagreed, and
-   `model_used` means *the model that produced the final answer*.
+   remaining cost cap, and at most `max_switches` (default 1) times. `max_switches:
+   0` disables an actual model change but not the effort rung below — raising
+   effort spends no switch — and a refusal at that limit says so plainly
+   ("this harness does not allow model switches") rather than reporting
+   "already changed model 0 time(s)", which reads as if a switch had already
+   happened. The engine also skips asking at all — no candidate list, no
+   priors lookup, no `switch_refused` event — once a 0 limit leaves nothing
+   the rung could still do: it already fired this run, the harness is not
+   even under `on_quality` (`on_stall` has no rung to reach), or the current
+   model would refuse the effort control anyway. Refusals that are asked for
+   are published as `switch_refused`. `runs.model_timeline` records each
+   model's own spend and its own energy accounting; `runs.energy_accounting`
+   becomes a roll-up whose per-model factors are null wherever the segments
+   disagreed, and `model_used` means *the model that produced the final
+   answer*.
+   `model_policy.adaptive.escalation` (default **`on_quality`**) adds an earlier,
+   cheaper trigger ahead of that stall: 2 consecutive terminal-tool validation
+   failures, or 1 repeated-call breaker trip — both short of the stall
+   thresholds above, because those are the earliest points a deterministic
+   signal can call a run non-convergent without also flagging ordinary,
+   unhurried work. Its first move is not a switch — it **raises reasoning
+   effort on the same model** (low→medium→high, treating no recorded effort
+   yet as "low" so the rung still gets its shot) when the model accepts the
+   control and has not already been raised this run, because that needs no
+   transcript re-send (on Anthropic a top-level effort change still voids the
+   prompt cache, but re-pricing one turn is cheaper than a switch's full
+   re-send) and so skips the cost-cap check a switch needs. It falls through to
+   an ordinary switch only once effort is already at `high`, the model does not
+   accept the control, or it was already raised once this run. An effort raise
+   updates the *current* segment's `effort` in place — `run.routing[
+   "effort_changes"]` still gets the audit record and the segment its own
+   `effort_history` — rather than starting a new `ModelSegment`: a same-model
+   segment boundary used to leave the segment behind it looking `handed_off`
+   to `run_outcomes` (poisoning that model's own prior with a stall it never
+   had) and made the run-detail timeline falsely claim the run changed model
+   (the UI renders `ModelTimeline` only once a run has more than one segment).
+   The rung also carries a grace window: the two counters that triggered a
+   raise do not simply retrigger it on the very next iteration, because they
+   are running totals that would still be sitting at or past threshold for no
+   reason other than never having gone back down. Only what has accrued
+   *since* the raise, over at least one full completed iteration, can
+   retrigger it, so the raised effort level always gets a real turn before
+   anything acts on it again — and the baseline each counter is measured
+   against is self-healing rather than a fixed snapshot: once the counter it
+   is compared to no longer sits at or above that snapshot (an intervening
+   success reset it, or a later model switch reset both explicitly), the
+   snapshot is treated as zero, so a plain subtraction can never floor a
+   genuinely new run of failures or trips at zero just because a stale,
+   higher baseline is still on file. A model switch carries `effort_raised`
+   forward (the rung fires once per *run*, not once per model) but clears its
+   own snapshot and both counters' baselines, so the trigger is not
+   desensitised on the model the switch was meant to give a clean shot at. A
+   switch reached this way additionally refuses any target whose recorded
+   `delivered_rate` for this shape is *below* the current model's, even where
+   its `quality_ci_low` looks better — a model recorded as finishing this shape
+   of work less often is not a rescue (Signed Rescue Routing). `escalation:
+   on_stall` keeps the plain stall-only behavior with neither the earlier
+   trigger nor the effort rung; `off` disables both.
    A switch is also the strongest evidence tret can collect — a within-task
    comparison rather than an average across different tasks — so each segment
    becomes its own `run_outcomes` row. A handoff for stalling counts against the
    model; a handoff for running out of context window does not, because a window
-   is a size and not a failing.
+   is a size and not a failing. An effort raise is never such a handoff — it
+   stays one segment, and one `run_outcomes` row, for exactly this reason.
 6. **The loop** (`engine/harness.py`): streaming provider call → SSE events →
    **sequential** tool execution → repeat. A turn's tool calls run one at a
    time, committing after each, and that is a correctness requirement rather

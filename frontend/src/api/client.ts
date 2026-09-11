@@ -633,7 +633,7 @@ export interface ModelSegment {
   provider: string
   from_iteration: number
   to_iteration: number
-  /** "initial" | "context_exhausted" | "capability_stall" */
+  /** "initial" | "context_exhausted" | "capability_stall" | "quality_signal" */
   reason: string
   input_tokens: number
   output_tokens: number
@@ -644,6 +644,20 @@ export interface ModelSegment {
    *  doesn't accept the control (`ModelInfo.supports_effort` was false), or
    *  on a segment from before effort existed. */
   effort?: string | null
+  /** Every reasoning-effort change the quality trigger's Rung 1 made to this
+   *  segment while it was live, oldest first — a raise updates `effort`
+   *  above in place rather than starting a new segment, so this is the only
+   *  place a segment's own effort history survives. `reason` is always
+   *  "quality_signal" (`REASON_QUALITY` in engine/supervisor.py — the rung is
+   *  only ever reached from that trigger); it names *why* the raise
+   *  happened, not the `effort_raised` RunEvent type published alongside it,
+   *  which names the event itself. */
+  effort_history?: {
+    at_iteration: number
+    from_effort: string | null
+    to_effort: string
+    reason: string
+  }[]
   /** The upstream provider OpenRouter actually routed this segment's calls to
    *  (e.g. "Anthropic", "Together"), the constant "anthropic" for
    *  AnthropicProvider, or null — Kimi and other OpenAI-compatible servers
@@ -749,7 +763,7 @@ export interface TaskType {
 }
 
 export const COMPACTION_MODES = ['auto', 'off'] as const
-export const ESCALATION_MODES = ['off', 'on_stall'] as const
+export const ESCALATION_MODES = ['off', 'on_stall', 'on_quality'] as const
 export type CompactionMode = (typeof COMPACTION_MODES)[number]
 export type EscalationMode = (typeof ESCALATION_MODES)[number]
 
@@ -776,7 +790,7 @@ export const ADAPTIVE_DEFAULTS: Required<AdaptivePolicy> = {
   learn_from_outcomes: true,
   context_headroom: 0.8,
   compaction: 'auto',
-  escalation: 'on_stall',
+  escalation: 'on_quality',
   max_switches: 1,
 }
 

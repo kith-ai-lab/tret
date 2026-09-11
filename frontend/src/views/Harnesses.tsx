@@ -46,6 +46,8 @@ const ESCALATION_DESCRIPTIONS: Record<string, string> = {
   off: 'A run never changes model, however stuck it gets.',
   on_stall:
     'A run that has stopped making progress — repeated schema failures, a retrieval loop, or most of its iteration budget spent with nothing recorded — may move to a better-performing model within this harness policy.',
+  on_quality:
+    'On quality signals: raise effort after two validation failures or one repeated call, then switch if it persists.',
 }
 
 const COMPACTION_DESCRIPTIONS: Record<string, string> = {

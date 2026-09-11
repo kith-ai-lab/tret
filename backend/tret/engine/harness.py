@@ -78,6 +78,7 @@ from tret.providers.catalog import (
 from tret.router_llm.priors import OutcomePriors, PriorsProvider
 from tret.router_llm.router import ModelRouter, RoutingUnavailable
 from tret.engine.supervisor import (
+    KIND_EFFORT,
     Intervention,
     TurnState,
     assess,
@@ -190,6 +191,17 @@ class ModelSegment:
     # supervisor switch creates a new segment for a different model whose
     # `supports_effort` may disagree with the one the run started on.
     effort: str | None = None
+    # Every reasoning-effort change the quality trigger's Rung 1 made to this
+    # segment while it was live — `{at_iteration, from_effort, to_effort,
+    # reason}` per raise, oldest first. An effort raise updates `effort` above
+    # in place rather than starting a new segment (see `HarnessEngine.
+    # _raise_effort`'s own docstring for why: a same-model segment boundary
+    # left the segment it split off from looking `handed_off` to
+    # `services/outcomes.py`, poisoning the very model the raise was trying to
+    # keep), so this is the only place a segment's own effort history survives
+    # — `run.routing["effort_changes"]` is the run-wide audit trail, and this
+    # is that same fact attached to the segment it happened on.
+    effort_history: list[dict] = field(default_factory=list)
     # True once any turn folded into this segment was an ESTIMATE rather than a
     # provider-reported figure — a turn whose stream died mid-way (see
     # `HarnessEngine._book_usage`). The segment's totals stay one running sum
@@ -313,6 +325,7 @@ class ModelSegment:
             "cache_write_tokens": self.usage.cache_write_tokens,
             "cost_usd": float(self.cost_usd),
             "effort": self.effort,
+            "effort_history": list(self.effort_history),
             "served_by": self.served_by,
             "energy_wh": accounting["energy_wh"],
             # The full per-model derivation, kept segment by segment. The
@@ -1098,6 +1111,20 @@ class HarnessEngine:
         findings_total = 0
         compaction_exhausted = False
         switches_used = 0
+        # Set once the quality trigger's effort rung has fired, so it is never
+        # asked twice in one run (see supervisor.assess's Rung 1 gate) — mirrors
+        # `switches_used`/`adaptive.max_switches` for the switch path.
+        effort_raised = False
+        # The iteration the raise happened at, and the two stall counters'
+        # values at that moment — None/0/0 until a raise occurs. `_quality_
+        # trigger` (engine/supervisor.py) reads these to require fresh evidence
+        # after a raise rather than retriggering on the stale count that
+        # caused it: without this, the very counters the raise was meant to
+        # answer would force a switch on the next assess() before the raised
+        # effort ever got to prove itself.
+        effort_raised_at: int | None = None
+        failures_at_raise = 0
+        trips_at_raise = 0
         overridden = bool(decision.override)
 
         # ── loop ─────────────────────────────────────────────────────────────
@@ -1484,7 +1511,31 @@ class HarnessEngine:
             # it does not pay for a candidate list and a priors lookup on every
             # iteration to be told the same thing each time. `assess` refuses on
             # the same conditions; this only avoids the work of asking.
-            if adaptive.escalation == "off" or adaptive.max_switches <= 0 or overridden:
+            #
+            # `max_switches <= 0` alone is NOT one of those short-circuits: it
+            # spends no switch, so it must not disable the quality trigger's
+            # effort rung (Rung 1) — only once there is nothing left the rung
+            # could still do is asking it skipped:
+            #   * it already fired this run (`effort_raised`), or
+            #   * this harness is not even under `on_quality` (`on_stall` has
+            #     no effort rung to reach — see supervisor.assess), or
+            #   * the current model would refuse the control anyway
+            #     (`not model_info.supports_effort`).
+            # Any of those three, together with a 0 switch limit, means every
+            # `assess()` call this iteration could produce is one `candidates_
+            # for` lookup and a `switch_refused` event for a switch this
+            # harness will never be allowed to make.
+            if adaptive.escalation == "off" or overridden or (
+                adaptive.max_switches <= 0
+                and (
+                    effort_raised
+                    or adaptive.escalation != "on_quality"
+                    or not model_info.supports_effort
+                    # Already at the top level: the rung can never fire, so
+                    # there is nothing left for a zero-switch harness to ask.
+                    or segment.effort == "high"
+                )
+            ):
                 await db.commit()
                 continue
             candidates, live_priors = await self.router.candidates_for(
@@ -1510,11 +1561,41 @@ class HarnessEngine:
                     max_switches=adaptive.max_switches,
                     escalation=adaptive.escalation,
                     overridden=overridden,
+                    effort=segment.effort,
+                    supports_effort=model_info.supports_effort,
+                    effort_raised=effort_raised,
+                    effort_raised_at=effort_raised_at,
+                    failures_at_raise=failures_at_raise,
+                    trips_at_raise=trips_at_raise,
                 ),
                 candidates=candidates,
                 priors=live_priors,
             )
-            if intervention.switching:
+            if intervention.kind == KIND_EFFORT:
+                # Same model, same segment — no meter boundary, no
+                # context-limit recompute, no message normalization, and the
+                # cache stays alive on every provider but Anthropic (see
+                # supervisor.py's note in the intervention's own evidence) —
+                # the only thing that changes is which effort level the live
+                # segment's own `effort` reads as, off of which `provider.
+                # stream()` reads next iteration (see `_raise_effort`'s own
+                # docstring for why this is no longer a new segment).
+                self._raise_effort(
+                    run=run,
+                    intervention=intervention,
+                    segment=segment,
+                    segments=segments,
+                    iteration=iteration,
+                )
+                effort_raised = True
+                effort_raised_at = iteration
+                failures_at_raise = consecutive_terminal_failures
+                trips_at_raise = repeated_call_trips
+                await self.bus.publish(
+                    run.id,
+                    RunEvent("effort_raised", run.routing["effort_changes"][-1]),
+                )
+            elif intervention.switching:
                 switches_used += 1
                 # The old segment's meter (if any) stops the moment its
                 # segment stops accumulating turns — the new one starts its
@@ -1542,6 +1623,23 @@ class HarnessEngine:
                 compaction_exhausted = False
                 consecutive_terminal_failures = 0
                 repeated_call_trips = 0
+                # `effort_raised` itself is left alone: the rung fires at most
+                # once per *run*, not once per model (supervisor.assess's own
+                # Rung 1 gate). But `effort_raised_at`/`failures_at_raise`/
+                # `trips_at_raise` are a snapshot taken on the model the run
+                # is leaving — left un-reset, `_quality_trigger`'s post-raise
+                # baseline would compare this new model's fresh counters
+                # against a stale snapshot from a model that no longer even
+                # applies, desensitising the trigger on the very model the
+                # switch was supposed to give a clean shot at. Resetting
+                # `effort_raised_at` to None (rather than leaving the old
+                # iteration number in place) also moves the new model back
+                # onto `_quality_trigger`'s ordinary first-trigger path — no
+                # stale grace window to reason about — for exactly the same
+                # reason a fresh run's first raise does.
+                effort_raised_at = None
+                failures_at_raise = 0
+                trips_at_raise = 0
                 await self.bus.publish(
                     run.id, RunEvent("model_switch", run.routing["switches"][-1])
                 )
@@ -1623,6 +1721,23 @@ class HarnessEngine:
         run.messages = [m.to_json() for m in messages]
         run.overhead = overhead_block(overhead_calls)
         run.finished_at = _utcnow()
+        # A healthy single-segment run never persisted its timeline mid-run
+        # (see `_book_usage`), but `served_by` and `effort_history` both live
+        # only on the timeline, and `record_outcome` reads `served_by` from
+        # there. Refreshed unconditionally here whenever either is present —
+        # deliberately NOT gated on `not run.model_timeline`: a run whose
+        # effort was raised mid-run already has a truthy timeline from
+        # `_raise_effort`'s own write, but that write happened at the raise
+        # iteration and is frozen there — nothing refreshes it again for an
+        # otherwise-healthy single-segment run (`_book_usage`'s own condition
+        # only re-persists on a *later* raise, an estimate, or a second
+        # segment), so without dropping the guard here the persisted segment
+        # would report only the tokens/cost/energy up to the raise while the
+        # run's own totals kept growing underneath it — exactly the frozen
+        # timeline api/analytics.py's what-if recompute would otherwise read
+        # as the run's whole story.
+        if any(seg.served_by or seg.effort_history for seg in segments):
+            run.model_timeline = [seg.to_json() for seg in segments]
         # Evidence for the next routing decision, folded into the run's own final
         # commit. `record_outcome` never raises and returns None for runs that
         # carry no lesson (cancelled, or never routed) — see services/outcomes.py.
@@ -1688,13 +1803,6 @@ class HarnessEngine:
         """
         total_usage.input_tokens += usage.input_tokens
         total_usage.output_tokens += usage.output_tokens
-        # A healthy single-segment run never persisted its timeline (see
-        # `_book_usage`), but `served_by` lives only there and `record_outcome`
-        # reads it from there. Write it once, now, so `run_outcomes.served_by`
-        # is populated by ordinary runs and not just by the failures and
-        # switch runs that hit the other persistence conditions.
-        if not run.model_timeline and any(seg.served_by for seg in segments):
-            run.model_timeline = [seg.to_json() for seg in segments]
         total_usage.cache_read_tokens += usage.cache_read_tokens
         total_usage.cache_write_tokens += usage.cache_write_tokens
         # Booked against the model that actually ran the turn. A run may
@@ -1739,14 +1847,80 @@ class HarnessEngine:
         # `estimated_usage` lives nowhere else on the run, so the timeline is
         # persisted even for an ordinary single-segment run rather than
         # silently dropping the one signal analytics needs to tell a metered
-        # receipt from a guessed one. (A segment's `served_by` is the other
-        # signal that lives only on the timeline; that is written once, at the
-        # finish path just before `record_outcome`, rather than per turn here —
-        # each segment's JSON carries the full energy derivation, so writing it
-        # every iteration would double the run row's JSONB churn.)
-        if len(segments) > 1 or estimated:
+        # receipt from a guessed one. A segment carrying its own
+        # `effort_history` is the same argument again: an effort raise is
+        # deliberately *not* a new segment (see `_raise_effort`'s docstring),
+        # so without this, a single-segment run that raised effort would
+        # never persist a timeline mid-run at all, and analytics reading
+        # `model_timeline` to recompute cost (api/analytics.py's what-if path)
+        # would see nothing rather than the raise. (A segment's `served_by` is
+        # the other signal that lives only on the timeline; that is written
+        # once, at the finish path just before `record_outcome`, rather than
+        # per turn here — each segment's JSON carries the full energy
+        # derivation, so writing it every iteration would double the run
+        # row's JSONB churn.)
+        if len(segments) > 1 or estimated or any(seg.effort_history for seg in segments):
             run.model_timeline = [seg.to_json() for seg in segments]
         return turn_cost
+
+    def _raise_effort(
+        self,
+        *,
+        run: Run,
+        intervention: Intervention,
+        segment: ModelSegment,
+        segments: list[ModelSegment],
+        iteration: int,
+    ) -> None:
+        """Move the run onto a higher reasoning-effort level, same model,
+        same segment.
+
+        Used to start a new `ModelSegment` the way `_switch_model` does below,
+        on the theory that two effort levels on one model are still two
+        different call shapes worth accounting separately. In practice that
+        boundary was the bug: `services/outcomes.py` builds one `run_outcomes`
+        row per timeline segment and scores every segment but the last as a
+        handoff (`handoff_score`) — so the model that was *winning* got its own
+        prior poisoned with a `handed_off` (quality 0.05) the instant the
+        quality trigger gave it more room, for a run where the model never
+        actually changed. It also made the run-detail timeline claim "this run
+        changed model" for a run that never did (the frontend renders
+        `ModelTimeline` only once a run has more than one segment).
+        Updating `segment.effort` in place and appending to its own
+        `effort_history` (see `ModelSegment`) fixes both: one segment, one
+        model, one `run_outcomes` row, effort recorded as a fact about that
+        segment rather than a reason to end it.
+
+        Still recorded in `run.routing["effort_changes"]` — `_switch_model`
+        reads that list to carry an already-raised effort forward across an
+        actual switch — and `run.model_used`/`run.provider_used` were never
+        going to change here regardless, same as before.
+        """
+        new_effort = intervention.target
+        from_effort = segment.effort
+        segment.effort = new_effort
+        segment.effort_history.append(
+            {
+                "at_iteration": iteration,
+                "from_effort": from_effort,
+                "to_effort": new_effort,
+                "reason": intervention.reason,
+            }
+        )
+        record = {
+            "at_iteration": iteration,
+            "model": segment.model.id,
+            "from_effort": intervention.evidence.get("from_effort"),
+            "to_effort": new_effort,
+            "reason": intervention.reason,
+            "detail": intervention.detail,
+            "evidence": intervention.evidence,
+            "decided_at": _utcnow().isoformat(),
+        }
+        routing = dict(run.routing or {})
+        routing["effort_changes"] = [*(routing.get("effort_changes") or []), record]
+        run.routing = routing
+        run.model_timeline = [seg.to_json() for seg in segments]
 
     def _switch_model(
         self,
@@ -1767,15 +1941,21 @@ class HarnessEngine:
         sequence is in `model_timeline`.
         """
         target = intervention.target
-        # Carry the run's original effort intent forward rather than
-        # recomputing it: `run.routing["effort"]` is the same field the run
-        # started with (see `RoutingDecision.effort`), so a switch never
-        # invents a different level than the one this run was routed under —
-        # only whether it is actually sent changes, re-gated by the *new*
-        # model's own `supports_effort` (a switch can move onto a model that
-        # does, or does not, accept the control, independent of the model it
-        # is leaving).
-        effort = (run.routing or {}).get("effort")
+        # Carry the run's current effort intent forward rather than
+        # recomputing it: the run's own `["effort_changes"]`, if the quality
+        # trigger's Rung 1 already raised it once this run, otherwise
+        # `run.routing["effort"]`, the field the run started with (see
+        # `RoutingDecision.effort`) — so a switch never invents a different
+        # level than the one this run is actually under, and never quietly
+        # drops a raise that already happened. Only whether it is actually
+        # sent changes here, re-gated by the *new* model's own
+        # `supports_effort` (a switch can move onto a model that does, or does
+        # not, accept the control, independent of the model it is leaving).
+        effort_changes = (run.routing or {}).get("effort_changes") or []
+        effort = (
+            (effort_changes[-1].get("to_effort") if effort_changes else None)
+            or (run.routing or {}).get("effort")
+        )
         segments.append(
             ModelSegment(
                 target,

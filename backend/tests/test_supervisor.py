@@ -11,9 +11,13 @@ from decimal import Decimal
 import pytest
 
 from tret.engine.supervisor import (
+    KIND_EFFORT,
     KIND_NONE,
     KIND_SWITCH,
+    QUALITY_REPEATED_CALLS,
+    QUALITY_TERMINAL_FAILURES,
     REASON_CONTEXT,
+    REASON_QUALITY,
     REASON_STALL,
     STALL_ITERATION_FRACTION,
     STALL_REPEATED_CALLS,
@@ -26,6 +30,7 @@ from tret.engine.supervisor import (
 )
 from tret.providers.base import Msg, ToolCall
 from tret.providers.catalog import ModelInfo
+from tret.router_llm.objectives import EFFORT_LEVELS
 from tret.router_llm.priors import ModelPrior
 
 
@@ -62,6 +67,29 @@ def _prior(model_id: str, floor: float, mean: float | None = None) -> ModelPrior
         quality_ci_low=floor,
         delivered_rate=mean,
         failure_rate=1 - mean,
+        mean_cost_usd=0.02,
+        mean_output_tokens=800,
+        mean_iterations=5.0,
+        mean_energy_wh=0.4,
+        approvals=0,
+        rejections=0,
+    )
+
+
+def _prior_with_delivered(model_id: str, *, floor: float, delivered: float) -> ModelPrior:
+    """A prior whose `delivered_rate` is set independently of its quality
+    fields — `_prior` always ties the two together, which is exactly what the
+    delivered-rate guard tests need to *not* be true.
+    """
+    return ModelPrior(
+        model_id=model_id,
+        runs=40,
+        effective_n=30.0,
+        quality_mean=floor,
+        quality_raw=floor,
+        quality_ci_low=floor,
+        delivered_rate=delivered,
+        failure_rate=1 - delivered,
         mean_cost_usd=0.02,
         mean_output_tokens=800,
         mean_iterations=5.0,
@@ -315,3 +343,427 @@ def test_an_untried_candidate_is_still_eligible_when_the_recorded_ones_are_worse
 def test_a_recorded_worse_candidate_is_not_reached_by_the_price_fallback():
     priors = {SMALL.id: _prior(SMALL.id, 0.80), STRONG.id: _prior(STRONG.id, 0.20)}
     assert choose_target([SMALL, STRONG], SMALL, need_larger_window=False, priors=priors) is None
+
+
+# ── the quality trigger (escalation == "on_quality") ─────────────────────────
+# `on_quality` is a strict superset of `on_stall`: everything above must keep
+# passing unmodified (it does — none of it sets `escalation="on_quality"`),
+# and the tests below are additive, not replacements.
+def test_the_quality_trigger_never_fires_under_on_stall():
+    # Two failures and one repeated-call trip both clear the *quality*
+    # thresholds but not `_stalled`'s own — under `on_stall` neither may do
+    # anything, because that mode must never change behaviour by adding this
+    # feature.
+    assert _assess(_state(escalation="on_stall", consecutive_terminal_failures=2)).kind == KIND_NONE
+    assert _assess(_state(escalation="on_stall", repeated_call_trips=1)).kind == KIND_NONE
+
+
+def test_two_consecutive_terminal_failures_trigger_under_on_quality():
+    state = _state(escalation="on_quality", consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES)
+    result = _assess(state)
+    assert result.kind != KIND_NONE
+    assert result.reason == REASON_QUALITY
+
+
+def test_one_terminal_failure_does_not_trigger_the_quality_signal():
+    # The repair loop working as designed, same as it is for `_stalled`.
+    state = _state(escalation="on_quality", consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES - 1)
+    assert _assess(state).kind == KIND_NONE
+
+
+def test_one_repeated_call_trip_triggers_under_on_quality():
+    state = _state(escalation="on_quality", repeated_call_trips=QUALITY_REPEATED_CALLS)
+    result = _assess(state)
+    assert result.kind != KIND_NONE
+    assert result.reason == REASON_QUALITY
+
+
+def test_context_pressure_still_outranks_the_quality_signal():
+    # A run that is genuinely out of room gets the concrete remedy (a bigger
+    # window), not effort or a quality-driven switch to a same-size model.
+    state = _state(
+        escalation="on_quality",
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        est_wire_tokens=90_000,
+        context_limit=72_000,
+        compaction_exhausted=True,
+    )
+    result = _assess(state)
+    assert result.reason == REASON_CONTEXT
+
+
+def test_a_run_that_already_recorded_its_result_ignores_the_quality_signal_too():
+    state = _state(
+        escalation="on_quality",
+        terminal_recorded=True,
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+    )
+    assert _assess(state).kind == KIND_NONE
+
+
+# ── rung 1: raise effort before ever pricing a switch ────────────────────────
+def test_the_effort_rung_is_chosen_before_a_switch():
+    state = _state(
+        escalation="on_quality",
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=True,
+        effort="low",
+    )
+    result = _assess(state)
+    assert result.kind == KIND_EFFORT
+    assert result.target == "medium"
+    assert result.reason == REASON_QUALITY
+    # No model changes hands at this rung.
+    assert "from_effort" in result.evidence and "to_effort" in result.evidence
+
+
+def test_the_effort_rung_treats_no_effort_as_low():
+    # `effort=None` means either nothing was ever requested (a decision from
+    # before effort existed) or the field was never populated — not "this
+    # model is already at the top". Rung 1 must still get its shot, raising
+    # to "medium" exactly as it would from an explicit "low".
+    state = _state(
+        escalation="on_quality",
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=True,
+        effort=None,
+    )
+    result = _assess(state)
+    assert result.kind == KIND_EFFORT
+    assert result.target == "medium"
+    # The evidence records the true starting point, not the "low" stand-in
+    # used only to find the next rung.
+    assert result.evidence["from_effort"] is None
+
+
+def test_the_effort_rung_climbs_one_level_at_a_time():
+    state = _state(
+        escalation="on_quality",
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=True,
+        effort="medium",
+    )
+    result = _assess(state)
+    assert result.kind == KIND_EFFORT
+    assert result.target == "high"
+
+
+def test_the_effort_rung_is_skipped_when_the_model_does_not_support_it():
+    state = _state(
+        escalation="on_quality",
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=False,
+        effort=None,
+    )
+    result = _assess(state)
+    # Falls straight through to rung 2, exactly like the stall path.
+    assert result.kind == KIND_SWITCH
+    assert result.reason == REASON_QUALITY
+
+
+def test_the_effort_rung_is_skipped_once_already_at_the_top():
+    state = _state(
+        escalation="on_quality",
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=True,
+        effort="high",
+    )
+    result = _assess(state)
+    assert result.kind == KIND_SWITCH
+
+
+def test_the_effort_rung_fires_at_most_once_per_run():
+    state = _state(
+        escalation="on_quality",
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=True,
+        effort="low",
+        effort_raised=True,
+    )
+    result = _assess(state)
+    assert result.kind == KIND_SWITCH
+
+
+def test_the_effort_rung_needs_no_affordability_check():
+    # Unlike a switch, raising effort never re-sends the transcript, so it
+    # must go through even when the run's remaining budget could not afford a
+    # switch's re-send.
+    state = _state(
+        escalation="on_quality",
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=True,
+        effort="low",
+        est_wire_tokens=400_000,
+        cost_so_far=Decimal("4.99"),
+        max_cost_usd=Decimal("5.00"),
+    )
+    assert _assess(state).kind == KIND_EFFORT
+
+
+# ── rung 2: escalation can degrade (Signed Rescue Routing) ───────────────────
+def test_the_delivered_rate_guard_refuses_a_target_that_finishes_this_shape_less_often():
+    priors = {
+        SMALL.id: _prior_with_delivered(SMALL.id, floor=0.30, delivered=0.80),
+        STRONG.id: _prior_with_delivered(STRONG.id, floor=0.50, delivered=0.20),
+    }
+    # Without the guard — the stall path's own selection — the
+    # higher-confidence candidate wins, same as today.
+    assert (
+        choose_target([SMALL, STRONG], SMALL, need_larger_window=False, priors=priors)
+        is STRONG
+    )
+    # The quality path's guard refuses it anyway: however confident that
+    # record is, it finishes this shape of work less often than the
+    # incumbent, and escalating there would be the rescue making things worse.
+    assert (
+        choose_target(
+            [SMALL, STRONG],
+            SMALL,
+            need_larger_window=False,
+            priors=priors,
+            guard_delivered_rate=True,
+        )
+        is None
+    )
+
+
+def test_a_quality_triggered_switch_records_the_guards_refusal():
+    priors = {
+        SMALL.id: _prior_with_delivered(SMALL.id, floor=0.30, delivered=0.80),
+        STRONG.id: _prior_with_delivered(STRONG.id, floor=0.50, delivered=0.20),
+    }
+    state = _state(escalation="on_quality", consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES)
+    result = _assess(state, candidates=(SMALL, STRONG), priors=priors)
+    assert result.kind == KIND_NONE
+    assert result.reason == REASON_QUALITY
+    assert result.refused
+
+
+def test_a_stall_triggered_switch_is_not_subject_to_the_delivered_rate_guard():
+    # Byte-identical to today: `on_stall`'s own selection never passes
+    # `guard_delivered_rate`, so the same priors that refuse a quality-driven
+    # switch still let a plain stall through.
+    priors = {
+        SMALL.id: _prior_with_delivered(SMALL.id, floor=0.30, delivered=0.80),
+        STRONG.id: _prior_with_delivered(STRONG.id, floor=0.50, delivered=0.20),
+    }
+    state = _state(escalation="on_stall", consecutive_terminal_failures=STALL_TERMINAL_FAILURES)
+    result = _assess(state, candidates=(SMALL, STRONG), priors=priors)
+    assert result.kind == KIND_SWITCH
+    assert result.target is STRONG
+
+
+def test_effort_levels_are_the_shared_ladder():
+    # Guards against the ladder drifting out of sync with the router's own
+    # `EFFORT_LEVELS` (router_llm/objectives.py) without either side noticing.
+    assert EFFORT_LEVELS == ("low", "medium", "high")
+
+
+# ── the grace window after a raise ───────────────────────────────────────────
+# Without this, the very counters that caused the raise are still sitting at
+# or past threshold on the next assess() and force a switch immediately — the
+# rung buys the raised effort level zero iterations to prove itself.
+def test_a_raise_buys_the_next_iteration_when_the_trip_count_does_not_grow():
+    state = _state(
+        escalation="on_quality",
+        iteration=5,
+        repeated_call_trips=1,
+        supports_effort=True,
+        effort="medium",
+        effort_raised=True,
+        effort_raised_at=4,
+        trips_at_raise=1,
+    )
+    assert _assess(state).kind == KIND_NONE
+
+
+def test_a_second_trip_after_the_raise_does_switch():
+    state = _state(
+        escalation="on_quality",
+        iteration=5,
+        repeated_call_trips=2,
+        supports_effort=True,
+        effort="medium",
+        effort_raised=True,
+        effort_raised_at=4,
+        trips_at_raise=1,
+    )
+    result = _assess(state)
+    assert result.kind == KIND_SWITCH
+    assert result.reason == REASON_QUALITY
+
+
+def test_a_raise_buys_the_next_iteration_when_failures_do_not_grow():
+    state = _state(
+        escalation="on_quality",
+        iteration=5,
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=True,
+        effort="medium",
+        effort_raised=True,
+        effort_raised_at=4,
+        failures_at_raise=QUALITY_TERMINAL_FAILURES,
+    )
+    assert _assess(state).kind == KIND_NONE
+
+
+def test_new_terminal_failures_after_the_raise_do_switch():
+    # `failures_at_raise` stale-high, as if the raw counter had reached this
+    # value once before an intervening successful terminal call reset
+    # `consecutive_terminal_failures` to 0 (engine/harness.py resets the raw
+    # counter on a success, but nothing resets `failures_at_raise` to match
+    # outside of a model switch — see the self-healing baseline this is
+    # exercising). Two *fresh* failures since that reset must fire the
+    # quality trigger despite the raw count never reaching
+    # `STALL_TERMINAL_FAILURES` — a plain `current - failures_at_raise`
+    # subtraction floors at 0 for any current at or below the stale baseline,
+    # silently swallowing genuinely new failures until the raw counter climbs
+    # past it, which can mean waiting for the full stall threshold and losing
+    # `REASON_QUALITY`'s delivered-rate guard on the way.
+    state = _state(
+        escalation="on_quality",
+        iteration=5,
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=True,
+        effort="medium",
+        effort_raised=True,
+        effort_raised_at=4,
+        failures_at_raise=STALL_TERMINAL_FAILURES,
+    )
+    assert state.consecutive_terminal_failures < STALL_TERMINAL_FAILURES
+    result = _assess(state)
+    assert result.kind == KIND_SWITCH
+    assert result.reason == REASON_QUALITY
+
+
+def test_the_grace_window_needs_a_full_completed_iteration():
+    # Same iteration the raise happened at — no turn has run under the raised
+    # level yet — must never retrigger, even though the raw count alone (1)
+    # already clears `QUALITY_REPEATED_CALLS`. Kept below `STALL_REPEATED_
+    # CALLS` too, so this is testing the grace window and not the plain stall
+    # path underneath it.
+    state = _state(
+        escalation="on_quality",
+        iteration=4,
+        repeated_call_trips=1,
+        supports_effort=True,
+        effort="medium",
+        effort_raised=True,
+        effort_raised_at=4,
+        trips_at_raise=0,
+    )
+    assert _assess(state).kind == KIND_NONE
+
+
+def test_a_dropped_terminal_failure_count_is_clamped_rather_than_going_negative():
+    # `consecutive_terminal_failures` can reset to 0 on an intervening success;
+    # the delta must floor at 0 rather than go negative and mask a genuine new
+    # trip on the other counter.
+    state = _state(
+        escalation="on_quality",
+        iteration=5,
+        consecutive_terminal_failures=0,
+        failures_at_raise=QUALITY_TERMINAL_FAILURES,
+        repeated_call_trips=2,
+        trips_at_raise=1,
+        supports_effort=True,
+        effort="medium",
+        effort_raised=True,
+        effort_raised_at=4,
+    )
+    result = _assess(state)
+    assert result.kind == KIND_SWITCH
+    assert result.reason == REASON_QUALITY
+
+
+def test_a_single_trip_refires_the_quality_trigger_once_baselines_are_reset():
+    # What a state looks like right after engine/harness.py's switch block
+    # clears `failures_at_raise`/`trips_at_raise` for the model the run just
+    # landed on (see test_model_switch.py's `test_a_switch_resets_the_
+    # quality_triggers_baselines` for the engine side): the very next trip on
+    # the new model must count as fresh, not get compared against a snapshot
+    # left over from the model the run just left.
+    state = _state(
+        escalation="on_quality",
+        iteration=6,
+        repeated_call_trips=QUALITY_REPEATED_CALLS,
+        supports_effort=True,
+        effort="medium",
+        effort_raised=True,
+        effort_raised_at=5,
+        trips_at_raise=0,
+    )
+    result = _assess(state)
+    assert result.kind == KIND_SWITCH
+    assert result.reason == REASON_QUALITY
+
+
+def test_on_stall_thresholds_are_unaffected_by_the_grace_window_fields():
+    # `effort_raised_at`/`failures_at_raise`/`trips_at_raise` are quality-only
+    # machinery — `on_stall` must behave exactly as if they were never set.
+    state = _state(
+        escalation="on_stall",
+        consecutive_terminal_failures=STALL_TERMINAL_FAILURES,
+        effort_raised_at=1,
+        failures_at_raise=STALL_TERMINAL_FAILURES,
+    )
+    result = _assess(state)
+    assert result.kind == KIND_SWITCH
+    assert result.reason == REASON_STALL
+
+
+# ── max_switches: 0 disables switching, not the effort rung ─────────────────
+def test_max_switches_zero_still_allows_the_effort_rung():
+    state = _state(
+        escalation="on_quality",
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=True,
+        effort="low",
+        max_switches=0,
+    )
+    result = _assess(state)
+    assert result.kind == KIND_EFFORT
+    assert result.target == "medium"
+
+
+def test_max_switches_zero_still_refuses_an_actual_switch():
+    # The rung is already spent (effort maxed), so this falls through to
+    # rung 2 — which a 0 limit must refuse exactly as it would refuse any
+    # other switch. The wording says this is a policy choice, not a budget
+    # this run happened to spend: "already changed model 0 time(s)" would
+    # misread as a switch having already happened.
+    state = _state(
+        escalation="on_quality",
+        consecutive_terminal_failures=QUALITY_TERMINAL_FAILURES,
+        supports_effort=True,
+        effort="high",
+        max_switches=0,
+    )
+    result = _assess(state)
+    assert result.kind == KIND_NONE
+    assert result.refused == "this harness does not allow model switches"
+
+
+def test_max_switches_zero_also_refuses_a_plain_stall_switch():
+    state = _state(
+        escalation="on_stall", consecutive_terminal_failures=STALL_TERMINAL_FAILURES, max_switches=0
+    )
+    result = _assess(state)
+    assert result.kind == KIND_NONE
+    assert result.refused == "this harness does not allow model switches"
+
+
+# ── the delivered-rate guard needs both sides to have a prior to refuse ──────
+def test_guard_delivered_rate_does_not_refuse_when_the_current_model_has_no_prior():
+    # No prior for the incumbent means no delivered_rate to compare against —
+    # the guard must not manufacture a refusal out of one side of a comparison
+    # that does not exist.
+    priors = {STRONG.id: _prior_with_delivered(STRONG.id, floor=0.50, delivered=0.20)}
+    target = choose_target(
+        [SMALL, STRONG],
+        SMALL,
+        need_larger_window=False,
+        priors=priors,
+        guard_delivered_rate=True,
+    )
+    assert target is STRONG

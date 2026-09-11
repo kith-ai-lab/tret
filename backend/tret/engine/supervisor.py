@@ -37,6 +37,23 @@ version is worse than not intervening at all:
   not escalating.
 * **Rarely.** `max_switches` defaults to one. A run that has already changed
   model once and is still stuck is not usually one change away from succeeding.
+
+`escalation == "on_quality"` (the default, `tret/adaptive.py`) adds a second,
+earlier trigger and a cheaper first move. The trigger fires on 2 consecutive
+terminal-validation failures or 1 repeated-call trip — both short of the
+`on_stall` thresholds a plain stall waits for — because those are the earliest
+points a deterministic signal can say "this is not converging" without also
+being able to say so about ordinary, unhurried work (see `QUALITY_*` and
+`_quality_trigger`). The first move is not a switch: `assess` raises reasoning
+effort on the *same* model (`KIND_EFFORT`) when it is not already at "high"
+and the model accepts the control, because that avoids the transcript re-send
+a switch forces — it only falls through to a switch when effort is maxed,
+unsupported, or already raised once this run. A switch reached this way
+(`REASON_QUALITY`) additionally refuses a target with a lower recorded
+`delivered_rate` for this shape than the current model's, even if its
+`quality_ci_low` looks better — escalating into a model recorded as finishing
+this shape of work *less* often is the rescue making things worse (Signed
+Rescue Routing; see `choose_target`'s `guard_delivered_rate`).
 """
 from __future__ import annotations
 
@@ -44,7 +61,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 from tret.providers.catalog import ModelInfo
-from tret.router_llm.objectives import TIER_POOR, evidence_tier
+from tret.router_llm.objectives import EFFORT_LEVELS, TIER_POOR, evidence_tier
 from tret.router_llm.priors_base import ModelPrior
 
 # ── stall signals ────────────────────────────────────────────────────────────
@@ -59,6 +76,27 @@ STALL_REPEATED_CALLS = 2
 # it counts as stuck. Below this it may simply be doing thorough work.
 STALL_ITERATION_FRACTION = 0.6
 
+# ── quality signals (escalation == "on_quality" only) ───────────────────────
+# The same two counters `_stalled` reads, at thresholds reached earlier and
+# cheaper to act on than a confirmed stall:
+#
+# * **2, not 1.** One validation failure is the repair loop working as
+#   designed (`_stalled` already treats it as unremarkable) — a single
+#   malformed payload is often a formatting slip a model corrects on its own
+#   next attempt. Two in a row is the point where an operator reading the
+#   transcript would start to doubt the *third* attempt is coming, and it is
+#   also the last iteration this signal can still change anything: three ends
+#   the run (`STALL_TERMINAL_FAILURES`), so waiting for that would mean acting
+#   after there is nothing left to rescue.
+# * **1, not 2.** The repeated-call breaker's warning is itself already the
+#   model's second chance — it fires once the *same* call has come back
+#   unchanged, which the engine already treats as worth interrupting the
+#   model to say so. A model that keeps calling after being told costs
+#   nothing to react to immediately; waiting for `STALL_REPEATED_CALLS` (a
+#   second trip) buys nothing but a more expensive rescue later.
+QUALITY_TERMINAL_FAILURES = 2
+QUALITY_REPEATED_CALLS = 1
+
 # Multiplier on the estimated re-send cost, to leave room for the turn that
 # follows it. A switch that exactly fits the remaining budget buys one message.
 SWITCH_COST_SAFETY = Decimal("2.0")
@@ -66,9 +104,17 @@ SWITCH_COST_SAFETY = Decimal("2.0")
 # Reasons, recorded on the timeline and the decision.
 REASON_CONTEXT = "context_exhausted"
 REASON_STALL = "capability_stall"
+REASON_QUALITY = "quality_signal"
 
 KIND_NONE = "none"
 KIND_SWITCH = "switch"
+# Raising effort on the model already running, rather than switching to a
+# different one. Cheaper than a switch: no transcript re-send, because the
+# model does not change — only OpenRouter and Anthropic ever see the higher
+# effort level, and even on Anthropic, where a top-level effort change still
+# voids the prompt cache, that is one re-priced turn rather than a switch's
+# full re-send at full input price on every turn after it.
+KIND_EFFORT = "effort"
 
 
 @dataclass
@@ -91,12 +137,36 @@ class TurnState:
     max_switches: int
     escalation: str
     overridden: bool
+    # The current segment's reasoning-effort level, or None if either nothing
+    # was requested or `model` does not accept the control — mirrors
+    # `ModelSegment.effort` (see engine/harness.py), which is where this is
+    # read from. Only meaningful for the quality trigger's effort rung.
+    effort: str | None = None
+    supports_effort: bool = False
+    # True once this run has already raised effort — the rung fires at most
+    # once per run, same as a switch is bounded by `max_switches`, so a model
+    # that is still struggling after being given more room falls through to a
+    # switch rather than being asked a second time.
+    effort_raised: bool = False
+    # The iteration a raise happened at, and the two stall counters' values at
+    # that moment — None/0/0 until a raise occurs, set once by the engine and
+    # never again this run (mirrors `effort_raised` itself). `_quality_trigger`
+    # reads these to require a full turn under the raised effort, with fresh
+    # evidence beyond what was already true when it was raised, before it may
+    # retrigger — without this the very counters that caused the raise would
+    # still be sitting at or past threshold on the very next assess() and force
+    # an immediate switch, spending the rung's one shot for nothing.
+    effort_raised_at: int | None = None
+    failures_at_raise: int = 0
+    trips_at_raise: int = 0
 
 
 @dataclass
 class Intervention:
     kind: str = KIND_NONE
-    target: ModelInfo | None = None
+    # A `ModelInfo` for `KIND_SWITCH`; the effort level to move to (a string
+    # from `EFFORT_LEVELS`) for `KIND_EFFORT`.
+    target: ModelInfo | str | None = None
     reason: str = ""
     detail: str = ""
     # Why a switch that looked warranted was not made. Recorded rather than
@@ -144,6 +214,81 @@ def _stalled(state: TurnState) -> tuple[bool, str]:
     return False, ""
 
 
+def _quality_trigger(state: TurnState) -> tuple[bool, str]:
+    """The earlier, cheaper signal `on_quality` adds on top of `_stalled`.
+
+    Only ever consulted when `state.escalation == "on_quality"` — under
+    `on_stall` this must never be called, so that mode's behaviour cannot
+    change by so much as which function ran. See the `QUALITY_*` constants
+    above for why these two thresholds and not `_stalled`'s own.
+
+    After a raise (`state.effort_raised_at is not None`) this does not simply
+    re-check the raw counters: `consecutive_terminal_failures` and
+    `repeated_call_trips` are running totals that already tripped the
+    thresholds once, to cause the raise, and would still be sitting at or past
+    them on the very next call for no other reason than that they never went
+    back down. The rung would then buy the raised effort level zero
+    iterations — the stale count retriggers before it ever gets a turn to
+    prove itself. So once a raise has happened, only what has accrued *since*
+    counts, and only once at least one full iteration has completed under the
+    raised level (`iteration - effort_raised_at >= 1`) — the grace window that
+    gives the raise a turn to actually run before anything can act on it
+    again.
+
+    The baseline each counter is compared against is self-healing rather than
+    a fixed snapshot: `consecutive_terminal_failures` resets to 0 on an
+    intervening successful terminal call, and a model switch (engine/
+    harness.py) resets both raw counters for the *new* segment while
+    `effort_raised` itself stays true (the rung fires at most once per run,
+    not once per model). Either way the raw counter can end up *below* the
+    snapshot taken at raise time — comparing against the stale, higher
+    snapshot would then require more fresh failures/trips than actually
+    happened before the signal can retrigger, or in the switch case mask a
+    single new trip entirely (a raw count that lands exactly on the stale
+    snapshot subtracts to zero). So each baseline is dropped back to 0 the
+    moment the raw counter it is compared against is no longer at or above it
+    — at that point whatever caused the drop (a success, a switch) has already
+    made the snapshot meaningless, and every count from here is "since".
+    """
+    if state.escalation != "on_quality" or state.terminal_recorded:
+        return False, ""
+    if state.effort_raised_at is not None:
+        if state.iteration - state.effort_raised_at < 1:
+            return False, ""
+        base_failures = (
+            state.failures_at_raise
+            if state.consecutive_terminal_failures >= state.failures_at_raise
+            else 0
+        )
+        base_trips = (
+            state.trips_at_raise if state.repeated_call_trips >= state.trips_at_raise else 0
+        )
+        new_failures = max(0, state.consecutive_terminal_failures - base_failures)
+        new_trips = max(0, state.repeated_call_trips - base_trips)
+        if new_failures >= QUALITY_TERMINAL_FAILURES:
+            return True, (
+                f"the terminal tool failed validation {new_failures} more time(s) since "
+                "the effort raise"
+            )
+        if new_trips >= QUALITY_REPEATED_CALLS:
+            return True, (
+                f"the repeated-call breaker fired {new_trips} more time(s) since the "
+                "effort raise without the run converging"
+            )
+        return False, ""
+    if state.consecutive_terminal_failures >= QUALITY_TERMINAL_FAILURES:
+        return True, (
+            f"the terminal tool failed validation {state.consecutive_terminal_failures} "
+            "times in a row"
+        )
+    if state.repeated_call_trips >= QUALITY_REPEATED_CALLS:
+        return True, (
+            f"the repeated-call breaker fired {state.repeated_call_trips} time(s) without "
+            "the run converging"
+        )
+    return False, ""
+
+
 def affordable(state: TurnState, target: ModelInfo) -> bool:
     """Can this run pay for the re-send a switch forces?
 
@@ -167,6 +312,7 @@ def choose_target(
     *,
     need_larger_window: bool,
     priors: dict[str, ModelPrior] | None = None,
+    guard_delivered_rate: bool = False,
 ) -> ModelInfo | None:
     """The model to move to, from the candidates the policy already permits.
 
@@ -180,6 +326,17 @@ def choose_target(
     requirement is judgment, and the recorded track record is the only evidence
     tret has: prefer the candidate that most reliably finishes work of this
     shape, and never one with a demonstrably poor record.
+
+    `guard_delivered_rate` — set only by the quality trigger's Rung 2, never by
+    a plain stall — additionally refuses any candidate whose recorded
+    `delivered_rate` for this shape is *below* the current model's, when both
+    have a prior. `quality_ci_low` already orders candidates by confidence in
+    their mean, but a model can have a higher, less-certain mean while
+    finishing strictly less often than the incumbent — and escalating on a
+    quality signal into a model that is recorded as finishing *less* of this
+    shape of work is the rescue making things worse (Signed Rescue Routing).
+    Left off `on_stall`'s call so that mode's candidate selection cannot change
+    by adding this parameter.
     """
     others = [m for m in candidates if m.id != current.id]
     if need_larger_window:
@@ -188,12 +345,18 @@ def choose_target(
 
     priors = priors or {}
     current_floor = priors[current.id].quality_ci_low if current.id in priors else 0.0
+    current_delivered = priors[current.id].delivered_rate if current.id in priors else None
     better = [
         (priors[m.id].quality_ci_low, m)
         for m in others
         if m.id in priors
         and evidence_tier(priors[m.id]) != TIER_POOR
         and priors[m.id].quality_ci_low > current_floor
+        and not (
+            guard_delivered_rate
+            and current_delivered is not None
+            and priors[m.id].delivered_rate < current_delivered
+        )
     ]
     if better:
         return max(better, key=lambda pair: (pair[0], pair[1].id))[1]
@@ -223,7 +386,7 @@ def assess(
     priors: dict[str, ModelPrior] | None = None,
 ) -> Intervention:
     """Whether to change model before the next iteration, and to what."""
-    if state.escalation == "off" or state.max_switches <= 0:
+    if state.escalation == "off":
         return Intervention()
     if state.overridden:
         # The caller named a model. Running a different one because tret judged
@@ -231,30 +394,103 @@ def assess(
         return Intervention()
 
     context_pressure = _context_exhausted(state)
-    stalled, why = _stalled(state)
-    if not context_pressure and not stalled:
+    # Only ever non-trivial under `on_quality` — see `_quality_trigger`'s own
+    # guard. Checked ahead of `_stalled` so a run that qualifies for both (the
+    # common case: quality's thresholds are strictly earlier than stall's own)
+    # reports the earlier, cheaper reason.
+    quality_triggered, quality_why = _quality_trigger(state)
+    stalled, stall_why = _stalled(state)
+    if not context_pressure and not quality_triggered and not stalled:
         return Intervention()
 
-    reason = REASON_CONTEXT if context_pressure else REASON_STALL
-    detail = (
-        f"over the context budget ({state.est_wire_tokens} > {state.context_limit} est. "
-        "tokens) with nothing left to elide"
-        if context_pressure
-        else why
-    )
+    if context_pressure:
+        reason = REASON_CONTEXT
+        detail = (
+            f"over the context budget ({state.est_wire_tokens} > {state.context_limit} est. "
+            "tokens) with nothing left to elide"
+        )
+    elif quality_triggered:
+        reason = REASON_QUALITY
+        detail = quality_why
+    else:
+        reason = REASON_STALL
+        detail = stall_why
 
+    # Rung 1: raise effort on the model already running before ever pricing a
+    # switch. Only reachable via the quality trigger — a plain stall goes
+    # straight to Rung 2, unchanged from today. No `affordable()` check: unlike
+    # a switch, this never re-sends the transcript, so there is nothing here
+    # for the cost cap to guard against beyond the one (cheaper) re-priced turn
+    # noted below. Deliberately not gated on `max_switches` either: raising
+    # effort spends no switch, so a harness with `max_switches: 0` still gets
+    # this rung — it is Rung 2 below, not this one, that a zero limit refuses.
+    if (
+        reason == REASON_QUALITY
+        and state.supports_effort
+        # A model with no recorded effort yet (an existing run from before the
+        # control existed, or a switch onto a model whose decision predates
+        # it) is treated as already at "low" for the rung's own purposes —
+        # nothing about that model's own default should read as "already at
+        # the top" and skip straight to a switch.
+        and (state.effort is None or state.effort in ("low", "medium"))
+        and not state.effort_raised
+    ):
+        current_effort = state.effort or "low"
+        next_effort = EFFORT_LEVELS[EFFORT_LEVELS.index(current_effort) + 1]
+        return Intervention(
+            kind=KIND_EFFORT,
+            target=next_effort,
+            reason=reason,
+            detail=detail,
+            evidence={
+                "model": state.model.id,
+                "from_effort": state.effort,
+                "to_effort": next_effort,
+                "note": (
+                    "same model, no transcript re-send; on Anthropic a "
+                    "top-level effort change still invalidates the prompt "
+                    "cache, but re-pricing one turn is cheaper than the full "
+                    "re-send a model switch forces"
+                ),
+            },
+        )
+
+    # Also where `max_switches: 0` actually bites: 0 switches used is never
+    # less than a limit of 0, so this refuses every switch for such a harness
+    # without needing its own separate check — the rung above already got its
+    # chance regardless of this same limit.
     if state.switches_used >= state.max_switches:
         return Intervention(
             reason=reason,
             detail=detail,
             refused=(
-                f"already changed model {state.switches_used} time(s); the limit for this "
-                f"harness is {state.max_switches}"
+                # A 0 limit is a policy choice ("no model changes, ever"), not
+                # a budget this run happened to exhaust — the wording says so
+                # rather than reporting "already changed model 0 time(s)",
+                # which reads as if a switch had already happened.
+                "this harness does not allow model switches"
+                if state.max_switches == 0
+                else (
+                    f"already changed model {state.switches_used} time(s); the limit for this "
+                    f"harness is {state.max_switches}"
+                )
             ),
         )
 
     target = choose_target(
-        candidates, state.model, need_larger_window=context_pressure, priors=priors
+        candidates,
+        state.model,
+        need_larger_window=context_pressure,
+        priors=priors,
+        # Under on_quality the delivered-rate guard also covers a stall reached
+        # after the effort rung: the post-raise grace window means the third
+        # terminal failure lands on the stall threshold before the quality
+        # delta can, and that switch must not escalate into a model recorded
+        # as finishing this shape less often either.
+        guard_delivered_rate=(
+            reason == REASON_QUALITY
+            or (state.escalation == "on_quality" and reason == REASON_STALL)
+        ),
     )
     if target is None:
         return Intervention(
