@@ -1240,3 +1240,137 @@ async def test_budget_line_coexists_with_a_compaction_elision_marker(world):
     )
     # ...and the marker never lands on the message the budget line is on.
     assert "elided by tret" not in last_call.last_message.content
+
+
+# ── exact token counting near the boundary ──────────────────────────────────
+# Anthropic's newest tokenizer runs roughly 30% ahead of chars/4 on the same
+# text, so right at the edge of a window — exactly where a compaction decision
+# gets made — the chars/4 estimate can say "fits" when the real prompt does
+# not. `Provider.count_tokens` (`tret/providers/base.py`) is the fix; these
+# scenarios drive it through the real engine loop rather than unit-testing
+# `EXACT_COUNT_THRESHOLD` in isolation, because what matters is the decision
+# it feeds — `over_budget`, the compaction record, the `context_pressure`
+# event — not the comparison by itself.
+_EXACT_COUNT_BULK = "The site assessment narrative continues. " * 900
+
+
+class CountingProvider(ReplayProvider):
+    """A `ReplayProvider` whose `count_tokens` is scripted rather than left at
+    the base class's default `None` (see `Provider.count_tokens`).
+
+    `counts` is a queue: each call to `count_tokens` consumes the next entry,
+    or answers `None` once the queue is empty — the same "provider ran out of
+    scripted answers" fallback a real provider's silence would produce, not a
+    script violation, since one aim of these scenarios is a provider that never
+    gives a second answer.
+
+    Every call also records how many `stream()` calls have happened so far
+    (`self.count_call_iterations`), which is exactly the (0-based) iteration
+    it was asked for — `engine/harness.py` always resolves `count_tokens`
+    before that same iteration's own `stream()` call, never after.
+    """
+
+    def __init__(self, turns, *, counts, **kwargs):
+        super().__init__(turns, **kwargs)
+        self._counts = list(counts)
+        self.count_call_iterations: list[int] = []
+
+    async def count_tokens(self, *, model, system, messages, tools):
+        self.count_call_iterations.append(len(self.calls))
+        if not self._counts:
+            return None
+        return self._counts.pop(0)
+
+
+def _read_report(document_id) -> ScriptedCall:
+    return ScriptedCall("read_document", {"document_id": str(document_id)})
+
+
+async def _exact_count_run(world, *, limit: int, counts: list[int]):
+    """Four bulk `read_document` calls, then the real divergence script.
+
+    Same shape as `tests/evals/test_context_pressure.py`'s own long run — the
+    chars/4 growth it produces (roughly 3.4k, 8.4k, 13.5k, 18.5k, 23.6k tokens
+    across the first five iterations, budget line included, measured directly
+    off this exact script) is what `limit` is tuned against in the tests
+    below, not a coincidence of this helper's shape.
+    """
+    documents = [
+        await world.create_document(filename=f"report-{i}.txt", text=f"REPORT {i}\n{_EXACT_COUNT_BULK}")
+        for i in range(4)
+    ]
+    harness_id = await world.create_harness(
+        name="Exact Count Analyst",
+        tool_names=[
+            "read_document",
+            "search_documents",
+            "lookup_dataset",
+            "record_verdict",
+            "file_data_request",
+        ],
+        max_iterations=16,
+    )
+    provider = CountingProvider(
+        [
+            *[
+                ScriptedTurn(text=f"Reading report {i}.", tool_calls=[_read_report(d)])
+                for i, d in enumerate(documents)
+            ],
+            *divergence_happy_script(),
+        ],
+        counts=counts,
+    )
+    with patch("tret.engine.harness.context_budget", return_value=limit):
+        result = await world.run(
+            provider=provider,
+            harness_id=harness_id,
+            task_type="divergence_assessment",
+            task_input={"site_id": SITE, "peril": PERIL},
+            document_ids=documents,
+        )
+    return result, provider
+
+
+async def test_below_threshold_the_provider_is_never_asked(world):
+    """The first four iterations' chars/4 estimate (~3.4k-18.5k) stays under
+    85% of a 23.6k limit, so `count_tokens` stays silent until the fifth."""
+    result, provider = await _exact_count_run(world, limit=23_600, counts=[30_000])
+    assert result.run.status == "completed", result.run.error
+    assert provider.count_call_iterations == [4]
+
+
+async def test_an_exact_count_over_budget_compacts_even_though_chars4_read_under(world):
+    """The chars/4 estimate at iteration 5 (~23.6k) is under the 23.6k limit —
+    this run would not compact at all on chars/4 alone (see the sibling
+    `..._never_asked` test's own limit, which is exactly this number). The
+    scripted exact count (30k) is over it, and that is what must win: the
+    `context_pressure` event and the compaction record it causes both have to
+    show the real, larger figure and say where it came from.
+    """
+    result, provider = await _exact_count_run(world, limit=23_600, counts=[30_000])
+    assert result.run.status == "completed", result.run.error
+
+    pressure = result.events_of("context_pressure")
+    assert pressure, "the exact count must have pushed this iteration over budget"
+    fifth = next(e for e in pressure if e.data["iteration"] == 5)
+    assert fifth.data["est_input_tokens"] == 30_000
+    assert fifth.data["basis"] == "provider_count"
+
+    triggered = [c for c in result.run.compactions if c["iteration"] == 5]
+    assert triggered, "iteration 5 must have run a compaction pass"
+    assert triggered[0]["basis"] == "provider_count"
+    assert triggered[0]["before_est_tokens"] == 30_000
+
+
+async def test_a_provider_that_cannot_count_is_not_asked_again_this_run(world):
+    """A 3.9k limit crosses the exact-count threshold as early as iteration 1
+    (chars/4 ~3.4k there) and stays well past it every iteration after — a
+    provider asked on every one of those would show up here many times over.
+    Scripted with an empty `counts` queue, so every call answers `None`, the
+    same as the base `Provider.count_tokens` a real unsupported provider
+    never overrides at all.
+    """
+    result, provider = await _exact_count_run(world, limit=3_900, counts=[])
+    assert result.run.status == "completed", result.run.error
+    assert provider.count_call_iterations == [0]
+    assert any(e.data.get("basis") == "chars4" for e in result.events_of("context_pressure"))

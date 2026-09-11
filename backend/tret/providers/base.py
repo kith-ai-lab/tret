@@ -251,3 +251,26 @@ class Provider(ABC):
         call incurred — see `JsonCompletion` for why both.
         """
         ...
+
+    async def count_tokens(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[Msg],
+        tools: list[ToolSpec],
+    ) -> int | None:
+        """An exact input-token count for this exact request, when the
+        provider can give one cheaply. Optional — the default says
+        "unsupported" rather than raising `NotImplementedError`, so a caller
+        can try every provider the same way: call this, fall back to the
+        chars/4 estimate (`engine/compaction.py`'s `estimate_wire_tokens`) on
+        `None`. A concrete implementation must never let a network error or a
+        slow response propagate into the caller's loop — the exact count is a
+        refinement on top of an estimate that already works, not something a
+        run may fail over — so it should catch broadly and answer `None`
+        rather than raise. See `engine/harness.py`'s `EXACT_COUNT_THRESHOLD`
+        for when this gets called, and `AnthropicProvider.count_tokens` for
+        the one real implementation today.
+        """
+        return None

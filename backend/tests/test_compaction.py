@@ -31,6 +31,7 @@ from tret.engine.compaction import (
     trim_history,
     wire_view,
 )
+import tret.engine.harness as harness_module
 from tret.engine.harness import HarnessEngine
 from tret.engine.tools import get_builtin_tools
 from tret.providers.base import JsonCompletion, Msg, ProviderError, ToolCall, ToolSpec, Usage
@@ -241,6 +242,29 @@ def test_a_model_with_no_declared_window_is_left_exactly_as_it_was():
 def test_over_budget_is_only_true_against_a_real_limit():
     assert over_budget(100, 50) is True
     assert over_budget(10, 50) is False
+
+
+# ── exact token counting near the boundary ───────────────────────────────────
+# `EXACT_COUNT_THRESHOLD` and the decision it drives live in `engine/harness.py`
+# (`_near_context_limit`), next to `over_budget` it feeds — not here, since
+# unlike everything else in this module it is not pure with respect to the
+# transcript, it decides whether to make a provider call. These tests cover
+# the boundary condition in isolation; `tests/evals/test_engine_loop.py`
+# covers what the engine actually does with the answer.
+def test_below_the_threshold_an_exact_count_is_not_worth_asking_for():
+    assert harness_module.EXACT_COUNT_THRESHOLD == 0.85
+    assert harness_module._near_context_limit(8_499, 10_000) is False
+
+
+def test_at_the_threshold_an_exact_count_is_worth_asking_for():
+    assert harness_module._near_context_limit(8_500, 10_000) is True
+    assert harness_module._near_context_limit(10_000, 10_000) is True
+
+
+def test_an_unenforceable_limit_is_never_near_itself():
+    # `budget()`'s own "unknown context window" signal — there is no boundary
+    # to be near, the same reasoning `over_budget(x, 0)` already applies.
+    assert harness_module._near_context_limit(10**9, 0) is False
 
 
 # ── history trimming ─────────────────────────────────────────────────────────

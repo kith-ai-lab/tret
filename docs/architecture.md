@@ -160,7 +160,12 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    model is chosen once, but a run is not stuck with the consequences.
    Before each call the engine estimates what it is about to send and compares it
    against the chosen model's context window (`model_policy.adaptive.
-   context_headroom`, default 0.8, minus the output reservation). Over budget, it
+   context_headroom`, default 0.8, minus the output reservation). That estimate is
+   chars/4 by default; once it reaches 85% of the limit (`EXACT_COUNT_THRESHOLD`)
+   the engine asks the provider for an exact count instead — Anthropic's newest
+   tokenizer runs meaningfully ahead of chars/4 on the same text, and the
+   difference matters most right at this boundary — and uses that figure, when
+   the provider can give one, for the decision that follows. Over budget, it
    **compacts**: bulk retrieval results (`read_document`, `search_documents`) are
    replaced by markers naming what was there, and optionally summarized by a
    cheap model. Retrieved values (`lookup_dataset`, `run_method`) and recorded

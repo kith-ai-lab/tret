@@ -10,6 +10,7 @@ Two kinds of prompt-cache breakpoint are set:
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 
 import anthropic
@@ -36,6 +37,15 @@ from tret.providers.base import (
 MAX_CACHE_BREAKPOINTS = 4
 SYSTEM_CACHE_BREAKPOINTS = 1
 MESSAGE_CACHE_BREAKPOINTS = MAX_CACHE_BREAKPOINTS - SYSTEM_CACHE_BREAKPOINTS
+
+log = logging.getLogger("tret.providers.anthropic")
+
+# `count_tokens` sits on the hot per-iteration path (engine/harness.py calls it
+# only once budget pressure is already showing, but that can be every turn from
+# then on), so it gets a much shorter timeout than the 600s the streaming client
+# is built with — a slow or hung count is worth abandoning quickly in favour of
+# the chars/4 estimate the caller already has, not worth stalling a turn over.
+COUNT_TOKENS_TIMEOUT = 5.0
 
 # There is only ever one upstream behind this provider — unlike OpenRouter,
 # which can route the same request to any of several — so `served_by` is a
@@ -331,3 +341,41 @@ class AnthropicProvider(Provider):
                     served_by=SERVED_BY,
                 )
         raise ProviderError("anthropic", "No tool_use block in structured completion")
+
+    async def count_tokens(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: list[Msg],
+        tools: list[ToolSpec],
+    ) -> int | None:
+        """The SDK's `messages.count_tokens`, given the same converted shapes
+        `stream()` sends — including the trailing budget-line message, when
+        `messages`' tail carries one, and any `cache_control` blocks that
+        would ride along on the real call. The endpoint tolerates
+        `cache_control`; stripping it before counting would mean a second,
+        divergent conversion path to keep in sync with `_to_anthropic_messages`
+        for no accuracy gain, since it changes nothing the tokenizer counts.
+
+        Never raises: an exact count is a refinement on top of the chars/4
+        estimate the caller already has, not something a run may fail over.
+        Any exception — a timeout (`COUNT_TOKENS_TIMEOUT`, short because this
+        sits on the per-iteration hot path once a run is near its window), a
+        rate limit (the endpoint is metered separately from completions), a
+        malformed conversion — is logged and answered with `None`, which
+        `engine/harness.py` reads as "fall back to chars/4, and stop asking
+        this provider for the rest of the run".
+        """
+        anthropic_messages, _ = _to_anthropic_messages(messages)
+        kwargs: dict = dict(model=model, system=system, messages=anthropic_messages)
+        if tools:
+            kwargs["tools"] = _to_anthropic_tools(tools)
+        try:
+            result = await self._client.messages.count_tokens(
+                timeout=COUNT_TOKENS_TIMEOUT, **kwargs
+            )
+        except Exception:  # noqa: BLE001 - an exact count is optional, never fatal
+            log.warning("anthropic count_tokens failed; falling back to chars/4", exc_info=True)
+            return None
+        return result.input_tokens

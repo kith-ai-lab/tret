@@ -168,6 +168,31 @@ BUDGET_LINE_DEFAULT = True
 # `tests/evals/test_token_economy.py`).
 BUDGET_LINE_MARKER = "[tret budget: "
 
+# ── exact token counting near the boundary ──────────────────────────────────
+# `estimate_wire_tokens` (chars/4) is deliberately dependency-free and
+# provider-independent, but Anthropic's newest tokenizer produces roughly 30%
+# more tokens than earlier generations for the same text — chars/4 now
+# underestimates on the newest models specifically where the margin matters
+# most: right at the edge of the window, where a compaction or model-switch
+# decision is about to be made on it. Below this fraction of the budget the
+# chars/4 estimate has plenty of headroom to be wrong in either direction and
+# an exact count would only spend a provider call for no behavior change; at
+# or above it, `Provider.count_tokens` is asked for the real number when the
+# provider offers one. 0.85 rather than closer to 1.0 so the exact figure is
+# in hand with at least one turn's worth of margin before `over_budget` would
+# actually fire on the estimate alone.
+EXACT_COUNT_THRESHOLD = 0.85
+
+
+def _near_context_limit(est_tokens: int, context_limit: int) -> bool:
+    """Whether `est_tokens` (the chars/4 estimate) is close enough to
+    `context_limit` that an exact provider count is worth the call. A `0`
+    limit — `budget()`'s own "unknown/unenforceable" signal for a model with
+    no reported context window — always answers False: there is no boundary
+    to be near, and `over_budget` never fires against it either.
+    """
+    return bool(context_limit) and est_tokens >= EXACT_COUNT_THRESHOLD * context_limit
+
 
 def _format_token_budget(n: int) -> str:
     """`n` rounded to a short k/M suffix (`118000` -> `"118k"`, `2100` ->
@@ -1306,6 +1331,14 @@ class HarnessEngine:
         # that made OpenRouter reject every endpoint for this model doesn't
         # stop being true partway through a run.
         provider_ignore_waived = False
+        # Set the first time this run's provider answers `count_tokens` with
+        # `None` (unsupported, or a real call that failed) — see
+        # `EXACT_COUNT_THRESHOLD` above. A provider that cannot give an exact
+        # count on one turn will not give one on the next either (it is either
+        # not implemented or the same call away from an identical timeout), so
+        # asking again every iteration for the rest of the run would just pay
+        # the same latency for the same `None` each time.
+        count_tokens_unavailable = False
 
         def _wire_for_provider(view: list[Msg]) -> list[Msg]:
             """`view` (a `wire_view(...)` result) with this iteration's budget
@@ -1370,6 +1403,33 @@ class HarnessEngine:
                 if not budget_line_enabled
                 else estimate_wire_tokens(system, pre_line_view, tool_specs)
             )
+            # Near the boundary, ask the provider for an exact count instead of
+            # trusting chars/4 — see `EXACT_COUNT_THRESHOLD`. `wire` is what is
+            # actually about to be sent, so the count is taken on it (one call,
+            # not one per estimate below) and both `est_tokens` and
+            # `before_tokens` are overwritten from it; `before_tokens` then
+            # carries the budget line's own handful of tokens even when the
+            # chars/4 path above would have excluded them, which is the same
+            # order of error the estimate itself already carries. The budget
+            # line already rendered above (inside `_wire_for_provider`) used
+            # the chars/4 estimate for its own "context tokens" figure — it is
+            # built before this exact count exists, so on a turn that crosses
+            # the threshold the number shown to the model can lag by one turn.
+            # Not restructured: recomputing it here would mean either a second
+            # provider call (against the "at most once per iteration" budget)
+            # or reordering the whole budget-line/compaction pipeline to fix a
+            # cosmetic mismatch of a few thousand tokens.
+            est_tokens_basis = "chars4"
+            if not count_tokens_unavailable and _near_context_limit(est_tokens, context_limit):
+                exact_tokens = await provider.count_tokens(
+                    model=model_info.wire_id, system=system, messages=wire, tools=tool_specs
+                )
+                if exact_tokens is None:
+                    count_tokens_unavailable = True
+                else:
+                    est_tokens = exact_tokens
+                    before_tokens = exact_tokens
+                    est_tokens_basis = "provider_count"
             forced_switch_compaction = compact_before_next_turn and adaptive.compaction != "off"
             compact_before_next_turn = False
             compaction_changed_wire = False
@@ -1386,6 +1446,7 @@ class HarnessEngine:
                                 "limit_est_tokens": context_limit,
                                 "context_window": model_info.context_window,
                                 "estimator": TOKEN_ESTIMATOR,
+                                "basis": est_tokens_basis,
                             },
                         ),
                     )
@@ -1395,6 +1456,7 @@ class HarnessEngine:
                     state=compaction,
                     iteration=iteration,
                     before_tokens=before_tokens,
+                    basis=est_tokens_basis,
                     system=system,
                     tool_specs=tool_specs,
                     terminal_tool=ctx.terminal_tool,
@@ -2452,6 +2514,7 @@ class HarnessEngine:
         overhead: list[dict],
         emissions: "_EmissionsContext",
         trigger: str = "budget",
+        basis: str = "chars4",
     ) -> dict | None:
         """Shrink what the provider sees, and say exactly what was shrunk.
 
@@ -2465,6 +2528,13 @@ class HarnessEngine:
         ever sees the transcript (`compact_before_next_turn`, above). It never
         changes what gets elided — the elision rules are the same either way —
         only what the record says caused this particular pass to run.
+
+        `basis` says whether `before_tokens` (and, for the ordinary budget
+        path, the `over_budget` decision that led here) came from the chars/4
+        estimate or an exact provider count (`EXACT_COUNT_THRESHOLD`,
+        `Provider.count_tokens`) — carried straight onto the returned record
+        so an operator reading `runs.compactions` can tell which one triggered
+        this pass, without it changing anything about what gets elided.
 
         Returns None when there was nothing left to elide — which is a real
         outcome, not a failure: a run can be over its window on protected
@@ -2505,6 +2575,7 @@ class HarnessEngine:
                 "after_est_tokens": before_tokens,
                 "note": note,
                 "estimator": TOKEN_ESTIMATOR,
+                "basis": basis,
             }
 
         source = elided_source_text(messages, plan)
@@ -2545,6 +2616,7 @@ class HarnessEngine:
             # because it ran on a different model and possibly a different
             # provider — see services/emissions.overhead_call.
             "estimator": TOKEN_ESTIMATOR,
+            "basis": basis,
         }
 
     async def _fail_before_start(

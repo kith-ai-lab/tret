@@ -17,7 +17,7 @@ from tret.providers.anthropic import (
     _apply_conversation_cache,
     _to_anthropic_messages,
 )
-from tret.providers.base import Msg, ToolCall, ToolCallComplete, TextDelta, Usage
+from tret.providers.base import Msg, ToolCall, ToolCallComplete, ToolSpec, TextDelta, Usage
 from tret.providers.catalog import (
     CACHE_READ_MULTIPLIER,
     CACHE_WRITE_MULTIPLIER,
@@ -740,3 +740,106 @@ def test_a_trailing_empty_assistant_turn_leaves_a_valid_request():
         [Msg(role="user", content="hi"), Msg(role="assistant", content=None)]
     )
     assert messages == [{"role": "user", "content": "hi"}]
+
+
+# ── exact token counting (Anthropic) ─────────────────────────────────────────
+# `AnthropicProvider.count_tokens` (engine/harness.py's exact-count refinement
+# on chars/4 — see EXACT_COUNT_THRESHOLD there) goes through the SDK's own
+# `messages.count_tokens` rather than a raw HTTP call, so it is exercised the
+# same way `test_openrouter_request_hygiene.py`'s effort tests exercise
+# `stream()`: a fake stand-in for `client.messages` swapped onto the real
+# provider instance, not a fake transport underneath it.
+class _FakeTokenCount:
+    def __init__(self, input_tokens: int):
+        self.input_tokens = input_tokens
+
+
+class _FakeCountTokensMessages:
+    """Stands in for `anthropic.AsyncMessages`, recording the kwargs
+    `count_tokens` was called with — the SDK-level analogue of `_FakeClient`
+    above, which does the same job one layer down (httpx) for the
+    OpenAI-compatible providers."""
+
+    def __init__(self, *, result: "_FakeTokenCount | None" = None, error: Exception | None = None):
+        self._result = result
+        self._error = error
+        self.captured: dict = {}
+        self.calls = 0
+
+    async def count_tokens(self, **kwargs):
+        self.calls += 1
+        self.captured = kwargs
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+async def test_count_tokens_converts_the_same_shapes_stream_uses(monkeypatch):
+    provider = anthropic_module.AnthropicProvider("test-key")
+    fake_messages = _FakeCountTokensMessages(result=_FakeTokenCount(4242))
+    monkeypatch.setattr(provider._client, "messages", fake_messages)
+
+    result = await provider.count_tokens(
+        model="claude-sonnet-5",
+        system="doctrine",
+        messages=[
+            Msg(role="user", content="analyze this"),
+            Msg(role="assistant", tool_calls=[ToolCall("t1", "read_document", {"id": "d"})]),
+            Msg(role="tool", content="doc text", tool_call_id="t1"),
+        ],
+        tools=[
+            ToolSpec(name="read_document", description="Read a document.",
+                     parameters={"type": "object"})
+        ],
+    )
+
+    assert result == 4242
+    assert fake_messages.captured["model"] == "claude-sonnet-5"
+    assert fake_messages.captured["system"] == "doctrine"
+    assert fake_messages.captured["timeout"] == anthropic_module.COUNT_TOKENS_TIMEOUT
+    # Same conversion `stream()` sends — tool_use/tool_result blocks, not a
+    # second hand-rolled shape kept in sync by hand.
+    assert fake_messages.captured["messages"][1]["content"] == [
+        {"type": "tool_use", "id": "t1", "name": "read_document", "input": {"id": "d"}}
+    ]
+    assert fake_messages.captured["tools"] == [
+        {"name": "read_document", "description": "Read a document.",
+         "input_schema": {"type": "object"}}
+    ]
+
+
+async def test_count_tokens_omits_the_tools_kwarg_when_none_are_offered(monkeypatch):
+    provider = anthropic_module.AnthropicProvider("test-key")
+    fake_messages = _FakeCountTokensMessages(result=_FakeTokenCount(10))
+    monkeypatch.setattr(provider._client, "messages", fake_messages)
+
+    await provider.count_tokens(
+        model="m", system="s", messages=[Msg(role="user", content="hi")], tools=[]
+    )
+
+    assert "tools" not in fake_messages.captured
+
+
+async def test_count_tokens_swallows_errors_and_answers_none(monkeypatch):
+    """Never raises into the caller — an exact count is a refinement on top of
+    the chars/4 estimate the caller already has, not something a run may fail
+    over."""
+    provider = anthropic_module.AnthropicProvider("test-key")
+    fake_messages = _FakeCountTokensMessages(error=RuntimeError("boom"))
+    monkeypatch.setattr(provider._client, "messages", fake_messages)
+
+    result = await provider.count_tokens(
+        model="m", system="s", messages=[Msg(role="user", content="hi")], tools=[]
+    )
+
+    assert result is None
+    assert fake_messages.calls == 1
+
+
+async def test_the_base_provider_default_is_unimplemented_not_an_error():
+    """Every provider without its own override answers `None` — the caller's
+    signal to fall back to chars/4 and, per `engine/harness.py`, to stop
+    asking this provider again this run."""
+    assert await base_module.Provider.count_tokens(
+        object(), model="m", system="s", messages=[], tools=[]
+    ) is None
