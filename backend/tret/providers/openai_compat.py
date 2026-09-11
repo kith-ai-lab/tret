@@ -280,11 +280,9 @@ class OpenAICompatProvider(Provider):
         `{}` by default — most OpenAI-compatible servers (Kimi included) have
         no such field, so `provider_ignore` is accepted here only to keep the
         signature uniform and is otherwise unused. OpenRouter overrides this
-        to build `{"require_parameters": True}` when tools are present (so a
-        provider that would otherwise silently drop tool calling or the JSON
-        schema is excluded from routing instead) plus whatever an operator
-        configured via `TRET_OPENROUTER_PROVIDER_PREFS`, plus `provider_ignore`
-        merged into `ignore`. An empty return means "omit the `provider` key
+        to send whatever an operator configured via
+        `TRET_OPENROUTER_PROVIDER_PREFS` (including an opt-in
+        `require_parameters`), plus `provider_ignore` merged into `ignore`. An empty return means "omit the `provider` key
         entirely" — sending `{}` is not the same as sending nothing on some
         upstreams.
         """
@@ -447,8 +445,8 @@ class OpenAICompatProvider(Provider):
             **self._extra_body,
         }
         # A forced tool call always carries `tools`, so this is unconditionally
-        # the "tools present" case — the router's own JSON call benefits from
-        # `require_parameters` exactly as much as a tool-calling agent turn.
+        # the "tools present" case; the same operator prefs apply as on an
+        # agent turn.
         provider_body = self._provider_body(True)
         if provider_body:
             body["provider"] = provider_body
@@ -550,10 +548,11 @@ class OpenRouterProvider(OpenAICompatProvider):
         # this module builds never sees a value to act on.
         headers["X-OpenRouter-Metadata"] = "enabled"
         super().__init__(api_key, base_url="https://openrouter.ai/api/v1", default_headers=headers)
-        # Operator overrides for the `provider` request object — order, ignore,
-        # quantizations, data_collection, zdr, sort — merged on top of
-        # `_provider_body`'s own `require_parameters` default. See
-        # TRET_OPENROUTER_PROVIDER_PREFS (config.py) for where this is parsed.
+        # Operator settings for the `provider` request object — order, ignore,
+        # quantizations, data_collection, zdr, sort, require_parameters — sent
+        # as given by `_provider_body`, which adds nothing of its own except
+        # the evidence-driven `ignore` union. See TRET_OPENROUTER_PROVIDER_PREFS
+        # (config.py) for where this is parsed.
         self._provider_prefs = provider_prefs or {}
         # Per-model cache for `_resolve_served_by`: wire model id -> (expiry
         # monotonic timestamp, {display name lowercased: provider slug}).
@@ -673,12 +672,21 @@ class OpenRouterProvider(OpenAICompatProvider):
     ) -> dict:
         """The `provider` object: https://openrouter.ai/docs/guides/routing/provider-selection.
 
-        `require_parameters: true` only when tools are present — it guarantees
-        tool calling and JSON schema are honored instead of silently dropped by
-        a provider that would otherwise still be routed to — then
-        `provider_prefs` is shallow-merged on top so an operator's own
-        `order`/`ignore`/`quantizations`/`data_collection`/`zdr`/`sort` always
-        wins over this default.
+        Starts empty: `provider_prefs` (TRET_OPENROUTER_PROVIDER_PREFS) is
+        shallow-merged in, so an operator's `order`/`ignore`/`quantizations`/
+        `data_collection`/`zdr`/`sort`/`require_parameters` are sent verbatim.
+
+        `require_parameters` is opt-in, never a default. Sending it whenever
+        tools were present (the behaviour until 2026-09-11) made OpenRouter
+        drop every endpoint that does not advertise the full parameter set,
+        and for the OpenAI models that was every endpoint: each tool-calling
+        run on gpt-5.6-luna, gpt-5.6-terra and gpt-6-astra died at iteration
+        0 with "No endpoints found that can handle the requested parameters"
+        while the router's own tool-less call to the same model succeeded.
+        The engine already validates tool calls and JSON output in-loop, so a
+        provider that silently drops tools is caught there; an operator who
+        wants OpenRouter to pre-filter anyway sets
+        `{"require_parameters": true}` in the prefs.
 
         `provider_ignore` — the calling `RoutingDecision`'s own poor-endpoint
         evidence (`router_llm.router.RoutingDecision.provider_ignore`) — is
@@ -695,8 +703,7 @@ class OpenRouterProvider(OpenAICompatProvider):
         in engine/harness.py handles that the same as any other upstream
         failure.
         """
-        body: dict = {"require_parameters": True} if tools_present else {}
-        body.update(self._provider_prefs)
+        body: dict = dict(self._provider_prefs)
         ignore = sorted(set(self._provider_prefs.get("ignore") or []) | set(provider_ignore or []))
         if ignore:
             body["ignore"] = ignore

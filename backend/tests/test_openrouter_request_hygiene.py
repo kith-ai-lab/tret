@@ -366,10 +366,22 @@ async def test_kimi_stream_never_sends_reasoning(monkeypatch):
 
 
 # ── 2. provider preferences ────────────────────────────────────────────────────
-async def test_require_parameters_set_only_when_tools_present(monkeypatch):
+async def test_require_parameters_is_never_sent_by_default(monkeypatch):
+    """Regression for the 2026-09-11 outage: sending `require_parameters`
+    whenever tools were present made OpenRouter drop every endpoint for the
+    OpenAI models ("No endpoints found that can handle the requested
+    parameters"), so no tool-calling run on them could start. Tools present
+    and no prefs means no `provider` object at all."""
     lines = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
     _, body = await _run_stream(monkeypatch, OpenRouterProvider("k"), lines, tools=[_tool()])
-    assert body["provider"]["require_parameters"] is True
+    assert "provider" not in body
+
+
+async def test_require_parameters_is_opt_in_via_prefs(monkeypatch):
+    lines = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+    provider = OpenRouterProvider("k", provider_prefs={"require_parameters": True})
+    _, body = await _run_stream(monkeypatch, provider, lines, tools=[_tool()])
+    assert body["provider"] == {"require_parameters": True}
 
 
 async def test_no_provider_key_without_tools_or_prefs(monkeypatch):
@@ -386,14 +398,14 @@ async def test_prefs_apply_without_tools_but_carry_no_require_parameters(monkeyp
     assert "require_parameters" not in body["provider"]
 
 
-async def test_prefs_merge_on_top_of_require_parameters_and_add_quantizations(monkeypatch):
+async def test_prefs_are_sent_verbatim_with_tools_present(monkeypatch):
     lines = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
     provider = OpenRouterProvider("k", provider_prefs={"quantizations": ["fp8", "fp16"]})
     _, body = await _run_stream(monkeypatch, provider, lines, tools=[_tool()])
-    assert body["provider"] == {"require_parameters": True, "quantizations": ["fp8", "fp16"]}
+    assert body["provider"] == {"quantizations": ["fp8", "fp16"]}
 
 
-async def test_prefs_can_override_require_parameters_itself(monkeypatch):
+async def test_prefs_explicit_false_is_passed_through(monkeypatch):
     lines = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
     provider = OpenRouterProvider("k", provider_prefs={"require_parameters": False})
     _, body = await _run_stream(monkeypatch, provider, lines, tools=[_tool()])
@@ -406,18 +418,17 @@ async def test_kimi_never_gets_a_provider_key(monkeypatch):
     assert "provider" not in body
 
 
-async def test_complete_json_sends_require_parameters_too(monkeypatch):
+async def test_complete_json_sends_no_provider_object_by_default(monkeypatch):
     """The router's own forced-tool-call JSON completion always carries
-    `tools`, so it benefits from `require_parameters` exactly like a
-    tool-calling agent turn."""
+    `tools`; like an agent turn it gets only what the operator configured."""
     _, body = await _run_complete_json(monkeypatch, OpenRouterProvider("k"), _completion_json())
-    assert body["provider"]["require_parameters"] is True
+    assert "provider" not in body
 
 
-async def test_complete_json_prefs_merge_too(monkeypatch):
+async def test_complete_json_prefs_apply_too(monkeypatch):
     provider = OpenRouterProvider("k", provider_prefs={"order": ["anthropic"]})
     _, body = await _run_complete_json(monkeypatch, provider, _completion_json())
-    assert body["provider"] == {"require_parameters": True, "order": ["anthropic"]}
+    assert body["provider"] == {"order": ["anthropic"]}
 
 
 async def test_kimi_complete_json_never_gets_a_provider_key(monkeypatch):
@@ -465,7 +476,7 @@ async def test_provider_ignore_unions_and_dedupes_with_operator_prefs(monkeypatc
     assert body["provider"]["ignore"] == ["operator-blocked", "quantized-endpoint", "shared"]
 
 
-async def test_provider_ignore_combines_with_require_parameters_when_tools_present(monkeypatch):
+async def test_provider_ignore_is_the_only_default_key_when_tools_present(monkeypatch):
     lines = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
     _, body = await _run_stream(
         monkeypatch,
@@ -474,7 +485,7 @@ async def test_provider_ignore_combines_with_require_parameters_when_tools_prese
         tools=[_tool()],
         provider_ignore=["quantized-endpoint"],
     )
-    assert body["provider"] == {"require_parameters": True, "ignore": ["quantized-endpoint"]}
+    assert body["provider"] == {"ignore": ["quantized-endpoint"]}
 
 
 async def test_kimi_never_sends_provider_ignore(monkeypatch):

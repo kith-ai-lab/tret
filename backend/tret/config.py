@@ -567,11 +567,13 @@ class Settings(BaseSettings):
     openrouter_catalog: bool = True
     openrouter_referer: str = "https://github.com/tret-platform/tret"
     openrouter_title: str = "tret"
-    # Optional provider-selection preferences, shallow-merged over
-    # OpenRouterProvider's own `{"require_parameters": True}` default (see
+    # Optional provider-selection preferences (see
     # `OpenRouterProvider._provider_body`) — a raw JSON object accepting
     # OpenRouter's `provider` fields: order, ignore, only, quantizations,
-    # data_collection, zdr, sort. None (unset) sends just the default. Gates
+    # data_collection, zdr, sort, require_parameters. None (unset) sends no
+    # `provider` object beyond the router's evidence-driven `ignore` list.
+    # `require_parameters` is opt-in since 2026-09-11: sent by default it made
+    # OpenRouter reject every tool-calling run on the OpenAI models. Gates
     # every OpenRouter call this deployment makes, so malformed JSON is
     # warned about and treated as unset rather than refusing to boot.
     openrouter_provider_prefs: dict | None = None

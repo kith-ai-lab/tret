@@ -30,6 +30,25 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## OpenRouter `require_parameters` is now opt-in (2026-09-11)
+
+Until this change every OpenRouter request that carried tools also sent
+`provider.require_parameters: true`. OpenRouter then dropped every endpoint
+that does not advertise the full parameter set, and for the OpenAI models that
+was all of them: tool-calling runs on `gpt-5.6-luna`, `gpt-5.6-terra` and
+`gpt-6-astra` failed at iteration 0 with "No endpoints found that can handle
+the requested parameters" while the router's own tool-less call succeeded.
+
+Nothing is sent by default now. The engine already validates tool calls and
+JSON output in-loop, which catches a provider that silently drops tools. If
+you still want OpenRouter to pre-filter endpoints, opt in:
+
+```
+TRET_OPENROUTER_PROVIDER_PREFS={"require_parameters":true}
+```
+
+No migration, no restart beyond the deploy.
+
 ## Harness authoring now requires the admin or owner workspace role (2026-09-03)
 
 Creating, updating or archiving a harness (`POST`/`PATCH`/`DELETE` under
