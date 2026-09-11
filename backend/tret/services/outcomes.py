@@ -46,6 +46,11 @@ async def _finding_counts(db: AsyncSession, run_id: uuid.UUID) -> dict[str, int]
     return {status: count for status, count in rows}
 
 
+def _explored(routing: dict) -> bool:
+    """Whether the run's initial model was chosen by bounded exploration."""
+    return bool((routing.get("exploration") or {}).get("explored"))
+
+
 async def _task_shape(db: AsyncSession, run: Run, routing: dict) -> str:
     """The shape this run was routed for.
 
@@ -168,7 +173,11 @@ async def build_outcomes(db: AsyncSession, run: Run) -> list[RunOutcome]:
                 quality_score=final.quality_score,
                 score_version=final.score_version,
                 error_kind=final.error_kind,
-                components=final.components,
+                # `explored` marks a row the router chose by bounded exploration
+                # (an untried model picked without consulting the router LLM —
+                # router_llm/router.py `_maybe_explore`), so priors can be read
+                # with and without those deliberate trials.
+                components={**final.components, "explored": _explored(routing)},
                 iterations=run.iterations or 0,
                 cost_usd=run.cost_usd or 0,
                 input_tokens=run.input_tokens or 0,
@@ -206,7 +215,12 @@ async def build_outcomes(db: AsyncSession, run: Run) -> list[RunOutcome]:
                 quality_score=scored.quality_score,
                 score_version=scored.score_version,
                 error_kind=scored.error_kind,
-                components=scored.components,
+                # Only the first segment is the model exploration chose; later
+                # segments come from supervisor switches.
+                components={
+                    **scored.components,
+                    "explored": _explored(routing) if index == 0 else False,
+                },
                 # Each segment's own spend, never the run's totals — that is the
                 # whole reason model_timeline exists (engine/harness.py).
                 iterations=max(

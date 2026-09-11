@@ -15,9 +15,13 @@ uses (`Climate Analyst`):
 Every configuration is its own temporary harness (same pack, tools, task
 profile and loop config as the base harness; only `model_policy` differs),
 created or updated through `POST`/`PUT /api/harnesses` so repeated runs reuse
-rather than duplicate it. Adaptive behavior is left at the harness default —
-escalation `on_quality`, compaction `auto` — by omitting `model_policy.
-adaptive` entirely (see `tret/adaptive.py`'s `DEFAULT_ADAPTIVE`).
+rather than duplicate it. Adaptive behavior on the auto arms matches the
+harness default in every field — escalation `on_quality`, compaction `auto`
+(see `tret/adaptive.py`'s `DEFAULT_ADAPTIVE`) — except `exploration`, set
+explicitly to 0: this benchmark's DB starts thin-to-empty on priors, so every
+candidate would read as untried, and exploration's coin flip picking a model
+*instead of* the router would spend a real, costed run contaminating the
+router-vs-pins comparison this arm exists to make (see `_harness_body`).
 
 `--turns N` (default 1) resends the *same* case as an N-turn conversation:
 each turn passes the same `site_id`/`peril` task input again, with the prior
@@ -142,8 +146,24 @@ def _harness_body(base_harness: dict, cfg: dict, label: str) -> dict:
         if base_policy.get("allowed"):
             model_policy["allowed"] = base_policy["allowed"]
         model_policy["max_cost_tier"] = base_policy.get("max_cost_tier", "premium")
-        # `adaptive` deliberately omitted: the harness default (escalation
-        # on_quality, compaction auto) applies — see module docstring.
+        # `adaptive` explicit, not omitted: the harness default (escalation
+        # on_quality, compaction auto — tret/adaptive.py DEFAULT_ADAPTIVE)
+        # applies here same as before, EXCEPT `exploration`, forced to 0.
+        # These auto arms run against a fresh-ish benchmark DB, so priors are
+        # thin-to-absent and every candidate would read as untried; leaving
+        # exploration on would let a rare coin flip spend a real, costed
+        # (case, config) run on a model picked *instead of* the router this
+        # arm exists to measure, contaminating the very comparison
+        # (router vs. pins) the arm is for.
+        model_policy["adaptive"] = {
+            "learn_from_outcomes": True,
+            "context_headroom": 0.8,
+            "compaction": "auto",
+            "escalation": "on_quality",
+            "max_switches": 1,
+            "exploration": 0,
+            "exploration_max_cost_tier": "economy",
+        }
     else:
         model_policy = {"mode": "pinned", "model": cfg["pin"]}
     return {

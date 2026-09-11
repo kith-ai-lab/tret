@@ -168,3 +168,87 @@ async def test_each_segment_of_a_model_switching_run_carries_its_own_served_by(d
     assert by_index[0].served_by is None
     assert by_index[1].model_id == "openrouter/big"
     assert by_index[1].served_by == "deepinfra/fp8"
+
+
+# ── `components["explored"]` (services/outcomes.py `_explored`) ────────────
+# Marks a row the router chose by bounded exploration (router_llm/router.py
+# `ModelRouter._maybe_explore`) rather than a router-LLM call, so priors can
+# later be read with and without those deliberate trials factored in.
+
+
+@pytest.mark.asyncio
+async def test_the_single_segment_run_records_explored_true_from_the_routing_decision(db):
+    run = _base_run(
+        model_used="openrouter/untried",
+        provider_used="openrouter",
+        routing={
+            "task_shape": "extraction",
+            "objective": "balanced",
+            "max_cost_tier": "premium",
+            "exploration": {
+                "explored": True,
+                "candidate": "openrouter/untried",
+                "probability": 0.05,
+                "eligible": 1,
+                "reason": "untried model within exploration tier",
+            },
+        },
+    )
+    rows = await build_outcomes(db, run)
+    assert len(rows) == 1
+    assert rows[0].components["explored"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_single_segment_run_records_explored_false_when_nothing_was_explored(db):
+    # `_base_run`'s default routing carries no "exploration" key at all — the
+    # same shape a pin/override/single-candidate decision produces, and also
+    # the shape of a decision where the roll simply declined.
+    run = _base_run(model_used="openrouter/big", provider_used="openrouter")
+    rows = await build_outcomes(db, run)
+    assert len(rows) == 1
+    assert rows[0].components["explored"] is False
+
+
+@pytest.mark.asyncio
+async def test_only_segment_zero_of_a_switching_run_can_be_marked_explored(db):
+    # The run's *initial* model is the one exploration could have picked;
+    # a later segment is always a supervisor switch, never exploration's
+    # doing, regardless of what the top-level routing decision recorded.
+    run = _base_run(
+        model_used="openrouter/big",
+        provider_used="openrouter",
+        routing={
+            "task_shape": "extraction",
+            "objective": "balanced",
+            "max_cost_tier": "premium",
+            "exploration": {
+                "explored": True,
+                "candidate": "openrouter/untried",
+                "probability": 0.05,
+                "eligible": 1,
+                "reason": "untried model within exploration tier",
+            },
+        },
+        model_timeline=[
+            {
+                "model": "openrouter/untried",
+                "provider": "openrouter",
+                "served_by": None,
+                "reason": "capability_stall",
+                "from_iteration": 1,
+                "to_iteration": 2,
+            },
+            {
+                "model": "openrouter/big",
+                "provider": "openrouter",
+                "served_by": "deepinfra/fp8",
+                "from_iteration": 3,
+                "to_iteration": 5,
+            },
+        ],
+    )
+    rows = await build_outcomes(db, run)
+    by_index = {row.segment_index: row for row in rows}
+    assert by_index[0].components["explored"] is True
+    assert by_index[1].components["explored"] is False

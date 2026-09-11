@@ -26,6 +26,7 @@ Three invariants hold across every path through `route()`:
 """
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -34,7 +35,7 @@ from tret.config import get_settings
 from tret.providers.base import ProviderError
 from tret.providers.catalog import ModelCatalog, ModelInfo, ProviderRegistry
 from tret.router_llm.fallback import fallback_model
-from tret.adaptive import adaptive_of
+from tret.adaptive import AdaptivePolicy, adaptive_of
 from tret.router_llm.objectives import (
     DEFAULT_MAX_COST_TIER,
     DEFAULT_OBJECTIVE,
@@ -43,6 +44,7 @@ from tret.router_llm.objectives import (
     TIER_ORDER,
     TIER_POOR,
     TIER_PROVEN,
+    TIER_UNKNOWN,
     candidate_sort_key,
     default_effort,
     evidence_tier,
@@ -51,6 +53,7 @@ from tret.router_llm.objectives import (
 )
 from tret.router_llm.outcomes import size_band
 from tret.router_llm.priors_base import (
+    MIN_EFFECTIVE_SAMPLES,
     PRIORS_VERSION,
     ModelPrior,
     NoPriors,
@@ -73,6 +76,19 @@ __all__ = ["TIER_ORDER", "ModelRouter", "RoutingDecision", "RoutingUnavailable"]
 
 # How many candidates the router model is shown. The list is a prompt cost too.
 CANDIDATE_LIMIT = 20
+
+# Exploration (see `ModelRouter._exploration_pick`) only ever runs under these
+# two: the default objective, on the one shape cheap and safe enough to spend
+# a coin flip on. `extraction` pulls fields out of a document into a
+# schema-validated tool call — there is no open-ended judgment for an untried
+# model to get wrong, and a bad answer fails validation rather than silently
+# shipping. `balanced` is the objective every harness gets unless it asked for
+# something else, which is exactly the population an untried model needs a
+# chance to be seen by; `quality`, `eco`, and `token_conservation` are each
+# already optimizing for one specific thing evidence has to be trusted to
+# support, and an unproven model has by definition not earned that trust yet.
+EXPLORATION_OBJECTIVE = "balanced"
+EXPLORATION_TASK_SHAPE = "extraction"
 
 
 def _max_cost_tier(model_policy: dict) -> str:
@@ -328,6 +344,28 @@ class RoutingDecision:
     override: str | None = None  # "user_pin" | "run_override" | None
     latency_ms: int = 0
     decided_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    # Bandit-style exploration record — see `ModelRouter._exploration_pick`.
+    # `None` on every path that never reaches the LLM-router logic at all: a
+    # single candidate, an override, or a pin. On the LLM-router path itself it
+    # is always a dict, whether or not exploration actually fired:
+    #   {"explored": False, "candidate": None, "probability": p,
+    #    "eligible": None, "reason": "..."}
+    #     the guardrails were not met at all (wrong objective, wrong task
+    #     shape, or `adaptive.exploration == 0`) — `eligible` is `None`
+    #     because untried candidates were never even counted.
+    #   {"explored": False, "candidate": None, "probability": p,
+    #    "eligible": 0, "reason": "..."}
+    #     the guardrails were met but nothing untried survived the
+    #     exploration-tier/context-fit filter.
+    #   {"explored": False, "candidate": None, "probability": p,
+    #    "eligible": n, "reason": "exploration roll did not fire"}
+    #     eligible untried candidates existed and the coin flip declined them
+    #     this time; the LLM router (or its fallback) then ran as normal.
+    #   {"explored": True, "candidate": id, "probability": p,
+    #    "eligible": n, "reason": "untried model within exploration tier"}
+    #     the roll fired: `chosen_model` is `candidate` and no router call was
+    #     made for this decision at all (see `reasoning`, which says so).
+    exploration: dict | None = None
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -348,12 +386,19 @@ class ModelRouter:
         catalog: ModelCatalog,
         registry: ProviderRegistry,
         priors: PriorsProvider | None = None,
+        rng: random.Random | None = None,
     ):
         self._catalog = catalog
         self._registry = registry
         # Defaults to no evidence, so a caller that never wires up priors — and
         # every existing caller — routes exactly as it did before.
         self._priors = priors or NoPriors()
+        # Exploration's coin flip (`_exploration_pick`). A caller that wants a
+        # reproducible sequence — every test that exercises exploration —
+        # injects its own seeded instance; production gets a fresh one, which
+        # `random.Random()` seeds from the OS the same as the bare `random`
+        # module would.
+        self._rng = rng or random.Random()
 
     def _candidates(
         self,
@@ -482,6 +527,129 @@ class ModelRouter:
             return None
         return min(options, key=lambda m: (m.prices_at()[1], m.id))
 
+    def _untried_exploration_candidates(
+        self,
+        candidates: list[ModelInfo],
+        priors: dict[str, ModelPrior],
+        context_fit: dict,
+        exploration_max_cost_tier: str,
+    ) -> list[ModelInfo]:
+        """Which of `candidates` `_exploration_pick` may choose among.
+
+        "Untried" means no prior at all, or one that has not yet crossed
+        `MIN_EFFECTIVE_SAMPLES` — `evidence_tier` alone is not enough, because a
+        model can also land on `TIER_UNKNOWN` by having *plenty* of evidence for
+        a merely middling record, and that model has already had its turn.
+
+        `candidates` has already passed every gate `route()` applies before this
+        is called — `allowed`, the provider-key check, the harness's own
+        `max_cost_tier` — so this only ever narrows further, same as every other
+        filter in this module. Two narrowings are exploration's own:
+        `exploration_max_cost_tier` (a tighter, harness-independent ceiling on
+        what an *unproven* model may cost) and the context-fit exclusion list —
+        a candidate the composed prompt cannot fit in is never a fair trial of
+        that model, whatever the coin flip would have said.
+        """
+        fit_excluded = set(context_fit.get("excluded") or [])
+        out = []
+        for m in candidates:
+            if m.id in fit_excluded:
+                continue
+            if not within_cost_tier(m, exploration_max_cost_tier):
+                continue
+            prior = priors.get(m.id)
+            if evidence_tier(prior) != TIER_UNKNOWN:
+                continue
+            if prior is not None and prior.effective_n >= MIN_EFFECTIVE_SAMPLES:
+                continue
+            out.append(m)
+        return out
+
+    def _pick_exploration_candidate(self, untried: list[ModelInfo]) -> ModelInfo:
+        """Deterministic among ties: cheapest current price, id breaks a tie."""
+        return min(untried, key=lambda m: (m.prices_at()[1], m.id))
+
+    def _exploration_off_reason(
+        self, objective: str, task_shape: str, adaptive: AdaptivePolicy
+    ) -> str | None:
+        """Why exploration cannot fire on this decision at all, or None when
+        its guardrails (learning, objective, task shape, a nonzero rate) are
+        all met and it is worth actually looking for an untried candidate."""
+        if not adaptive.learn_from_outcomes:
+            # With learning off, `route()` never fetches `priors` at all (it
+            # stays `{}`), so *every* candidate — including one with a
+            # recorded poor prior — would read as `TIER_UNKNOWN` and look
+            # "untried" to `_untried_exploration_candidates`. Checked first,
+            # before the untried scan ever runs, so a model this deployment's
+            # own evidence already rejected is never handed a second chance
+            # under the cover of "no track record": with learning off there is
+            # no track record to *earn* either, so exploration has nothing to
+            # spend its coin flip on.
+            return "outcome learning is off, so an untried model has nothing to earn"
+        if objective != EXPLORATION_OBJECTIVE:
+            return f"exploration only applies to the '{EXPLORATION_OBJECTIVE}' objective"
+        if task_shape != EXPLORATION_TASK_SHAPE:
+            return f"exploration only applies to the '{EXPLORATION_TASK_SHAPE}' task shape"
+        if adaptive.exploration <= 0:
+            return "harness exploration rate is 0"
+        return None
+
+    def _maybe_explore(
+        self,
+        *,
+        objective: str,
+        task_shape: str,
+        adaptive: AdaptivePolicy,
+        candidates: list[ModelInfo],
+        context_fit: dict,
+        priors: dict[str, ModelPrior],
+    ) -> tuple[ModelInfo | None, dict]:
+        """The exploration coin flip. Only ever called on the LLM-router path —
+        after the single-candidate and override/pin paths have already
+        returned — so `exploration` is `None` on every RoutingDecision this
+        never runs for. See `RoutingDecision.exploration` for the four shapes
+        the returned record can take.
+        """
+        off_reason = self._exploration_off_reason(objective, task_shape, adaptive)
+        if off_reason is not None:
+            return None, {
+                "explored": False,
+                "candidate": None,
+                "probability": adaptive.exploration,
+                "eligible": None,
+                "reason": off_reason,
+            }
+
+        untried = self._untried_exploration_candidates(
+            candidates, priors, context_fit, adaptive.exploration_max_cost_tier
+        )
+        if not untried:
+            return None, {
+                "explored": False,
+                "candidate": None,
+                "probability": adaptive.exploration,
+                "eligible": 0,
+                "reason": "no untried candidates within the exploration tier",
+            }
+
+        if self._rng.random() >= adaptive.exploration:
+            return None, {
+                "explored": False,
+                "candidate": None,
+                "probability": adaptive.exploration,
+                "eligible": len(untried),
+                "reason": "exploration roll did not fire",
+            }
+
+        pick = self._pick_exploration_candidate(untried)
+        return pick, {
+            "explored": True,
+            "candidate": pick.id,
+            "probability": adaptive.exploration,
+            "eligible": len(untried),
+            "reason": "untried model within exploration tier",
+        }
+
     async def route(
         self,
         *,
@@ -521,7 +689,8 @@ class ModelRouter:
     ) -> RoutingDecision:
         objective = objective_of(model_policy)
         max_tier = _max_cost_tier(model_policy)
-        learning = adaptive_of(model_policy).learn_from_outcomes
+        adaptive = adaptive_of(model_policy)
+        learning = adaptive.learn_from_outcomes
         # Local and dynamic models reach the catalog only through a discovery
         # pass. On a fresh process this is the first thing that needs them, so
         # make sure one has been attempted before deciding there are no
@@ -588,10 +757,53 @@ class ModelRouter:
                 effort=default_effort(objective, task_shape),
             )
 
+        candidate_ids = [m.id for m in candidates]
+
+        # 1.5. Bounded exploration: spend a rare, cheap coin flip on an untried
+        # model instead of asking the router, so a model with no track record
+        # is not stuck at the back of the catalog forever (see module-level
+        # `EXPLORATION_OBJECTIVE`/`EXPLORATION_TASK_SHAPE` and
+        # `_maybe_explore`'s docstring). Only reachable here — past the
+        # single-candidate and override/pin returns above — so it never
+        # touches a run that named its own model.
+        exploration_pick, exploration = self._maybe_explore(
+            objective=objective,
+            task_shape=task_shape,
+            adaptive=adaptive,
+            candidates=candidates,
+            context_fit=context_fit,
+            priors=priors,
+        )
+        if exploration_pick is not None:
+            return RoutingDecision(
+                # No router was contacted for this decision — that is the
+                # entire point of exploration, so the audit trail records the
+                # same "no router" shape a single-candidate or override
+                # decision does.
+                router_model=None,
+                routing_prompt_version=ROUTING_PROMPT_VERSION,
+                candidates=candidate_ids,
+                chosen_model=exploration_pick.id,
+                reasoning=(
+                    f"Exploration: '{exploration_pick.id}' has no track record yet and "
+                    f"was picked directly at probability {exploration['probability']:.2f} "
+                    "under the harness's exploration tier — no router call was made, so "
+                    "this decision spent no router overhead."
+                ),
+                objective=objective,
+                task_shape=task_shape,
+                max_cost_tier=max_tier,
+                evidence=_evidence_snapshot(priors, candidate_ids, est_input_tokens),
+                provider_ignore=_provider_ignore_for(priors, exploration_pick.id),
+                context_fit=context_fit,
+                fallback_used=False,
+                effort=default_effort(objective, task_shape),
+                exploration=exploration,
+            )
+
         settings = get_settings()
         router_info = self._resolve_router_model(max_tier)
         router_model_id = router_info.id if router_info is not None else settings.router_model
-        candidate_ids = [m.id for m in candidates]
 
         router_usable = router_info is not None
         prompt = None
@@ -692,6 +904,7 @@ class ModelRouter:
                             latency_ms=int((time.monotonic() - start) * 1000),
                             effort=chosen_effort,
                             router_served_by=completion.served_by,
+                            exploration=exploration,
                         )
                 except ProviderError:
                     continue
@@ -749,6 +962,7 @@ class ModelRouter:
             router_prompt_sha256=prompt_fingerprint,
             fallback_used=True,
             effort=default_effort(objective, task_shape),
+            exploration=exploration,
         )
 
     def _assert_within_ceiling(self, model_id: str, max_tier: str) -> None:

@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
+from tret.router_llm.objectives import TIER_ORDER
+
 COMPACTION_MODES = ("auto", "off")
 # What the supervisor (engine/supervisor.py) is allowed to do about a run that
 # is not going well, from least to most willing to act:
@@ -66,14 +68,51 @@ MAX_CONTEXT_HEADROOM = 0.95
 DEFAULT_MAX_SWITCHES = 1
 MAX_MAX_SWITCHES = 3
 
+# The probability an eligible decision explores an untried model instead of
+# asking the router — see `router_llm.router.ModelRouter.route`'s exploration
+# block. Bounded well below "sometimes" territory: this is a bandit's coin
+# flip on the cheapest, schema-validated shape a harness runs, not a general
+# routing strategy, and 0.2 is already one call in five spent on a model with
+# no track record.
+DEFAULT_EXPLORATION = 0.05
+MAX_EXPLORATION = 0.2
+# The cost ceiling exploration itself is willing to gamble on, independent of
+# (and never wider than) the harness's own `max_cost_tier` — an operator who
+# raises the harness ceiling for capability reasons should not thereby also
+# raise how much an unproven model is allowed to cost while being tried out.
+DEFAULT_EXPLORATION_MAX_COST_TIER = "economy"
+
 
 @dataclass(frozen=True)
 class AdaptivePolicy:
+    """
+    | field                       | default    | range/values                |
+    |------------------------------|-----------|------------------------------|
+    | `learn_from_outcomes`        | `True`    | bool                         |
+    | `context_headroom`           | `0.8`     | 0.3–0.95                     |
+    | `compaction`                 | `"auto"`  | `auto` \\| `off`             |
+    | `escalation`                 | `on_quality` | `off` \\| `on_stall` \\| `on_quality` |
+    | `max_switches`               | `1`       | 0–3                          |
+    | `exploration`                | `0.05`    | 0.0–0.2                      |
+    | `exploration_max_cost_tier`  | `"economy"` | `local` \\| `economy` \\| `standard` \\| `premium` |
+
+    `exploration` and `exploration_max_cost_tier` govern the same coin flip
+    described in `router_llm.router.ModelRouter.route`: with probability
+    `exploration`, a `balanced`/`extraction` decision with an untried
+    candidate within `exploration_max_cost_tier` picks that candidate outright
+    instead of asking the router LLM. `exploration: 0` (not the harness
+    ceiling) is what actually turns the behavior off — the guardrails around
+    it (objective, task shape, tier, no pin/override) narrow *when* it can
+    fire, this is *whether* it does at all.
+    """
+
     learn_from_outcomes: bool = True
     context_headroom: float = DEFAULT_CONTEXT_HEADROOM
     compaction: str = "auto"
     escalation: str = "on_quality"
     max_switches: int = DEFAULT_MAX_SWITCHES
+    exploration: float = DEFAULT_EXPLORATION
+    exploration_max_cost_tier: str = DEFAULT_EXPLORATION_MAX_COST_TIER
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -81,9 +120,16 @@ class AdaptivePolicy:
 
 DEFAULT_ADAPTIVE = AdaptivePolicy()
 # What the evals and the benchmark arms pin: every adaptive behavior off, so a
-# replayed run depends on the replay and nothing else.
+# replayed run depends on the replay and nothing else. Exploration is a
+# routing behavior like the rest of this block, so a reproducible replay pins
+# it to 0 too — a golden run must never pick a model the replay did not ask
+# for.
 STATIC_ADAPTIVE = AdaptivePolicy(
-    learn_from_outcomes=False, compaction="off", escalation="off", max_switches=0
+    learn_from_outcomes=False,
+    compaction="off",
+    escalation="off",
+    max_switches=0,
+    exploration=0.0,
 )
 
 
@@ -94,6 +140,12 @@ def adaptive_of(model_policy: dict | None) -> AdaptivePolicy:
     API validates on write (`api/harnesses.py::_validate_policy`) and a bad value
     should be refused at the door rather than silently steering a run from inside
     the engine. This is the same division `objectives.objective_of` draws.
+
+    `exploration` is the one field that breaks that pattern on purpose: an
+    out-of-range stored value fails *closed* to 0.0 rather than reviving the
+    0.05 default, because it is a probability gating an unproven model being
+    picked with no router call at all — see the comment at its own check
+    below.
     """
     block = (model_policy or {}).get("adaptive")
     if not isinstance(block, dict):
@@ -116,12 +168,39 @@ def adaptive_of(model_policy: dict | None) -> AdaptivePolicy:
 
     compaction = block.get("compaction", DEFAULT_ADAPTIVE.compaction)
     escalation = block.get("escalation", DEFAULT_ADAPTIVE.escalation)
+
+    exploration = block.get("exploration", DEFAULT_ADAPTIVE.exploration)
+    try:
+        exploration = float(exploration)
+    except (TypeError, ValueError):
+        exploration = DEFAULT_ADAPTIVE.exploration
+    # Fails *closed* to 0.0, not to the default — the deliberate exception to
+    # this function's own "unknown/out-of-range falls back to the default"
+    # rule. Every other field here defaults to the harness-default *behavior*
+    # when it cannot be trusted; `exploration` is a probability that gates
+    # whether an unproven model gets picked outright with no router call, and
+    # a stored value already out of the API's own valid range (a downgrade
+    # from a since-lowered `MAX_EXPLORATION`, or a row written before
+    # validation existed) is not a value this deployment ever meant to run
+    # with. Reviving it at the 0.05 default would silently turn exploration
+    # back on for a harness whose own stored intent cannot be trusted at all.
+    if not 0.0 <= exploration <= MAX_EXPLORATION:
+        exploration = 0.0
+
+    exploration_max_cost_tier = block.get(
+        "exploration_max_cost_tier", DEFAULT_ADAPTIVE.exploration_max_cost_tier
+    )
+    if exploration_max_cost_tier not in TIER_ORDER:
+        exploration_max_cost_tier = DEFAULT_ADAPTIVE.exploration_max_cost_tier
+
     return AdaptivePolicy(
         learn_from_outcomes=bool(block.get("learn_from_outcomes", True)),
         context_headroom=headroom,
         compaction=compaction if compaction in COMPACTION_MODES else DEFAULT_ADAPTIVE.compaction,
         escalation=escalation if escalation in ESCALATION_MODES else DEFAULT_ADAPTIVE.escalation,
         max_switches=switches,
+        exploration=exploration,
+        exploration_max_cost_tier=exploration_max_cost_tier,
     )
 
 
@@ -165,4 +244,15 @@ def validation_error(block) -> str | None:
             return "model_policy.adaptive.max_switches must be an integer"
         if not 0 <= value <= MAX_MAX_SWITCHES:
             return f"model_policy.adaptive.max_switches must be between 0 and {MAX_MAX_SWITCHES}"
+    if "exploration" in block:
+        value = block["exploration"]
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return "model_policy.adaptive.exploration must be a number"
+        if not 0.0 <= float(value) <= MAX_EXPLORATION:
+            return f"model_policy.adaptive.exploration must be between 0.0 and {MAX_EXPLORATION}"
+    if "exploration_max_cost_tier" in block and block["exploration_max_cost_tier"] not in TIER_ORDER:
+        return (
+            "model_policy.adaptive.exploration_max_cost_tier must be one of "
+            f"{sorted(TIER_ORDER, key=TIER_ORDER.get)}"
+        )
     return None

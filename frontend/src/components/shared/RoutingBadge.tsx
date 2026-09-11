@@ -138,6 +138,19 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
             <span>{routing.candidates.length ? routing.candidates.join(', ') : '—'}</span>
             <span className="k">Context</span>
             <span>{contextFitLabel(routing)}</span>
+            {/* Only shown when the coin flip actually fired — every other
+                shape of the exploration record (guardrails not met, nothing
+                untried, or a declined roll) is not interesting enough to earn
+                a row on the collapsed-by-default summary. */}
+            {routing.exploration?.explored && (
+              <>
+                <span className="k">Explored</span>
+                <span>
+                  untried model chosen at {(routing.exploration.probability * 100).toFixed(0)}%
+                  — no router call made
+                </span>
+              </>
+            )}
           </div>
           {routing.evidence && (
             <>

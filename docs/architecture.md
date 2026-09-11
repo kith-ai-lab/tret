@@ -68,6 +68,39 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    call, which local models are exempt from that check, and — when adaptive
    compaction is on — whether the floor it was checked against already
    excluded the history that trimming would shrink).
+   The evidence floor above (`MIN_EFFECTIVE_SAMPLES`) has a consequence
+   `candidate_sort_key` alone cannot fix: an untried model keeps its catalog
+   position rather than sorting last, but nothing ever routes to it *on
+   purpose*, so it can sit forever without ever earning the samples that
+   would let it be judged at all. `model_policy.adaptive.exploration`
+   (default `0.05`, capped at `0.2`) is tret's perturbation against that —
+   deliberately narrow rather than a general bandit: it requires outcome
+   learning to be on (`adaptive.learn_from_outcomes`; with it off there are
+   no priors to read at all, so nothing could be told apart from "untried" in
+   the first place), the default `balanced` objective, the `extraction` task
+   shape (schema-validated output, no open-ended judgment for an unproven
+   model to get wrong), and no pin or run override having named a model
+   already. Within those guardrails it considers candidates with no prior at
+   all *or* fewer than `MIN_EFFECTIVE_SAMPLES` effective samples — a proven
+   model and a poor one are both excluded regardless of sample count, since
+   both have already been judged — filtered further to
+   `adaptive.exploration_max_cost_tier` (default `economy`, itself never
+   wider than the harness's own `max_cost_tier` — this tier applies *on top
+   of* that ceiling, never instead of it) and to whatever `context_fit`
+   hasn't already excluded. With that probability, `route()` picks the
+   cheapest such candidate outright (ties broken by model id) instead of
+   paying for a router call at all — the fastest and cheapest a routing
+   decision can be — and records `runs.routing.exploration` on every
+   decision that reaches this stage: `{explored: true, candidate,
+   probability, eligible, reason}` when it fired, or `{explored: false,
+   ...}` otherwise, with `eligible: null` when the guardrails above were
+   never met and a count when they were but nothing untried qualified or the
+   roll simply declined. It is `null`, not one of those shapes, on the
+   single-candidate, pin, and run-override paths, which return before
+   exploration is ever considered. `exploration: 0` is what actually
+   disables the behavior — evals and both benchmark arms pin it there
+   alongside every other adaptive setting, because a reproducible replay
+   must never pick a model the replay script did not ask for.
    `POST /api/routing/preview` (`api/routing.py`) answers the same question
    before a run exists: it builds the identical routing inputs (task shape,
    description and output contract from the pack task, `max_output_tokens`/
@@ -80,7 +113,11 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    `assemble_context`/`composition_report` the engine uses, and
    `min_context_window` from `required_context_window`) and calls `route()`
    for a saved harness's own policy or an inline one a form has not saved
-   yet, returning the `RoutingDecision` plus a cost range — the low end prices
+   yet — with `adaptive.exploration` forced to 0 on the copy handed to
+   `route()` only, never on the policy itself, so the same preview called
+   twice (and `compare`'s four objectives within one call) can never
+   disagree because a coin flip landed differently — returning the
+   `RoutingDecision` plus a cost range — the low end prices
    the whole input as a cache *read* plus only 10% of the output budget used
    (the cheapest this call could plausibly be), the high end prices the whole
    input uncached plus the full output budget used — `compare: true` runs it

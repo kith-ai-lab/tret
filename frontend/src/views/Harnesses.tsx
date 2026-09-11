@@ -333,6 +333,9 @@ function HarnessEditor({
   const knownTier = (COST_TIERS as readonly string[]).includes(costTier)
     ? (costTier as CostTier)
     : null
+  const knownExplorationTier = (COST_TIERS as readonly string[]).includes(
+    adaptive.exploration_max_cost_tier,
+  )
 
   const setPolicy = (patch: Partial<ModelPolicy>) =>
     setForm((f) => ({ ...f, model_policy: { ...f.model_policy, ...patch } }))
@@ -693,6 +696,44 @@ function HarnessEditor({
           {ADAPTIVE_LIMITS.max_switches.max}) — each one voids the prompt cache and
           re-sends the transcript at full price.
           {isPinned && ' Switching applies when routing is automatic.'}
+        </div>
+
+        <div className="row" style={{ alignItems: 'flex-start', marginTop: 10 }}>
+          <NumberField
+            label="Exploration rate"
+            value={adaptive.exploration}
+            step={0.01}
+            onChange={(v) => setAdaptive({ exploration: v })}
+          />
+          <div className="field" style={{ marginBottom: 0, width: 180 }}>
+            <label className="mono-label">Exploration tier</label>
+            <select
+              value={adaptive.exploration_max_cost_tier}
+              onChange={(e) =>
+                setAdaptive({ exploration_max_cost_tier: e.target.value as CostTier })
+              }
+            >
+              {COST_TIERS.map((tier) => (
+                <option key={tier} value={tier}>
+                  {tier}
+                </option>
+              ))}
+              {!knownExplorationTier && (
+                <option value={adaptive.exploration_max_cost_tier}>
+                  {adaptive.exploration_max_cost_tier} (as stored)
+                </option>
+              )}
+            </select>
+          </div>
+        </div>
+        <div style={{ ...HINT, marginTop: 6 }}>
+          On a <code>balanced</code> objective, <code>extraction</code>-shaped task with an
+          untried model available at or below the exploration tier, this is the chance a
+          decision picks that model outright instead of asking the router — the only way an
+          untried model ever earns a track record ({ADAPTIVE_LIMITS.exploration.min * 100}
+          %–{ADAPTIVE_LIMITS.exploration.max * 100}%, default{' '}
+          {ADAPTIVE_DEFAULTS.exploration * 100}%). Never wider than Max cost tier above, and
+          never applies to a pinned model or a per-run override.
         </div>
       </div>
 

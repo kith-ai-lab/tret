@@ -216,6 +216,22 @@ export interface RoutingDecision {
   override: string | null // "user_pin" | "run_override" | null
   latency_ms: number
   decided_at: string
+  /** Bandit-style exploration record (`router_llm/router.py`'s
+   *  `_maybe_explore`) — null on every path that never reaches the
+   *  LLM-router logic (a single candidate, an override, or a pin). Otherwise
+   *  always present, whether or not exploration actually fired: `explored:
+   *  false` with `eligible: null` means its guardrails (objective ==
+   *  "balanced", task_shape == "extraction", a nonzero rate) were not met at
+   *  all; `eligible: 0` means they were met but nothing untried survived the
+   *  exploration-tier/context-fit filter; a positive `eligible` with
+   *  `explored: false` means the coin flip declined this time. */
+  exploration?: {
+    explored: boolean
+    candidate: string | null
+    probability: number
+    eligible: number | null
+    reason: string
+  } | null
 }
 
 /** `POST /api/routing/preview` request (backend: `api/routing.py`). Either
@@ -869,6 +885,14 @@ export interface AdaptivePolicy {
   escalation?: EscalationMode
   /** How many times one run may change model. Backend range 0–3, default 1. */
   max_switches?: number
+  /** Probability that a `balanced`/`extraction` decision with an untried
+   *  candidate picks it directly instead of asking the router — see
+   *  `tret/router_llm/router.py::ModelRouter._maybe_explore`. Backend range
+   *  0.0–0.2, default 0.05. `0` turns exploration off outright. */
+  exploration?: number
+  /** The cost ceiling exploration itself will gamble on, independent of (and
+   *  never wider than) this policy's own `max_cost_tier`. Default `economy`. */
+  exploration_max_cost_tier?: CostTier
 }
 
 export const ADAPTIVE_DEFAULTS: Required<AdaptivePolicy> = {
@@ -877,11 +901,14 @@ export const ADAPTIVE_DEFAULTS: Required<AdaptivePolicy> = {
   compaction: 'auto',
   escalation: 'on_quality',
   max_switches: 1,
+  exploration: 0.05,
+  exploration_max_cost_tier: 'economy',
 }
 
 export const ADAPTIVE_LIMITS = {
   context_headroom: { min: 0.3, max: 0.95 },
   max_switches: { min: 0, max: 3 },
+  exploration: { min: 0, max: 0.2 },
 } as const
 
 export interface ModelPolicy {

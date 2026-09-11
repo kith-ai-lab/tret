@@ -324,6 +324,13 @@ async def preview_routing(
     docstring for why that is a documented tradeoff rather than a gap to
     close: building a billing path for a call that produces no artifact would
     be scaffolding for a feature (metered previews) nobody has asked for.
+
+    Deterministic by construction: bounded exploration's coin flip
+    (`ModelRouter._maybe_explore`) is forced off for every objective this
+    preview evaluates — `adaptive.exploration` is overridden to 0 on the copy
+    of the policy handed to the router, never on `model_policy` itself — so
+    calling this endpoint twice with the same policy, and a real run later
+    made under that same (untouched) policy, are unaffected by it.
     """
     fields_set = body.model_fields_set
     if body.compare and ROLE_RANK[ctx.role] < ROLE_RANK["approver"]:
@@ -465,7 +472,19 @@ async def preview_routing(
     total_router_overhead_usd = 0.0
     try:
         for objective in objectives:
-            policy_for_objective = {**model_policy, "objective": objective}
+            # Exploration forced to 0 on the copy sent to the router only —
+            # never on `model_policy` itself, so the saved/inline policy this
+            # preview describes, and any real run later made under it, is
+            # untouched. A preview exists to answer "what will this pick", and
+            # `_maybe_explore`'s coin flip (router_llm/router.py) would let two
+            # calls to this same endpoint, with the same policy, return two
+            # different decisions — a preview and `compare` must be
+            # deterministic (see the module/endpoint docstrings).
+            policy_for_objective = {
+                **model_policy,
+                "objective": objective,
+                "adaptive": {**(model_policy.get("adaptive") or {}), "exploration": 0},
+            }
             decision = await model_router.route(
                 model_policy=policy_for_objective,
                 task_type=body.task_type,

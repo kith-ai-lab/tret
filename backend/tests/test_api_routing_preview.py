@@ -28,6 +28,7 @@ from sqlalchemy.pool import StaticPool
 
 import tret.engine.tools as tools_module
 from tests.evals.golden_world import install_sqlite_type_shims
+from tret.adaptive import MAX_EXPLORATION
 from tret.api import auth
 from tret.api import routing as routing_api
 from tret.db.engine import get_db
@@ -322,6 +323,51 @@ async def test_compare_true_returns_four_objectives(client, seed, session_factor
     assert {r["objective"] for r in results} == set(OBJECTIVES)
     for r in results:
         assert r["decision"]["chosen_model"].startswith("openrouter/")
+
+
+async def test_preview_forces_exploration_to_zero_on_the_policy_it_routes_with(
+    client, seed, session_factory, monkeypatch
+):
+    """A preview must be reproducible: `ModelRouter._maybe_explore`'s coin
+    flip (router_llm/router.py) must never let two previews of the same
+    policy — or `compare`'s four objectives within one call — disagree.
+    `preview_routing` (api/routing.py) forces `adaptive.exploration` to 0 on
+    the copy of the policy it hands to `route()`, never on `model_policy`
+    itself. Verified by capturing what `ModelRouter.route` is actually
+    called with, rather than by seeding a roll to fire — this fixture's
+    harness/task carry a `verdict`-shaped task, not `extraction`, so
+    exploration's own guardrails would never let it fire here regardless;
+    the point under test is the policy mutation itself, not the coin flip.
+    """
+    _team, admin, _pack, harness = await _basic_setup(seed, session_factory)
+    await login(client, admin.email)
+
+    captured: list[dict] = []
+    real_route = ModelRouter.route
+
+    async def _capturing_route(self, *, model_policy, **kwargs):
+        captured.append(model_policy)
+        return await real_route(self, model_policy=model_policy, **kwargs)
+
+    monkeypatch.setattr(ModelRouter, "route", _capturing_route)
+
+    response = await client.post(
+        "/api/routing/preview",
+        json={
+            "harness_id": str(harness.id),
+            "task_type": "divergence_assessment",
+            "compare": True,
+            "model_policy": {
+                "mode": "auto",
+                "max_cost_tier": "premium",
+                "adaptive": {"exploration": MAX_EXPLORATION},
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert len(captured) == 4  # compare: true, one route() call per objective
+    for policy in captured:
+        assert policy["adaptive"]["exploration"] == 0
 
 
 # ── never persists ───────────────────────────────────────────────────────────

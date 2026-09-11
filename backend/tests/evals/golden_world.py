@@ -29,6 +29,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
+from tret.adaptive import DEFAULT_ADAPTIVE
 from tret.db.models import (
     Base,
     DataRequest,
@@ -175,6 +176,13 @@ class GoldenWorld:
         # named). Pass `model_policy=` for the scenarios where routing itself, or
         # what the engine may do to it, is the thing under test.
         policy: dict = dict(model_policy) if model_policy else {"mode": "pinned", "model": model}
+        # The implicit pinned policy above keeps the ordinary harness defaults
+        # (compaction auto, escalation on) — the context-pressure and switch
+        # scenarios exercise exactly that machinery — but pins exploration to
+        # zero so a golden run can never take an untried-model roll. A caller
+        # passing its own `model_policy=` decides for itself.
+        if model_policy is None and "adaptive" not in policy:
+            policy["adaptive"] = {**DEFAULT_ADAPTIVE.to_json(), "exploration": 0.0}
         if max_run_output_tokens is not None:
             policy["max_run_output_tokens"] = max_run_output_tokens
         async with self.session_factory() as db:
