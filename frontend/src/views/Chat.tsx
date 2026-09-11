@@ -590,6 +590,20 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
           )
         )}
 
+        {message.grounding?.status === 'unresolved' && (
+          <div className="chat-turn-footer">
+            <span className="err">
+              Unverified figures: {message.grounding.unsupported.join(', ')} — not found in
+              any retrieved data
+            </span>
+          </div>
+        )}
+        {message.grounding?.status === 'repaired' && (
+          <div className="chat-turn-footer">
+            Reply rewritten: an earlier draft cited figures that were not retrieved
+          </div>
+        )}
+
         {message.run_id && (
           <div className="chat-turn-footer">
             <Link to={`/runs/${message.run_id}`} className="chat-viewrun">

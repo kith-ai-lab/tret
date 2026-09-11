@@ -23,6 +23,7 @@ from tret.router_llm.outcomes import (
 from tret.services.transcript import (
     ENGINE_NUDGE_KEY,
     NUDGE_EMPTY_REPLY,
+    NUDGE_GROUNDING,
     NUDGE_OUTPUT_BUDGET,
     NUDGE_TERMINAL,
     REPEATED_CALL_KEY,
@@ -77,6 +78,20 @@ def test_the_empty_reply_nudge_is_read_from_meta_and_penalized():
     assert read_signals(messages).empty_reply_nudged
     # Same failure class as the terminal nudge: the run recovered, but the
     # model had to be told to finish properly, and the score remembers.
+    assert _clean(messages=messages).quality_score < _clean().quality_score
+
+
+def test_grounding_nudges_are_counted_and_penalized():
+    # Unlike the other nudges, grounding can fire more than once per run
+    # (engine/grounding.py's GROUNDING_MAX_REPAIRS budget) — read_signals
+    # counts every one of them, not just whether it happened at all.
+    messages = [
+        {"role": "user", "content": "rewrite it", "meta": {ENGINE_NUDGE_KEY: NUDGE_GROUNDING, "unsupported": ["58"]}},
+    ]
+    signals = read_signals(messages)
+    assert signals.grounding_nudged
+    assert signals.grounding_nudges == 1
+    # Same penalty schedule as an unrecovered validation error.
     assert _clean(messages=messages).quality_score < _clean().quality_score
 
 

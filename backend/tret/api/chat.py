@@ -382,6 +382,9 @@ def _assistant_message(run: Run) -> dict:
         # when the run never estimated/routed.
         "energy": run.energy_accounting,
         "routing": run.routing,
+        # The prose grounding check's verdict on this reply (engine/
+        # grounding.py) — null for anything the check does not apply to.
+        "grounding": run.grounding,
     }
 
 

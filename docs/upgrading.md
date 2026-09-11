@@ -30,6 +30,31 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## Chat replies get a grounding check (2026-09-11)
+
+Chat and freeform prose had no equivalent of the `cited_values` cross-check a
+verdict task's structured output gets — a model could state a number in plain
+text that no `lookup_dataset` call this run returned, and nothing noticed. The
+engine now checks every number in a chat/freeform reply against what the run
+actually retrieved and what the conversation actually said
+(`tret/engine/grounding.py`); an unsupported figure gets the reply sent back
+for a rewrite, up to two rewrites, and a third bad reply ships as the model
+wrote it, flagged rather than blanked. See the new paragraph in
+`docs/trust-doctrine.md` after the cited-values one.
+
+This adds a nullable `runs.grounding` column, applied by the automatic
+migration step above like any other — nothing to run by hand. It is null for
+every run that predates this (nothing to backfill: the check never ran) and
+for any run that still isn't chat/freeform. `GET /api/runs/{id}` and a chat
+message's assistant entry both now carry a `grounding` field
+(`{checked, status, attempts, unsupported, first_unsupported}`) whose `status`
+is one of `clean`, `repaired`, `unresolved`, or `skipped` (`checked: False`) —
+a run that never called a tool and never retrieved anything has nothing to
+check a reply's numbers against, so it is recorded `skipped` rather than
+either `clean` (which would claim a check that never ran) or silently null
+(indistinguishable from a run that predates this feature). The chat UI shows
+a line when a reply shipped unresolved or had to be rewritten.
+
 ## OpenRouter `require_parameters` is now opt-in (2026-09-11)
 
 Until this change every OpenRouter request that carried tools also sent

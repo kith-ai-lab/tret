@@ -378,6 +378,20 @@ def test_one_repeated_call_trip_triggers_under_on_quality():
     assert result.reason == REASON_QUALITY
 
 
+def test_grounding_nudges_trigger_under_on_quality_with_the_grounding_reason():
+    # `consecutive_terminal_failures` and `grounding_nudges` are mutually
+    # exclusive per run (a grounding-checked run has no terminal tool to fail
+    # validation on) — `_quality_trigger` sums them against the same
+    # threshold, and picks the grounding wording when it was the grounding
+    # count, not the terminal count, that got it there.
+    state = _state(escalation="on_quality", grounding_nudges=QUALITY_TERMINAL_FAILURES)
+    result = _assess(state)
+    assert result.kind != KIND_NONE
+    assert result.reason == REASON_QUALITY
+    assert "the grounding check caught unsupported figures" in result.detail
+    assert str(QUALITY_TERMINAL_FAILURES) in result.detail
+
+
 def test_context_pressure_still_outranks_the_quality_signal():
     # A run that is genuinely out of room gets the concrete remedy (a bigger
     # window), not effort or a quality-driven switch to a same-size model.

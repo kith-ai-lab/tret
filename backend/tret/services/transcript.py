@@ -33,11 +33,12 @@ VALIDATION_MARKER = "Validation failed"
 EXHAUSTED_MARKER = "repair attempts are exhausted"
 
 # Stamped by engine/harness.py onto messages the engine itself appends.
-ENGINE_NUDGE_KEY = "engine_nudge"  # "terminal_tool" | "output_budget" | "empty_reply"
+ENGINE_NUDGE_KEY = "engine_nudge"  # "terminal_tool" | "output_budget" | "empty_reply" | "grounding"
 REPEATED_CALL_KEY = "repeated_call"  # int: how many times this exact call was made
 NUDGE_TERMINAL = "terminal_tool"
 NUDGE_OUTPUT_BUDGET = "output_budget"
 NUDGE_EMPTY_REPLY = "empty_reply"
+NUDGE_GROUNDING = "grounding"  # engine/grounding.py — a reply cited unsupported numbers
 
 
 def validation_errors_in(messages: list) -> tuple[int, int]:
@@ -74,6 +75,11 @@ class TranscriptSignals:
     output_budget_nudged: bool = False
     empty_reply_nudged: bool = False
     repeated_call_trips: int = 0
+    # A chat/freeform run can be nudged more than once (engine/grounding.py's
+    # GROUNDING_MAX_REPAIRS budget) — unlike the other nudges, which fire at
+    # most once, so a bool alone would lose how many times it happened.
+    grounding_nudged: bool = False
+    grounding_nudges: int = 0
 
     @property
     def non_validation_tool_errors(self) -> int:
@@ -82,7 +88,7 @@ class TranscriptSignals:
 
 def read_signals(messages: list) -> TranscriptSignals:
     """Every signal this module knows how to read, in one pass."""
-    tool_calls = tool_errors = repeated = 0
+    tool_calls = tool_errors = repeated = grounding_nudges = 0
     terminal_nudged = budget_nudged = empty_nudged = False
     validation, unrecovered = validation_errors_in(messages)
 
@@ -108,6 +114,8 @@ def read_signals(messages: list) -> TranscriptSignals:
             budget_nudged = True
         elif nudge == NUDGE_EMPTY_REPLY:
             empty_nudged = True
+        elif nudge == NUDGE_GROUNDING:
+            grounding_nudges += 1
 
     return TranscriptSignals(
         tool_calls=tool_calls,
@@ -118,4 +126,6 @@ def read_signals(messages: list) -> TranscriptSignals:
         output_budget_nudged=budget_nudged,
         empty_reply_nudged=empty_nudged,
         repeated_call_trips=repeated,
+        grounding_nudged=grounding_nudges > 0,
+        grounding_nudges=grounding_nudges,
     )

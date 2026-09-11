@@ -22,7 +22,7 @@ import pytest
 from golden_world import GOLDEN_MODEL, _replay_registry, build_world
 from replay_provider import ProviderCall, ReplayProvider, ScriptedCall, ScriptedTurn
 from sqlalchemy import select
-from test_golden_runs import PERIL, SITE, divergence_happy_script
+from test_golden_runs import GAP_SITE, PERIL, SITE, divergence_happy_script, run_happy_path
 
 import tret.engine.harness as harness_module
 from tret.adaptive import DEFAULT_CONTEXT_HEADROOM
@@ -34,6 +34,7 @@ from tret.packs.links import set_harness_packs
 from tret.packs.loader import install_pack
 from tret.providers.base import TextDelta, ToolCall, ToolCallComplete, TurnComplete, Usage
 from tret.providers.catalog import ModelCatalog
+from tret.services.transcript import ENGINE_NUDGE_KEY, NUDGE_GROUNDING
 from tret.router_llm.priors import NoPriors
 from tret.router_llm.prompts import ROUTING_PROMPT_VERSION
 from tret.router_llm.router import RoutingDecision
@@ -1374,3 +1375,356 @@ async def test_a_provider_that_cannot_count_is_not_asked_again_this_run(world):
     assert result.run.status == "completed", result.run.error
     assert provider.count_call_iterations == [0]
     assert any(e.data.get("basis") == "chars4" for e in result.events_of("context_pressure"))
+
+
+# ── grounding: a chat/freeform reply's numbers must trace to this run ─────────
+def _grounding_nudges(result) -> list[dict]:
+    return [
+        m
+        for m in result.run.messages
+        if (m.get("meta") or {}).get(ENGINE_NUDGE_KEY) == NUDGE_GROUNDING
+    ]
+
+
+async def test_a_fabricated_figure_gets_one_grounding_nudge_then_completes(world):
+    """The motivating scenario: a `lookup_dataset` call that comes back with no
+    rows, followed by a reply that states a score and a vintage anyway. One
+    nudge, a clean rewrite, and `run.grounding` records exactly what happened.
+    """
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Looking up the hazard score.",
+                tool_calls=[_lookup("hazard_scores", site_id=GAP_SITE, peril=PERIL)],
+            ),
+            ScriptedTurn(
+                text=(
+                    "the retrieved record shows score 58, rating moderate, source "
+                    "GlobalFloodModel v4, vintage 2021"
+                )
+            ),
+            ScriptedTurn(text="I could not find a hazard score for this site in this run."),
+        ]
+    )
+    harness_id = await world.create_harness(tool_names=["lookup_dataset"])
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={"message": f"What is the flood hazard score for site {GAP_SITE}?"},
+    )
+
+    assert result.run.status == "completed", result.run.error
+    nudges = _grounding_nudges(result)
+    assert len(nudges) == 1
+    assert nudges[0]["meta"]["unsupported"] == ["58", "2021"]
+    assert result.run.grounding == {
+        "checked": True,
+        "status": "repaired",
+        "attempts": 1,
+        "unsupported": [],
+        "first_unsupported": ["58", "2021"],
+    }
+
+
+async def test_a_reply_that_repeats_a_lookups_own_no_match_filter_is_still_flagged(world):
+    """`lookup_dataset`'s own "No rows ... match {filters}" message echoes the
+    filters it was called with verbatim — including any number the model
+    happened to pass as a filter value. That echo must not launder a
+    fabricated figure into evidence just because the model asked for it by
+    that exact number: the reply below cites "58" only because it put "58"
+    into its own `filters`, not because anything was actually retrieved.
+    """
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Looking up the hazard score.",
+                tool_calls=[_lookup("hazard_scores", site_id=GAP_SITE, peril=PERIL, score=58)],
+            ),
+            ScriptedTurn(text="the retrieved record shows score 58"),
+            ScriptedTurn(text="I could not find a hazard score for this site in this run."),
+        ]
+    )
+    harness_id = await world.create_harness(tool_names=["lookup_dataset"])
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={"message": f"What is the flood hazard score for site {GAP_SITE}?"},
+    )
+
+    assert result.run.status == "completed", result.run.error
+    nudges = _grounding_nudges(result)
+    assert len(nudges) == 1
+    assert nudges[0]["meta"]["unsupported"] == ["58"]
+
+
+async def test_a_reply_that_only_cites_retrieved_and_user_numbers_is_never_nudged(world):
+    """S-003's real flood score (22, vintage 2018) plus a number from the
+    user's own message — nothing here was never retrieved or said."""
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Looking up the hazard score.",
+                tool_calls=[_lookup("hazard_scores", site_id=SITE, peril=PERIL)],
+            ),
+            ScriptedTurn(
+                text=(
+                    "The retrieved score is 22 (rating low, vintage 2018), well under your "
+                    "stated threshold of 500."
+                )
+            ),
+        ]
+    )
+    harness_id = await world.create_harness(tool_names=["lookup_dataset"])
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={
+            "message": f"What's the flood score for site {SITE}? My threshold is 500."
+        },
+    )
+
+    assert result.run.status == "completed", result.run.error
+    assert _grounding_nudges(result) == []
+    assert result.run.grounding == {
+        "checked": True,
+        "status": "clean",
+        "attempts": 0,
+        "unsupported": [],
+        "first_unsupported": [],
+    }
+
+
+async def test_numbers_from_conversation_history_are_accepted_as_evidence(world):
+    """`task_input["_history"]`'s user-role entries — an earlier turn's own
+    words — are evidence even when nothing in *this* run's tools or system
+    prompt repeats them. A `lookup_dataset` call is scripted purely so the
+    check runs at all (otherwise, with no tool ever called and nothing
+    retrieved, this run would be `skipped` rather than exercise the history
+    evidence path this test is actually about — see
+    `test_a_pure_knowledge_reply_is_never_checked_no_retrieval_to_contradict`
+    for that case).
+    """
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Checking the current hazard score.",
+                tool_calls=[_lookup("hazard_scores", site_id=SITE, peril=PERIL)],
+            ),
+            ScriptedTurn(text="Your threshold of 777 still stands; nothing else to add."),
+        ]
+    )
+    harness_id = await world.create_harness(tool_names=["lookup_dataset"])
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={
+            "message": "Any update?",
+            "_history": [
+                {"role": "user", "content": "set my threshold to 777"},
+                {"role": "assistant", "content": "understood, 777 it is"},
+            ],
+        },
+    )
+
+    assert result.run.status == "completed", result.run.error
+    assert _grounding_nudges(result) == []
+    assert result.run.grounding["status"] == "clean"
+
+
+async def test_a_repeated_fabricated_figure_is_never_self_evidence(world):
+    """The fix this locks in: an earlier turn of *this run* is never evidence,
+    not even for the model's own next attempt. A reply that fails the
+    grounding check, gets nudged, and then simply repeats the same fabricated
+    number does not get to "cite" its own rejected draft — it fails again.
+
+    Three replies, all "58", after a lookup that comes back with no rows: two
+    nudges (the model gets two rewrites), then shipped unresolved rather than
+    asked for a third.
+    """
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Looking up the hazard score.",
+                tool_calls=[_lookup("hazard_scores", site_id=GAP_SITE, peril=PERIL)],
+            ),
+            ScriptedTurn(text="the retrieved record shows score 58"),
+            ScriptedTurn(text="to confirm, the score is 58"),
+            ScriptedTurn(text="the score remains 58"),
+        ]
+    )
+    harness_id = await world.create_harness(tool_names=["lookup_dataset"])
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={"message": f"What is the flood hazard score for site {GAP_SITE}?"},
+    )
+
+    assert result.run.status == "completed", result.run.error
+    nudges = _grounding_nudges(result)
+    assert len(nudges) == 2
+    assert all(m["meta"][ENGINE_NUDGE_KEY] == "grounding" for m in nudges)
+    assert result.run.grounding == {
+        "checked": True,
+        "status": "unresolved",
+        "attempts": 3,
+        "unsupported": ["58"],
+        "first_unsupported": ["58"],
+    }
+
+
+async def test_three_grounding_failures_in_a_row_exhaust_the_repair_budget(world):
+    """`GROUNDING_MAX_REPAIRS = 3`: the model gets two rewrites (a nudge after
+    the first failure, a nudge after the second); the third failing reply is
+    kept as-is (never blanked) and flagged unresolved rather than asked for a
+    third rewrite.
+    """
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Looking up the hazard score.",
+                tool_calls=[_lookup("hazard_scores", site_id=GAP_SITE, peril=PERIL)],
+            ),
+            ScriptedTurn(text="the retrieved record shows score 58, vintage 2021"),
+            ScriptedTurn(text="apologies — the correct figures are score 77, vintage 1999"),
+            ScriptedTurn(text="final answer: score 33, vintage 2010"),
+        ]
+    )
+    harness_id = await world.create_harness(tool_names=["lookup_dataset"])
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={"message": f"What is the flood hazard score for site {GAP_SITE}?"},
+    )
+
+    assert result.run.status == "completed", result.run.error
+    nudges = _grounding_nudges(result)
+    assert len(nudges) == 2  # the 3rd failure exhausts the budget, kept rather than retried
+    assert result.run.grounding == {
+        "checked": True,
+        "status": "unresolved",
+        "attempts": 3,
+        "unsupported": ["33", "2010"],
+        "first_unsupported": ["58", "2021"],
+    }
+    last = result.run.messages[-1]
+    assert last["role"] == "assistant"
+    assert last["content"] == "final answer: score 33, vintage 2010"
+
+
+async def test_a_grounding_failure_on_the_last_iteration_is_not_nudged(world):
+    """The last iteration is never spent on a nudge that cannot be acted on —
+    there is no further turn left for the rewrite it would ask for. Here the
+    ceiling is 2: iteration 1 is the tool call, iteration 2 is the bad reply,
+    which IS the run's last iteration. Rather than append a nudge nothing can
+    answer and let the ceiling end the run `failed`, the harness ships the
+    reply as-is, flags it `unresolved`, and lets `_final_status` complete the
+    run normally — exactly as it would for a run with iterations to spare
+    that simply exhausted its own repair budget.
+    """
+    harness_id = await world.create_harness(tool_names=["lookup_dataset"], max_iterations=2)
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Looking up the hazard score.",
+                tool_calls=[_lookup("hazard_scores", site_id=GAP_SITE, peril=PERIL)],
+            ),
+            ScriptedTurn(text="the retrieved record shows score 58"),
+        ]
+    )
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={"message": f"What is the flood hazard score for site {GAP_SITE}?"},
+    )
+
+    assert result.run.status == "completed", result.run.error
+    assert result.run.error is None
+    assert result.run.grounding == {
+        "checked": True,
+        "status": "unresolved",
+        "attempts": 1,
+        "unsupported": ["58"],
+        "first_unsupported": ["58"],
+    }
+    assert _grounding_nudges(result) == []
+
+
+async def test_a_pure_knowledge_reply_is_never_checked_no_retrieval_to_contradict(world):
+    """No tool ran this run and nothing was retrieved — there is nothing a
+    reply's numbers could contradict, so the check does not run at all rather
+    than pattern-matching a knowledge answer against an empty evidence set.
+    `run.grounding` records `checked: False, status: "skipped"` so an
+    operator (and the chat UI) can tell "not checked" apart from "checked and
+    found nothing wrong".
+    """
+    provider = ReplayProvider(
+        [ScriptedTurn(text="Flood models often cite a 100-year return period as a baseline.")]
+    )
+    harness_id = await world.create_harness(tool_names=["lookup_dataset"])
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={"message": "In general terms, how are flood return periods described?"},
+    )
+
+    assert result.run.status == "completed", result.run.error
+    assert _grounding_nudges(result) == []
+    assert result.run.grounding == {
+        "checked": False,
+        "status": "skipped",
+        "attempts": 0,
+        "unsupported": [],
+        "first_unsupported": [],
+    }
+
+
+async def test_grounding_is_not_written_over_an_empty_final_reply(world):
+    """The empty-reply guard owns an empty final turn's status, not the
+    grounding check: a fabricated reply gets nudged once, then two empty
+    replies in a row end the run `completed_without_output` — and
+    `run.grounding` is left exactly as it was before those empty turns (never
+    set, since the nudged turn never got to finish), not overwritten with a
+    spurious "clean" verdict over a reply that said nothing at all.
+    """
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Looking up the hazard score.",
+                tool_calls=[_lookup("hazard_scores", site_id=GAP_SITE, peril=PERIL)],
+            ),
+            ScriptedTurn(text="the retrieved record shows score 58"),
+            ScriptedTurn(text=""),
+            ScriptedTurn(text=""),
+        ]
+    )
+    harness_id = await world.create_harness(tool_names=["lookup_dataset"])
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="freeform",
+        task_input={"message": f"What is the flood hazard score for site {GAP_SITE}?"},
+    )
+
+    assert result.run.status == "completed_without_output", result.run.error
+    assert result.run.grounding is None
+    assert len(_grounding_nudges(result)) == 1
+
+
+async def test_a_verdict_task_never_checks_grounding(world):
+    """A divergence_assessment run has a terminal tool — its numbers are
+    already held to the cited-values cross-check, and `run.grounding` stays
+    null rather than double-checking the same prose a second way.
+    """
+    result = await run_happy_path(world)
+
+    assert result.run.status == "completed", result.run.error
+    assert result.run.grounding is None
+    assert _grounding_nudges(result) == []

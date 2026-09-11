@@ -1336,6 +1336,16 @@ export interface ChatMessage {
   // expanded/click-through view (EmissionsCalc/EnergyDetail, RoutingBadge).
   energy?: EnergyAccounting | null
   routing?: RoutingDecision | null
+  // The prose grounding check's verdict on this reply (backend
+  // engine/grounding.py) — null for anything the check does not apply to
+  // (a divergence/verdict task, or a run predating the check).
+  grounding?: {
+    checked: boolean
+    status: 'clean' | 'repaired' | 'unresolved'
+    attempts: number
+    unsupported: string[]
+    first_unsupported?: string[]
+  } | null
 }
 
 export interface ConversationSummary {

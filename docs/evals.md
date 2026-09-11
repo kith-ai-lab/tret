@@ -123,6 +123,27 @@ the shipped pack — never set it, while `draft_section` set it unconditionally)
 `assert_no_false_nudge` and `assert_status_agrees_with_findings` in that file are
 the reusable form of the invariant — apply them to any new scenario that writes.
 
+### `test_engine_loop.py` — the grounding check
+
+`tret/engine/grounding.py`'s in-loop number check on chat/freeform prose — see
+the trust-doctrine.md paragraph after cited-values. All ten drive `freeform`
+or the flagship verdict task through the real engine with a scripted model;
+none touch the grounding module's own extraction/evidence/rounding/percent/
+arithmetic logic, which is covered offline in `tests/test_grounding.py`.
+
+| Test | Guarantee |
+| --- | --- |
+| `test_a_fabricated_figure_gets_one_grounding_nudge_then_completes` | A reply citing numbers no `lookup_dataset` call this run returned (and nothing in the conversation said) gets exactly one nudge naming them, a clean rewrite completes the run, and `run.grounding` records `status: "repaired"` with the figures that triggered the first nudge preserved under `first_unsupported`. |
+| `test_a_reply_that_repeats_a_lookups_own_no_match_filter_is_still_flagged` | `lookup_dataset`'s own "No rows ... match {filters}" message echoes the filter values it was called with — including a number the model put there itself. That echo does not launder the number into evidence: the reply still gets nudged for citing it. |
+| `test_a_reply_that_only_cites_retrieved_and_user_numbers_is_never_nudged` | A reply that only repeats a retrieved value and a number the user themselves stated is never nudged; `run.grounding` reads `status: "clean"`, `attempts: 0`. |
+| `test_numbers_from_conversation_history_are_accepted_as_evidence` | A number from a user-role entry of `task_input["_history"]` — an earlier turn's own words — counts as evidence even when nothing in this run's own tools or system prompt repeats it (a `lookup_dataset` call is scripted purely so the check runs at all rather than being `skipped`). |
+| `test_a_repeated_fabricated_figure_is_never_self_evidence` | A rewrite that just repeats the same fabricated number is not let off the hook by citing its own earlier, rejected turn — no assistant turn from this run (or an earlier one, via `_history`) is ever evidence, so the same "58" fails all three times it appears, exhausting the budget for exactly two nudges. |
+| `test_three_grounding_failures_in_a_row_exhaust_the_repair_budget` | `GROUNDING_MAX_REPAIRS = 3`: the model gets two rewrites; a third, differently-fabricated reply in a row is kept exactly as the model wrote it (never blanked) rather than asked for a fourth rewrite, and `run.grounding` reads `status: "unresolved"`, `attempts: 3` — the run's own status is unaffected. |
+| `test_a_grounding_failure_on_the_last_iteration_is_not_nudged` | A failing reply that lands on the run's own last iteration is never nudged — there is no turn left for the rewrite it would ask for — and ships as-is, flagged `unresolved`; the run still ends `completed`, not `failed` by the iteration ceiling. |
+| `test_a_pure_knowledge_reply_is_never_checked_no_retrieval_to_contradict` | A run that never calls a tool and never retrieves anything is not checked at all: `run.grounding` reads `checked: False, status: "skipped"`, distinct from `"clean"`. |
+| `test_grounding_is_not_written_over_an_empty_final_reply` | A fabricated reply gets nudged, then two empty replies in a row end the run `completed_without_output` — the empty-reply guard owns that outcome, and `run.grounding` is left `None` rather than backfilled with a stale or spurious verdict. |
+| `test_a_verdict_task_never_checks_grounding` | A task with a declared `terminal_tool` (`divergence_assessment`) is already held to the cited-values cross-check on its structured output — the grounding check never runs on it, `run.grounding` stays null, and no grounding nudge ever appears in its transcript. |
+
 ## Adding a golden scenario
 
 1. Decide which guarantee is unprotected. A scenario that does not fail when a

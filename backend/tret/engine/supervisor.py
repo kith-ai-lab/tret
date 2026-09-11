@@ -159,6 +159,12 @@ class TurnState:
     effort_raised_at: int | None = None
     failures_at_raise: int = 0
     trips_at_raise: int = 0
+    # How many times, this run, a chat/freeform reply failed the grounding
+    # check (engine/grounding.py) — always 0 on a run with a terminal tool,
+    # since grounding is only checked where there is none. `_quality_trigger`
+    # folds this into `consecutive_terminal_failures`'s own threshold: see its
+    # comment for why the two counts are safe to add together.
+    grounding_nudges: int = 0
 
 
 @dataclass
@@ -276,9 +282,20 @@ def _quality_trigger(state: TurnState) -> tuple[bool, str]:
                 "effort raise without the run converging"
             )
         return False, ""
-    if state.consecutive_terminal_failures >= QUALITY_TERMINAL_FAILURES:
+    # `consecutive_terminal_failures` and `grounding_nudges` are mutually
+    # exclusive per run: the former only moves around a call to
+    # `ctx.terminal_tool` (engine/harness.py), which a grounding-checked run
+    # has none of, and grounding is only ever checked on a run with no
+    # terminal tool. Summing them lets a chat/freeform model that keeps
+    # fabricating figures trip the same escalation a terminal tool stuck
+    # failing validation would, without a second threshold to keep in sync.
+    terminal_failures = state.consecutive_terminal_failures + state.grounding_nudges
+    if terminal_failures >= QUALITY_TERMINAL_FAILURES:
         return True, (
             f"the terminal tool failed validation {state.consecutive_terminal_failures} "
+            "times in a row"
+            if state.consecutive_terminal_failures
+            else f"the grounding check caught unsupported figures {state.grounding_nudges} "
             "times in a row"
         )
     if state.repeated_call_trips >= QUALITY_REPEATED_CALLS:

@@ -495,6 +495,17 @@ class Run(Base):
     # what it means would rewrite the meaning of every historical value.
     # {"calls": [...], "total_cost_usd": ..., "accounting": {...}}
     overhead: Mapped[dict | None] = mapped_column(JSONB)
+    # The prose grounding check's verdict on this run's final reply
+    # (engine/grounding.py): {"checked", "status" ("clean"|"repaired"|
+    # "unresolved"|"skipped"), "attempts", "unsupported", "first_unsupported"}.
+    # "skipped" (checked: False) means the check applies to this task type but
+    # never ran: no tool call was made and nothing was retrieved, so there was
+    # no evidence to check the reply against (`run_has_retrieval_evidence`) —
+    # distinct from "clean", which means it ran and found nothing wrong. Null
+    # for any run the check does not apply to at all — anything but a
+    # chat/freeform run with no terminal tool (a terminal tool's numbers are
+    # already held to engine/validation.py's cited-values cross-check).
+    grounding: Mapped[dict | None] = mapped_column(JSONB)
     iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))

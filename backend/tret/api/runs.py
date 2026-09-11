@@ -196,7 +196,11 @@ async def get_run(
             # energy, never added into them: these ran on different models and
             # possibly different providers, so their energy class and grid basis
             # are their own (services/emissions.overhead_call).
-            "overhead": run.overhead}
+            "overhead": run.overhead,
+            # The prose grounding check's verdict (engine/grounding.py):
+            # {checked, status, attempts, unsupported, first_unsupported}.
+            # Null for any run the check does not apply to.
+            "grounding": run.grounding}
 
 
 @router.get("/method-runs/{method_run_id}")

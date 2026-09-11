@@ -172,6 +172,10 @@ def _automatic_score(base: float, signals: TranscriptSignals, iterations: int, m
         # properly — here, to say anything at all.
         "empty_reply_nudge": PENALTY_TERMINAL_NUDGE if signals.empty_reply_nudged else 0.0,
         "output_budget_nudge": PENALTY_BUDGET_NUDGE if signals.output_budget_nudged else 0.0,
+        # Same failure class, and the same penalty schedule, as an unrecovered
+        # validation error: the model stated a number nothing in the run
+        # backs up, same as a terminal call whose repair budget ran out.
+        "grounding_nudges": _capped(signals.grounding_nudges, *PENALTY_UNRECOVERED_VALIDATION),
         "iteration_pressure": _iteration_penalty(iterations, max_iterations),
     }
     total = sum(penalties.values())

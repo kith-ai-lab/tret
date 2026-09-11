@@ -22,6 +22,44 @@ everything actually retrieved or computed this run — a value from neither door
 fails validation and is sent back for repair. (`tret/engine/validation.py`,
 `tret/services/methods.py`)
 
+Chat and freeform prose have no `cited_values` array — there is no schema for
+the cross-check to hold them to — so it used to hold them to nothing at all. A
+run could answer three turns running that "the retrieved record shows score
+58" while every `lookup_dataset` call that run made came back empty, and the
+transcript would look exactly like a run that had never invented anything.
+The grounding check (`tret/engine/grounding.py`) closes that gap in the loop
+itself, not after the fact: every number in a chat/freeform reply is checked
+against everything this run actually retrieved and everything said in the
+conversation, and a figure that traces to neither gets the reply sent back for
+a rewrite — the same in-loop repair discipline as a rejected `cited_values`
+entry, just without a schema to key it off. Two repairs, then the reply ships
+as the model wrote it, flagged `unresolved` rather than silently passed off as
+clean; the run's status is unaffected, but the flag is on the record and in
+the chat UI, because ending a run over one stubborn number would refuse
+delivery of everything else it got right.
+
+**What is exempt, honestly.** The check is number-level pattern matching, not
+a grader of reasoning, and it is deliberately lenient about the ways a number
+can honestly restate evidence rather than invent it: a small bare count under
+10 ("we checked 3 datasets") and a markdown list ordinal ("1. ", "2) ") are
+never treated as claimed figures at all; a reply may round a retrieved value
+("58" for a retrieved 58.37), state the equivalent percent or fraction of one
+("71%" for a retrieved 0.71, or the reverse), or do arithmetic — sum,
+difference, or mean — over two *other* numbers in the same reply that are
+themselves grounded, within half a unit of its own last decimal place, so
+"the combined score is 80" clears when the reply also states the two
+retrieved figures that sum to it. None of these chain: an arithmetic result
+cannot itself support a further arithmetic claim, so a run cannot bootstrap a
+tower of "derived" figures from one retrieved seed. An ISO-format date
+(`2026-09-11`) is not a claimed figure either — it is a timestamp, not three
+cited numbers — though a real figure elsewhere in the same reply is
+unaffected. And a run that never called a tool and never retrieved anything
+is not checked at all: a pure-knowledge chat answer has nothing retrieved to
+contradict, so `run.grounding` records `status: "skipped"` (`checked: False`)
+rather than either silently passing or flagging ordinary prose that was never
+meant to be grounded — distinct from `"clean"`, which means the check ran and
+found nothing wrong.
+
 **What this guarantees, precisely.** Method code is pinned two ways: each
 execution records the entrypoint's `code_sha`, and the pack's whole content
 hash is re-verified before the method runs, so a pack edited under a running

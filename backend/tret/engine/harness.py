@@ -102,9 +102,17 @@ from tret.services.outcomes import record_outcome
 from tret.services.transcript import (
     ENGINE_NUDGE_KEY,
     NUDGE_EMPTY_REPLY,
+    NUDGE_GROUNDING,
     NUDGE_OUTPUT_BUDGET,
     NUDGE_TERMINAL,
     REPEATED_CALL_KEY,
+)
+from tret.engine.grounding import (
+    GROUNDING_MAX_REPAIRS,
+    evidence_numbers,
+    grounding_nudge_message,
+    run_has_retrieval_evidence,
+    unsupported_numbers,
 )
 
 log = logging.getLogger("tret.harness")
@@ -1213,6 +1221,12 @@ class HarnessEngine:
             terminal_tool=task.get("terminal_tool"),
             delegation_depth=int(run.task_input.get(DELEGATION_DEPTH_KEY) or 0),
         )
+        # The grounding check (engine/grounding.py) only makes sense where a
+        # reply's prose *is* the output: a verdict task's numbers are already
+        # held to the cited-values cross-check (engine/validation.py) through
+        # its terminal tool's schema, and checking the free text around that
+        # too would flag reasoning prose that was never meant to be citable.
+        grounding_applies = run.task_type in GENERIC_TASK_TYPES and not ctx.terminal_tool
 
         # ── context budget ───────────────────────────────────────────────────
         # The chosen model's window is known only now, which is why the history
@@ -1296,6 +1310,26 @@ class HarnessEngine:
         total_usage = Usage()
         nudged = False
         budget_nudged = False
+        # How many times a reply failed the grounding check (engine/
+        # grounding.py), on a run where `grounding_applies`. Incremented
+        # whenever the check finds unsupported numbers, whether or not a nudge
+        # is actually sent for it — the attempt that meets
+        # `GROUNDING_MAX_REPAIRS`, or lands on the run's last iteration with
+        # no turn left for a rewrite, is kept rather than retried, so this can
+        # end at the budget (or below it) with one fewer nudge actually
+        # appended to the transcript. `grounding_first_unsupported` is set
+        # once, the first time this happens, for
+        # `run.grounding["first_unsupported"]`; `grounding_last_unsupported`
+        # is overwritten on every failure, so the loop-ended-some-other-way
+        # fallback below still has something to report even when the final
+        # failing turn never reaches the block that normally sets
+        # `run.grounding`.
+        grounding_failures = 0
+        grounding_first_unsupported: list[str] | None = None
+        grounding_last_unsupported: list[str] | None = None
+        # False until the loop evaluates its first not-tool-calls turn; see
+        # that turn's own comment for what this guards in the fallback below.
+        grounding_final_reply_blank = False
         seen_calls: dict[str, int] = {}  # repeated-identical-call breaker
         # Stall signals for the supervisor. Counted here rather than re-derived
         # from the transcript each iteration, because "in a row" is a property of
@@ -1778,6 +1812,14 @@ class HarnessEngine:
                     )
                     continue
                 final_text = "".join(assistant_text)
+                # Read by the end-of-loop fallback below, after this loop
+                # variable has gone out of scope in every sense but Python's
+                # own (a `for` body has no block scope) — it is what lets
+                # that fallback tell "this run's last turn was a blank reply,
+                # deliberately left unchecked" apart from "grounding was
+                # mid-repair when something else (cost cap, output budget, a
+                # provider error) cut the run off first".
+                grounding_final_reply_blank = not final_text.strip()
                 if not ctx.terminal_tool and not final_text.strip() and not nudged:
                     # A chat/freeform turn's answer *is* its text, and some
                     # models end a tool exchange with an empty completion. One
@@ -1796,6 +1838,84 @@ class HarnessEngine:
                         )
                     )
                     continue
+                # Guarded on `final_text.strip()` too: an empty reply's own
+                # guard above owns that path (either nudging once or ending
+                # `completed_without_output`), and there is nothing here for
+                # the grounding check to run against — an empty string has no
+                # numbers, so it would otherwise record a spurious "clean"
+                # (or, worse, a stale unsupported list from an EARLIER failed
+                # attempt this same run, if one preceded the empty replies)
+                # over a turn that never said anything at all.
+                if grounding_applies and final_text.strip():
+                    if not run_has_retrieval_evidence(messages, ctx.retrieved_values):
+                        # No tool ever ran this run and nothing was retrieved
+                        # — a pure-knowledge answer has no retrieved data to
+                        # contradict, so the check does not run at all rather
+                        # than flagging ordinary prose against an empty
+                        # evidence set. `checked: False` is what lets an
+                        # operator (and the chat UI) tell "not checked" apart
+                        # from "checked and found nothing wrong".
+                        run.grounding = {
+                            "checked": False,
+                            "status": "skipped",
+                            "attempts": 0,
+                            "unsupported": [],
+                            "first_unsupported": [],
+                        }
+                    else:
+                        # `messages` already carries this turn's own assistant
+                        # message (appended above, before tool_calls was even
+                        # known to be empty) as its last entry — `evidence_
+                        # numbers` excludes exactly that entry, so the reply
+                        # is never checked against itself.
+                        unsupported = unsupported_numbers(
+                            final_text,
+                            evidence_numbers(
+                                system=system,
+                                messages=messages,
+                                task_input=run.task_input,
+                                retrieved=ctx.retrieved_values,
+                            ),
+                        )
+                        if unsupported:
+                            if grounding_first_unsupported is None:
+                                grounding_first_unsupported = unsupported
+                            grounding_last_unsupported = unsupported
+                            grounding_failures += 1
+                            # Never spend the LAST iteration on a nudge: there
+                            # is no further turn left for the rewrite it would
+                            # ask for, so appending one here would just ship
+                            # the reply unresolved anyway, one wasted turn
+                            # later, via the max-iterations path instead of
+                            # this one — worse, not better, since that path
+                            # ends the run `failed` over a repair it was never
+                            # given room to make. Finish normally instead.
+                            if (
+                                grounding_failures < GROUNDING_MAX_REPAIRS
+                                and iteration < max_iterations
+                            ):
+                                messages.append(
+                                    Msg(
+                                        role="user",
+                                        content=grounding_nudge_message(unsupported),
+                                        meta={
+                                            ENGINE_NUDGE_KEY: NUDGE_GROUNDING,
+                                            "unsupported": unsupported,
+                                        },
+                                    )
+                                )
+                                continue
+                        run.grounding = {
+                            "checked": True,
+                            "status": (
+                                "clean"
+                                if grounding_failures == 0
+                                else ("unresolved" if unsupported else "repaired")
+                            ),
+                            "attempts": grounding_failures,
+                            "unsupported": unsupported,
+                            "first_unsupported": grounding_first_unsupported or [],
+                        }
                 run.status = self._final_status(ctx, final_text)
                 break
 
@@ -1991,6 +2111,7 @@ class HarnessEngine:
                     context_limit=context_limit,
                     compaction_exhausted=compaction_exhausted,
                     consecutive_terminal_failures=consecutive_terminal_failures,
+                    grounding_nudges=grounding_failures,
                     repeated_call_trips=repeated_call_trips,
                     terminal_recorded=ctx.terminal_recorded,
                     findings_created=findings_total,
@@ -2160,6 +2281,33 @@ class HarnessEngine:
             # deserves a `model_timeline` that agrees with `energy_accounting`
             # too, not just the multi-segment case.
             run.model_timeline = [seg.to_json() for seg in segments]
+
+        # `run.grounding` is normally set inside the loop, on the turn whose
+        # reply finally goes unchallenged (engine/grounding.py "the reply
+        # being checked itself" block above). If the loop instead ended some
+        # other way — the iteration cap, an output-budget or cost-cap stop,
+        # a provider error — after at least one grounding failure, that block
+        # never ran and the failure would otherwise vanish from the record
+        # entirely. Recover it here, minimally, as unresolved.
+        #
+        # `not grounding_final_reply_blank` excludes exactly the one case
+        # that block itself declines to handle on purpose: the run's last
+        # turn was an empty reply, whose own guard (`_final_status`) already
+        # owns the run's status and leaves `run.grounding` deliberately unset
+        # rather than backfilling a verdict over a turn that said nothing.
+        if (
+            grounding_applies
+            and run.grounding is None
+            and grounding_failures > 0
+            and not grounding_final_reply_blank
+        ):
+            run.grounding = {
+                "checked": True,
+                "status": "unresolved",
+                "attempts": grounding_failures,
+                "unsupported": grounding_last_unsupported or [],
+                "first_unsupported": grounding_first_unsupported or [],
+            }
 
         # ── finish ───────────────────────────────────────────────────────────
         if run.status == "running":

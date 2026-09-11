@@ -219,6 +219,22 @@ def test_assistant_message_preserves_null_not_zero_when_unestimated():
     assert message["routing"] is None
 
 
+def test_assistant_message_carries_grounding():
+    # Null when the engine never checked (the common case, and every run
+    # before this column existed).
+    assert _assistant_message(_run())["grounding"] is None
+
+    verdict = {
+        "checked": True,
+        "status": "repaired",
+        "attempts": 1,
+        "unsupported": [],
+        "first_unsupported": ["58", "2021"],
+    }
+    run = _run(grounding=verdict)
+    assert _assistant_message(run)["grounding"] == verdict
+
+
 def test_assistant_message_reports_failure_status_and_error_as_content():
     run = _run(status="failed", error="boom", messages=[])
     message = _assistant_message(run)
