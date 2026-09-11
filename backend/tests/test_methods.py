@@ -76,3 +76,86 @@ def test_ghg_inventory_is_deterministic():
     a = run_script("ghg_inventory.py", {}, {"carbon_workbook": WORKBOOK})
     b = run_script("ghg_inventory.py", {}, {"carbon_workbook": WORKBOOK})
     assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+# ── D5: scope1_mobile is diesel or gasoline, not one flat factor ────────────
+
+MOBILE_WORKBOOK = [
+    {"record_id": "CW-002", "facility": "Alder Point", "category": "scope1_mobile",
+     "activity": "diesel fleet", "quantity": "38200", "unit": "gallons",
+     "data_source": "fuel card statements", "notes": "Complete"},
+    {"record_id": "CW-011", "facility": "Alder Point", "category": "scope1_mobile",
+     "activity": "sales fleet gasoline", "quantity": "1200", "unit": "gallons",
+     "data_source": "fuel card statements", "notes": "Complete"},
+    {"record_id": "CW-012", "facility": "Willow Bend", "category": "scope1_mobile",
+     "activity": "petrol vans", "quantity": "800", "unit": "gallons",
+     "data_source": "fuel card statements", "notes": "Complete"},
+    {"record_id": "CW-013", "facility": "Cedar Landing", "category": "scope1_mobile",
+     "activity": "forklifts", "quantity": "500", "unit": "gallons",
+     "data_source": "fuel logs", "notes": "Fuel type not recorded on the invoice"},
+]
+
+
+def test_ghg_inventory_mobile_fuel_is_matched_from_activity_and_notes():
+    rows = run_script("ghg_inventory.py", {}, {"carbon_workbook": MOBILE_WORKBOOK})
+    by_id = {r["record_id"]: r for r in rows if r["record_id"] != "TOTAL"}
+
+    diesel = by_id["CW-002"]
+    assert diesel["fuel"] == "diesel"
+    assert diesel["factor_basis"] == "diesel"
+    assert diesel["factor_tco2e_per_unit"] == 0.01021
+    assert diesel["emissions_tco2e"] == 390.02  # 38200 * 0.01021
+
+    gasoline = by_id["CW-011"]
+    assert gasoline["fuel"] == "gasoline"
+    assert gasoline["factor_basis"] == "gasoline"
+    assert gasoline["factor_tco2e_per_unit"] == 0.00878
+    assert gasoline["emissions_tco2e"] == 10.54  # 1200 * 0.00878
+
+    petrol = by_id["CW-012"]  # "petrol" matches gasoline too
+    assert petrol["fuel"] == "gasoline"
+    assert petrol["factor_tco2e_per_unit"] == 0.00878
+
+    defaulted = by_id["CW-013"]  # neither word present -> diesel, flagged as defaulted
+    assert defaulted["fuel"] == "diesel"
+    assert defaulted["factor_basis"] == "diesel (default)"
+    assert defaulted["factor_tco2e_per_unit"] == 0.01021
+
+
+def test_ghg_inventory_a_gasoline_record_is_not_over_counted_at_the_diesel_rate():
+    """The bug this fix closes: keying scope1_mobile on the diesel factor
+    alone over-counted a gasoline record by about 16% (0.01021 vs 0.00878)."""
+    rows = run_script("ghg_inventory.py", {}, {"carbon_workbook": MOBILE_WORKBOOK})
+    gasoline = next(r for r in rows if r["record_id"] == "CW-011")
+    at_the_diesel_rate = round(1200 * 0.01021, 2)
+    assert gasoline["emissions_tco2e"] < at_the_diesel_rate
+    assert gasoline["emissions_tco2e"] == round(1200 * 0.00878, 2)
+
+
+def test_ghg_inventory_non_mobile_rows_carry_no_fuel_or_basis():
+    """`fuel`/`factor_basis` are new fields on every row (schema
+    consistency) but only scope1_mobile ever populates them."""
+    rows = run_script("ghg_inventory.py", {}, {"carbon_workbook": WORKBOOK})
+    stationary = next(r for r in rows if r["record_id"] == "CW-001")
+    assert stationary["fuel"] is None
+    assert stationary["factor_basis"] is None
+
+
+def test_ghg_inventory_totals_are_unchanged_for_the_existing_all_diesel_sample_data():
+    """D5's fix must not move the numbers this pack's shipped sample data
+    (packs/climate-risk/sample-data/evidence/acme-carbon-workbook.csv) has
+    always produced — every one of its scope1_mobile rows is diesel."""
+    diesel_only = WORKBOOK + [
+        {"record_id": "CW-002", "facility": "Alder Point", "category": "scope1_mobile",
+         "activity": "diesel fleet", "quantity": "38200", "unit": "gallons",
+         "data_source": "fuel card statements", "notes": "Complete"},
+        {"record_id": "CW-005", "facility": "Cedar Landing", "category": "scope1_mobile",
+         "activity": "yard tractors diesel", "quantity": "9100", "unit": "gallons",
+         "data_source": "fuel card statements", "notes": "Complete"},
+    ]
+    rows = run_script("ghg_inventory.py", {}, {"carbon_workbook": diesel_only})
+    s1 = next(r for r in rows if r["category"] == "scope1_total")
+    # 531.0 (stationary, unchanged) + 38200*0.01021 + 9100*0.01021, at the
+    # same per-record rounding main() has always used.
+    expected = 531.0 + round(38200 * 0.01021, 2) + round(9100 * 0.01021, 2)
+    assert s1["emissions_tco2e"] == round(expected, 2)

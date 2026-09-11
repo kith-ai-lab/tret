@@ -178,19 +178,59 @@ def _apply_context_fit(
     }
 
 
+def _apply_cooldown(
+    candidates: list[ModelInfo], cooldown: list[dict]
+) -> tuple[list[ModelInfo], list[dict], str]:
+    """Drop candidates the model-level circuit breaker flagged
+    (`router_llm.priors.OutcomePriors.cooldown_for`), unless doing so would
+    leave nothing to route to.
+
+    Returns `(surviving candidates, cooldown records actually enforced,
+    reasoning suffix)`. The third element is `""` unless the guard fired — in
+    which case it is appended to whatever `reasoning` the caller ends up
+    recording, so "why is this known-bad model still a candidate" has an
+    answer on the decision itself rather than only in a log line. When the
+    guard fires, the enforced-records list is `[]` too: nothing was actually
+    excluded, so `evidence.cooldown` should not claim otherwise.
+    """
+    if not cooldown:
+        return candidates, [], ""
+    excluded_ids = {c["model"] for c in cooldown}
+    survivors = [m for m in candidates if m.id not in excluded_ids]
+    if survivors:
+        return survivors, cooldown, ""
+    note = (
+        " Cooldown ignored: excluding "
+        + ", ".join(sorted(excluded_ids))
+        + " (repeated provider errors) would leave no candidates."
+    )
+    return candidates, [], note
+
+
 def _evidence_snapshot(
-    priors: dict[str, ModelPrior], candidate_ids: list[str], est_input_tokens: int
+    priors: dict[str, ModelPrior],
+    candidate_ids: list[str],
+    est_input_tokens: int,
+    cooldown: list[dict] | None = None,
 ) -> dict | None:
-    """What this decision knew, frozen onto it. None when it knew nothing.
+    """What this decision knew, frozen onto it. None when it knew nothing —
+    neither a prior nor a cooldown record.
 
     Only the candidates actually considered are included: a decision's evidence
     should describe the choice that was made, and priors for models the policy
     excluded are not part of it. `demoted` and `unrecorded` are called out by
     name because they are the two things an operator asks about first — why a
     model was passed over, and which models had no say.
+
+    `cooldown` — the model-level circuit breaker's own findings
+    (`router_llm.priors.OutcomePriors.cooldown_for`, applied by
+    `_apply_cooldown` before this is called) — is independent of `priors`: it
+    can be non-empty on a decision with no quality evidence at all (a fresh
+    install whose only history is a broken endpoint failing fast), so it is
+    what keeps this from returning `None` in that case.
     """
     shown = {mid: p for mid, p in priors.items() if mid in candidate_ids}
-    if not shown:
+    if not shown and not cooldown:
         return None
     return {
         "version": PRIORS_VERSION,
@@ -203,6 +243,7 @@ def _evidence_snapshot(
             mid for mid, p in shown.items() if evidence_tier(p) == TIER_PROVEN
         ),
         "unrecorded": sorted(mid for mid in candidate_ids if mid not in shown),
+        "cooldown": cooldown or [],
     }
 
 
@@ -472,6 +513,18 @@ class ModelRouter:
             )
         return self._candidates(model_policy, priors), priors
 
+    async def _cooldown_for(self, candidate_ids: list[str]) -> list[dict]:
+        """`self._priors.cooldown_for(...)`, tolerant of a `PriorsProvider`
+        that predates the method — a test double implementing only `for_key`/
+        `invalidate` reads as "no cooldown evidence", the same "evidence is
+        optional, never a dependency" contract `NoPriors` already gives every
+        other caller of `self._priors` in this class.
+        """
+        cooldown_fn = getattr(self._priors, "cooldown_for", None)
+        if cooldown_fn is None:
+            return []
+        return await cooldown_fn(candidate_ids)
+
     def _resolve_router_model(self, max_tier: str) -> ModelInfo | None:
         """Which model performs the routing decision, or None to skip the LLM step.
 
@@ -740,24 +793,49 @@ class ModelRouter:
             raise RoutingUnavailable(
                 "No candidate models: check provider API keys and the harness model policy."
             )
+
+        # 1.4. Model-level circuit breaker: a model whose endpoint has just
+        # started rejecting every request is excluded from candidates for
+        # every shape and objective, not only the (task_shape, objective,
+        # size_band) key `priors` above is scoped to — see `_apply_cooldown`
+        # and `router_llm.priors.OutcomePriors.cooldown_for`. Applied before
+        # the single-candidate and exploration checks below so a two-candidate
+        # list with one cooling down correctly collapses to the survivor,
+        # and a cooled-down sole candidate is still protected by
+        # `_apply_cooldown`'s own never-empty-the-list guarantee.
+        cooldown_note = ""
+        cooldown_records: list[dict] = []
+        if get_settings().router_cooldown_minutes > 0:
+            raw_cooldown = await self._cooldown_for([m.id for m in candidates])
+            if raw_cooldown:
+                candidates, cooldown_records, cooldown_note = _apply_cooldown(
+                    candidates, raw_cooldown
+                )
+
         if len(candidates) == 1:
             return RoutingDecision(
                 router_model=None,
                 routing_prompt_version=ROUTING_PROMPT_VERSION,
                 candidates=[candidates[0].id],
                 chosen_model=candidates[0].id,
-                reasoning="Only one candidate model available.",
+                reasoning=f"Only one candidate model available.{cooldown_note}",
                 objective=objective,
                 task_shape=task_shape,
                 max_cost_tier=max_tier,
-                evidence=_evidence_snapshot(priors, [candidates[0].id], est_input_tokens),
+                evidence=_evidence_snapshot(
+                    priors, [candidates[0].id], est_input_tokens, cooldown_records
+                ),
                 provider_ignore=_provider_ignore_for(priors, candidates[0].id),
                 context_fit=context_fit,
                 fallback_used=False,
-                effort=default_effort(objective, task_shape),
+                effort=default_effort(objective, task_shape, candidates[0].cost_tier),
             )
 
         candidate_ids = [m.id for m in candidates]
+        # For `default_effort`'s verdict-shape tier lookup below — the LLM
+        # router answers with an id, not a `ModelInfo`, and `default_effort`
+        # needs that model's own `cost_tier`, not the harness ceiling.
+        candidates_by_id = {m.id: m for m in candidates}
 
         # 1.5. Bounded exploration: spend a rare, cheap coin flip on an untried
         # model instead of asking the router, so a model with no track record
@@ -789,15 +867,18 @@ class ModelRouter:
                     f"was picked directly at probability {exploration['probability']:.2f} "
                     "under the harness's exploration tier — no router call was made, so "
                     "this decision spent no router overhead."
+                    f"{cooldown_note}"
                 ),
                 objective=objective,
                 task_shape=task_shape,
                 max_cost_tier=max_tier,
-                evidence=_evidence_snapshot(priors, candidate_ids, est_input_tokens),
+                evidence=_evidence_snapshot(
+                    priors, candidate_ids, est_input_tokens, cooldown_records
+                ),
                 provider_ignore=_provider_ignore_for(priors, exploration_pick.id),
                 context_fit=context_fit,
                 fallback_used=False,
-                effort=default_effort(objective, task_shape),
+                effort=default_effort(objective, task_shape, exploration_pick.cost_tier),
                 exploration=exploration,
             )
 
@@ -869,11 +950,15 @@ class ModelRouter:
                         # told to assume by default, not an unrelated guess.
                         # Under the thrift objectives the default is also a
                         # hard ceiling: `default_effort` already returns
-                        # "low" for both, so a router that named anything
-                        # else there ignored the EFFORT section's explicit
-                        # "never exceed the default" rule, and this is the
-                        # enforcement of that rule rather than a suggestion.
-                        default = default_effort(objective, task_shape)
+                        # "low" for both (outside the verdict shape's own
+                        # tier table — see its docstring), so a router that
+                        # named anything higher there ignored the EFFORT
+                        # section's explicit "never exceed the default" rule,
+                        # and this is the enforcement of that rule rather
+                        # than a suggestion.
+                        default = default_effort(
+                            objective, task_shape, candidates_by_id[chosen].cost_tier
+                        )
                         chosen_effort = result.get("effort")
                         if chosen_effort not in EFFORT_LEVELS:
                             chosen_effort = default
@@ -888,13 +973,13 @@ class ModelRouter:
                             routing_prompt_version=ROUTING_PROMPT_VERSION,
                             candidates=candidate_ids,
                             chosen_model=chosen,
-                            reasoning=str(result.get("reasoning", ""))[:600],
+                            reasoning=str(result.get("reasoning", ""))[:600] + cooldown_note,
                             confidence=result.get("confidence"),
                             objective=objective,
                             task_shape=task_shape,
                             max_cost_tier=max_tier,
                             evidence=_evidence_snapshot(
-                                priors, candidate_ids, est_input_tokens
+                                priors, candidate_ids, est_input_tokens, cooldown_records
                             ),
                             provider_ignore=_provider_ignore_for(priors, chosen),
                             context_fit=context_fit,
@@ -922,6 +1007,7 @@ class ModelRouter:
             max_cost_tier=max_tier,
             priors=priors,
             min_context_window=min_context_window,
+            exclude={c["model"] for c in cooldown_records} or None,
         )
         if chosen is None:
             raise RoutingUnavailable(
@@ -946,11 +1032,14 @@ class ModelRouter:
             reasoning=(
                 f"{why}; deterministic fallback for shape '{task_shape}' under "
                 f"objective '{objective}' with cost ceiling '{max_tier}'."
+                f"{cooldown_note}"
             ),
             objective=objective,
             task_shape=task_shape,
             max_cost_tier=max_tier,
-            evidence=_evidence_snapshot(priors, candidate_ids, est_input_tokens),
+            evidence=_evidence_snapshot(
+                priors, candidate_ids, est_input_tokens, cooldown_records
+            ),
             provider_ignore=_provider_ignore_for(priors, chosen),
             context_fit=context_fit,
             # Kept on the fallback path too, and this is where it earns its
@@ -961,7 +1050,12 @@ class ModelRouter:
             router_prompt=prompt,
             router_prompt_sha256=prompt_fingerprint,
             fallback_used=True,
-            effort=default_effort(objective, task_shape),
+            # `fallback_model` picks from its own catalog scan, not from
+            # `candidates` (see that function's docstring), so the chosen
+            # model's tier is looked up fresh rather than through
+            # `candidates_by_id`, which may not have it. `chosen` always came
+            # from the catalog itself, so this lookup cannot miss.
+            effort=default_effort(objective, task_shape, self._catalog.get(chosen).cost_tier),
             exploration=exploration,
         )
 
@@ -1056,5 +1150,5 @@ class ModelRouter:
             max_cost_tier=max_cost_tier,
             context_fit=context_fit,
             override=kind,
-            effort=default_effort(objective, task_shape),
+            effort=default_effort(objective, task_shape, info.cost_tier),
         )

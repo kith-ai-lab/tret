@@ -14,6 +14,7 @@ import pytest
 
 from tret.db.models import RunOutcome
 from tret.router_llm.priors import (
+    COOLDOWN_TRIP_COUNT,
     HALF_LIFE_DAYS,
     MIN_EFFECTIVE_SAMPLES,
     OFF_BAND_WEIGHT,
@@ -267,3 +268,205 @@ def test_a_capacity_handoff_is_not_counted_at_all():
 
 def test_a_model_seen_only_in_capacity_handoffs_has_no_prior():
     assert summarize(_many("m/small", 0.0, 40, outcome_class="handed_off_capacity"), now=NOW) == {}
+
+
+# ── model-level circuit breaker (2026-09-11) ─────────────────────────────────
+# gpt-5.6-luna was demoted by priors for chat shapes but kept getting chosen
+# for extraction and verdict runs and failing there too — priors are keyed
+# per (task_shape, objective, size_band), so a model whose *endpoint* rejects
+# every request never demotes itself outside the one key it happened to fail
+# on. `OutcomePriors.cooldown_for` answers a shape/objective-free question
+# instead, from the model's most recent runs alone.
+def _cooldown_row(
+    model_id: str,
+    *,
+    minutes_ago: float = 5.0,
+    outcome_class: str = "failed",
+    iterations: int = 0,
+    error_kind: str | None = "provider_error",
+    provider: str = "openrouter",
+) -> RunOutcome:
+    return RunOutcome(
+        task_shape="verdict",
+        objective="balanced",
+        max_cost_tier="premium",
+        task_type="assess",
+        size_band="m",
+        model_id=model_id,
+        provider=provider,
+        outcome_class=outcome_class,
+        quality_score=Decimal("0"),
+        score_version="outcome-v1",
+        error_kind=error_kind,
+        components={},
+        iterations=iterations,
+        cost_usd=Decimal("0"),
+        input_tokens=0,
+        output_tokens=0,
+        energy_wh=None,
+        duration_ms=0,
+        findings_created=0,
+        findings_approved=0,
+        findings_rejected=0,
+        observed_at=NOW - timedelta(minutes=minutes_ago),
+    )
+
+
+class _ScriptedCooldownPriors(OutcomePriors):
+    """Overrides `_cooldown_rows` to return hand-built rows instead of
+    querying a real database — same pattern `_Exploding`/`_Counting` above
+    use for `_rows`. Also records every `since` cutoff it was asked to
+    query with, so a test can confirm the query is skipped entirely when it
+    should be."""
+
+    def __init__(self, rows: list[RunOutcome], **kw):
+        super().__init__(session_factory=object(), now=lambda: NOW, **kw)
+        self._scripted_rows = rows
+        self.queried_since: list = []
+
+    async def _cooldown_rows(self, candidate_ids, since):
+        self.queried_since.append(since)
+        return [r for r in self._scripted_rows if r.model_id in candidate_ids]
+
+
+assert COOLDOWN_TRIP_COUNT == 2  # every test below assumes exactly two
+
+
+@pytest.mark.asyncio
+async def test_two_provider_errors_at_iteration_0_trip_the_breaker():
+    rows = [_cooldown_row("m/bad", minutes_ago=1), _cooldown_row("m/bad", minutes_ago=2)]
+    priors = _ScriptedCooldownPriors(rows, cooldown_minutes=30)
+    cooldown = await priors.cooldown_for(["m/bad"])
+    assert len(cooldown) == 1
+    entry = cooldown[0]
+    assert entry["model"] == "m/bad"
+    assert "provider error" in entry["reason"]
+    assert "iteration 0" in entry["reason"]
+    # `until` is the *older* of the two failures plus the cooldown window —
+    # when this cooldown actually lifts on its own, evidence permitting, not
+    # simply "now plus 30 minutes".
+    assert entry["until"] == (NOW - timedelta(minutes=2) + timedelta(minutes=30)).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_single_failure_does_not_trip_the_breaker():
+    # One bad request is not yet a pattern.
+    rows = [_cooldown_row("m/bad", minutes_ago=1)]
+    priors = _ScriptedCooldownPriors(rows, cooldown_minutes=30)
+    assert await priors.cooldown_for(["m/bad"]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_delivered_run_between_two_failures_does_not_trip_it():
+    """The model's most recent two runs are what matters — [failed, delivered,
+    failed] has a success between the failures and must not trip the breaker,
+    which a query pre-filtered to `outcome_class == 'failed'` alone could not
+    tell apart from two failures back to back."""
+    rows = [
+        _cooldown_row("m/bad", minutes_ago=1),
+        _cooldown_row("m/bad", minutes_ago=2, outcome_class="delivered", error_kind=None),
+        _cooldown_row("m/bad", minutes_ago=3),
+    ]
+    priors = _ScriptedCooldownPriors(rows, cooldown_minutes=30)
+    assert await priors.cooldown_for(["m/bad"]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_non_zero_iteration_failure_does_not_count():
+    # A failure well into a run is not the fast, wire-level rejection this
+    # breaker exists to catch.
+    rows = [
+        _cooldown_row("m/bad", minutes_ago=1, iterations=3),
+        _cooldown_row("m/bad", minutes_ago=2, iterations=0),
+    ]
+    priors = _ScriptedCooldownPriors(rows, cooldown_minutes=30)
+    assert await priors.cooldown_for(["m/bad"]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_non_provider_error_does_not_count():
+    rows = [
+        _cooldown_row("m/bad", minutes_ago=1, error_kind="output_budget_exceeded"),
+        _cooldown_row("m/bad", minutes_ago=2, error_kind="output_budget_exceeded"),
+    ]
+    priors = _ScriptedCooldownPriors(rows, cooldown_minutes=30)
+    assert await priors.cooldown_for(["m/bad"]) == []
+
+
+@pytest.mark.asyncio
+async def test_a_provider_outside_scope_does_not_count():
+    # Scoped to openrouter/anthropic (the 2026-09-11 incident and Anthropic's
+    # own transient failures) — a single self-hosted upstream like Kimi is a
+    # different signal.
+    rows = [
+        _cooldown_row("m/bad", minutes_ago=1, provider="kimi"),
+        _cooldown_row("m/bad", minutes_ago=2, provider="kimi"),
+    ]
+    priors = _ScriptedCooldownPriors(rows, cooldown_minutes=30)
+    assert await priors.cooldown_for(["m/bad"]) == []
+
+
+@pytest.mark.asyncio
+async def test_only_qualifying_models_are_flagged_sorted_by_model_id():
+    rows = [
+        _cooldown_row("m/z", minutes_ago=1),
+        _cooldown_row("m/z", minutes_ago=2),
+        _cooldown_row("m/a", minutes_ago=1),
+        _cooldown_row("m/a", minutes_ago=2),
+        _cooldown_row("m/fine", minutes_ago=1, outcome_class="delivered", error_kind=None),
+    ]
+    priors = _ScriptedCooldownPriors(rows, cooldown_minutes=30)
+    cooldown = await priors.cooldown_for(["m/z", "m/a", "m/fine"])
+    assert [c["model"] for c in cooldown] == ["m/a", "m/z"]
+
+
+@pytest.mark.asyncio
+async def test_cooldown_disabled_returns_nothing_without_querying():
+    priors = _ScriptedCooldownPriors(
+        [_cooldown_row("m/bad", minutes_ago=1), _cooldown_row("m/bad", minutes_ago=2)],
+        cooldown_minutes=0,
+    )
+    assert await priors.cooldown_for(["m/bad"]) == []
+    assert priors.queried_since == []  # the query is skipped entirely, not just filtered
+
+
+@pytest.mark.asyncio
+async def test_no_candidates_returns_nothing_without_querying():
+    priors = _ScriptedCooldownPriors([], cooldown_minutes=30)
+    assert await priors.cooldown_for([]) == []
+    assert priors.queried_since == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_cooldown_query_degrades_to_no_evidence():
+    # Same contract as `for_key`: a safety net must never become a dependency.
+    class _Exploding(OutcomePriors):
+        async def _cooldown_rows(self, candidate_ids, since):
+            raise RuntimeError('relation "run_outcomes" does not exist')
+
+    priors = _Exploding(session_factory=object(), now=lambda: NOW, cooldown_minutes=30)
+    assert await priors.cooldown_for(["m/bad"]) == []
+
+
+@pytest.mark.asyncio
+async def test_cooldown_minutes_reads_settings_when_not_pinned(monkeypatch):
+    import tret.config as config_module
+
+    calls = []
+
+    class _Settings:
+        router_cooldown_minutes = 0  # disabled via "settings"
+
+    monkeypatch.setattr(config_module, "get_settings", lambda: _Settings())
+
+    class _Counting(OutcomePriors):
+        async def _cooldown_rows(self, candidate_ids, since):
+            calls.append(since)
+            return []
+
+    # No `cooldown_minutes` passed to the constructor: reads the settings
+    # value fresh on every call, same as `TRET_ROUTER_COOLDOWN_MINUTES` does
+    # for every other caller.
+    priors = _Counting(session_factory=object(), now=lambda: NOW)
+    assert await priors.cooldown_for(["m/bad"]) == []
+    assert calls == []  # the settings value (0) disabled it before any query

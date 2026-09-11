@@ -21,6 +21,37 @@ from tret.services.emissions import energy_wh_field
 from tret.services.html_sanitize import render_markdown
 
 
+def strip_draft_status_banner(markdown: str | None) -> str | None:
+    """Drop a leading "Draft status" paragraph — bold (`**Draft status:** ...`)
+    or plain — up to the first blank line.
+
+    Models drafting a `draft_section` finding sometimes open with exactly this
+    boilerplate ("This section is a draft awaiting review by a named human
+    reviewer..."). It is true while the finding is a draft and stale the
+    moment it is approved, so it must never ship in an export or an
+    approved-only render. Called both at approval time (`api/findings.py`)
+    and again here at assembly, defensively, for any section approved before
+    that stripping existed.
+    """
+    if not markdown:
+        return markdown
+    stripped = markdown.lstrip()
+    first_para, sep, rest = stripped.partition("\n\n")
+    probe = first_para.strip().lstrip("*").strip().lower()
+    if not probe.startswith("draft status"):
+        return markdown
+    if sep and rest.strip():
+        # Banner paragraph, blank line, body: drop the whole paragraph.
+        return rest.lstrip("\n")
+    # No blank line: the banner and the body share a paragraph. Only the
+    # first line is safely attributable to the banner, so drop just that —
+    # and never return an empty body, whatever the banner looks like.
+    first_line, nl, tail = stripped.partition("\n")
+    if nl and tail.strip():
+        return tail.lstrip("\n")
+    return markdown
+
+
 async def assemble_deliverable(
     db: AsyncSession, project_id: uuid.UUID, deliverable_slug: str, include_draft: bool = False
 ) -> dict:
@@ -59,7 +90,7 @@ async def assemble_deliverable(
     for slug, f in sections.items():
         title = slug.replace("_", " ").title()
         parts.append(f"\n---\n\n## {title}\n")
-        body = f.payload.get("markdown", "").lstrip()
+        body = strip_draft_status_banner(f.payload.get("markdown", "") or "").lstrip()
         # Models often open with their own section heading — drop it if it
         # duplicates the title we just added.
         first_line, _, rest = body.partition("\n")

@@ -97,7 +97,12 @@ client id/secret set, the feature is simply absent from the UI.
   the Google Picker to select files, SharePoint/OneDrive opens a
   browser over the connected account's sites and drives. Selected
   files are downloaded server-side with the connection's token and fed
-  through the same ingestion path as a manual upload.
+  through the same ingestion path as a manual upload. Each item that
+  reaches the provider — imported fresh or not — logs one row to the
+  [activity log](#the-activity-log). Re-importing an item already
+  present in the project (same file content, same picked item) does
+  not create a second document: the response returns the existing one
+  with `"deduplicated": true` on that item.
 - **Disconnect**: Settings → Connections → Disconnect (admin only,
   confirms first). The stored refresh token is deleted; for Google,
   tret also best-effort revokes it at Google's revoke endpoint. For
@@ -249,9 +254,10 @@ is affected.
 
 ### The activity log
 
-Every connections action — a search, a file read, a write-back upload
-(and its failure), a connect, a disconnect, or an admin changing the
-read/write allowlists — is recorded to a per-workspace activity log,
+Every connections action — a search, a file read, an import, a
+write-back upload (and its failure), a connect, a disconnect, or an
+admin changing the read/write allowlists — is recorded to a
+per-workspace activity log,
 newest first: `GET /api/connections/activity` (workspace admins only).
 Each row carries the provider, the action, who (or which run) did it
 when known, what it touched, and how many bytes moved — enough to

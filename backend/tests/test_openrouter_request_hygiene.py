@@ -33,19 +33,33 @@ from __future__ import annotations
 import json
 import logging
 
+import anthropic
 import httpx
 import pytest
 
 from tret.config import Settings
 from tret.providers import openai_compat
+from tret.providers import anthropic as anthropic_provider_module
 from tret.providers.anthropic import AnthropicProvider
-from tret.providers.base import Msg, ToolCall, ToolSpec
+from tret.providers.base import (
+    Msg,
+    ProviderError,
+    TextDelta,
+    ToolCall,
+    ToolSpec,
+    TurnComplete,
+)
 from tret.providers.openai_compat import (
     KimiProvider,
     OpenRouterProvider,
     _choose_base_slug,
     _served_by_from_openai,
 )
+
+
+async def _instant_sleep(_seconds):
+    """Stands in for `asyncio.sleep` in retry tests — the retry policy itself
+    (`providers.base.RETRY_DELAY_SECONDS`) is not what these tests check."""
 
 
 @pytest.fixture(autouse=True)
@@ -935,3 +949,433 @@ async def test_anthropic_stream_passes_output_config_effort_when_given(monkeypat
 async def test_anthropic_stream_omits_output_config_when_effort_is_none(monkeypatch):
     _, kwargs = await _run_anthropic_stream(monkeypatch, effort=None)
     assert "output_config" not in kwargs
+
+
+# ── 6. transient upstream retry (2026-09-11) ────────────────────────────────
+# Over ~330 cloud runs, three Google AI Studio 503s relayed through OpenRouter
+# and one OpenRouter HTML error page (a Cloudflare template, stored verbatim
+# as `run.error`) each failed a run outright. `OpenAICompatProvider.stream`/
+# `complete_json` (and `AnthropicProvider`'s, for the same signal — 529 is
+# Anthropic's own "overloaded" status) now retry once on a transient failure,
+# and summarize an HTML error body instead of storing the page source.
+class _FakeStreamResponse:
+    """One scripted response for `_SequencedStreamClient`: either a
+    successful SSE stream (`lines`) or an error (`status_code` + `body`)."""
+
+    def __init__(self, *, status_code=200, lines=None, body=b"", headers=None):
+        self.status_code = status_code
+        self._lines = lines or []
+        self._body = body
+        self.headers = headers or {}
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+    async def aread(self):
+        return self._body
+
+
+class _SequencedStreamClient:
+    """Like `_FakeStreamClient` above, but scripts a *sequence* of responses
+    — one per call to `.stream()` — so a retry test can see attempt 1 fail
+    and attempt 2 succeed. The last response repeats once the script is
+    exhausted, so a test need not script more attempts than it cares about."""
+
+    def __init__(self, responses: list[_FakeStreamResponse]):
+        self._responses = list(responses)
+        self.call_count = 0
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def stream(self, method, url, headers=None, json=None):
+        response = self._responses[min(self.call_count, len(self._responses) - 1)]
+        self.call_count += 1
+        return _FakeStreamCtx(response)
+
+    async def get(self, url, headers=None):
+        return _FakeEndpointsResponse({})
+
+
+async def _run_stream_sequence(monkeypatch, provider, responses):
+    client = _SequencedStreamClient(responses)
+    monkeypatch.setattr(openai_compat.httpx, "AsyncClient", client)
+    monkeypatch.setattr(openai_compat.asyncio, "sleep", _instant_sleep)
+    events = []
+    async for event in provider.stream(
+        model="m",
+        system="doctrine",
+        messages=[Msg(role="user", content="hi")],
+        tools=[],
+        max_tokens=64,
+        temperature=0.0,
+    ):
+        events.append(event)
+    return events, client
+
+
+_HTML_502 = (
+    b"<!DOCTYPE html><html><head><title>Bad Gateway</title></head>"
+    b"<body>502 Bad Gateway</body></html>"
+)
+
+
+async def test_stream_503_then_200_succeeds_with_one_retry(monkeypatch):
+    responses = [
+        _FakeStreamResponse(status_code=503, body=b'{"error":"overloaded"}'),
+        _FakeStreamResponse(
+            lines=_sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+        ),
+    ]
+    events, client = await _run_stream_sequence(monkeypatch, OpenRouterProvider("k"), responses)
+    assert client.call_count == 2
+    assert any(isinstance(e, TextDelta) and e.text == "ok" for e in events)
+    assert isinstance(events[-1], TurnComplete)
+
+
+async def test_stream_503_then_503_fails_with_the_summarised_error(monkeypatch):
+    responses = [
+        _FakeStreamResponse(status_code=503, body=b'{"error":"overloaded"}'),
+        _FakeStreamResponse(status_code=503, body=b'{"error":"overloaded"}'),
+    ]
+    with pytest.raises(ProviderError) as exc:
+        await _run_stream_sequence(monkeypatch, OpenRouterProvider("k"), responses)
+    assert exc.value.status == 503
+
+
+async def test_stream_404_is_not_retried(monkeypatch):
+    responses = [_FakeStreamResponse(status_code=404, body=b'{"error":"not found"}')]
+    client = _SequencedStreamClient(responses)
+    monkeypatch.setattr(openai_compat.httpx, "AsyncClient", client)
+    monkeypatch.setattr(openai_compat.asyncio, "sleep", _instant_sleep)
+    with pytest.raises(ProviderError) as exc:
+        async for _event in OpenRouterProvider("k").stream(
+            model="m",
+            system="doctrine",
+            messages=[Msg(role="user", content="hi")],
+            tools=[],
+            max_tokens=64,
+            temperature=0.0,
+        ):
+            pass
+    assert client.call_count == 1
+    assert exc.value.status == 404
+
+
+async def test_stream_html_502_body_is_summarized_not_stored_verbatim(monkeypatch):
+    responses = [
+        _FakeStreamResponse(status_code=502, body=_HTML_502, headers={"content-type": "text/html"}),
+        _FakeStreamResponse(status_code=502, body=_HTML_502, headers={"content-type": "text/html"}),
+    ]
+    with pytest.raises(ProviderError) as exc:
+        await _run_stream_sequence(monkeypatch, OpenRouterProvider("k"), responses)
+    assert str(exc.value) == "[openrouter] upstream returned HTML (HTTP 502, Bad Gateway)"
+    assert "<html>" not in str(exc.value)
+    assert "DOCTYPE" not in str(exc.value)
+
+
+async def test_stream_5xx_html_body_is_retried_even_off_the_named_status_list(monkeypatch):
+    """500 is not one of the four named codes (502/503/504/529), but the
+    OpenRouter Cloudflare-template incident this fixes was a plain HTML body,
+    not necessarily one of those statuses — any 5xx with an HTML body qualifies."""
+    responses = [
+        _FakeStreamResponse(status_code=500, body=_HTML_502, headers={"content-type": "text/html"}),
+        _FakeStreamResponse(
+            lines=_sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+        ),
+    ]
+    events, client = await _run_stream_sequence(monkeypatch, OpenRouterProvider("k"), responses)
+    assert client.call_count == 2
+    assert isinstance(events[-1], TurnComplete)
+
+
+async def test_stream_5xx_non_html_off_the_named_list_is_not_retried(monkeypatch):
+    responses = [_FakeStreamResponse(status_code=500, body=b'{"error":"internal"}')]
+    client = _SequencedStreamClient(responses)
+    monkeypatch.setattr(openai_compat.httpx, "AsyncClient", client)
+    monkeypatch.setattr(openai_compat.asyncio, "sleep", _instant_sleep)
+    with pytest.raises(ProviderError):
+        async for _event in OpenRouterProvider("k").stream(
+            model="m",
+            system="doctrine",
+            messages=[Msg(role="user", content="hi")],
+            tools=[],
+            max_tokens=64,
+            temperature=0.0,
+        ):
+            pass
+    assert client.call_count == 1
+
+
+async def test_stream_never_retries_once_a_token_has_been_yielded(monkeypatch):
+    """Even a retryable failure is not retried once a token has already
+    reached the caller — a partial stream must never be silently replaced,
+    since the caller may already have acted on what it received."""
+    attempts = []
+
+    async def fake_attempt(self, body, *, model):
+        attempts.append(1)
+        yield TextDelta("partial")
+        raise openai_compat._StreamFailure("upstream reset mid-stream", 503, retryable=True)
+
+    monkeypatch.setattr(OpenRouterProvider, "_stream_attempt", fake_attempt)
+    monkeypatch.setattr(openai_compat.asyncio, "sleep", _instant_sleep)
+    events = []
+    with pytest.raises(ProviderError):
+        async for event in OpenRouterProvider("k").stream(
+            model="m",
+            system="doctrine",
+            messages=[Msg(role="user", content="hi")],
+            tools=[],
+            max_tokens=64,
+            temperature=0.0,
+        ):
+            events.append(event)
+    assert len(attempts) == 1  # never retried
+    assert len(events) == 1
+
+
+# ── 6a. same retry policy on complete_json ──────────────────────────────────
+class _FakeRawJsonResponse:
+    """Like `_FakeJsonResponse` above, but carries a literal `.text` body
+    (HTML, or any other non-JSON-encoded payload) instead of JSON-encoding a
+    dict — for testing an error response's raw wire body."""
+
+    def __init__(self, text: str, status_code: int = 200, headers: dict | None = None):
+        self.text = text
+        self.status_code = status_code
+        self.headers = headers or {}
+
+    def json(self):
+        return json.loads(self.text)
+
+
+class _SequencedJsonClient:
+    def __init__(self, responses: list):
+        self._responses = list(responses)
+        self.call_count = 0
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        response = self._responses[min(self.call_count, len(self._responses) - 1)]
+        self.call_count += 1
+        return response
+
+    async def get(self, url, headers=None):
+        return _FakeEndpointsResponse({})
+
+
+async def _complete_json(monkeypatch, provider, responses):
+    client = _SequencedJsonClient(responses)
+    monkeypatch.setattr(openai_compat.httpx, "AsyncClient", client)
+    monkeypatch.setattr(openai_compat.asyncio, "sleep", _instant_sleep)
+    completion = await provider.complete_json(
+        model="m", system="doctrine", prompt="hi", schema={"type": "object"}
+    )
+    return completion, client
+
+
+async def test_complete_json_503_then_200_succeeds_with_one_retry(monkeypatch):
+    responses = [
+        _FakeRawJsonResponse('{"error":"overloaded"}', status_code=503),
+        _FakeJsonResponse(_completion_json()),
+    ]
+    completion, client = await _complete_json(monkeypatch, OpenRouterProvider("k"), responses)
+    assert client.call_count == 2
+    assert completion.payload == {"ok": True}
+
+
+async def test_complete_json_503_then_503_fails_with_the_summarised_error(monkeypatch):
+    responses = [
+        _FakeRawJsonResponse('{"error":"overloaded"}', status_code=503),
+        _FakeRawJsonResponse('{"error":"overloaded"}', status_code=503),
+    ]
+    with pytest.raises(ProviderError) as exc:
+        await _complete_json(monkeypatch, OpenRouterProvider("k"), responses)
+    assert exc.value.status == 503
+
+
+async def test_complete_json_404_is_not_retried(monkeypatch):
+    responses = [_FakeRawJsonResponse('{"error":"not found"}', status_code=404)]
+    client = _SequencedJsonClient(responses)
+    monkeypatch.setattr(openai_compat.httpx, "AsyncClient", client)
+    monkeypatch.setattr(openai_compat.asyncio, "sleep", _instant_sleep)
+    with pytest.raises(ProviderError):
+        await OpenRouterProvider("k").complete_json(
+            model="m", system="doctrine", prompt="hi", schema={"type": "object"}
+        )
+    assert client.call_count == 1
+
+
+async def test_complete_json_html_502_body_is_summarized(monkeypatch):
+    responses = [
+        _FakeRawJsonResponse(
+            _HTML_502.decode(), status_code=502, headers={"content-type": "text/html"}
+        ),
+        _FakeRawJsonResponse(
+            _HTML_502.decode(), status_code=502, headers={"content-type": "text/html"}
+        ),
+    ]
+    with pytest.raises(ProviderError) as exc:
+        await _complete_json(monkeypatch, OpenRouterProvider("k"), responses)
+    assert str(exc.value) == "[openrouter] upstream returned HTML (HTTP 502, Bad Gateway)"
+
+
+# ── 6b. the same policy on AnthropicProvider — 529 is its own "overloaded" ──
+def _anthropic_status_error(status: int, *, html: bool = False) -> anthropic.APIStatusError:
+    if html:
+        text = (
+            "<!DOCTYPE html><html><head><title>Overloaded</title></head>"
+            "<body>x</body></html>"
+        )
+        headers = {"content-type": "text/html"}
+    else:
+        text = '{"error":{"type":"overloaded_error","message":"Overloaded"}}'
+        headers = {"content-type": "application/json"}
+    resp = httpx.Response(
+        status_code=status,
+        headers=headers,
+        content=text.encode(),
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+    )
+    return anthropic.APIStatusError("overloaded", response=resp, body=None)
+
+
+class _RetryingAnthropicMessages:
+    """Like `_FakeAnthropicMessages` above, but raises the scripted errors
+    (in order) before succeeding — scripts the retry path for
+    `AnthropicProvider.stream`."""
+
+    def __init__(self, failures: list[Exception]):
+        self._failures = list(failures)
+        self.call_count = 0
+
+    def stream(self, **kwargs):
+        self.call_count += 1
+        if self._failures:
+            raise self._failures.pop(0)
+        return _FakeAnthropicStreamCtx()
+
+
+async def _anthropic_stream(monkeypatch, fake_messages):
+    provider = AnthropicProvider("test-key")
+    monkeypatch.setattr(provider._client, "messages", fake_messages)
+    monkeypatch.setattr(anthropic_provider_module.asyncio, "sleep", _instant_sleep)
+    events = []
+    async for event in provider.stream(
+        model="claude-sonnet-5",
+        system="doctrine",
+        messages=[Msg(role="user", content="hi")],
+        tools=[],
+        max_tokens=64,
+        temperature=0.0,
+    ):
+        events.append(event)
+    return events
+
+
+async def test_anthropic_stream_retries_once_on_529_then_succeeds(monkeypatch):
+    fake_messages = _RetryingAnthropicMessages([_anthropic_status_error(529)])
+    events = await _anthropic_stream(monkeypatch, fake_messages)
+    assert fake_messages.call_count == 2
+    assert isinstance(events[-1], TurnComplete)
+
+
+async def test_anthropic_stream_fails_after_two_529s(monkeypatch):
+    fake_messages = _RetryingAnthropicMessages(
+        [_anthropic_status_error(529), _anthropic_status_error(529)]
+    )
+    with pytest.raises(ProviderError) as exc:
+        await _anthropic_stream(monkeypatch, fake_messages)
+    assert exc.value.status == 529
+    assert fake_messages.call_count == 2
+
+
+async def test_anthropic_stream_404_is_not_retried(monkeypatch):
+    fake_messages = _RetryingAnthropicMessages([_anthropic_status_error(404)])
+    with pytest.raises(ProviderError) as exc:
+        await _anthropic_stream(monkeypatch, fake_messages)
+    assert exc.value.status == 404
+    assert fake_messages.call_count == 1
+
+
+async def test_anthropic_stream_html_error_body_is_summarized(monkeypatch):
+    fake_messages = _RetryingAnthropicMessages(
+        [_anthropic_status_error(502, html=True), _anthropic_status_error(502, html=True)]
+    )
+    with pytest.raises(ProviderError) as exc:
+        await _anthropic_stream(monkeypatch, fake_messages)
+    assert str(exc.value) == "[anthropic] upstream returned HTML (HTTP 502, Overloaded)"
+
+
+class _FakeToolUseBlock:
+    def __init__(self, name: str, input_: dict):
+        self.type = "tool_use"
+        self.name = name
+        self.input = input_
+
+
+class _FakeAnthropicCreateResult:
+    def __init__(self, tool_name: str, payload: dict):
+        self.content = [_FakeToolUseBlock(tool_name, payload)]
+        self.usage = None
+
+
+class _RetryingAnthropicCreate:
+    """Scripts `messages.create` (the `complete_json` path) the same way
+    `_RetryingAnthropicMessages` scripts `messages.stream`."""
+
+    def __init__(self, failures: list[Exception], result):
+        self._failures = list(failures)
+        self._result = result
+        self.call_count = 0
+
+    async def create(self, **kwargs):
+        self.call_count += 1
+        if self._failures:
+            raise self._failures.pop(0)
+        return self._result
+
+
+async def test_anthropic_complete_json_retries_once_on_503_then_succeeds(monkeypatch):
+    provider = AnthropicProvider("test-key")
+    result = _FakeAnthropicCreateResult("respond", {"ok": True})
+    fake_messages = _RetryingAnthropicCreate([_anthropic_status_error(503)], result)
+    monkeypatch.setattr(provider._client, "messages", fake_messages)
+    monkeypatch.setattr(anthropic_provider_module.asyncio, "sleep", _instant_sleep)
+    completion = await provider.complete_json(
+        model="claude-sonnet-5", system="doctrine", prompt="hi", schema={"type": "object"}
+    )
+    assert fake_messages.call_count == 2
+    assert completion.payload == {"ok": True}
+
+
+async def test_anthropic_complete_json_fails_after_two_503s(monkeypatch):
+    provider = AnthropicProvider("test-key")
+    result = _FakeAnthropicCreateResult("respond", {"ok": True})
+    fake_messages = _RetryingAnthropicCreate(
+        [_anthropic_status_error(503), _anthropic_status_error(503)], result
+    )
+    monkeypatch.setattr(provider._client, "messages", fake_messages)
+    monkeypatch.setattr(anthropic_provider_module.asyncio, "sleep", _instant_sleep)
+    with pytest.raises(ProviderError) as exc:
+        await provider.complete_json(
+            model="claude-sonnet-5", system="doctrine", prompt="hi", schema={"type": "object"}
+        )
+    assert exc.value.status == 503
+    assert fake_messages.call_count == 2

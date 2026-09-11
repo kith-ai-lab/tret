@@ -26,7 +26,7 @@ from test_golden_runs import GAP_SITE, PERIL, SITE, divergence_happy_script, run
 
 import tret.engine.harness as harness_module
 from tret.adaptive import DEFAULT_CONTEXT_HEADROOM
-from tret.db.models import Harness, Run, RunOutcome
+from tret.db.models import Document, Harness, Project, Run, RunOutcome
 from tret.engine.harness import HarnessEngine
 from tret.engine.supervisor import KIND_SWITCH, Intervention
 from tret.engine.tools import MAX_DELEGATION_DEPTH
@@ -1728,3 +1728,148 @@ async def test_a_verdict_task_never_checks_grounding(world):
     assert result.run.status == "completed", result.run.error
     assert result.run.grounding is None
     assert _grounding_nudges(result) == []
+
+
+# ── chat/freeform reaches the workspace's documents with none attached ────────
+# `search_documents`/`read_document` used to see only `run.document_ids`, and a
+# chat run always has none — so a chat user asking about a document already
+# sitting in their project always got "No documents are attached to this run".
+# A chat/freeform run with nothing explicitly attached now searches (and may
+# read) every document of its own project instead; a specialist task with
+# nothing attached keeps the old, narrower refusal.
+PLANTED_SENTENCE = (
+    "The riverside warehouse floods every leap year according to the site engineer."
+)
+
+
+async def test_a_chat_run_with_no_documents_searches_every_document_in_the_project(world):
+    document_id = await world.create_document(
+        filename="site-notes.md",
+        text=f"# Site Notes\n\n{PLANTED_SENTENCE} The rest of this memo is routine "
+        "maintenance chatter with no bearing on flood risk.",
+    )
+    harness_id = await world.create_harness(tool_names=["search_documents", "read_document"])
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Searching the project's documents for flood mentions.",
+                tool_calls=[ScriptedCall("search_documents", {"query": "riverside warehouse floods"})],
+            ),
+            ScriptedTurn(text="Found it: the riverside warehouse floods every leap year."),
+        ]
+    )
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="chat",
+        task_input={"message": "Does anything in our documents mention flooding?"},
+    )
+
+    assert result.run.status == "completed", result.run.error
+    assert result.tool_errors == []
+    hits = result.tool_results("search_documents")
+    assert len(hits) == 1
+    assert PLANTED_SENTENCE in hits[0]["result"]
+    assert str(document_id) in hits[0]["result"]
+
+
+async def test_a_specialist_run_with_no_documents_still_refuses_to_search(world):
+    """The widened scope is for chat/freeform only — `evidence_extraction`
+    (a declared, non-generic task type) with nothing attached must still get
+    the plain "no documents" refusal, never a fallback to the whole project.
+    """
+    harness_id = await world.create_harness(
+        tool_names=["search_documents", "read_document", "record_finding", "file_data_request"]
+    )
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Looking for evidence documents first.",
+                tool_calls=[ScriptedCall("search_documents", {"query": "governance"})],
+            ),
+            ScriptedTurn(text="No documents were attached to this run; nothing to extract."),
+            ScriptedTurn(text="Confirming there is nothing further to record."),
+        ]
+    )
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="evidence_extraction",
+        task_input={"focus": "governance evidence"},
+    )
+
+    assert result.tool_errors == [
+        {
+            "tool": "search_documents",
+            "id": "call-1-1",
+            "error": True,
+            "result": "Tool error: No documents are attached to this run",
+        }
+    ]
+    assert result.run.status == "completed_without_output", result.run.error
+
+
+async def test_another_projects_document_is_never_returned_by_a_project_wide_search(world):
+    """The project-wide fallback is scoped by `project_id`, not left to trust
+    whatever ids happen to exist — a document belonging to a different
+    project must never surface in this project's chat search, and reading it
+    directly by id must still be refused.
+    """
+    await world.create_document(filename="site-notes.md", text=f"# Site Notes\n\n{PLANTED_SENTENCE}")
+    async with world.session_factory() as db:
+        other_project = Project(workspace_id=world.workspace_id, name="Other Project")
+        db.add(other_project)
+        await db.flush()
+        foreign_doc = Document(
+            project_id=other_project.id,
+            filename="other-site-notes.md",
+            content_type="text/markdown",
+            byte_size=100,
+            storage_path="golden://other-site-notes.md",
+            extracted_text=(
+                "# Other Site\n\nThe downtown annex has a brand new sprinkler system "
+                "installed last spring, unrelated to any flood risk."
+            ),
+            extraction_status="completed",
+            meta={},
+            sha256="0" * 64,
+            uploaded_by=world.user_id,
+        )
+        db.add(foreign_doc)
+        await db.commit()
+        foreign_doc_id = foreign_doc.id
+
+    harness_id = await world.create_harness(tool_names=["search_documents", "read_document"])
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text="Searching the project's documents.",
+                tool_calls=[ScriptedCall("search_documents", {"query": "sprinkler downtown annex"})],
+            ),
+            ScriptedTurn(
+                text="Trying to read the other project's document directly.",
+                tool_calls=[ScriptedCall("read_document", {"document_id": str(foreign_doc_id)})],
+            ),
+            ScriptedTurn(text="That document is not part of this project; nothing else to report."),
+        ]
+    )
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="chat",
+        task_input={"message": "Any mention of sprinklers in our documents?"},
+    )
+
+    search_hits = result.tool_results("search_documents")
+    assert len(search_hits) == 1
+    # The other project's document is the only one that would ever match this
+    # query — an empty result proves the search never reached across projects,
+    # not just that this particular query happened to rank it low.
+    assert search_hits[0]["result"] == "No matches for 'sprinkler downtown annex' in this project's documents."
+    assert str(foreign_doc_id) not in search_hits[0]["result"]
+
+    read_calls = result.tool_results("read_document")
+    assert len(read_calls) == 1
+    assert read_calls[0]["error"] is True
+    assert "not found in this project" in read_calls[0]["result"].lower()
+    assert result.run.status == "completed", result.run.error

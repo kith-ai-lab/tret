@@ -39,6 +39,7 @@ from tret.services.connections import (
     gdrive_file_metadata,
     get_access_token,
     m365_item_metadata,
+    record_connection_activity,
 )
 from tret.services.documents import MAX_DOCUMENT_BYTES, ingest_document
 
@@ -226,16 +227,51 @@ def _import_too_large(name: str, num_bytes: int) -> ValueError:
     )
 
 
+async def _find_existing_imported_document(
+    db: AsyncSession, project_id: uuid.UUID, *, sha256: str, file_id: str
+) -> Document | None:
+    """A `Document` this project already imported for exactly this bytes
+    content AND this provider item — re-importing the same picked item a
+    second time (the obvious thing to do after a first import that silently
+    failed, or just a double click) must return the row that already exists
+    rather than create an identical duplicate.
+
+    Matched on both `sha256` and `meta.source.file_id`, not either alone: two
+    different provider items that happen to contain identical bytes are
+    still two distinct imports worth two rows (a template duplicated across
+    folders, say), and an item whose content genuinely changed since the
+    last import must still create a fresh row rather than silently keeping
+    stale text under the old one. Filtered in Python rather than in SQL on
+    `meta->'source'->>'file_id'`, same tradeoff `services/connections.py::
+    _find_existing_connected_document` makes for its own dedupe check: a
+    project's document count is small enough that this costs nothing, and it
+    sidesteps the sqlite-vs-Postgres JSON-operator differences elsewhere in
+    this codebase work around with `.op("->>")`.
+    """
+    rows = (
+        await db.execute(
+            select(Document).where(Document.project_id == project_id, Document.sha256 == sha256)
+        )
+    ).scalars().all()
+    for doc in rows:
+        source = (doc.meta or {}).get("source") or {}
+        if source.get("file_id") == file_id:
+            return doc
+    return None
+
+
 async def _import_one(
     *,
     access_token: str,
     provider: str,
     item: ImportItem,
     project_id: uuid.UUID,
+    workspace_id: uuid.UUID,
     uploaded_by: uuid.UUID,
     storage_dir: Path,
     imported_at: str,
-) -> tuple[Document, Path | None]:
+    db: AsyncSession,
+) -> tuple[Document, Path | None, bool]:
     """Download one picked item and ingest it exactly like an upload.
 
     A metadata call precedes the download for both providers: it is where the
@@ -251,11 +287,22 @@ async def _import_one(
     the sort of caller-supplied string the rest of this module already
     treats as untrusted.
 
-    Returns `(doc, created_path)`: `created_path` is the file this call
-    itself wrote under `storage_dir`, or `None` if a file already sat at
-    that sha-named path (another Document row owns it) — so a caller whose
-    own `db.add`/`commit` fails afterward knows whether it is safe to unlink
-    the bytes on disk.
+    Returns `(doc, created_path, deduplicated)`: `created_path` is the file
+    this call itself wrote under `storage_dir`, or `None` if a file already
+    sat at that sha-named path (another Document row owns it) or nothing was
+    written at all (the dedup branch below) — so a caller whose own
+    `db.add`/`commit` fails afterward knows whether it is safe to unlink the
+    bytes on disk. `deduplicated` is True when this call resolved to a
+    document a previous import of this exact item already created, rather
+    than ingesting a new one — see `_find_existing_imported_document`.
+
+    Logs one `ConnectionActivity` row (`action="import"`) via the same
+    `record_connection_activity` helper the connected-file read/search tools
+    use (`services/connections.py`), on every path that actually reached the
+    provider — the dedup hit included, since bytes were still downloaded and
+    compared, only `detail="deduplicated"` tells the two apart in the audit
+    trail. A metadata-stage failure (too large, a bad drive_id) never
+    reaches here, so it never logs one.
     """
     if provider == GDRIVE:
         meta = await gdrive_file_metadata(access_token, file_id=item.id)
@@ -285,6 +332,21 @@ async def _import_one(
 
     filename = safe_filename(filename)
     sha = hashlib.sha256(data).hexdigest()
+
+    existing = await _find_existing_imported_document(db, project_id, sha256=sha, file_id=item.id)
+    if existing is not None:
+        await record_connection_activity(
+            db,
+            workspace_id=workspace_id,
+            provider=provider,
+            action="import",
+            target=name,
+            bytes_count=len(data),
+            actor_user_id=uploaded_by,
+            detail="deduplicated",
+        )
+        return existing, None, True
+
     storage_path = (storage_dir / f"{sha}-{filename}").resolve()
     if storage_path.parent != storage_dir:
         raise ValueError("Invalid filename")
@@ -341,7 +403,16 @@ async def _import_one(
         if created:
             storage_path.unlink(missing_ok=True)
         raise
-    return doc, (storage_path if created else None)
+    await record_connection_activity(
+        db,
+        workspace_id=workspace_id,
+        provider=provider,
+        action="import",
+        target=name,
+        bytes_count=len(data),
+        actor_user_id=uploaded_by,
+    )
+    return doc, (storage_path if created else None), False
 
 
 @router.post("/projects/{project_id}/documents/import")
@@ -378,6 +449,13 @@ async def import_documents(
     those routes do: a workspace whose plan lapses after connecting loses
     the ability to import on its very next request, with nothing in this
     route needing to know that happened beyond this one check.
+
+    Each item that reaches the provider — a fresh import or a dedupe hit —
+    gets one `ConnectionActivity` row (`_import_one`, via `services/
+    connections.py::record_connection_activity`), and re-importing the same
+    picked item returns the document that import already created
+    (`"deduplicated": true` on that item) instead of a second identical row.
+    See docs/connections.md.
     """
     if body.provider not in (GDRIVE, M365):
         raise HTTPException(404, f"unknown provider {body.provider!r}")
@@ -397,29 +475,33 @@ async def import_documents(
     storage_dir.mkdir(parents=True, exist_ok=True)
     imported_at = datetime.now(timezone.utc).isoformat()
 
-    # Captured as plain values, not read off `project`/`user` inside the loop
-    # below: `db.rollback()` (a per-item DB failure) expires every object
+    # Captured as plain values, not read off `project`/`user`/`ctx` inside the
+    # loop below: `db.rollback()` (a per-item DB failure) expires every object
     # still attached to the session, and re-reading an expired ORM attribute
-    # from inside an async endpoint outside of an awaited refresh blows up
-    # with SQLAlchemy's `MissingGreenlet` rather than transparently
-    # reloading it. `project_id` is the path parameter itself — the same
-    # value `project.id` already equals, since `project_in_workspace` only
-    # returned a row at all if its id matched it.
+    # (including `ctx.id`, a property that reads `ctx.workspace.id`) from
+    # inside an async endpoint outside of an awaited refresh blows up with
+    # SQLAlchemy's `MissingGreenlet` rather than transparently reloading it.
+    # `project_id` is the path parameter itself — the same value `project.id`
+    # already equals, since `project_in_workspace` only returned a row at all
+    # if its id matched it.
     uploaded_by = user.id
+    workspace_id = ctx.id
 
     documents = []
     errors = []
     for item in body.items:
         created_path: Path | None = None
         try:
-            doc, created_path = await _import_one(
+            doc, created_path, deduplicated = await _import_one(
                 access_token=access_token,
                 provider=body.provider,
                 item=item,
                 project_id=project_id,
+                workspace_id=workspace_id,
                 uploaded_by=uploaded_by,
                 storage_dir=storage_dir,
                 imported_at=imported_at,
+                db=db,
             )
             db.add(doc)
             await db.commit()
@@ -437,7 +519,13 @@ async def import_documents(
                 created_path.unlink(missing_ok=True)
             errors.append({"id": item.id, "name": item.name, "detail": str(exc)})
             continue
-        documents.append(_doc_out(doc))
+        out = _doc_out(doc)
+        if deduplicated:
+            # Response shape is otherwise unchanged — this key only appears
+            # on an item that resolved to a document a previous import of
+            # the exact same provider item already created.
+            out["deduplicated"] = True
+        documents.append(out)
     return {"documents": documents, "errors": errors}
 
 

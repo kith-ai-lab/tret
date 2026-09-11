@@ -17,7 +17,10 @@ lands on one of its findings, because the human verdict is the strongest signal
 tret has and it arrives minutes or days after the run is over. The second write
 is an update of the same row, so a run always has exactly one outcome.
 """
+
 from __future__ import annotations
+
+from datetime import timezone
 
 import logging
 import uuid
@@ -87,7 +90,16 @@ async def _max_iterations(db: AsyncSession, run: Run) -> int:
 def _duration_ms(run: Run) -> int:
     if not run.started_at or not run.finished_at:
         return 0
-    return max(0, int((run.finished_at - run.started_at).total_seconds() * 1000))
+    # SQLite hands back naive datetimes after a refresh while the engine
+    # stamps aware ones; treat naive as UTC so the two never fail to subtract
+    # (which would drop the whole outcome row, and with it the priors and the
+    # cooldown breaker that read it).
+    started, finished = run.started_at, run.finished_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    if finished.tzinfo is None:
+        finished = finished.replace(tzinfo=timezone.utc)
+    return max(0, int((finished - started).total_seconds() * 1000))
 
 
 def _est_input_tokens(run: Run) -> int:
@@ -286,13 +298,17 @@ async def record_outcome(db: AsyncSession, run: Run, *, commit: bool = False) ->
         # weights). Leaving the surplus behind would keep counting evidence for a
         # segment that no longer exists.
         stale = (
-            await db.execute(
-                select(RunOutcome).where(
-                    RunOutcome.run_id == run.id,
-                    RunOutcome.segment_index >= len(fresh),
+            (
+                await db.execute(
+                    select(RunOutcome).where(
+                        RunOutcome.run_id == run.id,
+                        RunOutcome.segment_index >= len(fresh),
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for row in stale:
             await db.delete(row)
         if commit:

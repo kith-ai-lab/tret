@@ -381,20 +381,50 @@ def test_effort_levels_and_schema():
 
 
 def test_default_effort_table():
-    # Thrift objectives ignore task shape entirely.
+    # Thrift objectives ignore task shape entirely — except verdict, which is
+    # governed by the chosen model's own cost tier for every objective (see
+    # test_default_effort_verdict_shape_is_tier_based).
     for objective in THRIFT_OBJECTIVES:
-        for shape in ("extraction", "drafting", "freeform", "verdict", "qa_review", "unknown"):
+        for shape in ("extraction", "drafting", "freeform", "qa_review", "unknown"):
             assert default_effort(objective, shape) == "low"
-    # Quality always climbs to high, regardless of shape.
-    for shape in ("extraction", "drafting", "freeform", "verdict", "qa_review", "unknown"):
+    # Quality always climbs to high, regardless of shape — except verdict.
+    for shape in ("extraction", "drafting", "freeform", "qa_review", "unknown"):
         assert default_effort("quality", shape) == "high"
     # Balanced differentiates by shape; an unrecognized shape lands on medium.
     assert default_effort("balanced", "extraction") == "low"
     assert default_effort("balanced", "drafting") == "medium"
     assert default_effort("balanced", "freeform") == "medium"
-    assert default_effort("balanced", "verdict") == "high"
     assert default_effort("balanced", "qa_review") == "high"
     assert default_effort("balanced", "some_shape_nobody_declared") == "medium"
+
+
+def test_default_effort_verdict_shape_is_tier_based():
+    """2026-09-11: gemini-3.8-flash (a "standard"-tier model) spent 31k-74k
+    output tokens and $0.14-0.34 per verdict case at the flat "high" default
+    without landing more designed cases — verdict effort now follows the
+    *chosen model's own* cost tier instead of a flat per-objective value."""
+    # Every objective but quality follows the tier table exactly.
+    for objective in ("balanced", "token_conservation", "eco"):
+        assert default_effort(objective, "verdict", "premium") == "high"
+        assert default_effort(objective, "verdict", "standard") == "medium"
+        assert default_effort(objective, "verdict", "economy") == "low"
+        assert default_effort(objective, "verdict", "local") == "low"
+    # Quality keeps "high" on standard and premium (unlike every other
+    # objective, which drops to "medium" on standard), but still drops to
+    # "low" like everything else once the model itself is economy/local tier
+    # — a quality-first policy still should not spend a premium-sized budget
+    # on a model not equipped to earn it back.
+    assert default_effort("quality", "verdict", "premium") == "high"
+    assert default_effort("quality", "verdict", "standard") == "high"
+    assert default_effort("quality", "verdict", "economy") == "low"
+    assert default_effort("quality", "verdict", "local") == "low"
+    # No tier given (a caller with no model to name yet, e.g. the router
+    # prompt's own EFFORT section) reads as premium — the historical
+    # always-high assumption. An unrecognized tier reads the same way.
+    assert default_effort("balanced", "verdict") == "high"
+    assert default_effort("quality", "verdict") == "high"
+    assert default_effort("eco", "verdict") == "high"
+    assert default_effort("balanced", "verdict", "made_up_tier") == "high"
 
 
 async def test_llm_chosen_effort_is_recorded():
@@ -494,7 +524,9 @@ async def test_llm_chosen_effort_missing_or_invalid_falls_back_to_the_default():
         n_documents=0,
         est_input_tokens=100,
     )
-    assert decision.effort == default_effort("balanced", "verdict") == "high"
+    # claude-sonnet-5 is a "standard"-tier model, so the tier table (not the
+    # historical flat "high") is what the missing effort falls back to.
+    assert decision.effort == default_effort("balanced", "verdict", "standard") == "medium"
 
     provider_bad = _EffortProvider(
         {
@@ -516,19 +548,20 @@ async def test_llm_chosen_effort_missing_or_invalid_falls_back_to_the_default():
         n_documents=0,
         est_input_tokens=100,
     )
-    assert decision_bad.effort == "high"
+    assert decision_bad.effort == "medium"
 
 
 async def test_llm_chosen_effort_is_clamped_under_thrift_objectives():
     """The router prompt tells the router never to exceed the default under
     token_conservation/eco — this is the enforcement of that rule, for a
-    router that answered anyway."""
+    router that answered anyway. claude-sonnet-5 is "standard"-tier, so under
+    the verdict shape's tier table the ceiling is "medium", not a flat "low"."""
     provider = _EffortProvider(
         {
             "model_id": "anthropic/claude-sonnet-5",
             "reasoning": "chosen for the test",
             "confidence": "high",
-            "effort": "high",  # oversteps the "low" ceiling for eco
+            "effort": "high",  # oversteps the "medium" ceiling for eco+standard
         }
     )
     registry = _LLMRegistry({"anthropic", "kimi", "openrouter"}, provider)
@@ -542,7 +575,7 @@ async def test_llm_chosen_effort_is_clamped_under_thrift_objectives():
         n_documents=0,
         est_input_tokens=100,
     )
-    assert decision.effort == "low"  # clamped down from the router's "high"
+    assert decision.effort == "medium"  # clamped down from the router's "high"
 
 
 async def test_llm_chosen_effort_within_the_thrift_ceiling_is_kept():
@@ -583,7 +616,48 @@ async def test_fallback_effort_matches_the_objective_default(monkeypatch):
         est_input_tokens=100,
     )
     assert decision.fallback_used is True
-    assert decision.effort == default_effort("eco", "verdict") == "low"
+    # ECO_MODEL is "economy"-tier, so the verdict tier table gives "low" here
+    # regardless of the flat historical (no-tier) default.
+    assert decision.chosen_model == ECO_MODEL
+    assert default_effort("eco", "verdict", "economy") == "low"
+    assert decision.effort == "low"
+
+
+# ── C4: token_conservation forces "low" except on the verdict shape ─────────
+async def test_token_conservation_non_verdict_shapes_still_force_low(monkeypatch):
+    monkeypatch.setattr(ModelRouter, "_resolve_router_model", lambda self, max_tier: None)
+    router = ModelRouter(ModelCatalog(), _Registry({"anthropic", "kimi", "openrouter"}))
+    for shape in ("extraction", "drafting", "freeform", "qa_review"):
+        decision = await router.route(
+            model_policy=_policy(objective="token_conservation"),
+            task_type="divergence_assessment",
+            task_shape=shape,
+            task_description="x",
+            output_contract="y",
+            n_documents=0,
+            est_input_tokens=100,
+        )
+        assert decision.effort == "low", shape
+
+
+async def test_token_conservation_verdict_shape_effort_follows_the_chosen_models_tier():
+    """token_conservation does not force "low" on the verdict shape — the
+    chosen model's own cost tier decides instead (see `default_effort`'s
+    verdict-shape table), same as every objective but `quality`."""
+    router = ModelRouter(ModelCatalog(), _Registry({"anthropic"}))
+    decision = await router.route(
+        model_policy=_policy(
+            objective="token_conservation", allowed=["anthropic/claude-sonnet-5"]
+        ),
+        task_type="divergence_assessment",
+        task_shape="verdict",
+        task_description="Render a verdict.",
+        output_contract="verdict",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.chosen_model == "anthropic/claude-sonnet-5"  # "standard"-tier
+    assert decision.effort == "medium"  # not the objective's usual flat "low"
 
 
 async def test_override_and_pin_paths_record_the_objective_default_effort():
@@ -727,6 +801,111 @@ async def test_route_records_the_objective_for_a_single_candidate():
     )
     assert decision.chosen_model == "kimi/kimi-k2"
     assert decision.objective == "token_conservation"
+
+
+# ── model-level circuit breaker, end to end through route() (2026-09-11) ─────
+# `router_llm.priors.OutcomePriors.cooldown_for`'s own aggregation rules are
+# tested in test_routing_priors.py; these confirm `route()` actually acts on
+# what it reports — excluding the flagged model, recording it on the
+# decision's evidence, and never emptying the candidate list over it.
+class _CooldownPriors:
+    """A `PriorsProvider` stub that reports no quality evidence but a fixed
+    set of cooldown records, for exercising `router_llm.router._apply_cooldown`
+    without a database."""
+
+    def __init__(self, cooldown: list[dict]):
+        self._cooldown = cooldown
+        self.cooldown_calls: list[list[str]] = []
+
+    async def for_key(self, *, task_shape, objective, size_band=None):
+        return {}
+
+    def invalidate(self) -> None:
+        pass
+
+    async def cooldown_for(self, candidate_ids: list[str]) -> list[dict]:
+        self.cooldown_calls.append(list(candidate_ids))
+        return [c for c in self._cooldown if c["model"] in candidate_ids]
+
+
+async def test_route_excludes_a_cooled_down_model_and_records_it_on_evidence(monkeypatch):
+    monkeypatch.setattr(ModelRouter, "_resolve_router_model", lambda self, max_tier: None)
+    cooldown_entry = {
+        "model": ECO_MODEL,
+        "until": "2026-09-11T12:00:00+00:00",
+        "reason": "last 2 runs failed at iteration 0 with a provider error",
+    }
+    priors = _CooldownPriors([cooldown_entry])
+    router = ModelRouter(ModelCatalog(), _all_keys(), priors)
+    decision = await router.route(
+        model_policy=_policy(objective="eco"),
+        task_type="divergence_assessment",
+        task_shape="verdict",
+        task_description="Signal divergence assessment",
+        output_contract="divergence_verdict",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.fallback_used is True
+    # The flagged model is gone from both the candidate list and the choice —
+    # eco's own ordering would otherwise have picked it, since ECO_MODEL is
+    # the cheapest-energy candidate.
+    assert ECO_MODEL not in decision.candidates
+    assert decision.chosen_model != ECO_MODEL
+    assert decision.evidence is not None
+    assert decision.evidence["cooldown"] == [cooldown_entry]
+
+
+async def test_cooldown_never_empties_the_candidate_list(monkeypatch):
+    """The sole permitted candidate is on cooldown — excluding it would leave
+    nothing to route to, so the breaker is ignored and says so."""
+    priors = _CooldownPriors(
+        [{"model": "kimi/kimi-k2", "until": "later", "reason": "repeated provider errors"}]
+    )
+    router = ModelRouter(ModelCatalog(), _Registry({"kimi"}), priors)
+    decision = await router.route(
+        model_policy=_policy(objective="balanced", allowed=["kimi/kimi-k2"]),
+        task_type="divergence_assessment",
+        task_shape="extraction",
+        task_description="Pull fields from a filing.",
+        output_contract="json",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.chosen_model == "kimi/kimi-k2"
+    assert "Cooldown ignored" in decision.reasoning
+    assert "kimi/kimi-k2" in decision.reasoning
+    # Nothing was actually excluded, so evidence.cooldown (if the decision has
+    # an evidence dict at all) must not claim otherwise.
+    if decision.evidence is not None:
+        assert decision.evidence["cooldown"] == []
+
+
+async def test_cooldown_disabled_via_settings_never_excludes(monkeypatch):
+    import tret.router_llm.router as router_module
+
+    class _NoCooldownSettings:
+        router_cooldown_minutes = 0
+        router_model = "anthropic/claude-haiku-4-5"
+        router_timeout_seconds = 10.0
+
+    monkeypatch.setattr(router_module, "get_settings", lambda: _NoCooldownSettings())
+    monkeypatch.setattr(ModelRouter, "_resolve_router_model", lambda self, max_tier: None)
+    priors = _CooldownPriors(
+        [{"model": ECO_MODEL, "until": "later", "reason": "repeated provider errors"}]
+    )
+    router = ModelRouter(ModelCatalog(), _all_keys(), priors)
+    decision = await router.route(
+        model_policy=_policy(objective="eco"),
+        task_type="divergence_assessment",
+        task_shape="verdict",
+        task_description="Signal divergence assessment",
+        output_contract="divergence_verdict",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.chosen_model == ECO_MODEL  # the cooldown was never even queried
+    assert priors.cooldown_calls == []
 
 
 # ── per-run objective override (chat composer control) ───────────────────────

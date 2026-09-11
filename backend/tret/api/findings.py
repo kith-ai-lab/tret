@@ -3,6 +3,7 @@
 The approver identity is stamped from the session — the API accepts no
 approver field, by design.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -25,6 +26,7 @@ from tret.api.workspace import (
 from tret.db.engine import get_db
 from tret.db.models import Approval, DataRequest, Finding, User
 from tret.services import connections as connections_service
+from tret.services.export import strip_draft_status_banner
 from tret.services.outcomes import record_outcome_for_finding
 
 router = APIRouter(prefix="/api", tags=["findings"])
@@ -144,6 +146,18 @@ async def decide_finding(
     )
     db.add(approval)
     f.status = "approved" if body.action == "approve" else "rejected"
+    if body.action == "approve" and f.schema_slug == "draft_section":
+        # A stale "this is a draft" banner must not survive approval — see
+        # `services/export.py::strip_draft_status_banner`.
+        original = f.payload.get("markdown")
+        stripped = strip_draft_status_banner(original)
+        if stripped != original:
+            # Keep what was removed so the change is auditable and reversible.
+            f.payload = {
+                **f.payload,
+                "markdown": stripped,
+                "stripped_draft_banner": original[: len(original) - len(stripped)].strip(),
+            }
     await db.commit()
     # Approving a `connected_write` finding is the trigger for the actual
     # SharePoint upload — `propose_connected_write` (engine/tools.py) never
@@ -405,9 +419,7 @@ async def export_deliverable(
         return Response(
             data,
             media_type=content_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{deliverable_slug}.pdf"'
-            },
+            headers={"Content-Disposition": f'attachment; filename="{deliverable_slug}.pdf"'},
         )
     return PlainTextResponse(data.decode("utf-8"), media_type="text/markdown")
 
@@ -445,7 +457,9 @@ async def publish_deliverable(
     if project is None:
         raise HTTPException(404, "No approved sections exist for this deliverable")
     try:
-        data, content_type = await render_deliverable_bytes(db, project.id, deliverable_slug, body.format)
+        data, content_type = await render_deliverable_bytes(
+            db, project.id, deliverable_slug, body.format
+        )
     except DeliverableEmpty:
         raise HTTPException(404, "No approved sections exist for this deliverable")
     except PdfUnavailable as e:
@@ -469,7 +483,10 @@ async def publish_deliverable(
             content_type=content_type,
             actor_user_id=user.id,
         )
-    except (connections_service.ConnectionWriteError, connections_service.ConnectionUnavailable) as e:
+    except (
+        connections_service.ConnectionWriteError,
+        connections_service.ConnectionUnavailable,
+    ) as e:
         # upload_connected_file already flushed the refusal's ConnectionActivity
         # row (an "upload_failed" one) onto this session — commit it now, before
         # raising, so it survives past this request's session close instead of

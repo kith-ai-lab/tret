@@ -76,6 +76,7 @@ from tret.providers.catalog import (
     energy_accounting,
     get_catalog,
 )
+from tret.router_llm.objectives import objective_of
 from tret.router_llm.priors import OutcomePriors, PriorsProvider
 from tret.router_llm.router import ModelRouter, RoutingUnavailable
 from tret.engine.supervisor import (
@@ -1122,6 +1123,7 @@ class HarnessEngine:
             lessons=(
                 await approved_lessons(db, workspace_id, pack.slug) if lessons_on else None
             ),
+            objective=objective_of(model_policy),
         )
         system = assembled.system
         user_message = build_user_message(run, pack, documents)

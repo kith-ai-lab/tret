@@ -172,6 +172,13 @@ class PriorsProvider(Protocol):
         """Drop any cached aggregate. Called when a run adds new evidence."""
         ...
 
+    async def cooldown_for(self, candidate_ids: list[str]) -> list[dict]:
+        """Which of `candidate_ids` the model-level circuit breaker currently
+        excludes — `[{"model", "until", "reason"}, ...]`, shape/objective-free
+        unlike `for_key`. See `router_llm.priors.OutcomePriors.cooldown_for`.
+        """
+        ...
+
 
 class NoPriors:
     """The cold-start provider: no evidence, ever.
@@ -189,6 +196,9 @@ class NoPriors:
 
     def invalidate(self) -> None:
         """No cache, nothing to drop — but the engine calls this on every run."""
+
+    async def cooldown_for(self, candidate_ids: list[str]) -> list[dict]:
+        return []
 
 
 # ── aggregation ──────────────────────────────────────────────────────────────

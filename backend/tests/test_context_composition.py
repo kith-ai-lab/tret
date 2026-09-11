@@ -20,9 +20,11 @@ from fastapi import HTTPException
 from tret.api.harnesses import _validate_tool_names
 from tret.db.models import Harness, Pack
 from tret.engine.context import (
+    TOKEN_CONSERVATION_GUIDANCE,
     assemble_context,
     composition_report,
     estimate_tokens,
+    objective_guidance_block,
     parse_doctrine_selector,
     select_doctrine_text,
     task_doctrine_selection,
@@ -345,3 +347,96 @@ def test_the_web_rules_come_after_the_pack_doctrine():
     assert kinds.index("web_evidence_rules") > max(
         i for i, kind in enumerate(kinds) if kind == "doctrine"
     )
+
+
+# ── objective-aware guidance: token_conservation (2026-09-11) ────────────────
+# The router's `token_conservation` objective already picks a cheap model and
+# caps its reasoning effort (router_llm.objectives.default_effort); this is
+# the third lever — telling the model itself that the turn it is about to run
+# is being optimized for token thrift, since neither of the other two levers
+# says anything about output length once the model is actually writing.
+def test_objective_guidance_block_fires_only_for_token_conservation():
+    assert objective_guidance_block("token_conservation") is not None
+    for objective in ("balanced", "quality", "eco", None, "", "not-a-real-objective"):
+        assert objective_guidance_block(objective) is None
+
+
+def test_objective_guidance_block_is_kind_and_label_tagged():
+    block = objective_guidance_block("token_conservation")
+    assert block.kind == "objective_guidance"
+    assert block.label == "token_conservation"
+    assert block.text == TOKEN_CONSERVATION_GUIDANCE
+
+
+def test_the_guidance_is_absent_by_default_and_for_every_other_objective():
+    """No caller before this parameter existed passed `objective` at all, and
+    every existing test in this file calls `assemble_context`/`_context`
+    without it — the block must not appear unless it is asked for."""
+    pack = _pack()
+    for objective in (None, "balanced", "quality", "eco"):
+        assembled = assemble_context(
+            _harness(),
+            pack,
+            "divergence_assessment",
+            pack.manifest["schemas"],
+            objective=objective,
+        )
+        assert not _blocks_by_kind(assembled.blocks, "objective_guidance")
+
+
+def test_the_guidance_appears_under_token_conservation_and_is_accounted_for():
+    pack = _pack()
+    assembled = assemble_context(
+        _harness(),
+        pack,
+        "divergence_assessment",
+        pack.manifest["schemas"],
+        objective="token_conservation",
+    )
+    blocks = _blocks_by_kind(assembled.blocks, "objective_guidance")
+    assert len(blocks) == 1
+    assert blocks[0].label == "token_conservation"
+    assert blocks[0].text in assembled.system
+    # `composition_report` is what gets persisted on the run — the block must
+    # be part of that accounting like every other component, not a string
+    # appended after the fact outside the ledger.
+    report = composition_report(assembled.blocks)
+    assert "objective_guidance" in report["by_kind"]
+    assert report["by_kind"]["objective_guidance"] == blocks[0].est_tokens
+    assert report["total_est_tokens"] >= blocks[0].est_tokens
+
+
+def test_the_guidance_lands_after_task_instructions():
+    pack = _pack()
+    assembled = assemble_context(
+        _harness(),
+        pack,
+        "divergence_assessment",
+        pack.manifest["schemas"],
+        objective="token_conservation",
+    )
+    kinds = [b.kind for b in assembled.blocks]
+    assert kinds.index("objective_guidance") > kinds.index("task_instructions")
+
+
+def test_the_guidance_appears_for_chat_and_freeform_task_types_too():
+    """The block is keyed on the run's objective, not on whether the task
+    type declares a schema-backed task — a chat turn under token_conservation
+    needs the same instruction a structured task does."""
+    pack = _pack()
+    for task_type in ("chat", "freeform"):
+        assembled = assemble_context(
+            _harness(),
+            pack,
+            task_type,
+            pack.manifest["schemas"],
+            objective="token_conservation",
+        )
+        assert _blocks_by_kind(assembled.blocks, "objective_guidance")
+
+
+def test_the_guidance_tells_the_model_to_be_terse_and_keep_citations_exact():
+    text = TOKEN_CONSERVATION_GUIDANCE
+    assert "fewest words" in text
+    assert "no preamble" in text.lower()
+    assert "exact" in text.lower()

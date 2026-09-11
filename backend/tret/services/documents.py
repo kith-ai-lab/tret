@@ -278,7 +278,15 @@ async def extract_bounded(filename: str, data: bytes) -> tuple[str, dict, str]:
         return "", {"error": str(e)}, "failed"
     except Exception as e:  # a parser blowing up on hostile bytes
         log.warning("text extraction failed for %r: %s", filename, e)
-        return "", {"error": f"text extraction failed: {type(e).__name__}"}, "failed"
+        detail = type(e).__name__
+        if filename.lower().endswith(".pptx"):
+            # python-pptx's own exceptions (a missing package member, a
+            # malformed part) carry a first line worth surfacing alongside
+            # the class name — the other extractors' exceptions rarely do.
+            first_line = next((line for line in str(e).splitlines() if line.strip()), "")
+            if first_line:
+                detail = f"{detail}: {first_line}"
+        return "", {"error": f"text extraction failed: {detail}"}, "failed"
     if len(text) > MAX_EXTRACTED_CHARS:
         meta = {**meta, "truncated": True, "extracted_chars": MAX_EXTRACTED_CHARS}
         text = text[:MAX_EXTRACTED_CHARS]

@@ -7,6 +7,7 @@ parts, so writing them is opt-in per subclass via `_apply_cache_control`.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
@@ -17,6 +18,7 @@ import httpx
 from tret.net import CLASS_PROVIDER, EgressDenied, open_client
 
 from tret.providers.base import (
+    RETRY_DELAY_SECONDS,
     JsonCompletion,
     Msg,
     Provider,
@@ -28,8 +30,27 @@ from tret.providers.base import (
     ToolSpec,
     TurnComplete,
     Usage,
+    is_retryable_status,
+    looks_like_html,
     mark_cache_breakpoint,
+    summarize_html_error,
 )
+
+
+class _StreamFailure(Exception):
+    """One attempt's failure, carrying what the retry loop needs to decide
+    whether a second attempt is worth making — see `OpenAICompatProvider.stream`.
+
+    Internal to this module: never escapes `stream()`, which always converts
+    it to a `ProviderError` (retried once first, when `retryable` says so and
+    nothing has been yielded to the caller yet).
+    """
+
+    def __init__(self, message: str, status: int | None, *, retryable: bool):
+        self.message = message
+        self.status = status
+        self.retryable = retryable
+        super().__init__(message)
 
 
 def _to_openai_messages(system: str, messages: list[Msg]) -> list[dict]:
@@ -319,6 +340,34 @@ class OpenAICompatProvider(Provider):
             body["provider"] = provider_body
         self._apply_cache_control(body, messages)
 
+        # Retry a transient upstream failure once (2026-09-11 — see
+        # `providers.base`'s retry-constants docstring for the incident this
+        # is for): three Google AI Studio 503s relayed through OpenRouter and
+        # one OpenRouter HTML error page each failed a run outright, when a
+        # single retry would very likely have recovered them. Never retried
+        # past the first token: `yielded_any` tracks whether anything has
+        # already reached the caller, and a partial stream is not something a
+        # second attempt can safely replace — the caller may already have
+        # acted on what it received.
+        for attempt in range(2):
+            yielded_any = False
+            try:
+                async for event in self._stream_attempt(body, model=model):
+                    yielded_any = True
+                    yield event
+                return
+            except _StreamFailure as exc:
+                if exc.retryable and not yielded_any and attempt == 0:
+                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+                    continue
+                raise ProviderError(self.name, exc.message, exc.status) from exc
+
+    async def _stream_attempt(self, body: dict, *, model: str) -> AsyncIterator[ProviderEvent]:
+        """One attempt at the streamed request — the whole of what `stream()`
+        used to be, before it needed a retry loop around it. Raises
+        `_StreamFailure` (never `ProviderError` directly) so `stream()` can
+        decide whether a second attempt is worth making.
+        """
         # Aggregate tool-call deltas per (choice, tool index). The tool index is
         # only unique *within* a choice, so keying on it alone concatenated the
         # argument fragments of unrelated tool calls whenever a provider returned
@@ -345,8 +394,14 @@ class OpenAICompatProvider(Provider):
                     "POST", f"{self._base_url}/chat/completions", headers=self._headers, json=body
                 ) as resp:
                     if resp.status_code >= 400:
-                        detail = (await resp.aread()).decode(errors="replace")[:2000]
-                        raise ProviderError(self.name, detail, resp.status_code)
+                        raw = (await resp.aread()).decode(errors="replace")
+                        html = looks_like_html(raw, resp.headers.get("content-type"))
+                        message = summarize_html_error(resp.status_code, raw) if html else raw[:2000]
+                        raise _StreamFailure(
+                            message,
+                            resp.status_code,
+                            retryable=is_retryable_status(resp.status_code, html_body=html),
+                        )
                     async for line in resp.aiter_lines():
                         if not line.startswith("data:"):
                             continue
@@ -390,7 +445,10 @@ class OpenAICompatProvider(Provider):
                                 if fn.get("arguments"):
                                     slot["args"] += fn["arguments"]
             except httpx.HTTPError as e:
-                raise ProviderError(self.name, str(e)) from e
+                # No status code and no body to summarize — a connection-level
+                # failure, never retried (see `providers.base.is_retryable_status`,
+                # which this deliberately does not call).
+                raise _StreamFailure(str(e), None, retryable=False) from e
 
         for key in sorted(pending):
             _choice_idx, idx = key
@@ -450,15 +508,27 @@ class OpenAICompatProvider(Provider):
         provider_body = self._provider_body(True)
         if provider_body:
             body["provider"] = provider_body
-        async with open_client(self.egress_class, timeout=timeout) as client:
-            try:
-                resp = await client.post(
-                    f"{self._base_url}/chat/completions", headers=self._headers, json=body
-                )
-            except httpx.HTTPError as e:
-                raise ProviderError(self.name, str(e)) from e
-        if resp.status_code >= 400:
-            raise ProviderError(self.name, resp.text[:2000], resp.status_code)
+        # Same retry-once policy as `stream()` (see `providers.base`'s
+        # retry-constants docstring): a non-streaming call has no partial
+        # output to protect, so the only question is whether the failure
+        # itself is worth a second try.
+        for attempt in range(2):
+            async with open_client(self.egress_class, timeout=timeout) as client:
+                try:
+                    resp = await client.post(
+                        f"{self._base_url}/chat/completions", headers=self._headers, json=body
+                    )
+                except httpx.HTTPError as e:
+                    raise ProviderError(self.name, str(e)) from e
+            if resp.status_code >= 400:
+                raw = resp.text
+                html = looks_like_html(raw, resp.headers.get("content-type"))
+                message = summarize_html_error(resp.status_code, raw) if html else raw[:2000]
+                if is_retryable_status(resp.status_code, html_body=html) and attempt == 0:
+                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+                    continue
+                raise ProviderError(self.name, message, resp.status_code)
+            break
         data = resp.json()
         usage = _usage_from_openai(data.get("usage") or {})
         served_by = await self._resolve_served_by(model, _served_by_from_openai(data))

@@ -9,6 +9,7 @@ Two kinds of prompt-cache breakpoint are set:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -18,6 +19,7 @@ import anthropic
 from tret.net import CLASS_PROVIDER, build_client
 
 from tret.providers.base import (
+    RETRY_DELAY_SECONDS,
     JsonCompletion,
     Msg,
     Provider,
@@ -29,7 +31,10 @@ from tret.providers.base import (
     ToolSpec,
     TurnComplete,
     Usage,
+    is_retryable_status,
+    looks_like_html,
     mark_cache_breakpoint,
+    summarize_html_error,
 )
 
 # The API rejects requests carrying more than four cache_control blocks. One is
@@ -53,6 +58,45 @@ COUNT_TOKENS_TIMEOUT = 5.0
 # field is uniform across providers instead of "populated for OpenRouter,
 # absent everywhere else".
 SERVED_BY = "anthropic"
+
+
+class _StreamFailure(Exception):
+    """One attempt's failure, carrying what the retry loop needs to decide
+    whether a second attempt is worth making — see `AnthropicProvider.stream`
+    and the shared retry policy in `providers.base`. Internal to this module;
+    always converted to a `ProviderError` before it can escape.
+    """
+
+    def __init__(self, message: str, status: int | None, *, retryable: bool):
+        self.message = message
+        self.status = status
+        self.retryable = retryable
+        super().__init__(message)
+
+
+def _failure_from_api_error(e: anthropic.APIError) -> _StreamFailure:
+    """One attempt's `_StreamFailure`, from whatever the SDK raised.
+
+    `APIStatusError` (a real HTTP response came back, just an error one) is
+    the only case with a status and a body to summarize; `retryable` is
+    decided the same way as every other provider (`providers.base.
+    is_retryable_status`) — 529 is Anthropic's own "overloaded" code, so this
+    is the provider most likely to actually hit that branch. Anything else
+    (`APIConnectionError` and friends) has no status and is never retried —
+    same scope as `openai_compat.py`'s handling of a bare `httpx.HTTPError`.
+    """
+    if isinstance(e, anthropic.APIStatusError):
+        response = e.response
+        try:
+            raw = response.text
+        except Exception:  # noqa: BLE001 - a body that cannot be read is not an HTML one
+            raw = ""
+        html = looks_like_html(raw, response.headers.get("content-type"))
+        message = summarize_html_error(e.status_code, raw) if html else str(e)
+        return _StreamFailure(
+            message, e.status_code, retryable=is_retryable_status(e.status_code, html_body=html)
+        )
+    return _StreamFailure(str(e), getattr(e, "status_code", None), retryable=False)
 
 
 def _as_blocks(content) -> list[dict]:
@@ -269,6 +313,31 @@ class AnthropicProvider(Provider):
             # calling; this provider only forwards what it is given.
             kwargs["output_config"] = {"effort": effort}
 
+        # Retry a transient upstream failure once (2026-09-11 — see the
+        # shared retry policy in `providers.base`). 529 ("overloaded") is
+        # Anthropic's own status for exactly this. Never retried past the
+        # first token: `yielded_any` tracks whether anything has already
+        # reached the caller, and a partial stream is not something a second
+        # attempt can safely replace.
+        for attempt in range(2):
+            yielded_any = False
+            try:
+                async for event in self._stream_attempt(kwargs):
+                    yielded_any = True
+                    yield event
+                return
+            except _StreamFailure as exc:
+                if exc.retryable and not yielded_any and attempt == 0:
+                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+                    continue
+                raise ProviderError("anthropic", exc.message, exc.status) from exc
+
+    async def _stream_attempt(self, kwargs: dict) -> AsyncIterator[ProviderEvent]:
+        """One attempt at the streamed request — the whole of what `stream()`
+        used to be, before it needed a retry loop around it. Raises
+        `_StreamFailure` (never `ProviderError` directly) so `stream()` can
+        decide whether a second attempt is worth making.
+        """
         try:
             async with self._client.messages.stream(**kwargs) as stream:
                 # Track in-flight tool_use blocks by index to assemble arguments.
@@ -306,7 +375,7 @@ class AnthropicProvider(Provider):
                     served_by=SERVED_BY,
                 )
         except anthropic.APIError as e:
-            raise ProviderError("anthropic", str(e), getattr(e, "status_code", None)) from e
+            raise _failure_from_api_error(e) from e
 
     async def complete_json(
         self,
@@ -319,19 +388,29 @@ class AnthropicProvider(Provider):
         max_tokens: int = 1024,
         timeout: float = 30.0,
     ) -> JsonCompletion:
-        try:
-            msg = await self._client.messages.create(
-                model=model,
-                system=system,
-                messages=[{"role": "user", "content": prompt}],
-                tools=[{"name": tool_name, "description": "Respond with the structured result.",
-                        "input_schema": schema}],
-                tool_choice={"type": "tool", "name": tool_name},
-                max_tokens=max_tokens,
-                timeout=timeout,
-            )
-        except anthropic.APIError as e:
-            raise ProviderError("anthropic", str(e), getattr(e, "status_code", None)) from e
+        # Same retry-once policy as `stream()` — see `providers.base`'s retry
+        # constants and this class's `_failure_from_api_error`. A
+        # non-streaming call has no partial output to protect, so the only
+        # question is whether the failure itself is worth a second try.
+        for attempt in range(2):
+            try:
+                msg = await self._client.messages.create(
+                    model=model,
+                    system=system,
+                    messages=[{"role": "user", "content": prompt}],
+                    tools=[{"name": tool_name, "description": "Respond with the structured result.",
+                            "input_schema": schema}],
+                    tool_choice={"type": "tool", "name": tool_name},
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                )
+                break
+            except anthropic.APIError as e:
+                failure = _failure_from_api_error(e)
+                if failure.retryable and attempt == 0:
+                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+                    continue
+                raise ProviderError("anthropic", failure.message, failure.status) from e
         for block in msg.content:
             if block.type == "tool_use" and block.name == tool_name:
                 return JsonCompletion(

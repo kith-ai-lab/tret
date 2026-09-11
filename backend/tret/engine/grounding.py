@@ -440,9 +440,10 @@ def grounding_nudge_message(unsupported: list[str]) -> str:
     """
     return (
         "Grounding check: these figures appear in none of the data retrieved in this run "
-        f"and nowhere in the conversation: {', '.join(unsupported)}. Every number in your "
-        "reply must come from a tool result (a dataset lookup, a method, a document read) "
-        "or from what the user wrote. Rewrite your reply using only such values. If the "
-        "data you need was not found, say so plainly and file a data request instead of "
-        "stating a value."
+        f"and nowhere in the conversation: {', '.join(unsupported)}. The data already "
+        "retrieved for this turn is already in the conversation above — do not call a tool "
+        "again to look for it. Rewrite your reply using only values already retrieved or "
+        "given by the user. For any value that was not retrieved, say plainly that it is "
+        "not available, and file a data request if the task needs it. The rewrite must "
+        "still answer the user's question in full, not just drop the unsupported figures."
     )

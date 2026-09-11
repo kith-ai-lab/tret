@@ -557,7 +557,8 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
                 title={message.run_id ? 'View the run for this turn' : undefined}
                 onClick={() => message.run_id && navigate(`/runs/${message.run_id}`)}
               >
-                <GearIcon /> {a.summary || a.tool}
+                <GearIcon /> {a.tool}
+                {a.summary && <span style={{ opacity: 0.65 }}> · {a.summary}</span>}
               </button>
             ))}
           </div>

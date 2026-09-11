@@ -28,7 +28,16 @@ from tests.evals.golden_world import install_sqlite_type_shims
 from tret.api import auth, connections as connections_api, documents as documents_api
 from tret.config import get_settings
 from tret.db.engine import get_db
-from tret.db.models import Base, Document, Project, User, Workspace, WorkspaceConnection, WorkspaceMember
+from tret.db.models import (
+    Base,
+    ConnectionActivity,
+    Document,
+    Project,
+    User,
+    Workspace,
+    WorkspaceConnection,
+    WorkspaceMember,
+)
 from tret.engine import extensions as extensions_module
 from tret.engine.extensions import ExtensionAPI, GateResult
 from tret.net import guard as net_guard
@@ -474,6 +483,152 @@ async def test_import_gdrive_binary_happy_path(client, seed, session_factory):
     # appears via the existing document-listing endpoint
     listed = await client.get("/api/documents")
     assert [d["filename"] for d in listed.json()] == ["notes.txt"]
+
+    # one activity row for the import, logged through the same helper the
+    # connected-file read/search tools use
+    async with session_factory() as db:
+        activity = (
+            (await db.execute(select(ConnectionActivity).where(ConnectionActivity.workspace_id == workspace.id)))
+            .scalars()
+            .one()
+        )
+    assert activity.provider == "gdrive"
+    assert activity.action == "import"
+    assert activity.target == "notes.txt"
+    assert activity.bytes == 11
+    assert activity.actor_user_id == user.id
+    assert activity.detail is None
+
+
+def _mock_gdrive_notes_file(mock: respx.MockRouter) -> None:
+    mock.get(f"{GDRIVE_API}/files/file-1", params={"fields": "id,name,mimeType,size,modifiedTime"}).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "file-1", "name": "notes.txt", "mimeType": "text/plain",
+                "size": 11, "modifiedTime": "2026-08-01T00:00:00Z",
+            },
+        )
+    )
+    mock.get(f"{GDRIVE_API}/files/file-1", params={"alt": "media"}).mock(
+        return_value=httpx.Response(200, content=b"hello world", headers={"content-type": "text/plain"})
+    )
+
+
+async def test_reimporting_the_same_item_returns_the_existing_document_not_a_duplicate(
+    client, seed, session_factory
+):
+    """`POST .../import` used to create an identical-content `Document` row
+    on every repeat of the same picked item — a double click, or the obvious
+    thing to do after retrying a request whose response was lost. A second
+    import of the same provider item (same sha256 content, same
+    `meta.source.file_id`) must return the document the first import already
+    created, flagged `"deduplicated": true`, not a second row.
+    """
+    workspace = make_workspace("Alpha")
+    user = make_user("import-dedup@example.com")
+    project = make_project(workspace)
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, conn)
+    await login(client, user.email)
+
+    item = {"id": "file-1", "name": "notes.txt", "drive_id": None}
+    # One `respx.mock` block for both requests: `get_access_token` caches the
+    # refreshed token at module scope for the life of the process, so a
+    # second `mock_gdrive_refresh` would sit uncalled and fail
+    # `assert_all_called`. The two file-metadata/download routes, unlike the
+    # token route, are hit once per request — respx routes tolerate that.
+    with respx.mock(assert_all_called=True) as mock:
+        mock_gdrive_refresh(mock)
+        _mock_gdrive_notes_file(mock)
+        first = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [item]},
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["documents"][0].get("deduplicated") is None
+        first_id = first.json()["documents"][0]["id"]
+
+        second = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [item]},
+        )
+    assert second.status_code == 200, second.text
+    assert second.json()["errors"] == []
+    second_doc = second.json()["documents"][0]
+    assert second_doc["id"] == first_id
+    assert second_doc["deduplicated"] is True
+
+    async with session_factory() as db:
+        docs = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().all()
+        assert [d.id for d in docs] == [uuid.UUID(first_id)]
+
+        activities = (
+            (
+                await db.execute(
+                    select(ConnectionActivity)
+                    .where(ConnectionActivity.workspace_id == workspace.id)
+                    .order_by(ConnectionActivity.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert [a.detail for a in activities] == [None, "deduplicated"]
+    assert all(a.action == "import" and a.target == "notes.txt" for a in activities)
+
+
+async def test_a_different_provider_item_with_identical_bytes_is_not_deduplicated(
+    client, seed, session_factory
+):
+    """Dedup is keyed on `sha256` AND `meta.source.file_id` together — two
+    distinct provider items that happen to contain identical bytes (a
+    template copied across two folders, say) are still two distinct imports,
+    each worth its own document row.
+    """
+    workspace = make_workspace("Alpha")
+    user = make_user("import-dedup-2@example.com")
+    project = make_project(workspace)
+    conn = make_connection(workspace, provider="gdrive")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, conn)
+    await login(client, user.email)
+
+    # One `respx.mock` block for both requests — see the comment in
+    # `test_reimporting_the_same_item_returns_the_existing_document_not_a_
+    # duplicate` on why a second `mock_gdrive_refresh` would go uncalled.
+    with respx.mock(assert_all_called=True) as mock:
+        mock_gdrive_refresh(mock)
+        _mock_gdrive_notes_file(mock)
+        mock.get(f"{GDRIVE_API}/files/file-2", params={"fields": "id,name,mimeType,size,modifiedTime"}).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "file-2", "name": "notes-copy.txt", "mimeType": "text/plain",
+                    "size": 11, "modifiedTime": "2026-08-01T00:00:00Z",
+                },
+            )
+        )
+        mock.get(f"{GDRIVE_API}/files/file-2", params={"alt": "media"}).mock(
+            return_value=httpx.Response(200, content=b"hello world", headers={"content-type": "text/plain"})
+        )
+        first = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [{"id": "file-1", "name": "notes.txt", "drive_id": None}]},
+        )
+        assert first.status_code == 200, first.text
+
+        second = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "gdrive", "items": [{"id": "file-2", "name": "notes-copy.txt", "drive_id": None}]},
+        )
+    assert second.status_code == 200, second.text
+    second_doc = second.json()["documents"][0]
+    assert second_doc.get("deduplicated") is None
+    assert second_doc["id"] != first.json()["documents"][0]["id"]
+
+    async with session_factory() as db:
+        docs = (await db.execute(select(Document).where(Document.project_id == project.id))).scalars().all()
+    assert len(docs) == 2
 
 
 async def test_import_gdrive_native_doc_is_exported_to_docx(client, seed, session_factory):

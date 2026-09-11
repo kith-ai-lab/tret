@@ -83,6 +83,56 @@ CONTENT_SECURITY_POLICY = (
     "form-action 'self'"
 )
 
+async def _drain_in_flight_runs(
+    db, tasks: set[asyncio.Task], deadline_seconds: float
+) -> None:
+    """Give whatever runs `tasks` are still executing up to `deadline_seconds`
+    to reach their own terminal state before this process exits, polling once
+    a second and logging how many are still outstanding.
+
+    Two live deploys each marked a run still genuinely in progress with
+    `reconcile.ORPHAN_ERROR` — the run hadn't crashed, it just hadn't finished
+    by the moment the old process exited, so the new process's startup sweep
+    (`sweep_orphaned_runs`) found its row still `running` and closed it out.
+    Waiting here, before *this* process exits, gives an ordinary run the
+    chance to reach `completed`/`failed` on its own, so that sweep never even
+    sees it next boot. `tasks` is the union of `tret.api.runs`'s and `tret.api.chat`'s
+    background-task registries in production (each task wraps one run)
+    — an injectable set in tests, so a fake engine's tasks can stand in for
+    it without booting a real app.
+
+    Only a run still executing once the deadline passes is left non-terminal
+    — closed out right here (`sweep_orphaned_runs`, reused unchanged rather
+    than duplicated) instead of waiting on a next boot nothing guarantees is
+    coming soon. Never cancels an overrunning task: killing it mid-write
+    would trade one bad outcome for a worse one, so it is simply left to run
+    (and exit with the process) while its row gets marked the same way a
+    truly killed process's leftover row always has been.
+    """
+    from tret.services.reconcile import sweep_orphaned_runs
+
+    deadline = asyncio.get_event_loop().time() + deadline_seconds
+    remaining = {t for t in tasks if not t.done()}
+    while remaining and asyncio.get_event_loop().time() < deadline:
+        log.info(
+            "shutdown: draining %d in-flight run(s) (up to %.0fs)...",
+            len(remaining),
+            deadline_seconds,
+        )
+        await asyncio.sleep(1)
+        remaining = {t for t in tasks if not t.done()}
+    if remaining:
+        log.warning(
+            "shutdown: %d run(s) still in flight after the %.0fs drain window; "
+            "marking as orphaned rather than leaving them non-terminal",
+            len(remaining),
+            deadline_seconds,
+        )
+    else:
+        log.info("shutdown: all in-flight run(s) finished within the drain window")
+    await sweep_orphaned_runs(db)
+
+
 SECURITY_HEADERS: dict[str, str] = {
     "X-Frame-Options": "DENY",
     "X-Content-Type-Options": "nosniff",
@@ -211,6 +261,29 @@ async def lifespan(app: FastAPI):
         warm_task.cancel()
         with suppress(asyncio.CancelledError):
             await warm_task
+        # Drain whatever runs are still executing before this process exits
+        # — see _drain_in_flight_runs's docstring for the deploy bug this
+        # closes. Skipped under the same "lost" condition the startup sweep
+        # above skips under: a process that lost the instance lock is not
+        # the single instance actually executing these runs, so marking
+        # anything non-terminal here would be exactly as wrong as it would
+        # be at startup.
+        if instance_lock.state == "lost":
+            log.error(
+                "skipping the shutdown drain: this process lost the instance lock "
+                "(TRET_INSTANCE_LOCK=warn) — another instance may still be running "
+                "and legitimately finishing runs this process must not touch"
+            )
+        else:
+            async with get_session_factory()() as db:
+                # Both registries: Workbench runs live in `runs`, chat turns
+                # in `chat` — a drain that watched only one would sweep the
+                # other's live run as an orphan while it was still executing.
+                await _drain_in_flight_runs(
+                    db,
+                    runs._background_tasks | chat._background_tasks,
+                    get_settings().shutdown_drain_seconds,
+                )
         # Release last: a process that never actually held the lock (SQLite,
         # TRET_INSTANCE_LOCK=off, or a `warn` that lost the race) closes
         # nothing here — see InstanceLock.release.

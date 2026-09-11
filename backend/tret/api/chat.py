@@ -329,6 +329,50 @@ async def send_message(
     return {"run_id": str(run.id), "conversation_id": str(conv.id)}
 
 
+def _own_messages(run: Run) -> list[dict]:
+    """`run.messages` with the injected conversation-history prefix stripped off.
+
+    `send_message` seeds every chat run's `task_input["_history"]` with the
+    conversation's prior turns, and the engine puts that history straight onto
+    the front of `run.messages` before this run's own turn begins (`history =
+    [Msg.from_json(m) for m in run.task_input.get("_history", [])]` then
+    `messages: list[Msg] = [*history, Msg(role="user", content=user_message)]`
+    — see `engine/harness.py`). Scanning `run.messages` for "the last assistant
+    text" without skipping that prefix means a run that fails before writing
+    anything of its own surfaces the *previous* turn's reply as if it were
+    this run's own (seen on cloud: runs 3ccb2fd2, 8474f908).
+
+    The skip count starts at `len(_history)` but is reduced by whatever the
+    engine's own context-budget trim dropped off the front of that history
+    before it ever reached `run.messages` (`engine/compaction.py::
+    trim_history`, recorded on `run.compactions` as `{"kind": "history_trim",
+    "dropped_history_turns": N}`) — otherwise a trimmed run would over-skip
+    into its own turn's messages.
+    """
+    history_len = len(run.task_input.get("_history") or [])
+    for record in run.compactions or []:
+        if record.get("kind") == "history_trim":
+            history_len -= record.get("dropped_history_turns", 0)
+    history_len = max(history_len, 0)
+    return (run.messages or [])[history_len:]
+
+
+def _tool_result_summary(result: dict | None) -> str:
+    """Read a tool call's own result and say, in the activity pill, when it
+    came back empty — a lookup or search that silently found nothing used to
+    render exactly like one that found something (A2)."""
+    if result is None:
+        return ""
+    if (result.get("meta") or {}).get("error"):
+        return "error"
+    content = result.get("content") or ""
+    if content.startswith("No rows in"):
+        return "no rows matched"
+    if content.startswith("No matches") or content.startswith("No connected-source matches"):
+        return "no matches"
+    return ""
+
+
 def _assistant_message(run: Run) -> dict:
     """The persisted assistant turn: text/activity, plus the full cost, carbon
     and routing record behind it.
@@ -340,9 +384,13 @@ def _assistant_message(run: Run) -> dict:
     components a run detail page uses. Nullable fields stay null, never 0, when
     the run has no estimate or was never routed.
     """
+    own_messages = _own_messages(run)
+    tool_results = {
+        m.get("tool_call_id"): m for m in own_messages if m.get("role") == "tool"
+    }
     assistant_text = ""
     activity = []
-    for m in run.messages or []:
+    for m in own_messages:
         if m.get("role") == "assistant":
             if m.get("content"):
                 assistant_text = m["content"]  # last assistant text wins
@@ -351,6 +399,8 @@ def _assistant_message(run: Run) -> dict:
                 if tc.get("name") == "run_harness_task":
                     args = tc.get("arguments") or {}
                     entry["summary"] = f"delegated {args.get('task_type', '?')}"
+                else:
+                    entry["summary"] = _tool_result_summary(tool_results.get(tc.get("id")))
                 activity.append(entry)
     if run.status == "completed_without_output" and not assistant_text:
         # The engine's empty-reply guard: the model finished its tool calls and

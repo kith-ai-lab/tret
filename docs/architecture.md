@@ -61,7 +61,16 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    fallback. **Nothing derived from evidence can widen a policy**: it reorders
    within `allowed` and under `max_cost_tier`, never past them. Each decision
    snapshots what it read as `runs.routing.evidence`, because the aggregate moves
-   and a decision has to stay explicable after it has. Every decision also
+   and a decision has to stay explicable after it has.
+   A separate, shape/objective-free **circuit breaker** (`router_llm/priors.py`
+   `OutcomePriors.cooldown_for`, `TRET_ROUTER_COOLDOWN_MINUTES`, default 30,
+   `0` disables) sits alongside the keyed priors above: when a model's last two
+   runs within that window both failed at iteration 0 with a provider error, it
+   is excluded from candidates for *every* shape and objective for that long —
+   catching the endpoint-level failure the keyed priors cannot generalize
+   across keys, recorded as `evidence.cooldown` and never allowed to empty the
+   candidate list.
+   Every decision also
    carries `effort` (the reasoning-effort level it recorded, sent to the
    provider only when the chosen model's own catalog entry accepts the
    control) and `context_fit` (whether the chosen model's window can hold the
@@ -436,6 +445,13 @@ trust model runs through forced tool calls, so a model that ignores `tools` is
 not usable here regardless of its prose. Cost accounting derives from catalog
 prices (cache reads/writes at their own rates); estimated energy accounting
 derives from catalog energy classes (docs/eco-accounting.md).
+
+Every provider retries a transient upstream failure once — an HTTP
+502/503/504/529, or any 5xx whose body is HTML — waiting 2s before the retry
+and never retrying once any part of a stream has already reached the caller.
+An HTML error body (a gateway's own error page, not the provider's JSON error
+shape) is summarized to `upstream returned HTML (HTTP <status>[, <title>])`
+rather than stored verbatim as `run.error`.
 
 ## Packs
 

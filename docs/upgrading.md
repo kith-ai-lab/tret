@@ -30,6 +30,38 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## 2026-09-11 · chat and runs fixes
+
+Three fixes, no migration:
+
+- **A failed chat turn no longer shows the previous turn's reply.**
+  `_assistant_message` (`backend/tret/api/chat.py`) scanned all of
+  `run.messages` for "the last assistant text", but `run.messages` begins
+  with the conversation history the engine seeds onto the front of every
+  chat run (`task_input["_history"]`) — so a run that failed before writing
+  anything of its own surfaced the *prior* turn's reply as if it were this
+  one's (seen on cloud: runs `3ccb2fd2`, `8474f908`). The scan now skips
+  exactly that history prefix (accounting for however much of it the
+  engine's own context-budget trim dropped, via `run.compactions`); a failed
+  run with no text of its own again shows "(run failed: …)".
+- **An empty lookup or search is now visible in the chat activity pills**,
+  instead of rendering identically to one that found something. A tool
+  call's activity entry now carries a `summary` of `"no rows matched"`
+  (`lookup_dataset`), `"no matches"` (`search_documents` /
+  `search_connected_files`), or `"error"` (the tool result's
+  `meta.error`) — delegation's existing `"delegated <task_type>"` summary is
+  unaffected. The chat pill (`frontend/src/views/Chat.tsx`) now shows the
+  tool name and, when present, the summary after it.
+- **`GET /api/runs` now pages.** It returned at most 50/200 rows with no way
+  to see the rest. It now accepts `limit` (1–200, default 50) and `cursor`
+  and, when either is passed, returns `{"items": [...], "next_cursor": ...}`
+  — keyset pagination on `(created_at desc, id desc)`, so a run created
+  mid-page never shifts or duplicates a row across pages. Calling it with
+  neither parameter still returns the original bare list, unchanged, for any
+  caller that never updates. The Runs page (`frontend/src/views/Runs.tsx`)
+  now fetches 50 at a time behind a "Load more" button instead of 200 in one
+  shot.
+
 ## Chat replies get a grounding check (2026-09-11)
 
 Chat and freeform prose had no equivalent of the `cited_values` cross-check a
@@ -73,6 +105,150 @@ TRET_OPENROUTER_PROVIDER_PREFS={"require_parameters":true}
 ```
 
 No migration, no restart beyond the deploy.
+
+## 2026-09-11 · providers and routing
+
+Four fixes, no migration:
+
+- **A transient upstream failure is now retried once**, in the OpenAI-compatible
+  provider (`backend/tret/providers/openai_compat.py`, used by OpenRouter and
+  Kimi) and in `AnthropicProvider`. Over roughly 330 cloud runs, three Google AI
+  Studio 503s relayed through OpenRouter and one OpenRouter HTML error page (a
+  Cloudflare template, stored verbatim as `run.error`) each failed a run outright
+  when a single retry would very likely have recovered them. On an HTTP
+  502/503/504/529, or any 5xx whose body is HTML, the provider now waits 2s and
+  retries the request once before raising; a partial stream (any token already
+  yielded to the caller) is never retried, since the caller may already have
+  acted on it. An HTML error body is now summarized to `[<provider>] upstream
+  returned HTML (HTTP <status>[, <title>])` instead of being stored as the raw
+  page source.
+- **A model whose endpoint has just started rejecting every request is now
+  excluded from routing across every task shape and objective for a while** —
+  a circuit breaker, not the existing per-key priors (which are scoped to one
+  `(task_shape, objective, size_band)` and so never generalized: `gpt-5.6-luna`
+  was demoted for chat shapes but kept getting chosen, and failing, for
+  extraction and verdict runs). When a model's last two runs within the last
+  `TRET_ROUTER_COOLDOWN_MINUTES` (default 30, `0` disables) both failed at
+  iteration 0 with a provider error, it sits out routing for that long,
+  recorded on the run's `routing.evidence.cooldown`. Never excludes every
+  candidate — if doing so would leave nothing to route to, the cooldown is
+  ignored and the decision's `reasoning` says so.
+- **Verdict-shape reasoning effort now follows the chosen model's own cost
+  tier**, not a flat per-objective value. `gemini-3.8-flash` (a `standard`-tier
+  model) spent 31k–74k output tokens and $0.14–0.34 per verdict case at the
+  previous flat `high` default without landing more designed cases than a
+  cheaper effort would have, while `low` under the `eco` objective landed the
+  hardest case in the same batch. `premium` still gets `high`, `standard` now
+  gets `medium`, and `economy`/`local` get `low` — for every objective except
+  `quality`, which keeps `high` on `standard` too. See
+  [eco-accounting.md](eco-accounting.md#reasoning-effort-and-the-verdict-shapes-own-tier-table).
+- **`token_conservation` runs now tell the model itself to conserve tokens.**
+  The objective already picked a cheap model and capped its reasoning effort,
+  but neither touched what the model was told about the turn it was running —
+  and on two drafting-shape runs the cheap model wrote *more* than a `balanced`
+  run on the same prompt. The context assembler now appends an
+  `objective_guidance` block (accounted in `context_composition` like every
+  other block) asking for the fewest words that fully answer the task, no
+  preamble, a short list over prose, and exact quoted values. See
+  [eco-accounting.md](eco-accounting.md#telling-the-model-itself-to-conserve-tokens).
+
+No action needed on upgrade; `TRET_ROUTER_COOLDOWN_MINUTES` is optional (see
+`.env.example`).
+
+## 2026-09-11 · cloud, deploy and pack
+
+No migration. Three independent fixes:
+
+- **Shutdown now drains in-flight runs before exiting.** Two live deploys
+  each failed a run that was still genuinely in progress with
+  `process_restart: the server restarted while this run was in progress` —
+  the run hadn't crashed, it just hadn't finished by the moment the old
+  process exited, so the new process's startup sweep found its row still
+  `running` and closed it out as orphaned. `tret/main.py`'s lifespan
+  shutdown now waits up to `TRET_SHUTDOWN_DRAIN_SECONDS` (default 45s) for
+  runs still executing to reach their own terminal state before this process
+  exits, polling once a second; only a run still going once that deadline
+  passes is left non-terminal for the sweep to catch. If you run tret behind
+  an orchestrator that sends a hard kill after some timeout (Fly's
+  `kill_timeout`, Kubernetes' `terminationGracePeriodSeconds`, ...), make
+  sure that timeout is at least `TRET_SHUTDOWN_DRAIN_SECONDS` or the process
+  is killed out from under the wait before it can do any good — tret-cloud's
+  own `fly.toml` now sets `kill_timeout = "60s"` to cover the 45s default
+  with margin. See `.env.example` for the new setting.
+- **`GET /api/billing/status` (tret-cloud) now reports `held_usd` and
+  `available_usd`** alongside the existing `balance_usd`, so a tester (or
+  the billing UI) can see an in-flight run's credit reservation instead of
+  it being invisible until the run finishes. Additive fields only — nothing
+  existing changes shape. See tret-cloud's own README for details.
+- **The climate-risk pack's reason-code doctrine now distinguishes
+  `methodology_choice` from `site_specific_factor`** when a vendor's method
+  note names a technique (terrain amplification, resolution, a modelling
+  choice) that happens to reference a site property — see
+  `packs/climate-risk/doctrine/03-reason-codes.md`. Pack version bumped
+  0.1.0 → 0.1.1. **A workspace that already has the pack installed keeps
+  0.1.0 — and the old doctrine — until it reinstalls**; the pack version
+  bump alone does not retroactively change what an installed workspace's
+  runs see. Also in this pack: `methods/ghg_inventory.py`'s scope1_mobile
+  factor is now diesel- or gasoline-specific (matched from each record's
+  `activity`/`notes` text) instead of a single diesel-only number, which
+  used to over-count a gasoline record by about 16%; every existing
+  installed workspace's own workbook data is unaffected until it reinstalls,
+  same as the reason-code change above.
+
+## 2026-09-11 · documents, exports and the grounding nudge
+
+No migration. Five independent fixes:
+
+- **Chat can now reach a project's documents even when none are explicitly
+  attached.** `search_documents`/`read_document` (`tret/engine/tools.py`)
+  used to see only `run.document_ids`, and a chat run always has none — so a
+  chat user asking about a document already sitting in their project always
+  got "No documents are attached to this run". A chat/freeform run with
+  nothing attached now searches (and may read) every document of its own
+  project instead, scoped by `project_id` so a document belonging to another
+  project is never reachable this way. A specialist task (a divergence
+  assessment, an evidence extraction with nothing attached, ...) keeps the
+  old, narrower behaviour unchanged.
+- **The grounding nudge no longer reads as "throw away your whole reply and
+  re-look-up everything."** Two problems in the wording, seen on cloud: a
+  repaired reply sometimes dropped its actual substance along with the
+  unsupported numbers (down to "I am ready to assist…"), and a nudge could
+  trigger six to nine fresh tool calls even though the data it needed was
+  already in the conversation. `grounding_nudge_message`
+  (`tret/engine/grounding.py`) now says plainly that the retrieved data for
+  this turn is already there and the model must not query again for it,
+  that a value it cannot support should be stated as unavailable (filing a
+  data request if the task needs it), and that the rewrite must still
+  answer the user's question in full.
+- **A `.pptx` extraction failure now says more than "text extraction
+  failed: error".** `extract_bounded` (`tret/services/documents.py`) always
+  reported the exception's class name for every format; for `.pptx`
+  specifically it now also appends the first line of the exception's own
+  message (`python-pptx`'s own exceptions — a missing package member, a
+  malformed part — usually have one worth showing), so a reviewer sees
+  *what* about the file broke, not just that something did.
+- **An approved deliverable section no longer ships its own "this is a
+  draft" banner.** A `draft_section` finding's body sometimes opens with a
+  model-written `**Draft status:** This section is a draft awaiting review
+  by a named human reviewer…` paragraph — true while the finding actually
+  is a draft, false and confusing the moment it is approved. That leading
+  paragraph (bold or plain, up to the first blank line) is now stripped at
+  approval time (`tret/api/findings.py`'s approve path) and, defensively,
+  again at export assembly (`tret/services/export.py::
+  strip_draft_status_banner`) for any section that was approved before this
+  fix shipped.
+- **Importing the same connected file twice no longer creates two
+  documents, and imports are now logged.** `POST /api/projects/{project_id}
+  /documents/import` (`tret/api/documents.py`) previously created a document
+  per item with no `connection_activity` row at all, and an identical
+  duplicate document on every repeat of the same picked item. Each item that
+  reaches the provider now logs one `action="import"` activity row (via the
+  same `record_connection_activity` helper the connected-file read tools
+  use), and an item whose bytes (`sha256`) and provider id
+  (`meta.source.file_id`) match a document the project already has returns
+  that existing document instead of a new one — the response shape is
+  unchanged, with `"deduplicated": true` added on that one item. See
+  docs/connections.md.
 
 ## Harness authoring now requires the admin or owner workspace role (2026-09-03)
 

@@ -503,6 +503,44 @@ def test_approving_a_non_connected_write_finding_never_calls_upload(client, uplo
     assert upload_ok == []
 
 
+def test_approving_a_draft_section_strips_its_draft_status_banner(client, upload_ok, people):
+    banner = "**Draft status:** This section is a draft awaiting review by a named human reviewer."
+    section = Finding(
+        id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        project_id=PROJECT_ID,
+        schema_slug="draft_section",
+        subject={"deliverable": "d", "section": "s"},
+        payload={"markdown": f"{banner}\n\nThe flood exposure at Alder Point is material."},
+        provenance={},
+        status="draft",
+    )
+    db = FakeSession(
+        users=people.values(),
+        findings_=[section],
+        projects=[Project(id=PROJECT_ID, workspace_id=WORKSPACE.id, name="P")],
+        workspaces=[WORKSPACE],
+        members=[
+            WorkspaceMember(user_id=u.id, workspace_id=WORKSPACE.id, role=_WORKSPACE_ROLE[u.role])
+            for u in people.values()
+        ],
+    )
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.include_router(findings_api.router)
+    app.dependency_overrides[get_db] = lambda: db
+    login_limiter.reset()
+    with TestClient(app) as c:
+        login_as(c, people["approver"])
+        response = c.post(f"/api/findings/{section.id}/approval", json={"action": "approve"})
+    login_limiter.reset()
+
+    assert response.status_code == 200
+    assert section.status == "approved"
+    assert section.payload["markdown"] == "The flood exposure at Alder Point is material."
+    assert section.payload["stripped_draft_banner"].startswith("**Draft status:**")
+
+
 def test_approving_a_deliverable_sourced_finding_renders_then_uploads(
     client, db, people, upload_ok, fake_render_bytes
 ):

@@ -9,6 +9,7 @@ help for the providers whose upstream honours Anthropic-style `cache_control`.
 """
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -180,6 +181,63 @@ class ProviderError(Exception):
         self.provider = provider
         self.status = status
         super().__init__(f"[{provider}] {message}")
+
+
+# ── transient upstream retry (2026-09-11) ──────────────────────────────────────
+# Over ~330 cloud runs, three Google AI Studio 503s relayed verbatim through
+# OpenRouter, and one OpenRouter HTML error page (a Cloudflare template, stored
+# byte-for-byte as `run.error`), each failed a run outright that a single retry
+# would very likely have recovered — an overloaded upstream or a gateway hiccup
+# is not evidence the *next* request will fail too. Shared here because
+# `providers/openai_compat.py` (OpenRouter, Kimi) and `providers/anthropic.py`
+# both retry the same way, on the same signal.
+#
+# 2s: long enough to give a transient failure a real chance to clear, short
+# enough not to make a run wait long for a request that is about to fail its
+# retry too.
+RETRY_DELAY_SECONDS = 2.0
+# 529 is Anthropic's own "overloaded" status; 502/503/504 are the generic
+# reverse-proxy trio (bad gateway / unavailable / timeout) that OpenRouter and
+# every other gateway in front of an upstream emits for an outage on the other
+# side. Any *other* 5xx is retried too, but only when its body is HTML (see
+# `looks_like_html`) — the incident this exists for was exactly that: not one
+# of these four codes, but a gateway's own error template.
+RETRYABLE_STATUSES = frozenset({502, 503, 504, 529})
+
+
+def is_retryable_status(status: int, *, html_body: bool) -> bool:
+    """Whether a failed request is worth retrying once, from its status alone."""
+    return status in RETRYABLE_STATUSES or (status >= 500 and html_body)
+
+
+_HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+def looks_like_html(body: str, content_type: str | None = None) -> bool:
+    """Whether an error body is a gateway's own HTML error page rather than the
+    provider's usual JSON error shape.
+
+    Checked by `Content-Type` first (the more reliable signal when a provider
+    sends one), and by sniffing the body's own opening tag otherwise — a page
+    with no declared type is still recognizably HTML from its first bytes.
+    """
+    if content_type and "html" in content_type.lower():
+        return True
+    head = body.lstrip()[:512].lower()
+    return head.startswith("<!doctype html") or head.startswith("<html")
+
+
+def summarize_html_error(status: int, body: str) -> str:
+    """`upstream returned HTML (HTTP <status>[, <title>])` — what a raw HTML
+    error page (often several KB of markup, and never machine-actionable)
+    becomes instead of being stored verbatim as `run.error`, as an OpenRouter
+    Cloudflare template once was.
+    """
+    match = _HTML_TITLE_RE.search(body)
+    title = " ".join(match.group(1).split()) if match else ""
+    if title:
+        return f"upstream returned HTML (HTTP {status}, {title})"
+    return f"upstream returned HTML (HTTP {status})"
 
 
 class Provider(ABC):

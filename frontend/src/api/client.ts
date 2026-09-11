@@ -347,6 +347,15 @@ export interface RunSummary {
   finished_at: string | null
 }
 
+/** `GET /api/runs?limit=…&cursor=…`'s paged shape: keyset pagination on
+ *  (created_at desc, id desc). `next_cursor` is an opaque token — pass it
+ *  straight back as `cursor` for the next page — and is null once there is
+ *  no next page. */
+export interface RunsPage {
+  items: RunSummary[]
+  next_cursor: string | null
+}
+
 export interface MsgToolCall {
   id: string
   name: string
@@ -2736,7 +2745,10 @@ export const api = {
   // runs
   createRun: (body: CreateRunBody) =>
     request<{ run_id: string }>('/runs', { method: 'POST', body }),
-  listRuns: (limit = 100) => request<RunSummary[]>(`/runs?limit=${limit}`),
+  listRuns: (limit = 50, cursor?: string) =>
+    request<RunsPage>(
+      `/runs?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
+    ),
   getRun: (id: string) => request<RunDetail>(`/runs/${id}`),
   cancelRun: (id: string) => request<{ ok: boolean }>(`/runs/${id}/cancel`, { method: 'POST' }),
 

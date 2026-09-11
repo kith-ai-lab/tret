@@ -72,6 +72,54 @@ An unrecognized objective is a 422 from the harness API, never a silent fall bac
 to `balanced`. Quietly substituting a different objective is precisely the class
 of behavior this platform exists to rule out.
 
+## Reasoning effort, and the verdict shape's own tier table
+
+`RoutingDecision.effort` (`router_llm/objectives.py::default_effort`) is the
+other lever the objective pulls, alongside candidate ordering: `low`/`medium`/
+`high` reasoning-effort, forwarded to whichever provider control the chosen
+model supports (Anthropic's `output_config.effort`, OpenRouter's unified
+`reasoning.effort`). `quality` always asks for `high`; `token_conservation`
+and `eco` always ask for `low` — **except on the `verdict` shape**, added
+2026-09-11 after gemini-3.8-flash (a `standard`-tier model) spent 31k–74k
+output tokens and $0.14–0.34 per case at a flat `high` default without
+landing more designed cases than a cheaper effort would have.
+
+Verdict-shape effort is instead a function of the **chosen model's own cost
+tier** (not the harness's `max_cost_tier` ceiling):
+
+| chosen model's tier | effort | quality objective |
+|---|---|---|
+| `premium` | `high` | `high` |
+| `standard` | `medium` | `high` (kept) |
+| `economy` / `local` | `low` | `low` |
+
+A cheap model does not get more disciplined by being asked to think harder,
+only more expensive — so every objective but `quality` follows the table
+exactly, and `quality` itself still drops to `low` once the model is
+economy/local tier, even though it keeps `high` on `standard`. A caller with
+no model chosen yet (the router prompt's own EFFORT section, rendered before
+a candidate is picked) reads the harness's `max_cost_tier` as a stand-in and
+gets `high` for an unset or unrecognized tier — the historical always-high
+assumption.
+
+`token_conservation` still forces `low` on every *other* shape — a drafting
+or extraction task under this objective never climbs above it, verdict-shape
+tier table aside.
+
+## Telling the model itself to conserve tokens
+
+Candidate ordering and effort both act *before* the model sees a prompt —
+which model runs the turn, and how hard it is allowed to think. Neither says
+anything about output length once the model is actually writing, and on two
+`token_conservation` drafting runs the cheap model chosen wrote *more* than a
+`balanced` run on the same prompt. `engine/context.py::assemble_context` now
+appends a third, in-prompt lever when the run's objective is
+`token_conservation`: an `objective_guidance` context block (accounted in
+`context_composition` like every other block) telling the model to answer in
+the fewest words that fully answer the task, skip preamble and restated
+questions, prefer a short list to prose, and keep every quoted value exact —
+brevity trims words, never the numbers, ids, or filenames a citation reports.
+
 ## The energy model
 
 Each catalog model carries an `energy_class` and an `energy_wh_per_mtok`

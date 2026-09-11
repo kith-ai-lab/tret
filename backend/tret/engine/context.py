@@ -111,6 +111,41 @@ FREEFORM_PREAMBLE = """\
 Assist the analyst with their request, using the available tools and honoring \
 all platform rules."""
 
+# ── objective-aware guidance (2026-09-11) ───────────────────────────────────
+# The router's `token_conservation` objective already picks a small model and
+# caps its reasoning effort (`router_llm.objectives.default_effort`) — but
+# neither of those touches what the model is actually *told* about the turn
+# it is running. On two drafting-shape runs the cheap model routing chose
+# wrote *more* than a `balanced` run on the same prompt: the objective had
+# controlled every lever upstream of the model seeing the prompt, and none
+# downstream of it. This block is the downstream lever.
+TOKEN_CONSERVATION_GUIDANCE = """\
+## Token conservation
+
+This run is optimizing for token thrift. Answer in the fewest words that \
+fully answer the task:
+
+- No preamble, no restating the question, no summary of what you are about \
+to do or did.
+- Prefer a short list over prose wherever either would answer the question.
+- Quoted values stay exact. Brevity trims words, never the numbers, ids, or \
+filenames a citation actually reports."""
+
+
+def objective_guidance_block(objective: str | None) -> ContextBlock | None:
+    """The `objective_guidance` block for `objective`, or `None` when there is
+    nothing this objective needs the model told beyond what routing already
+    optimizes for.
+
+    Only `token_conservation` has one today (see the block's own comment
+    above). `eco`'s conservation is entirely a model/effort choice made
+    before the model ever sees a prompt — there is no in-prompt lever to
+    pull — and `quality`/`balanced` have no thrift instruction to give at all.
+    """
+    if objective != "token_conservation":
+        return None
+    return block_for("objective_guidance", "token_conservation", TOKEN_CONSERVATION_GUIDANCE)
+
 # Rendered only when the pack has at least one approved lesson in this
 # workspace (`services/lessons.py::approved_lessons`) — an empty list omits
 # the block entirely rather than sending this heading with nothing under it,
@@ -401,6 +436,7 @@ def assemble_context(
     extra_context: str | None = None,
     web_tools_enabled: bool = False,
     lessons: list[str] | None = None,
+    objective: str | None = None,
 ) -> AssembledContext:
     """Build the system prompt and its per-component token accounting.
 
@@ -409,6 +445,12 @@ def assemble_context(
     caller, not here, the same way `output_schemas` is: this function stays a
     pure function of its arguments, with no DB access of its own. Omitted or
     empty, the `pack_lessons` block is skipped entirely.
+
+    `objective` is the run's routing objective (`router_llm.objectives.
+    objective_of(model_policy)`) — `None` (every caller before this parameter
+    existed) renders exactly as before: no objective has a guidance block for
+    `None`, since `objective_guidance_block` only ever fires on a named one.
+    See that function for which objectives add anything at all.
     """
     blocks: list[ContextBlock] = [
         block_for("platform_preamble", "platform_preamble", PLATFORM_PREAMBLE)
@@ -441,6 +483,10 @@ def assemble_context(
     elif task_type == "freeform":
         blocks.append(block_for("task_instructions", "freeform", FREEFORM_PREAMBLE))
 
+    guidance_block = objective_guidance_block(objective)
+    if guidance_block:
+        blocks.append(guidance_block)
+
     if web_tools_enabled:
         # Placed after the doctrine, so a pack that has its own rules about
         # sourcing is read first and these qualify it rather than pre-empt it.
@@ -464,15 +510,16 @@ def assemble_system_prompt(
     extra_context: str | None = None,
     web_tools_enabled: bool = False,
     lessons: list[str] | None = None,
+    objective: str | None = None,
 ) -> str:
     """The system prompt alone (harness preview endpoint, and back-compat).
 
     The preview is meant to be the prompt a run will actually send, so callers
     pass `web_tools_enabled` the same way the engine derives it — a preview
-    missing a block the run includes is worse than no preview. `lessons`
-    defaults to None like `assemble_context`'s own default: a caller that
-    hasn't been updated to resolve and pass the approved list simply previews
-    without that block, rather than failing.
+    missing a block the run includes is worse than no preview. `lessons` and
+    `objective` both default to None like `assemble_context`'s own defaults: a
+    caller that hasn't been updated to resolve and pass them simply previews
+    without those blocks, rather than failing.
     """
     return assemble_context(
         harness,
@@ -482,6 +529,7 @@ def assemble_system_prompt(
         extra_context=extra_context,
         web_tools_enabled=web_tools_enabled,
         lessons=lessons,
+        objective=objective,
     ).system
 
 

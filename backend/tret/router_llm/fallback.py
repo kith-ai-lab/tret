@@ -77,6 +77,7 @@ def fallback_model(
     max_cost_tier: str = DEFAULT_MAX_COST_TIER,
     priors: dict[str, ModelPrior] | None = None,
     min_context_window: int | None = None,
+    exclude: set[str] | None = None,
 ) -> str | None:
     """The model this shape falls back to, or None if the policy permits none.
 
@@ -87,6 +88,17 @@ def fallback_model(
     which is the documented contract for a capped harness with nothing to run —
     see docs/local-models.md. Escalating past the ceiling instead would send
     confidential work to a provider the operator excluded on purpose.
+
+    `exclude` — model ids the caller's own model-level circuit breaker just
+    flagged (`router_llm.priors.OutcomePriors.cooldown_for`, applied by
+    `router_llm.router._apply_cooldown` to the LLM router's own candidate
+    list) — is dropped the same protective way `_drop_proven_poor` drops a
+    proven-poor record: when nothing survives, everything survives, because
+    this is the path a struggling deployment runs on most and it still has to
+    return a model. This pool is scanned independently of the router's own
+    `candidates` list (a wider, uncapped-by-context-fit scan of the catalog),
+    so it applies the guard on its own rather than trusting the caller already
+    checked it against a different, narrower list.
 
     `min_context_window`, when given, drops models whose window cannot hold
     the composed prompt (see `engine.compaction.required_context_window`) —
@@ -102,6 +114,10 @@ def fallback_model(
     usable = _usable(catalog, registry, allowed, max_cost_tier)
     if not usable:
         return None
+    if exclude:
+        survivors = [m for m in usable if m.id not in exclude]
+        if survivors:
+            usable = survivors
     usable = _drop_proven_poor(usable, priors)
 
     if min_context_window is not None:

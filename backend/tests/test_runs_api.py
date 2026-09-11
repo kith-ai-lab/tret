@@ -1,5 +1,6 @@
 """`POST /api/runs`: which pack a new run's `pack_id` resolves to now that a
-harness may link more than one pack (one harness, many packs).
+harness may link more than one pack (one harness, many packs). Also `GET
+/api/runs`'s keyset pagination (A3).
 
 Real sqlite database, `httpx.AsyncClient` + `ASGITransport` directly against
 the app — same harness as test_harnesses_api.py/test_packs_api.py. The engine
@@ -10,6 +11,7 @@ real model call.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest_asyncio
@@ -237,3 +239,133 @@ async def test_an_undeclared_task_type_still_carries_the_primary_pack(
     async with session_factory() as db:
         run = await db.get(Run, run_id)
     assert run.pack_id == pack_a.id
+
+
+# ── A3: GET /api/runs keyset pagination ─────────────────────────────────────
+
+
+async def test_list_runs_with_neither_limit_nor_cursor_returns_the_legacy_bare_list(
+    client, seed, session_factory
+):
+    """No caller of the old shape breaks: omitting both params still returns
+    a plain list, not `{"items": ...}`."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    user = make_user("analyst@example.com")
+    harness = Harness(
+        workspace_id=team.id, name="H", task_profile="freeform",
+        model_policy={"mode": "auto"}, tool_names=[],
+    )
+    await seed(team, project, user, make_member(user, team, role="analyst"), harness)
+    async with session_factory() as db:
+        db.add_all(
+            Run(project_id=project.id, harness_id=harness.id, task_type="freeform", task_input={})
+            for _ in range(3)
+        )
+        await db.commit()
+
+    await login(client, user.email)
+    response = await client.get("/api/runs")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert isinstance(body, list)
+    assert len(body) == 3
+
+
+async def test_list_runs_pages_through_all_sixty_with_no_duplicates(client, seed, session_factory):
+    """60 runs, paged 25 at a time: every page's `next_cursor` must lead to
+    the next page with no row repeated and no row skipped, until the union of
+    every page is exactly the 60 that were created."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    user = make_user("analyst@example.com")
+    harness = Harness(
+        workspace_id=team.id, name="H", task_profile="freeform",
+        model_policy={"mode": "auto"}, tool_names=[],
+    )
+    await seed(team, project, user, make_member(user, team, role="analyst"), harness)
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    run_ids = set()
+    async with session_factory() as db:
+        for i in range(60):
+            run = Run(
+                id=uuid.uuid4(),
+                project_id=project.id,
+                harness_id=harness.id,
+                task_type="freeform",
+                task_input={},
+                # Deliberately not all distinct: several rows share a second,
+                # same as real bulk-created runs would under sqlite's
+                # second-level CURRENT_TIMESTAMP resolution — the id tiebreak
+                # is what keeps paging correct here, not distinct timestamps.
+                created_at=base + timedelta(seconds=i // 5),
+            )
+            db.add(run)
+            run_ids.add(run.id)
+        await db.commit()
+    assert len(run_ids) == 60
+
+    await login(client, user.email)
+
+    seen: list[str] = []
+    cursor = None
+    pages = 0
+    while True:
+        params = {"limit": 25}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = await client.get("/api/runs", params=params)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert "items" in body and "next_cursor" in body
+        assert len(body["items"]) <= 25
+        seen.extend(item["id"] for item in body["items"])
+        pages += 1
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+        assert pages < 10  # guard against an infinite loop on a real bug
+
+    assert pages == 3  # 25 + 25 + 10
+    assert len(seen) == len(set(seen)) == 60
+    assert set(seen) == {str(rid) for rid in run_ids}
+
+
+async def test_list_runs_paged_shape_when_only_limit_is_passed(client, seed, session_factory):
+    """Passing `limit` alone (no `cursor`) also switches to the paged shape —
+    matching `next_cursor` being how a caller is meant to get the rest."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    user = make_user("analyst@example.com")
+    harness = Harness(
+        workspace_id=team.id, name="H", task_profile="freeform",
+        model_policy={"mode": "auto"}, tool_names=[],
+    )
+    await seed(team, project, user, make_member(user, team, role="analyst"), harness)
+    async with session_factory() as db:
+        db.add_all(
+            Run(project_id=project.id, harness_id=harness.id, task_type="freeform", task_input={})
+            for _ in range(5)
+        )
+        await db.commit()
+
+    await login(client, user.email)
+    response = await client.get("/api/runs", params={"limit": 2})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["items"]) == 2
+    assert body["next_cursor"] is not None
+
+
+async def test_list_runs_rejects_an_out_of_range_limit(client, seed, session_factory):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    user = make_user("analyst@example.com")
+    await seed(team, project, user, make_member(user, team, role="analyst"))
+
+    await login(client, user.email)
+    response = await client.get("/api/runs", params={"limit": 0})
+    assert response.status_code == 422
+    response = await client.get("/api/runs", params={"limit": 201})
+    assert response.status_code == 422

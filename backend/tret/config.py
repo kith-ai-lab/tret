@@ -170,6 +170,19 @@ class Settings(BaseSettings):
     # connection (see instance_lock.py's module docstring).
     instance_lock_wait_seconds: float = 90.0
 
+    # ── graceful shutdown (tret/main.py's lifespan) ───────────────────────────
+    # How long shutdown waits for whatever runs are still executing
+    # (tret.api.runs's own background-task registry) to reach their own
+    # terminal state before this process exits, polling once a second. A run
+    # that finishes inside this window never sees `reconcile.ORPHAN_ERROR` at
+    # all — it reaches completed/failed on its own. Only a run still going
+    # once the deadline passes is closed out here as orphaned, the same
+    # sweep the next boot would otherwise have to do for it. 45s comfortably
+    # covers an ordinary chat turn; pair with a `kill_timeout` (fly.toml, or
+    # whatever orchestrator sends the eventual SIGKILL) at least this long,
+    # or the process is killed out from under the wait anyway.
+    shutdown_drain_seconds: float = 45.0
+
     @field_validator("instance_lock", mode="before")
     @classmethod
     def _known_instance_lock_mode(cls, value):
@@ -430,6 +443,16 @@ class Settings(BaseSettings):
     # Router
     router_model: str = "anthropic/claude-haiku-4-5"
     router_timeout_seconds: float = 10.0
+    # Model-level circuit breaker (2026-09-11): gpt-5.6-luna was demoted by
+    # priors for chat shapes but kept getting chosen for extraction/verdict
+    # runs and failing there too (the Sept 11 S1) — priors are keyed per
+    # (task_shape, objective, size_band), so a model failing at the endpoint
+    # rather than the task never demoted itself across shapes. When a model's
+    # last two runs within this many minutes both failed at iteration 0 with
+    # a provider error, `router_llm.priors.OutcomePriors.cooldown_for`
+    # excludes it from every shape and objective for this long — see
+    # `router_llm.router._apply_cooldown`. 0 disables the check entirely.
+    router_cooldown_minutes: float = 30.0
 
     # Headless CLI ledger (`tret run`, tret/local_run.py). One JSON line is
     # appended here per run: what it cost, what it's estimated to have emitted,

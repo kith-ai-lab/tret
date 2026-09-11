@@ -161,7 +161,7 @@ def choose_model_schema(candidate_ids: list[str]) -> dict:
     }
 
 
-def effort_block(objective: str, task_shape: str) -> list[str]:
+def effort_block(objective: str, task_shape: str, max_cost_tier: str) -> list[str]:
     """The EFFORT section: what the control does, and this task's default.
 
     Unconditional — every call has an objective and a shape, so there is
@@ -169,8 +169,13 @@ def effort_block(objective: str, task_shape: str) -> list[str]:
     `balanced`) or TRACK RECORD (which is silent with no history). That is
     what makes the route-v5 bump not byte-identical to v4 even on a cold
     start; see the version comment above `ROUTING_PROMPT_VERSION`.
+
+    `max_cost_tier` stands in for the chosen model's own tier here — no model
+    has been picked yet at prompt-render time, and the harness ceiling is the
+    closest available proxy for "how much this decision may spend" (see
+    `objectives.default_effort`'s `verdict`-shape tier table).
     """
-    default = default_effort(objective, task_shape)
+    default = default_effort(objective, task_shape, max_cost_tier)
     return [
         "",
         "EFFORT",
@@ -222,7 +227,7 @@ def render_router_prompt(
             f"ctx: {m.context_window} | strengths: {strengths}{energy}"
         )
     lines += ["", "CONSTRAINTS", f"  max_cost_tier: {max_cost_tier}"]
-    lines += effort_block(objective, task_shape)
+    lines += effort_block(objective, task_shape, max_cost_tier)
     lines += objective_block(objective)
 
     recorded = {mid: p for mid, p in (priors or {}).items() if mid in {m.id for m in candidates}}

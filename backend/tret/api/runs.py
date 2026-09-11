@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import uuid
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
@@ -133,29 +136,76 @@ async def create_run(
     return {"run_id": str(run.id)}
 
 
+def _encode_run_cursor(run: Run) -> str:
+    """Opaque keyset cursor: this row's own (created_at, id) — the point
+    `list_runs` resumes strictly after on the next page."""
+    raw = f"{run.created_at.isoformat()}|{run.id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def _decode_run_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+        ts_raw, id_raw = raw.rsplit("|", 1)
+        ts = datetime.fromisoformat(ts_raw)
+        # Postgres always returns a tz-aware TIMESTAMPTZ; sqlite (dev/test)
+        # drops tzinfo on the round trip — same normalisation api/workspaces.py
+        # applies to `expires_at` for the same reason. Every `created_at` this
+        # codebase writes is UTC either way.
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts, uuid.UUID(id_raw)
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(422, "Invalid cursor") from exc
+
+
 @router.get("")
 async def list_runs(
-    limit: int = 50,
+    limit: int | None = Query(default=None, ge=1, le=200),
+    cursor: str | None = None,
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
+    """List this workspace's runs, newest first.
+
+    Passing neither `limit` nor `cursor` returns the original bare list
+    (capped at 50), byte-identical to every caller before paging existed.
+    Passing either switches to `{"items": [...], "next_cursor": ...}`: keyset
+    pagination on (created_at desc, id desc) — an id tiebreak because
+    `created_at` alone is not unique (bulk-seeded or same-second rows) —
+    rather than an OFFSET, so a run created mid-page can never shift
+    already-seen rows into the next page or duplicate one across pages.
+    `next_cursor` is omitted (null) once the last page is reached.
+    """
+    paged = limit is not None or cursor is not None
+    effective_limit = limit if limit is not None else 50
+
     project = await current_project(db, ctx.id)
     if project is None:
-        return []
-    runs = (
-        (
-            await db.execute(
-                select(Run)
-                .where(Run.project_id == project.id)
-                .order_by(Run.created_at.desc())
-                .limit(min(limit, 200))
+        return {"items": [], "next_cursor": None} if paged else []
+
+    query = select(Run).where(Run.project_id == project.id)
+    if cursor is not None:
+        last_created_at, last_id = _decode_run_cursor(cursor)
+        query = query.where(
+            or_(
+                Run.created_at < last_created_at,
+                and_(Run.created_at == last_created_at, Run.id < last_id),
             )
         )
-        .scalars()
-        .all()
-    )
-    return [_run_summary(r) for r in runs]
+    query = query.order_by(Run.created_at.desc(), Run.id.desc())
+
+    if not paged:
+        runs = (await db.execute(query.limit(effective_limit))).scalars().all()
+        return [_run_summary(r) for r in runs]
+
+    # Fetch one extra row to learn whether a next page exists without a
+    # second round trip.
+    rows = (await db.execute(query.limit(effective_limit + 1))).scalars().all()
+    page = rows[:effective_limit]
+    next_cursor = _encode_run_cursor(page[-1]) if len(rows) > effective_limit and page else None
+    return {"items": [_run_summary(r) for r in page], "next_cursor": next_cursor}
 
 
 @router.get("/{run_id}")

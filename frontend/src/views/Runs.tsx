@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
@@ -39,11 +39,15 @@ const STATUSES = [
 
 export function Runs() {
   const navigate = useNavigate()
-  const runsQuery = useQuery({
+  const runsQuery = useInfiniteQuery({
     queryKey: ['runs'],
-    queryFn: () => api.listRuns(200),
+    queryFn: ({ pageParam }) => api.listRuns(50, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     refetchInterval: (query) =>
-      (query.state.data ?? []).some((r) => r.status === 'queued' || r.status === 'running')
+      (query.state.data?.pages ?? []).some((p) =>
+        p.items.some((r) => r.status === 'queued' || r.status === 'running'),
+      )
         ? 4000
         : false,
   })
@@ -58,15 +62,20 @@ export function Runs() {
     return map
   }, [harnessesQuery.data])
 
+  const loadedRuns = useMemo(
+    () => runsQuery.data?.pages.flatMap((p) => p.items) ?? [],
+    [runsQuery.data],
+  )
+
   const rows = useMemo(() => {
-    let out = runsQuery.data ?? []
+    let out = loadedRuns
     if (statusFilter) out = out.filter((r) => r.status === statusFilter)
     if (modelFilter.trim()) {
       const needle = modelFilter.trim().toLowerCase()
       out = out.filter((r) => (r.model_used ?? '').toLowerCase().includes(needle))
     }
     return out
-  }, [runsQuery.data, statusFilter, modelFilter])
+  }, [loadedRuns, statusFilter, modelFilter])
 
   const columns: Column<RunSummary>[] = [
     {
@@ -154,6 +163,18 @@ export function Runs() {
           onRowClick={(r) => navigate(`/runs/${r.id}`)}
           empty="No runs yet — start one from the Workbench."
         />
+      )}
+
+      {runsQuery.hasNextPage && (
+        <div className="row" style={{ justifyContent: 'center', marginTop: 14 }}>
+          <button
+            type="button"
+            onClick={() => runsQuery.fetchNextPage()}
+            disabled={runsQuery.isFetchingNextPage}
+          >
+            {runsQuery.isFetchingNextPage ? 'Loading…' : 'Load more'}
+          </button>
+        </div>
       )}
     </div>
   )

@@ -50,7 +50,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.config import get_settings
-from tret.db.models import DataRequest, Dataset, DatasetRow, Document, DocumentChunk, Finding
+from tret.db.models import DataRequest, Dataset, DatasetRow, Document, DocumentChunk, Finding, Run
 from tret.engine.events import RunEvent, get_event_bus
 from tret.engine.validation import validate_cited_values, validate_payload
 from tret.net import CLASS_RESEARCH, MODE_OFF, MODE_REPLAY, EgressDenied, effective_mode
@@ -212,10 +212,10 @@ CONNECTED_SOURCE_KIND = "connected"
 
 
 # ── document tools ────────────────────────────────────────────────────────────
-def _document_tier_label(doc: Document) -> str:
-    if doc.source_kind == SOURCE_KIND_WEB:
+def _document_tier_label(source_kind: str | None) -> str:
+    if source_kind == SOURCE_KIND_WEB:
         return " UNVERIFIED WEB SOURCE"
-    if doc.source_kind == CONNECTED_SOURCE_KIND:
+    if source_kind == CONNECTED_SOURCE_KIND:
         return " CONNECTED SOURCE"
     return ""
 
@@ -236,10 +236,69 @@ def _document_banner(doc: Document) -> str:
     return ""
 
 
+async def _document_scope(ctx: RunContext) -> tuple[list[uuid.UUID], bool]:
+    """The document ids `read_document`/`search_documents` may see, and whether
+    that is project-wide rather than attached-only.
+
+    A run with explicit *initial* attachments (any specialist task, or a chat
+    run the user attached files to) always stays attached-only — the second
+    value is False and the ids are `ctx.document_ids` as it stands now (which
+    may have grown since the run started; see below). A run with none
+    attached at the start only widens to every document of its project when
+    its task_type is one of `engine/harness.GENERIC_TASK_TYPES`
+    (chat/freeform) — a chat turn with no attachment still has a workspace's
+    documents behind it; a specialist task (e.g. a divergence run) with
+    nothing attached stays empty, exactly as before, so it fails the same "no
+    documents" error it always has.
+
+    "Initial" is the load-bearing word: `fetch_url`/`store_snapshot` and
+    `read_connected_file` append to `ctx.document_ids` mid-run (see the module
+    docstring and those tools below), so that list is NOT a stable read of
+    what the run started with — deciding attached-only-vs-project-wide from
+    its current contents means the very first web fetch of a chat run flips
+    it from project-wide to attached-only, silently narrowing every later
+    `search_documents` call to just the fetched page and breaking
+    `read_document` on any project document the model had already found. The
+    run row's own `document_ids` column, by contrast, is never written back
+    mid-run — the engine copies `ctx.document_ids` onto it only once, after
+    the loop finishes (`engine/harness.py`) — so it is exactly the run's
+    initial attachments for the whole life of the run, and is what decides
+    the mode here. Once decided, the *ids returned* are still
+    `ctx.document_ids` (current, not initial) in attached-only mode so a
+    document fetched mid-run stays readable there too; in project-wide mode
+    every fetched/materialized document already carries this run's
+    `project_id`, so the project-wide query below already includes it, but
+    `ctx.document_ids` is still unioned in as a defensive belt-and-braces.
+
+    GENERIC_TASK_TYPES is imported from `engine/harness.py` here, inside the
+    function, rather than at module level: harness.py itself imports this
+    module at import time, so a top-level import back the other way would be
+    circular.
+    """
+    run = await ctx.db.get(Run, ctx.run_id)
+    initial_ids = list(run.document_ids or []) if run is not None else []
+    if initial_ids:
+        return list(ctx.document_ids), False
+    from tret.engine.harness import GENERIC_TASK_TYPES
+
+    if run is None or run.task_type not in GENERIC_TASK_TYPES:
+        return list(ctx.document_ids), False
+    ids = (
+        await ctx.db.execute(select(Document.id).where(Document.project_id == ctx.project_id))
+    ).scalars().all()
+    merged = list(ids)
+    for doc_id in ctx.document_ids:
+        if doc_id not in merged:
+            merged.append(doc_id)
+    return merged, True
+
+
 @builtin(
     "read_document",
-    "Read the extracted text of an attached document. Use offset/limit to page through long "
-    "documents, or chunk_ordinal to jump straight to chunk N as printed by search_documents.",
+    "Read the extracted text of a document. For most tasks the document must be attached to the "
+    "run; for a chat/freeform run with none attached, any document in the project may be read. "
+    "Use offset/limit to page through long documents, or chunk_ordinal to jump straight to chunk "
+    "N as printed by search_documents.",
     {
         "type": "object",
         "required": ["document_id"],
@@ -267,8 +326,11 @@ async def read_document(
         doc_id = uuid.UUID(document_id)
     except ValueError:
         raise ToolError(f"'{document_id}' is not a valid document id")
-    if doc_id not in ctx.document_ids:
-        raise ToolError("Document is not attached to this run")
+    target_ids, project_wide = await _document_scope(ctx)
+    if doc_id not in target_ids:
+        raise ToolError(
+            "Document not found in this project" if project_wide else "Document is not attached to this run"
+        )
     doc = await ctx.db.get(Document, doc_id)
     if doc is None or doc.extracted_text is None:
         raise ToolError("Document not found or text not extracted yet")
@@ -302,10 +364,11 @@ async def read_document(
 
 @builtin(
     "search_documents",
-    "Search attached documents for a query, ranked by relevance rather than a plain substring "
-    "match. Returns the best-matching chunks with document ids, locators (page, heading, sheet "
-    "or table), and each chunk's ordinal N, so read_document can jump straight to chunk N as "
-    "printed here via chunk_ordinal.",
+    "Search documents for a query, ranked by relevance rather than a plain substring match. For "
+    "most tasks this searches only documents attached to the run; for a chat/freeform run with "
+    "none attached, every document in the project is searched instead. Returns the best-matching "
+    "chunks with document ids, locators (page, heading, sheet or table), and each chunk's ordinal "
+    "N, so read_document can jump straight to chunk N as printed here via chunk_ordinal.",
     {
         "type": "object",
         "required": ["query"],
@@ -314,7 +377,7 @@ async def read_document(
             "max_results": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
             "document_id": {
                 "type": "string",
-                "description": "Restrict the search to one attached document, by id",
+                "description": "Restrict the search to one document, by id",
             },
         },
     },
@@ -322,38 +385,63 @@ async def read_document(
 async def search_documents(
     ctx: RunContext, query: str, max_results: int = 8, document_id: str | None = None
 ) -> str:
-    if not ctx.document_ids:
+    target_ids, project_wide = await _document_scope(ctx)
+    if not target_ids:
         raise ToolError("No documents are attached to this run")
-    target_ids = list(ctx.document_ids)
     if document_id is not None:
         try:
             filter_id = uuid.UUID(document_id)
         except ValueError:
             raise ToolError(f"'{document_id}' is not a valid document id")
-        if filter_id not in ctx.document_ids:
-            raise ToolError("Document is not attached to this run")
+        if filter_id not in target_ids:
+            raise ToolError(
+                "Document not found in this project" if project_wide else "Document is not attached to this run"
+            )
         target_ids = [filter_id]
 
-    docs = (await ctx.db.execute(select(Document).where(Document.id.in_(target_ids)))).scalars().all()
+    # Only the columns the result lines need — never `extracted_text`, which
+    # in project-wide mode would mean every document of the project (up to
+    # 2 MB each) in memory per search.
+    meta_rows = (
+        await ctx.db.execute(
+            select(Document.id, Document.source_kind).where(Document.id.in_(target_ids))
+        )
+    ).all()
+    kinds_by_id = {row[0]: row[1] for row in meta_rows}
     # Chunk at first use rather than only at ingest: an older document may
     # predate this table, and a document ingested moments ago has never been
-    # searched before either. Best-effort — a chunking failure on one document
+    # searched before either. Load the full text only for documents that
+    # still lack chunks. Best-effort — a chunking failure on one document
     # must not stop the search from returning what the others have.
-    for doc in docs:
-        try:
-            await retrieval_service.ensure_chunks(ctx.db, doc)
-        except Exception:
-            continue
+    chunked = set(
+        (
+            await ctx.db.execute(
+                select(DocumentChunk.document_id)
+                .where(DocumentChunk.document_id.in_(target_ids))
+                .distinct()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    unchunked = [doc_id for doc_id in kinds_by_id if doc_id not in chunked]
+    if unchunked:
+        for doc in (
+            (await ctx.db.execute(select(Document).where(Document.id.in_(unchunked)))).scalars().all()
+        ):
+            try:
+                await retrieval_service.ensure_chunks(ctx.db, doc)
+            except Exception:
+                continue
 
     hits = await retrieval_service.rank_chunks(ctx.db, target_ids, query, max_results=int(max_results))
     if not hits:
-        return f"No matches for '{query}' in the attached documents."
+        where_ = "this project's documents" if project_wide else "the attached documents"
+        return f"No matches for '{query}' in {where_}."
 
-    docs_by_id = {doc.id: doc for doc in docs}
     lines: list[str] = []
     for hit in hits:
-        doc = docs_by_id.get(hit.document_id)
-        tier = _document_tier_label(doc) if doc is not None else ""
+        tier = _document_tier_label(kinds_by_id.get(hit.document_id))
         where = retrieval_service.describe_locator(hit.kind, hit.locator)
         lines.append(
             f"[{hit.document_id} {hit.filename}{tier} — {where} — chunk {hit.ordinal} — "

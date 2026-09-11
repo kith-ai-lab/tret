@@ -54,6 +54,7 @@ services:
       # Raw JSON `provider` object merged into every OpenRouter request; blank
       # (the default) reads as "not set" rather than a JSON parse error.
       TRET_OPENROUTER_PROVIDER_PREFS: ${TRET_OPENROUTER_PROVIDER_PREFS:-}
+      TRET_ROUTER_COOLDOWN_MINUTES: ${TRET_ROUTER_COOLDOWN_MINUTES:-30.0}
       TRET_LOGIN_MAX_ATTEMPTS: ${TRET_LOGIN_MAX_ATTEMPTS:-10}
       TRET_LOGIN_WINDOW_SECONDS: ${TRET_LOGIN_WINDOW_SECONDS:-300.0}
       TRET_METHODS_NETWORK_ISOLATION: ${TRET_METHODS_NETWORK_ISOLATION:-true}
@@ -177,6 +178,7 @@ services:
       # genuinely held rather than a deploy handover's old machine finishing
       # up. 90s covers a normal handover plus the keepalive reaping above.
       TRET_INSTANCE_LOCK_WAIT_SECONDS: ${TRET_INSTANCE_LOCK_WAIT_SECONDS:-90.0}
+      TRET_SHUTDOWN_DRAIN_SECONDS: ${TRET_SHUTDOWN_DRAIN_SECONDS:-45.0}
       # Multi-tenant SaaS mode (tret_cloud). false is every self-hosted
       # deployment: one workspace, no personal-workspace-per-user seeding.
       TRET_MULTI_TENANT: ${TRET_MULTI_TENANT:-false}

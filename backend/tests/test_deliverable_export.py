@@ -33,7 +33,7 @@ from tret.api.auth import current_user
 from tret.api.workspace import WorkspaceContext, current_workspace
 from tret.db.engine import get_db
 from tret.db.models import Finding, Project, Run, Workspace
-from tret.services.export import assemble_deliverable, render_pdf
+from tret.services.export import assemble_deliverable, render_pdf, strip_draft_status_banner
 
 PROJECT_ID = uuid.uuid4()
 OTHER_PROJECT_ID = uuid.uuid4()
@@ -240,6 +240,51 @@ async def test_a_different_heading_of_the_models_own_is_kept():
     body = (await assemble(db))["markdown"]
     assert "## Governance" in body
     assert "# Board oversight" in body
+
+
+# ── a stale "draft status" banner never ships ────────────────────────────────
+DRAFT_BANNER = (
+    "**Draft status:** This section is a draft awaiting review by a named "
+    "human reviewer before publication."
+)
+
+
+def test_strip_draft_status_banner_removes_a_bold_leading_paragraph():
+    markdown = f"{DRAFT_BANNER}\n\nActual section content."
+    assert strip_draft_status_banner(markdown) == "Actual section content."
+
+
+def test_strip_draft_status_banner_removes_a_plain_leading_paragraph():
+    markdown = "Draft status: still awaiting review.\n\nActual section content."
+    assert strip_draft_status_banner(markdown) == "Actual section content."
+
+
+def test_strip_draft_status_banner_leaves_other_content_untouched():
+    markdown = "# Governance\n\nBody text with no banner at all."
+    assert strip_draft_status_banner(markdown) == markdown
+
+
+def test_strip_draft_status_banner_never_blanks_a_body():
+    # Banner and body separated by a single newline: only the banner line goes.
+    markdown = f"{DRAFT_BANNER}\nThe flood exposure at Alder Point is material."
+    assert strip_draft_status_banner(markdown) == "The flood exposure at Alder Point is material."
+    # A banner with nothing after it is left alone rather than emptied.
+    assert strip_draft_status_banner(DRAFT_BANNER) == DRAFT_BANNER
+    assert strip_draft_status_banner(f"{DRAFT_BANNER}\n\n   ") == f"{DRAFT_BANNER}\n\n   "
+
+
+def test_strip_draft_status_banner_handles_none_and_empty():
+    assert strip_draft_status_banner(None) is None
+    assert strip_draft_status_banner("") == ""
+
+
+async def test_an_approved_sections_draft_banner_is_stripped_at_assembly():
+    # Defensive stripping at assembly: a section approved before this
+    # stripping existed must still never ship the banner in an export.
+    db = FakeSession([section("governance", markdown=f"{DRAFT_BANNER}\n\nReal content.")])
+    body = (await assemble(db))["markdown"]
+    assert "Draft status" not in body
+    assert "Real content." in body
 
 
 async def test_the_html_rendering_carries_the_section_bodies():

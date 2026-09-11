@@ -55,33 +55,76 @@ THRIFT_OBJECTIVES = ("token_conservation", "eco")
 # stated reason to differ from "medium" are listed; everything else — including
 # a shape this catalog does not recognize — falls through to "medium" below,
 # same as `released_rank`'s "unknown last" and the fallback table's own
-# `FALLBACK_TABLE.get(task_shape, FALLBACK_TABLE["freeform"])`.
+# `FALLBACK_TABLE.get(task_shape, FALLBACK_TABLE["freeform"])`. `verdict` is
+# deliberately absent — it is governed by the chosen model's own cost tier
+# instead (see `_VERDICT_TIER_EFFORT` below), not a flat value here.
 _BALANCED_SHAPE_EFFORT: dict[str, str] = {
     "extraction": "low",  # pulling fields out of a document is not judgment
     "drafting": "medium",
     "freeform": "medium",
-    "verdict": "high",  # the hardest, most consequential call a run makes
     "qa_review": "high",  # grading another run's output is itself a judgment
 }
 
+# verdict-shape effort by the *chosen model's own* `ModelInfo.cost_tier` —
+# 2026-09-11: three verdict runs on gemini-3.8-flash (a "standard"-tier model)
+# spent 31k-74k output tokens and $0.14-0.34 per case at the flat "high"
+# default without landing more designed cases than a cheaper effort would,
+# while "low" under the eco objective landed the hardest case in the batch.
+# Tier stands in for "how much a verdict on this model is worth spending on",
+# the same proxy `_quality_key`/`_eco_key` use elsewhere in this module: a
+# premium model earns the full "high" spend; a standard one is capped at
+# "medium"; an economy (or local) one at "low" regardless of objective — a
+# cheap model does not get more disciplined by being asked to think harder,
+# only more expensive. `quality` is the one exception, and only partially:
+# see `default_effort`.
+_VERDICT_TIER_EFFORT: dict[str, str] = {
+    "premium": "high",
+    "standard": "medium",
+    "economy": "low",
+    "local": "low",
+}
 
-def default_effort(objective: str, task_shape: str) -> str:
+
+def default_effort(objective: str, task_shape: str, cost_tier: str | None = None) -> str:
     """The effort level a policy gets when nothing more specific overrides it.
 
-    Read twice over: it is what the router prompt shows as *this* task's
-    default (see `prompts.render_router_prompt`'s EFFORT section), and it is
-    what every non-LLM path (override, single-candidate, fallback) records
-    outright, since none of those paths ask a router anything.
+    Read three ways over: it is what the router prompt shows as *this* task's
+    default (see `prompts.render_router_prompt`'s EFFORT section, which passes
+    the harness's `max_cost_tier` as `cost_tier` — the chosen model is not
+    known yet at that point); it is what every non-LLM path (override,
+    single-candidate, exploration, fallback) records outright, since none of
+    those paths ask a router anything, passing the actual chosen model's own
+    tier; and it is the ceiling the LLM-router path clamps its own answer to
+    under the thrift objectives (`router_llm.router.route`), also passing the
+    chosen model's tier.
 
-    The thrift objectives ignore task shape entirely — `token_conservation`
-    and `eco` are optimizing for token/energy spend above all else, so the
-    hardest verdict gets the same "low" as the simplest extraction; `quality`
-    is the mirror image, always "high" regardless of shape, for the same
-    reason a quality-first policy always climbs to the most capable candidate
-    within its tier rather than reading the task shape as license to spend
-    less. Only `balanced` differentiates by shape, via
+    The thrift objectives ignore task shape entirely for every shape but
+    `verdict` — `token_conservation` and `eco` are optimizing for token/energy
+    spend above all else, so a drafting task gets the same "low" as the
+    simplest extraction. `quality` is the mirror image for every shape but
+    `verdict` too, always "high" regardless of shape, for the same reason a
+    quality-first policy always climbs to the most capable candidate within
+    its tier rather than reading the task shape as license to spend less.
+
+    `verdict` is the one shape every objective reads `cost_tier` for (see
+    `_VERDICT_TIER_EFFORT`): a verdict is the hardest, most consequential call
+    a run makes, which is exactly why spending "high" on a cheap model turned
+    out to buy more tokens without buying a better answer — see that table's
+    own comment for the evidence. `quality` keeps "high" on the `standard` and
+    `premium` tiers (unlike every other objective, which gets "medium" on
+    `standard`) but still drops to "low" on `economy`/`local` like everything
+    else — a quality-first policy still should not ask a genuinely small model
+    to spend a premium-sized budget on a verdict it is not equipped to earn
+    back. `cost_tier` unset or unrecognized reads as `"premium"`, the
+    historical always-high assumption, for a caller with no model to name yet.
+    Only `balanced` differentiates non-verdict shapes at all, via
     `_BALANCED_SHAPE_EFFORT`.
     """
+    if task_shape == "verdict":
+        tier = cost_tier if cost_tier in _VERDICT_TIER_EFFORT else "premium"
+        if objective == "quality" and tier in ("standard", "premium"):
+            return "high"
+        return _VERDICT_TIER_EFFORT[tier]
     if objective == "quality":
         return "high"
     if objective in THRIFT_OBJECTIVES:

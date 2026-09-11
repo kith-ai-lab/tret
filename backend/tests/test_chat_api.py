@@ -260,6 +260,197 @@ def test_assistant_message_summarizes_delegated_tool_activity():
     ]
 
 
+# ── A1: a failed turn must not surface a prior turn's reply ────────────────
+# `run.messages` begins with the injected `_history` prefix (`send_message`
+# seeds `task_input["_history"]`; the engine puts it straight onto the front
+# of `run.messages` — see `engine/harness.py`). Runs 3ccb2fd2 and 8474f908
+# on cloud both failed before writing anything of their own and surfaced the
+# *previous* turn's reply as if it were this run's.
+_HIST_TURN_1 = [
+    {"role": "user", "content": "first question", "tool_calls": [], "tool_call_id": None, "meta": {}},
+    {"role": "assistant", "content": "OLD", "tool_calls": [], "tool_call_id": None, "meta": {}},
+]
+
+
+def test_assistant_message_does_not_leak_a_prior_turns_reply_into_a_failed_run():
+    run = _run(
+        status="failed",
+        error="boom",
+        task_input={"message": "new question", "_history": _HIST_TURN_1, "_capabilities": ""},
+        messages=[
+            *_HIST_TURN_1,
+            {"role": "user", "content": "new question", "tool_calls": [], "tool_call_id": None, "meta": {}},
+        ],
+    )
+    message = _assistant_message(run)
+    assert message["content"] == "(run failed: boom)"
+    assert "OLD" not in message["content"]
+
+
+def test_assistant_message_uses_this_runs_own_text_after_the_history_prefix():
+    run = _run(
+        status="completed",
+        task_input={"message": "new question", "_history": _HIST_TURN_1, "_capabilities": ""},
+        messages=[
+            *_HIST_TURN_1,
+            {"role": "user", "content": "new question", "tool_calls": [], "tool_call_id": None, "meta": {}},
+            {"role": "assistant", "content": "NEW", "tool_calls": [], "tool_call_id": None, "meta": {}},
+        ],
+    )
+    message = _assistant_message(run)
+    assert message["content"] == "NEW"
+
+
+def test_assistant_message_accounts_for_a_trimmed_history_prefix():
+    """`trim_history` (engine/compaction.py) can drop the oldest turns off the
+    front of `_history` before it ever reaches `run.messages` — the skip
+    count must shrink by exactly what was dropped (`run.compactions`), or it
+    runs past the start of this run's own (shorter, post-trim) messages."""
+    full_history = [
+        {"role": "user", "content": "turn 1", "tool_calls": [], "tool_call_id": None, "meta": {}},
+        {"role": "assistant", "content": "OLD 1", "tool_calls": [], "tool_call_id": None, "meta": {}},
+        {"role": "user", "content": "turn 2", "tool_calls": [], "tool_call_id": None, "meta": {}},
+        {"role": "assistant", "content": "OLD 2", "tool_calls": [], "tool_call_id": None, "meta": {}},
+    ]
+    run = _run(
+        status="completed",
+        task_input={"message": "new question", "_history": full_history, "_capabilities": ""},
+        compactions=[{"kind": "history_trim", "iteration": 0, "dropped_history_turns": 2}],
+        messages=[
+            *full_history[2:],  # the engine dropped the oldest turn before recording
+            {"role": "user", "content": "new question", "tool_calls": [], "tool_call_id": None, "meta": {}},
+            {"role": "assistant", "content": "NEW", "tool_calls": [], "tool_call_id": None, "meta": {}},
+        ],
+    )
+    message = _assistant_message(run)
+    assert message["content"] == "NEW"
+
+
+# ── A2: an empty lookup/search must be visible in the activity pill ────────
+
+
+def test_assistant_message_flags_an_empty_dataset_lookup():
+    run = _run(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "done",
+                "tool_calls": [
+                    {"id": "call_1", "name": "lookup_dataset", "arguments": {"dataset": "hazard_scores"}}
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "No rows in 'hazard_scores' match {\"score\": 999}.",
+                "tool_call_id": "call_1",
+                "meta": {"error": False},
+            },
+        ]
+    )
+    message = _assistant_message(run)
+    assert message["activity"] == [{"tool": "lookup_dataset", "summary": "no rows matched"}]
+
+
+def test_assistant_message_flags_empty_document_and_connected_source_searches():
+    run = _run(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "done",
+                "tool_calls": [
+                    {"id": "call_1", "name": "search_documents", "arguments": {"query": "x"}},
+                    {"id": "call_2", "name": "search_connected_files", "arguments": {"query": "y"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "No matches for 'x' in the attached documents.",
+                "tool_call_id": "call_1",
+                "meta": {"error": False},
+            },
+            {
+                "role": "tool",
+                "content": "No connected-source matches for 'y'.",
+                "tool_call_id": "call_2",
+                "meta": {"error": False},
+            },
+        ]
+    )
+    message = _assistant_message(run)
+    assert message["activity"] == [
+        {"tool": "search_documents", "summary": "no matches"},
+        {"tool": "search_connected_files", "summary": "no matches"},
+    ]
+
+
+def test_assistant_message_flags_a_tool_error():
+    run = _run(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "done",
+                "tool_calls": [{"id": "call_1", "name": "lookup_dataset", "arguments": {}}],
+            },
+            {
+                "role": "tool",
+                "content": "Unknown dataset 'nope'.",
+                "tool_call_id": "call_1",
+                "meta": {"error": True},
+            },
+        ]
+    )
+    message = _assistant_message(run)
+    assert message["activity"] == [{"tool": "lookup_dataset", "summary": "error"}]
+
+
+def test_assistant_message_keeps_delegation_summary_over_an_empty_result():
+    run = _run(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "done",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "run_harness_task",
+                        "arguments": {"task_type": "evidence_extraction"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "No rows in 'x' match {}.",
+                "tool_call_id": "call_1",
+                "meta": {"error": False},
+            },
+        ]
+    )
+    message = _assistant_message(run)
+    assert message["activity"] == [
+        {"tool": "run_harness_task", "summary": "delegated evidence_extraction"}
+    ]
+
+
+def test_assistant_message_leaves_a_successful_lookup_summary_blank():
+    run = _run(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "done",
+                "tool_calls": [{"id": "call_1", "name": "lookup_dataset", "arguments": {}}],
+            },
+            {
+                "role": "tool",
+                "content": "3 rows: [...]",
+                "tool_call_id": "call_1",
+                "meta": {"error": False},
+            },
+        ]
+    )
+    message = _assistant_message(run)
+    assert message["activity"] == [{"tool": "lookup_dataset", "summary": ""}]
+
+
 # ── send_message's pack resolution (a harness may link more than one pack) ──
 HASHER = PasswordHasher()
 PASSWORD = "correct-horse-battery-1"

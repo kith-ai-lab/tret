@@ -298,6 +298,20 @@ def test_pptx_zip_guard_uses_a_lower_ceiling_than_xlsx():
     documents_service._refuse_zip_bombs("book.xlsx", data)
 
 
+async def test_a_broken_pptx_reports_the_exception_class_and_first_message_line():
+    # A well-formed zip that is not a real pptx package (no [Content_Types].xml)
+    # makes python-pptx raise a KeyError whose message is worth surfacing
+    # alongside the class name, not just "text extraction failed: KeyError".
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("dummy.txt", "not a real pptx package")
+    text, meta, status = await documents_service.extract_bounded("broken.pptx", buf.getvalue())
+    assert status == "failed"
+    assert text == ""
+    assert meta["error"].startswith("text extraction failed: KeyError: ")
+    assert "Content_Types" in meta["error"]
+
+
 # ── unsupported types ────────────────────────────────────────────────────────
 def test_unsupported_type_message_now_lists_xlsx_and_pptx():
     with pytest.raises(ValueError) as exc:
