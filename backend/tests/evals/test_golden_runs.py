@@ -256,9 +256,12 @@ async def test_happy_path_context_carries_doctrine_schema_and_pack_tools(world):
     assert first.messages[0].role == "user"
     assert f'"site_id": "{SITE}"' in first.messages[0].content
 
-    # Every later turn sees the tool results fed back.
-    assert result.provider.calls[1].messages[-1].role == "tool"
-    assert "R-VALLEY" in result.provider.calls[1].messages[-1].content
+    # Every later turn sees the tool results fed back. `[-1]` is the wire-only
+    # budget line (`engine/harness.py`'s `_append_budget_line` appends it as
+    # its own trailing message, on by default), so the tool result itself is
+    # one back from that.
+    assert result.provider.calls[1].messages[-2].role == "tool"
+    assert "R-VALLEY" in result.provider.calls[1].messages[-2].content
 
 
 # ── (b) hallucination caught ──────────────────────────────────────────────────
@@ -327,14 +330,17 @@ async def test_hallucinated_number_is_a_validation_error_not_a_finding(world):
         "was never retrieved via lookup_dataset in this run" in message
     )
 
-    # It is fed back in-loop so a real model gets the chance to repair.
-    third_turn = provider.calls[2].messages[-1]
+    # It is fed back in-loop so a real model gets the chance to repair. `[-1]`
+    # is the wire-only budget line, appended after the tool result — see
+    # `engine/harness.py`'s `_append_budget_line`.
+    third_turn = provider.calls[2].messages[-2]
     assert third_turn.role == "tool" and third_turn.meta["error"] is True
     assert "was never retrieved" in third_turn.content
 
-    # And the engine nudges once for the missing terminal verdict.
-    assert "You have not recorded your result" in provider.calls[3].messages[-1].content
-    assert provider.calls[3].messages[-1].role == "user"
+    # And the engine nudges once for the missing terminal verdict. `[-1]` is
+    # again the wire-only budget line, appended after this real nudge.
+    assert "You have not recorded your result" in provider.calls[3].messages[-2].content
+    assert provider.calls[3].messages[-2].role == "user"
 
     # The run's own status admits there is no verdict. This assertion replaces an
     # earlier one that locked in `completed` for this scenario — documented as a

@@ -245,7 +245,10 @@ async def test_output_budget_asks_for_a_finish_then_stops_the_run(world):
     assert warning[0].data == {"kind": "output_tokens", "output_tokens": 480, "budget": 300}
 
     # The model is told to finalize, in-loop, before anything is cut off.
-    nudge = provider.calls[2].messages[-1]
+    # `[-1]` is the wire-only budget line, appended after this real,
+    # transcript-persisted nudge — see `engine/harness.py`'s
+    # `_append_budget_line`.
+    nudge = provider.calls[2].messages[-2]
     assert nudge.role == "user"
     assert "OUTPUT BUDGET REACHED" in nudge.content
     assert "record_verdict" in nudge.content

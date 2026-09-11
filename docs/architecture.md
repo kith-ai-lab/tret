@@ -277,6 +277,20 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    tasks terminate via a `record_verdict` tool call validated against the pack
    schema, with up to 3 in-loop repair attempts on validation errors; the
    cited-values cross-check runs in the same place.
+   Every iteration also appends a short **budget line** — iteration count,
+   spend, estimated context tokens, and (when the harness sets one) the
+   output-token budget, each against its own cap above — as a new trailing
+   message on the **wire only** (`_wire_for_provider`/`_append_budget_line`,
+   `engine/harness.py`), never into `runs.messages`, the same wire/transcript
+   split compaction itself relies on. It rides as its own message rather than
+   text appended onto whatever the wire's last message already is, so each
+   provider's tail prompt-cache breakpoint still lands on content that is
+   byte-identical the next time it is sent — see `providers/anthropic.py`'s
+   `_apply_conversation_cache` and `providers/openai_compat.py`'s
+   `_apply_cache_control`, both of which skip this message rather than ever
+   marking it. `loop_config.budget_line: false` turns it off for a harness; it
+   defaults on and is uniform across every provider, unlike Anthropic's own
+   injected context-budget tag, which is Anthropic-only and context-only.
 7. Transcript, tokens (input, output, cache read, cache write), cost, and
    **estimated energy/carbon** (`runs.energy_wh`, `runs.energy_accounting`,
    from each model's energy class × weighted tokens × grid intensity, summed per

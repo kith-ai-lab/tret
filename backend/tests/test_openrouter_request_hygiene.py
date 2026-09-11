@@ -39,7 +39,7 @@ import pytest
 from tret.config import Settings
 from tret.providers import openai_compat
 from tret.providers.anthropic import AnthropicProvider
-from tret.providers.base import Msg, ToolSpec
+from tret.providers.base import Msg, ToolCall, ToolSpec
 from tret.providers.openai_compat import (
     KimiProvider,
     OpenRouterProvider,
@@ -146,7 +146,15 @@ def _sse(*chunks) -> list[str]:
 
 
 async def _run_stream(
-    monkeypatch, provider, lines, *, tools=None, session_id=None, effort=None, provider_ignore=None
+    monkeypatch,
+    provider,
+    lines,
+    *,
+    tools=None,
+    session_id=None,
+    effort=None,
+    provider_ignore=None,
+    messages=None,
 ):
     client = _FakeStreamClient(lines)
     monkeypatch.setattr(openai_compat.httpx, "AsyncClient", client)
@@ -154,7 +162,7 @@ async def _run_stream(
     async for event in provider.stream(
         model="m",
         system="doctrine",
-        messages=[Msg(role="user", content="hi")],
+        messages=messages if messages is not None else [Msg(role="user", content="hi")],
         tools=tools or [],
         max_tokens=64,
         temperature=0.0,
@@ -164,6 +172,67 @@ async def _run_stream(
     ):
         events.append(event)
     return events, _FakeStreamClient.captured
+
+
+# ── cache_control never lands on the wire-only budget line ───────────────────
+# `engine/harness.py`'s `_append_budget_line` appends the run's per-iteration
+# budget line as its own trailing `Msg(role="user", meta={"budget_line": True})`
+# rather than folding it into whatever message already ends the wire. On the
+# OpenAI-compatible shape `_to_openai_messages` never merges consecutive `Msg`s
+# the way the Anthropic translator does, so that line always arrives here as
+# its own `{"role": "user", ...}` entry, last in `body["messages"]`. Marking
+# it — the naive "last user message" rule `_apply_cache_control` used before
+# this fix — would spend a breakpoint on content that changes (this turn's
+# numbers) every iteration and is therefore never a prefix match at the next
+# one; see `test_prompt_caching.py`'s Anthropic-side tests of the same fix.
+async def test_budget_line_message_is_never_marked_with_cache_control(monkeypatch):
+    messages = [
+        Msg(role="user", content="analyze this"),
+        Msg(role="assistant", tool_calls=[ToolCall("t1", "lookup", {})]),
+        Msg(role="tool", content="result", tool_call_id="t1"),
+        Msg(
+            role="user",
+            content="[tret budget: iteration 1 of 6]",
+            meta={"budget_line": True},
+        ),
+    ]
+    lines = _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    _, body = await _run_stream(monkeypatch, OpenRouterProvider("k"), lines, messages=messages)
+
+    budget_message = body["messages"][-1]
+    assert budget_message["role"] == "user"
+    assert budget_message["content"] == "[tret budget: iteration 1 of 6]"
+    assert "cache_control" not in budget_message  # never promoted to a block, either
+
+    # The breakpoint that would have landed on it lands on the previous user
+    # turn instead — no slot is silently dropped.
+    assert "cache_control" in body["messages"][0]["content"][-1]
+
+
+async def test_budget_line_message_does_not_consume_the_breakpoint_budget(monkeypatch):
+    """Skipping the budget line costs nothing: the same number of real
+    breakpoints land whether or not a budget line is on the wire."""
+    convo = [Msg(role="user", content=f"q{i}") for i in range(6)]
+    with_line = [
+        *convo,
+        Msg(role="user", content="[tret budget: x]", meta={"budget_line": True}),
+    ]
+    lines = _sse({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+
+    _, plain_body = await _run_stream(monkeypatch, OpenRouterProvider("k"), lines, messages=convo)
+    _, lined_body = await _run_stream(
+        monkeypatch, OpenRouterProvider("k"), lines, messages=with_line
+    )
+
+    def _marked(body):
+        return sum(
+            1
+            for m in body["messages"]
+            if isinstance(m.get("content"), list)
+            and any("cache_control" in b for b in m["content"] if isinstance(b, dict))
+        )
+
+    assert _marked(lined_body) == _marked(plain_body)
 
 
 # ── fake httpx client (non-streaming, for complete_json) ──────────────────────

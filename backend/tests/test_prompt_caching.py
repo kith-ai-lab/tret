@@ -113,19 +113,20 @@ def test_caching_is_cheaper_than_re_sending_the_prefix():
 
 # ── Anthropic breakpoints ─────────────────────────────────────────────────────
 def test_conversation_breakpoint_lands_on_final_content_block():
-    messages = _to_anthropic_messages(
+    messages, budget_line_block = _to_anthropic_messages(
         [
             Msg(role="user", content="analyze this"),
             Msg(role="assistant", tool_calls=[ToolCall("t1", "read_document", {"id": "d"})]),
             Msg(role="tool", content="doc text", tool_call_id="t1"),
         ]
     )
+    assert budget_line_block is None
     _apply_conversation_cache(messages)
     assert messages[-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
 
 
 def test_string_user_content_is_promoted_to_a_markable_block():
-    messages = _to_anthropic_messages([Msg(role="user", content="hello")])
+    messages, _ = _to_anthropic_messages([Msg(role="user", content="hello")])
     assert isinstance(messages[0]["content"], str)  # unmarked form is a plain string
     _apply_conversation_cache(messages)
     assert messages[0]["content"] == [
@@ -140,7 +141,7 @@ def test_conversation_breakpoints_respect_the_request_budget():
     for i in range(10):
         convo.append(Msg(role="user", content=f"q{i}"))
         convo.append(Msg(role="assistant", content=f"a{i}"))
-    messages = _to_anthropic_messages(convo)
+    messages, _ = _to_anthropic_messages(convo)
     _apply_conversation_cache(messages)
     marked = _breakpoints(messages)
     assert marked == MESSAGE_CACHE_BREAKPOINTS
@@ -148,7 +149,7 @@ def test_conversation_breakpoints_respect_the_request_budget():
 
 
 def test_conversation_breakpoints_anchor_at_user_turns():
-    messages = _to_anthropic_messages(
+    messages, _ = _to_anthropic_messages(
         [
             Msg(role="user", content="first"),
             Msg(role="assistant", content="mid"),
@@ -168,10 +169,106 @@ def test_empty_history_is_left_alone():
 
 
 def test_breakpoints_are_not_duplicated_on_reapplication():
-    messages = _to_anthropic_messages([Msg(role="user", content="hello")])
+    messages, _ = _to_anthropic_messages([Msg(role="user", content="hello")])
     _apply_conversation_cache(messages, budget=3)
     _apply_conversation_cache(messages, budget=3)
     assert _breakpoints(messages) == 1
+
+
+# ── the wire-only budget line never carries the tail breakpoint ──────────────
+# `engine/harness.py`'s `_append_budget_line` appends the run's per-iteration
+# budget line as its own trailing `Msg(role="user", meta={"budget_line": True})`
+# rather than folding the text into whatever message already ends the wire —
+# see that function's own docstring for why concatenation defeated this exact
+# breakpoint. These tests are the other half of that fix: the breakpoint must
+# still land, just one block earlier.
+def _budget_msg(text: str = "[tret budget: x]") -> Msg:
+    return Msg(role="user", content=text, meta={"budget_line": True})
+
+
+def test_budget_line_breakpoint_lands_on_the_tool_result_not_the_line():
+    messages, budget_line_block = _to_anthropic_messages(
+        [
+            Msg(role="user", content="analyze this"),
+            Msg(role="assistant", tool_calls=[ToolCall("t1", "read_document", {"id": "d"})]),
+            Msg(role="tool", content="doc text", tool_call_id="t1"),
+            _budget_msg(),
+        ]
+    )
+    assert budget_line_block is not None
+    _apply_conversation_cache(messages, budget_line_block=budget_line_block)
+
+    tail = messages[-1]["content"]
+    assert tail[-1] is budget_line_block
+    assert "cache_control" not in tail[-1]  # the line itself is never marked
+    assert tail[-2]["type"] == "tool_result"
+    assert tail[-2]["cache_control"] == {"type": "ephemeral"}  # marked instead
+
+
+def test_budget_line_breakpoint_lands_on_the_last_real_user_text_when_there_is_no_tool_result():
+    """No tool call this turn: the budget line merges onto the plain user
+    turn instead of a tool_result block, and the same rule applies — the
+    breakpoint goes on the text before the line, not the line."""
+    messages, budget_line_block = _to_anthropic_messages(
+        [
+            Msg(role="user", content="a question with no tools involved"),
+            _budget_msg(),
+        ]
+    )
+    _apply_conversation_cache(messages, budget_line_block=budget_line_block)
+
+    tail = messages[-1]["content"]
+    assert tail[-1] is budget_line_block
+    assert "cache_control" not in tail[-1]
+    assert tail[-2] == {
+        "type": "text",
+        "text": "a question with no tools involved",
+        "cache_control": {"type": "ephemeral"},
+    }
+
+
+def test_budget_line_never_marked_even_when_it_is_the_only_content():
+    """Degenerate case: the budget line's own turn has nothing else in it
+    (e.g. it follows an assistant turn with no tool call). There is no
+    earlier block in *that* message to mark, so none is — the line is simply
+    left unmarked rather than a breakpoint landing on it anyway."""
+    messages, budget_line_block = _to_anthropic_messages(
+        [
+            Msg(role="assistant", content="thinking out loud"),
+            _budget_msg(),
+        ]
+    )
+    _apply_conversation_cache(messages, budget_line_block=budget_line_block)
+    assert "cache_control" not in messages[-1]["content"][-1]
+
+
+def test_budget_line_block_is_byte_identical_across_two_consecutive_turns():
+    """The whole point of not concatenating the line onto the tool result:
+    the block that carries turn N's breakpoint must be exactly what turn N+1
+    re-sends, or the cache prefix misses and the turn is billed as a write
+    instead of a read. Simulates building the wire twice, as the harness does
+    once per iteration, with the budget line's own numbers changing between
+    the two (as they always do — iteration count, spend) while the tool
+    result itself does not.
+    """
+    def _build(budget_text: str) -> dict:
+        messages, budget_line_block = _to_anthropic_messages(
+            [
+                Msg(role="user", content="analyze this"),
+                Msg(
+                    role="assistant",
+                    tool_calls=[ToolCall("t1", "read_document", {"id": "d"})],
+                ),
+                Msg(role="tool", content="doc text", tool_call_id="t1"),
+                _budget_msg(budget_text),
+            ]
+        )
+        _apply_conversation_cache(messages, budget_line_block=budget_line_block)
+        return messages[-1]["content"][-2]  # the block the breakpoint landed on
+
+    turn_n = _build("[tret budget: iteration 3 of 12 · $0.40 of $5.00 spent]")
+    turn_n_plus_1 = _build("[tret budget: iteration 4 of 12 · $0.55 of $5.00 spent]")
+    assert turn_n == turn_n_plus_1
 
 
 # ── OpenAI-compat cached-token parsing ────────────────────────────────────────
@@ -273,7 +370,7 @@ def test_unparseable_cost_reads_as_none_rather_than_raising():
 # ── OpenRouter cache_control passthrough ──────────────────────────────────────
 def _body(provider, messages):
     body = {"model": "m", "messages": _to_openai_messages("doctrine", messages)}
-    provider._apply_cache_control(body)
+    provider._apply_cache_control(body, messages)
     return body
 
 
@@ -606,7 +703,7 @@ def test_an_empty_assistant_turn_is_dropped_not_sent_as_an_empty_text_block():
     """The API rejects an empty text block ("text content blocks must be
     non-empty"), so one empty assistant turn in the history would fail every
     subsequent request of the run that re-sends it."""
-    messages = _to_anthropic_messages(
+    messages, _ = _to_anthropic_messages(
         [
             Msg(role="user", content="analyze this"),
             Msg(role="assistant", content=""),  # model returned nothing
@@ -626,7 +723,7 @@ def test_an_empty_assistant_turn_is_dropped_not_sent_as_an_empty_text_block():
 
 
 def test_an_assistant_turn_with_only_tool_calls_is_still_sent():
-    messages = _to_anthropic_messages(
+    messages, _ = _to_anthropic_messages(
         [Msg(role="assistant", tool_calls=[ToolCall("t1", "read_document", {"id": "d"})])]
     )
     assert messages == [
@@ -639,7 +736,7 @@ def test_an_assistant_turn_with_only_tool_calls_is_still_sent():
 
 
 def test_a_trailing_empty_assistant_turn_leaves_a_valid_request():
-    messages = _to_anthropic_messages(
+    messages, _ = _to_anthropic_messages(
         [Msg(role="user", content="hi"), Msg(role="assistant", content=None)]
     )
     assert messages == [{"role": "user", "content": "hi"}]

@@ -14,15 +14,18 @@ Each drives the real engine through the real world fixture; only the model and
 """
 from __future__ import annotations
 
+import re
+from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from golden_world import _replay_registry, build_world
+from golden_world import GOLDEN_MODEL, _replay_registry, build_world
 from replay_provider import ProviderCall, ReplayProvider, ScriptedCall, ScriptedTurn
 from sqlalchemy import select
 from test_golden_runs import PERIL, SITE, divergence_happy_script
 
 import tret.engine.harness as harness_module
+from tret.adaptive import DEFAULT_CONTEXT_HEADROOM
 from tret.db.models import Harness, Run, RunOutcome
 from tret.engine.harness import HarnessEngine
 from tret.engine.supervisor import KIND_SWITCH, Intervention
@@ -1005,3 +1008,235 @@ async def test_a_forced_switch_pass_protects_the_immediately_preceding_iteration
     # scripted turn (see `ReplayProvider.stream`).
     assert "elided by tret" not in (by_call_id["call-5-1"].content or "")
     assert "elided by tret" in (by_call_id["call-1-1"].content or "")
+
+
+# ── (g) the per-iteration budget line ──────────────────────────────────────────
+# The model is told where it stands against every cap the engine already
+# enforces — iteration, spend, context, and (when the harness sets one) the
+# output-token budget — as a line appended to the wire only. `harness_module`
+# is already imported above; its own private helpers are reused here rather
+# than re-implementing the k/M rounding, so these tests fail on a real
+# regression in what the engine sends and not on this file's own copy of the
+# formatting drifting out of sync with it.
+BUDGET_LINE_RE = re.compile(
+    r"\[tret budget: iteration (?P<iteration>\d+) of (?P<max_iterations>\d+)"
+    r" · \$(?P<cost>\d+\.\d{2}) of \$(?P<max_cost>\d+\.\d{2}) spent"
+    r"(?: · ~(?P<est_tokens>[\d.]+[kM]?) of (?P<context_limit>[\d.]+[kM]?) context tokens)?"
+    r"(?: · output (?P<output_so_far>[\d.]+[kM]?) of (?P<output_budget>[\d.]+[kM]?))?\]"
+)
+
+
+def _parse_token_budget(s: str) -> float:
+    """The inverse of `harness_module._format_token_budget`: `"795.9k"` ->
+    `795900.0`, `"2.1M"` -> `2_100_000.0`, `"512"` -> `512.0`. Lets a test
+    compare the budget line's rounded figure back against an exact expected
+    token count without re-deriving the same rounding rule by hand.
+    """
+    if s.endswith("M"):
+        return float(s[:-1]) * 1_000_000
+    if s.endswith("k"):
+        return float(s[:-1]) * 1_000
+    return float(s)
+
+
+async def _set_loop_config(world, harness_id, **overrides) -> None:
+    """Test-only: `world.create_harness` exposes only the loop_config keys
+    golden runs commonly need, so a scenario after a key of its own (here,
+    `budget_line`) reaches into the row directly rather than growing that
+    helper's signature for one flag no other suite needs.
+    """
+    async with world.session_factory() as db:
+        harness = await db.get(Harness, harness_id)
+        harness.loop_config = {**(harness.loop_config or {}), **overrides}
+        await db.commit()
+
+
+async def test_budget_line_appears_on_the_wire_with_the_runs_own_numbers(world):
+    """Every call the model sees ends with a budget line whose iteration,
+    spend-so-far, context-window and output-tokens-so-far all agree with the
+    run's own state at that point — never the transcript, which this test
+    proves byte-identical to the same script run with the feature off by
+    actually running both and diffing `run.messages`.
+    """
+    harness_id = await world.create_harness(
+        name="Budget Line Analyst", max_iterations=6, max_run_output_tokens=2000
+    )
+    provider = ReplayProvider(divergence_happy_script())
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+    assert result.run.status == "completed", result.run.error
+
+    usage_events = result.events_of("usage")
+    assert len(usage_events) == len(provider.calls) == 5
+
+    # `create_harness` always pins `loop_config.max_output_tokens` to 4096 and
+    # (with no `model_policy=` of its own) `adaptive.context_headroom` to
+    # `STATIC_ADAPTIVE`'s — which, like `DEFAULT_ADAPTIVE`, leaves headroom at
+    # its own default — so the context limit the engine is enforcing here is
+    # exactly `context_budget(GOLDEN_MODEL's window, 4096, DEFAULT_CONTEXT_HEADROOM)`,
+    # not just "some positive number".
+    model_info = ModelCatalog().get(GOLDEN_MODEL)
+    expected_context_limit = harness_module.context_budget(
+        model_info.context_window, 4096, DEFAULT_CONTEXT_HEADROOM
+    )
+    expected_context_limit_str = harness_module._format_token_budget(expected_context_limit)
+    # This run never hits `context_pressure` — every clause below is read off
+    # a run that stayed comfortably inside its own window the whole way.
+    assert result.events_of("context_pressure") == []
+
+    cost_so_far = Decimal("0")
+    output_so_far = 0
+    for i, call in enumerate(provider.calls):
+        last = call.last_message
+        assert last is not None and last.content
+        m = BUDGET_LINE_RE.search(last.content)
+        assert m, f"no budget line on call {i}: {last.content!r}"
+        assert last.content.rstrip().endswith("]"), "the line must end the message"
+
+        assert int(m["iteration"]) == i + 1
+        assert int(m["max_iterations"]) == 6
+        # Cost and output tokens are what prior turns booked — never this
+        # turn's own, which has not happened yet.
+        assert m["cost"] == f"{cost_so_far:.2f}"
+        assert m["output_so_far"] == harness_module._format_token_budget(output_so_far)
+        assert m["output_budget"] == harness_module._format_token_budget(2000)
+
+        # The context clause: the limit is constant for the run (one model,
+        # no switch), and the estimate is a positive number that never
+        # exceeds it — consistent with `context_pressure` never having fired.
+        assert m["context_limit"] == expected_context_limit_str
+        assert 0 < _parse_token_budget(m["est_tokens"]) <= expected_context_limit
+
+        cost_so_far = Decimal(str(usage_events[i].data["cost_usd"]))
+        output_so_far = usage_events[i].data["output_tokens"]
+
+    # Wire-only: the persisted transcript carries none of it.
+    for msg in result.run.messages:
+        assert "[tret budget:" not in (msg.get("content") or "")
+
+    # And the same script, run with the feature off, produces the identical
+    # persisted transcript — the wire-only guarantee, proven rather than
+    # inferred from the absence check above.
+    off_harness_id = await world.create_harness(
+        name="Budget Line Analyst (off)", max_iterations=6, max_run_output_tokens=2000
+    )
+    await _set_loop_config(world, off_harness_id, budget_line=False)
+    twin = await world.run(
+        provider=ReplayProvider(divergence_happy_script()),
+        harness_id=off_harness_id,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+    assert twin.run.status == "completed", twin.run.error
+    # Findings get a freshly generated id each run — the one thing genuinely
+    # non-deterministic between two identical scripts — so it is scrubbed
+    # before the comparison; nothing budget-line-related touches it.
+    uuid_re = re.compile(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
+    )
+
+    def _scrub(messages: list[dict]) -> list[dict]:
+        return [
+            {**m, "content": uuid_re.sub("<uuid>", m["content"]) if m.get("content") else m["content"]}
+            for m in messages
+        ]
+
+    assert _scrub(result.run.messages) == _scrub(twin.run.messages)
+
+
+async def test_budget_line_off_by_loop_config(world):
+    """`loop_config.budget_line: false` opts a harness out entirely."""
+    harness_id = await world.create_harness(name="No Budget Line", max_iterations=6)
+    await _set_loop_config(world, harness_id, budget_line=False)
+    provider = ReplayProvider(divergence_happy_script())
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+    assert result.run.status == "completed", result.run.error
+    assert provider.calls, "the script should have run"
+    for call in provider.calls:
+        last = call.last_message
+        assert last is not None
+        assert "[tret budget:" not in (last.content or "")
+    for msg in result.run.messages:
+        assert "[tret budget:" not in (msg.get("content") or "")
+
+
+async def test_budget_line_coexists_with_a_compaction_elision_marker(world):
+    """The line sits on the final message; elision markers sit on whichever
+    earlier messages compaction replaced. A forced-low context budget (same
+    technique as `tests/evals/test_context_pressure.py`) makes elision certain
+    without engineering a real million-token transcript.
+    """
+    documents = [
+        await world.create_document(
+            filename=f"report-{i}.txt",
+            text=f"REPORT {i}\n" + ("The site assessment narrative continues. " * 400),
+        )
+        for i in range(3)
+    ]
+    harness_id = await world.create_harness(
+        name="Budget Line Under Pressure",
+        tool_names=[
+            "read_document",
+            "lookup_dataset",
+            "record_verdict",
+            "file_data_request",
+        ],
+        max_iterations=10,
+        # `create_harness`'s own default pins `adaptive` to `STATIC_ADAPTIVE`
+        # (compaction "off" included) for reproducibility — exactly wrong for
+        # a scenario whose whole point is forcing compaction, so this stays
+        # pinned to one model (routing is not what is under test here) but
+        # asks for `compaction: "auto"` explicitly, same as `create_harness`'s
+        # own docstring says to for a scenario that needs the engine's real
+        # adaptive behavior.
+        model_policy={
+            "mode": "pinned",
+            "model": GOLDEN_MODEL,
+            "adaptive": {"compaction": "auto"},
+        },
+    )
+    provider = ReplayProvider(
+        [
+            *[
+                ScriptedTurn(
+                    text=f"Reading report {i}.",
+                    tool_calls=[ScriptedCall("read_document", {"document_id": str(d)})],
+                )
+                for i, d in enumerate(documents)
+            ],
+            *divergence_happy_script(),
+        ]
+    )
+    with patch("tret.engine.harness.context_budget", return_value=3_000):
+        result = await world.run(
+            provider=provider,
+            harness_id=harness_id,
+            task_type="divergence_assessment",
+            task_input={"site_id": SITE, "peril": PERIL},
+            document_ids=documents,
+        )
+
+    assert result.run.status == "completed", result.run.error
+    assert any(e.data.get("kind") == "elision" for e in result.events_of("compaction"))
+
+    last_call = provider.calls[-1]
+    m = BUDGET_LINE_RE.search(last_call.last_message.content or "")
+    assert m
+    # This harness never sets `max_run_output_tokens`, so the output clause
+    # is omitted entirely rather than shown against some other cap.
+    assert m["output_so_far"] is None and m["output_budget"] is None
+    # At least one earlier message on the same wire was elided...
+    assert any(
+        "elided by tret" in (m.content or "") for m in last_call.messages[:-1]
+    )
+    # ...and the marker never lands on the message the budget line is on.
+    assert "elided by tret" not in last_call.last_message.content

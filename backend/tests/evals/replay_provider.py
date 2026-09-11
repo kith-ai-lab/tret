@@ -103,6 +103,14 @@ class ProviderCall:
 
     @property
     def last_message(self) -> Msg | None:
+        """The wire's final message — the wire-only budget line's own `Msg`
+        (`meta={"budget_line": True}`) whenever the harness has one enabled,
+        since `_append_budget_line` always appends it as a new trailing
+        message rather than folding it into whatever came before. Budget-line
+        assertions (`tests/evals/test_engine_loop.py`) read `.content` here
+        directly — it is just the line itself now, not the line concatenated
+        onto a tool result.
+        """
         return self.messages[-1] if self.messages else None
 
 
@@ -264,6 +272,16 @@ class ReplayProvider(Provider):
 
 
 # ── script-writing helpers ────────────────────────────────────────────────────
+# `engine/harness.py` appends the run's wire-only "budget line" as its own
+# trailing `Msg(role="user", meta={"budget_line": True})` — never onto an
+# existing message's content (see that module's `_append_budget_line`, and
+# `test_prompt_caching.py`'s tests of the cache-breakpoint bug that concatenating
+# used to cause). Tool results on `messages` are therefore always exactly what
+# the scripted tool returned, with nothing appended by the engine — `rows_of`
+# below and `test_golden_write_integrity.py`'s own direct `tool_results` call
+# read them as-is. (`engine/tools.py`'s `[TRUNCATED: ...]` size-cap marker is a
+# different thing entirely — that one *is* inside the tool's own returned
+# content, which is why `test_token_economy.py` still splits it off by hand.)
 def tool_results(messages: list[Msg], tool_name: str) -> list[str]:
     """Every tool result the engine has fed back for `tool_name`, in order."""
     by_id = {call.id: call.name for m in messages for call in m.tool_calls}

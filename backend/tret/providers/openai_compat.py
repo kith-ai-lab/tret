@@ -223,12 +223,19 @@ class OpenAICompatProvider(Provider):
         }
         self._extra_body = extra_body or {}
 
-    def _apply_cache_control(self, body: dict) -> None:
+    def _apply_cache_control(self, body: dict, messages: list[Msg]) -> None:
         """Hook: add prompt-cache breakpoints to an outgoing request body.
 
         No-op by default — most OpenAI-compatible APIs cache implicitly and
         reject (or silently mangle) structured content parts. Subclasses whose
         upstream honors Anthropic-style `cache_control` override this.
+
+        `messages` — the canonical `Msg` list `body["messages"]` was built
+        from (`_to_openai_messages`, which is 1:1 with it after the leading
+        system entry) — is here so an override can recognize the wire-only
+        budget line (`harness._append_budget_line`, `meta={"budget_line":
+        True}`) by identity rather than by re-parsing `body`'s already-rendered
+        strings.
         """
 
     def _effort_body(self, effort: str | None) -> dict:
@@ -312,7 +319,7 @@ class OpenAICompatProvider(Provider):
         provider_body = self._provider_body(bool(tools), provider_ignore)
         if provider_body:
             body["provider"] = provider_body
-        self._apply_cache_control(body)
+        self._apply_cache_control(body, messages)
 
         # Aggregate tool-call deltas per (choice, tool index). The tool index is
         # only unique *within* a choice, so keying on it alone concatenated the
@@ -697,14 +704,26 @@ class OpenRouterProvider(OpenAICompatProvider):
             body.pop("ignore", None)
         return body
 
-    def _apply_cache_control(self, body: dict) -> None:
-        messages = body.get("messages") or []
+    def _apply_cache_control(self, body: dict, messages: list[Msg]) -> None:
+        """Mark `system` and `user` messages, skipping the wire-only budget
+        line (see the base hook's docstring) rather than spending a breakpoint
+        slot on a message that is never sent the same way twice: on the
+        OpenAI-compatible wire shape the line is always its own trailing
+        `user` message (`_to_openai_messages` never merges consecutive `Msg`s
+        the way the Anthropic translator does), so skipping it is just "don't
+        mark this one message" — no block-level surgery needed the way
+        `anthropic._mark_last_stable_block` requires.
+        """
+        body_messages = body.get("messages") or []
         budget = self.max_cache_breakpoints
-        if messages and messages[0].get("role") == "system":
-            if mark_cache_breakpoint(messages[0]):
+        if body_messages and body_messages[0].get("role") == "system":
+            if mark_cache_breakpoint(body_messages[0]):
                 budget -= 1
-            messages = messages[1:]
-        for message in reversed(messages):
+            body_messages = body_messages[1:]
+        skip_tail = bool(messages and messages[-1].meta.get("budget_line"))
+        for i, message in enumerate(reversed(body_messages)):
+            if skip_tail and i == 0:
+                continue
             if budget <= 0:
                 return
             if message.get("role") == "user" and mark_cache_breakpoint(message):

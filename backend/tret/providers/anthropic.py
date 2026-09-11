@@ -52,11 +52,26 @@ def _as_blocks(content) -> list[dict]:
     return [{"type": "text", "text": content or ""}]
 
 
-def _to_anthropic_messages(messages: list[Msg]) -> list[dict]:
+def _to_anthropic_messages(messages: list[Msg]) -> tuple[list[dict], dict | None]:
     """Translate canonical Msg list to Anthropic content-block format.
+
+    Returns `(messages, budget_line_block)`: `budget_line_block` is the exact
+    content-block dict the wire-only budget line (`harness._append_budget_line`)
+    ended up as, when `messages`' tail carries one (`meta={"budget_line": True}`,
+    see `harness.py`), else None. It is a reference into `messages` itself, not
+    a copy — `_apply_conversation_cache` uses `is` on it to recognize which
+    block a cache breakpoint must never land on, since that block is re-sent
+    with different content (this iteration's numbers) every turn and would
+    defeat the very breakpoint it carried. A marker string would work too, but
+    the meta already says exactly which Msg this is; no reason to duplicate
+    that as a magic prefix another consumer could collide with.
 
     Consecutive tool-result messages are folded into a single user turn, as the
     API requires tool_result blocks to open the message that follows tool_use.
+    The budget line, when present, is always this kind of trailing message —
+    a lone `role="user"` `Msg` appended after everything else — so it folds
+    into whatever turn already ends the conversation the same way a real
+    trailing user message would.
 
     An assistant turn with neither text nor tool calls is *dropped* rather than
     sent as an empty text block: the API rejects `{"type": "text", "text": ""}`
@@ -68,9 +83,22 @@ def _to_anthropic_messages(messages: list[Msg]) -> list[dict]:
     no tool_use ids), so no id can dangle.
     """
     out: list[dict] = []
+    budget_line_block: dict | None = None
     for m in messages:
         if m.role == "user":
-            if out and out[-1]["role"] == "user":
+            if m.meta.get("budget_line"):
+                # Always built as an explicit block (never left as a bare
+                # string, unlike the plain-message branch below) so there is a
+                # single object identity `_apply_conversation_cache` can test
+                # for, whether this ends up merged onto an existing turn or
+                # opening a new one.
+                block = {"type": "text", "text": m.content or ""}
+                if out and out[-1]["role"] == "user":
+                    out[-1]["content"] = _as_blocks(out[-1]["content"]) + [block]
+                else:
+                    out.append({"role": "user", "content": [block]})
+                budget_line_block = block
+            elif out and out[-1]["role"] == "user":
                 out[-1]["content"] = _as_blocks(out[-1]["content"]) + _as_blocks(m.content)
             else:
                 out.append({"role": "user", "content": m.content or ""})
@@ -95,10 +123,46 @@ def _to_anthropic_messages(messages: list[Msg]) -> list[dict]:
                 out[-1]["content"].append(block)
             else:
                 out.append({"role": "user", "content": [block]})
-    return out
+    return out, budget_line_block
 
 
-def _apply_conversation_cache(messages: list[dict], budget: int = MESSAGE_CACHE_BREAKPOINTS) -> None:
+def _mark_last_stable_block(message: dict, budget_line_block: dict | None) -> bool:
+    """`mark_cache_breakpoint(message)`, except when `message`'s own last block
+    is `budget_line_block` — in which case the breakpoint is set one block
+    earlier instead, and never on the line itself.
+
+    The budget line changes every iteration (this turn's numbers), so a
+    breakpoint written on it — or, worse, a breakpoint whose presence shifts
+    depending on where the line happened to land — is never a prefix match at
+    the next iteration. The rest of that same turn (the tool_result blocks it
+    was merged after, or a real trailing user message) is exactly as stable
+    turn to turn as it always was; this only ever changes which block within
+    the message gets marked, never which message.
+    """
+    content = message.get("content")
+    if (
+        budget_line_block is not None
+        and isinstance(content, list)
+        and content
+        and content[-1] is budget_line_block
+    ):
+        if len(content) < 2:
+            # This turn *is* the budget line and nothing else — there is no
+            # earlier block in it to mark instead.
+            return False
+        # `content[:-1]` is a new list, but its elements are the same dict
+        # objects as `content`'s — marking through this view mutates the real
+        # block in place, exactly as `mark_cache_breakpoint(message)` would.
+        return mark_cache_breakpoint({"content": content[:-1]})
+    return mark_cache_breakpoint(message)
+
+
+def _apply_conversation_cache(
+    messages: list[dict],
+    budget: int = MESSAGE_CACHE_BREAKPOINTS,
+    *,
+    budget_line_block: dict | None = None,
+) -> None:
     """Cache the conversation prefix at turn boundaries, in place.
 
     The tool loop re-sends the whole history every iteration, so a breakpoint on
@@ -106,13 +170,18 @@ def _apply_conversation_cache(messages: list[dict], budget: int = MESSAGE_CACHE_
     from cache. Earlier user-turn boundaries are marked too, budget permitting,
     so a read anchor survives iterations that append more content blocks than the
     cache lookback window.
+
+    `budget_line_block` (see `_to_anthropic_messages`) is the wire-only budget
+    line's own content block, when this call's tail carries one — every
+    breakpoint here is placed by `_mark_last_stable_block`, which skips exactly
+    that block rather than the message it lives in.
     """
     marked = 0
     for i, message in enumerate(reversed(messages)):
         if marked >= budget:
             return
         if i == 0 or message.get("role") == "user":
-            if mark_cache_breakpoint(message):
+            if _mark_last_stable_block(message, budget_line_block):
                 marked += 1
 
 
@@ -170,8 +239,8 @@ class AnthropicProvider(Provider):
         system_blocks = [
             {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
         ]
-        anthropic_messages = _to_anthropic_messages(messages)
-        _apply_conversation_cache(anthropic_messages)
+        anthropic_messages, budget_line_block = _to_anthropic_messages(messages)
+        _apply_conversation_cache(anthropic_messages, budget_line_block=budget_line_block)
         kwargs: dict = dict(
             model=model,
             system=system_blocks,

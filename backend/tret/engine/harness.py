@@ -145,6 +145,108 @@ CACHE_MISS_FLOOR_TOKENS = 0
 # answer is always "no" without having to look.
 NO_CACHE_STATS_PROVIDERS = frozenset({LOCAL_PROVIDER, "kimi"})
 
+# ── budget awareness ─────────────────────────────────────────────────────────
+# tret enforces iteration, cost, output-token and context-window caps but,
+# before this, never told the model where it stood against any of them.
+# Google's budget-aware test-time-scaling result (COLM 2026) and Anthropic's
+# own injected context-budget tags on Sonnet-class models both found agents
+# allocate work better once they can see what is left. Anthropic's tag is
+# context-only and Anthropic-only; this is uniform across every provider tret
+# talks to — see `_budget_line` and `_append_budget_line` below for what gets
+# added and where. `loop_config.budget_line: false` opts a harness out (see
+# `docs/architecture.md`'s loop paragraph).
+BUDGET_LINE_DEFAULT = True
+
+# The line's own stable opening — no builtin tool ever emits this literal
+# string, so it doubles as an anchor a consumer can use to recover a tool
+# result's real content when that result happens to be the wire's tail
+# message. `tests/evals/replay_provider.py`'s scripted argument builders are
+# exactly that consumer: a citation script reading back the last
+# `lookup_dataset` result and JSON-parsing it verbatim would otherwise choke
+# on this line the same way it already has to split off `engine/tools.py`'s
+# `[TRUNCATED: ...]` size-cap marker by hand (see
+# `tests/evals/test_token_economy.py`).
+BUDGET_LINE_MARKER = "[tret budget: "
+
+
+def _format_token_budget(n: int) -> str:
+    """`n` rounded to a short k/M suffix (`118000` -> `"118k"`, `2100` ->
+    `"2.1k"`) — `_budget_line`'s own ~160-char ceiling rules out a raw count
+    on a six-figure context window.
+    """
+    for threshold, suffix in ((1_000_000, "M"), (1_000, "k")):
+        if n >= threshold:
+            value = f"{n / threshold:.1f}".rstrip("0").rstrip(".")
+            return f"{value}{suffix}"
+    return str(n)
+
+
+def _budget_line(
+    *,
+    iteration: int,
+    max_iterations: int,
+    cost_so_far: Decimal,
+    max_cost: Decimal,
+    est_tokens: int,
+    context_limit: int,
+    output_tokens_so_far: int,
+    output_budget: int,
+) -> str:
+    """One line naming this run's position against every cap the engine
+    already enforces — never a cap the engine does not have, and this
+    function changes none of them; see `_execute_inner`'s loop for where it
+    is applied. `context_limit` is `budget()` from `engine/compaction.py`
+    (the same figure `over_budget` compares against, not the raw context
+    window), and `output_budget` is the optional per-run
+    `model_policy["max_run_output_tokens"]` — omitted entirely when a run has
+    none, rather than shown against the per-turn `max_output_tokens`, which
+    every run has and would make the clause meaningless.
+    """
+    parts = [
+        f"iteration {iteration} of {max_iterations}",
+        f"${cost_so_far:.2f} of ${max_cost:.2f} spent",
+    ]
+    if context_limit:
+        parts.append(
+            f"~{_format_token_budget(est_tokens)} of {_format_token_budget(context_limit)} "
+            "context tokens"
+        )
+    if output_budget:
+        parts.append(
+            f"output {_format_token_budget(output_tokens_so_far)} of "
+            f"{_format_token_budget(output_budget)}"
+        )
+    return BUDGET_LINE_MARKER + " · ".join(parts) + "]"
+
+
+def _append_budget_line(wire: list[Msg], line: str) -> list[Msg]:
+    """`wire` with a new trailing `Msg(role="user", content=line, meta={"budget_line":
+    True})` — a new list, never `wire` itself, and never touching any message
+    already in it.
+
+    A separate message, not text concatenated onto `wire[-1].content` (the prior
+    approach): concatenating changed the byte content of whichever message
+    happened to be the wire's tail — the folded tool-result turn on most
+    iterations — which is exactly the content each provider's tail cache
+    breakpoint is written against. The breakpoint written over "tool result +
+    this iteration's line" at turn N is not a prefix of "tool result + next
+    iteration's line" at turn N+1, so the whole prior turn re-wrote the cache
+    (billed at the ~1.25x write price) every single iteration instead of
+    reading it. A trailing message is instead something each provider's own
+    cache-control pass can recognize by its `meta` and skip, landing the
+    breakpoint on the stable content before it — see
+    `anthropic._apply_conversation_cache` and `openai_compat._apply_cache_
+    control` (a plain trailing `user` message needs no special handling there:
+    it is simply never marked). The persisted-transcript guarantee this
+    replaced still holds the same way: on the no-compaction path `wire_view`
+    returns `messages` itself (see its own docstring), and `messages` is
+    `runs.messages`-bound, so this must never mutate `wire` or anything in it
+    — only ever return a new list with a new `Msg` appended.
+    """
+    if not wire:
+        return wire
+    return [*wire, Msg(role="user", content=line, meta={"budget_line": True})]
+
 
 def effective_model_policy(harness_policy: dict | None, task_input: dict | None) -> dict:
     """The harness policy with per-run overrides applied, for this run only.
@@ -867,6 +969,10 @@ class HarnessEngine:
         model_policy = effective_model_policy(harness.model_policy, run.task_input)
         budget_raw = model_policy.get("max_run_output_tokens")
         output_budget = int(budget_raw) if budget_raw else 0
+        # Opt-out only — see `_budget_line`'s own docstring for what this adds
+        # and why it defaults on. `docs/architecture.md`'s loop paragraph
+        # documents the key.
+        budget_line_enabled = bool(loop_cfg.get("budget_line", BUDGET_LINE_DEFAULT))
 
         # ── tools ────────────────────────────────────────────────────────────
         builtins = get_builtin_tools()
@@ -1201,6 +1307,34 @@ class HarnessEngine:
         # stop being true partway through a run.
         provider_ignore_waived = False
 
+        def _wire_for_provider(view: list[Msg]) -> list[Msg]:
+            """`view` (a `wire_view(...)` result) with this iteration's budget
+            line appended, unless the harness opted out. A closure, not a
+            method, because every value it reads — `iteration`, `context_
+            limit`, `total_usage`, `run.cost_usd` — is loop-local state that
+            changes turn to turn and, for `context_limit`, on a model switch;
+            reading them by name here rather than threading eight parameters
+            through both call sites keeps those two sites to one line each.
+            Called from two places in the loop below: right after every
+            `wire_view(...)` call, so the line lands on the wire the same way
+            regardless of whether a compaction pass ran first.
+            """
+            if not budget_line_enabled:
+                return view
+            return _append_budget_line(
+                view,
+                _budget_line(
+                    iteration=iteration,
+                    max_iterations=max_iterations,
+                    cost_so_far=run.cost_usd or Decimal(0),
+                    max_cost=max_cost,
+                    est_tokens=estimate_wire_tokens(system, view, tool_specs),
+                    context_limit=context_limit,
+                    output_tokens_so_far=total_usage.output_tokens,
+                    output_budget=output_budget,
+                ),
+            )
+
         # ── loop ─────────────────────────────────────────────────────────────
         for iteration in range(1, max_iterations + 1):
             if self._is_cancelled(run.id):
@@ -1221,8 +1355,21 @@ class HarnessEngine:
             # Checked before every call, not after a failure: a run that exceeds
             # its window gets a provider error with nothing in the transcript
             # explaining it, and by then the turn has already been paid for.
-            wire = wire_view(messages, compaction)
+            pre_line_view = wire_view(messages, compaction)
+            wire = _wire_for_provider(pre_line_view)
             est_tokens = estimate_wire_tokens(system, wire, tool_specs)
+            # `_compact`'s own `after_est_tokens` is estimated on `wire_view(messages,
+            # state)` — the pre-append view, with no budget line — so `before_tokens`
+            # below is estimated the same way. Using `est_tokens` (which includes this
+            # iteration's line) instead would make every before/after pair overstate
+            # what compaction actually elided by the line's own handful of tokens, and
+            # on a harness with `budget_line` off this is simply `est_tokens` again
+            # (`_wire_for_provider` is a no-op in that case, so the two views match).
+            before_tokens = (
+                est_tokens
+                if not budget_line_enabled
+                else estimate_wire_tokens(system, pre_line_view, tool_specs)
+            )
             forced_switch_compaction = compact_before_next_turn and adaptive.compaction != "off"
             compact_before_next_turn = False
             compaction_changed_wire = False
@@ -1247,7 +1394,7 @@ class HarnessEngine:
                     messages=messages,
                     state=compaction,
                     iteration=iteration,
-                    before_tokens=est_tokens,
+                    before_tokens=before_tokens,
                     system=system,
                     tool_specs=tool_specs,
                     terminal_tool=ctx.terminal_tool,
@@ -1276,7 +1423,7 @@ class HarnessEngine:
                     # exactly as it was, so a cache miss on this turn is not
                     # this pass's doing.
                     compaction_changed_wire = record["kind"] != "no_op"
-                wire = wire_view(messages, compaction)
+                wire = _wire_for_provider(wire_view(messages, compaction))
 
             # Withheld once `provider_ignore_waived` is set (below): recomputing
             # the same evidence-based list every iteration after it has already
