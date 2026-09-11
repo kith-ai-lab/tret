@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tret.adaptive import validation_error as adaptive_validation_error
+from tret.api._policy import validate_policy as _validate_policy
 from tret.api.auth import current_user
 from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_admin
 from tret.db.engine import get_db
@@ -39,9 +39,6 @@ from tret.packs.links import (
     set_harness_packs,
     task_slug_collision,
 )
-from tret.providers.catalog import get_catalog
-from tret.router_llm.objectives import DEFAULT_OBJECTIVE, OBJECTIVES
-from tret.router_llm.router import TIER_ORDER
 
 router = APIRouter(prefix="/api/harnesses", tags=["harnesses"])
 
@@ -150,44 +147,6 @@ def _validate_tool_names(tool_names: list[str]) -> None:
             f"unknown tool name(s): {', '.join(sorted(set(unknown)))}. "
             f"Available tools: {', '.join(sorted(builtins))}",
         )
-
-
-def _validate_policy(policy: dict) -> None:
-    mode = policy.get("mode")
-    if mode not in ("auto", "pinned"):
-        raise HTTPException(422, "model_policy.mode must be 'auto' or 'pinned'")
-    catalog = get_catalog()
-    if mode == "pinned":
-        model = policy.get("model")
-        if not model or catalog.get(model) is None:
-            raise HTTPException(422, f"model_policy.model '{model}' is not in the catalog")
-    for m in policy.get("allowed") or []:
-        if catalog.get(m) is None:
-            raise HTTPException(422, f"allowed model '{m}' is not in the catalog")
-    # `local` is a real ceiling, not a floor: TIER_ORDER ranks it below economy,
-    # so capping there leaves local models as the only candidates — the
-    # zero-cloud policy (docs/local-models.md), expressed as a cost tier.
-    tier = policy.get("max_cost_tier", "premium")
-    if tier not in TIER_ORDER:
-        raise HTTPException(
-            422, f"max_cost_tier must be one of {'|'.join(TIER_ORDER)}"
-        )
-    # An unrecognized objective must never fall through to the default: silently
-    # routing on "balanced" when the operator asked for "eco" is exactly the kind
-    # of quiet substitution this platform exists to rule out.
-    # `or` (not a get default) so unset/None reads as the default exactly the way
-    # router_llm.objectives.objective_of reads it at run time.
-    objective = policy.get("objective") or DEFAULT_OBJECTIVE
-    if objective not in OBJECTIVES:
-        raise HTTPException(422, f"model_policy.objective must be one of {'|'.join(OBJECTIVES)}")
-    # The adaptive block, same rule as everything above it: refused at the door,
-    # never read as a default. A misspelled key here would silently leave a
-    # behavior on that the operator believed they had turned off — and two of
-    # them (`escalation`, `compaction`) let a run change what it is doing
-    # mid-flight, which is exactly the kind of thing to be sure about.
-    problem = adaptive_validation_error(policy.get("adaptive"))
-    if problem:
-        raise HTTPException(422, problem)
 
 
 @router.get("")

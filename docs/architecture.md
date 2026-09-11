@@ -68,6 +68,56 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    call, which local models are exempt from that check, and — when adaptive
    compaction is on — whether the floor it was checked against already
    excluded the history that trimming would shrink).
+   `POST /api/routing/preview` (`api/routing.py`) answers the same question
+   before a run exists: it builds the identical routing inputs (task shape,
+   description and output contract from the pack task, `max_output_tokens`/
+   `system_prompt_extra`/`tool_names` from the named harness unless a form's
+   unsaved edits override them — `tool_names` feeds the same
+   pack-task-tools-take-precedence-then-subtract-withheld-web-tools
+   derivation `api/harnesses.py::get_harness` uses, rather than trusting a
+   client-computed `web_tools_enabled` boolean, though that field is still
+   accepted for compatibility — `est_input_tokens` from the same
+   `assemble_context`/`composition_report` the engine uses, and
+   `min_context_window` from `required_context_window`) and calls `route()`
+   for a saved harness's own policy or an inline one a form has not saved
+   yet, returning the `RoutingDecision` plus a cost range — the low end prices
+   the whole input as a cache *read* plus only 10% of the output budget used
+   (the cheapest this call could plausibly be), the high end prices the whole
+   input uncached plus the full output budget used — `compare: true` runs it
+   again for every other objective, four calls total, and is itself gated to
+   the workspace's approver role or higher (`ROLE_RANK` in `api/workspace.py`;
+   403 below it) since four router calls is four times the unrecorded spend
+   of a plain preview. An inline `model_policy` is validated exactly as a
+   saved harness's is (`api/_policy.py`). The permission rule is exact: with
+   `harness_id`, a non-admin overriding that harness's policy inline is held
+   to its own `max_cost_tier`/`allowed` ceiling, never above it, `mode:
+   "pinned"` included — a pin's own `max_cost_tier` field is never read by
+   `route()` (it goes straight to the named model), so the check resolves the
+   pinned model's actual catalog `cost_tier` instead of trusting the field,
+   and a saved `mode: "pinned"` policy's own ceiling is derived the same way
+   (its `max_cost_tier` field is equally cosmetic and usually unset, which
+   would otherwise leave it with no effective ceiling at all); *without*
+   `harness_id` there is no saved ceiling to hold anyone to, so that path
+   requires the workspace's admin role or higher outright — harness authoring
+   is already admin-gated, and "preview an unsaved new harness" is that same
+   workflow. Otherwise a preview would be a way to see what a costlier or
+   less confidential model would have done with a harness's data, or, with no
+   harness at all, simply any policy an analyst cared to hand it. `pack_id`
+   on the harness-id path
+   resolves like the inline path (any pack in the caller's workspace, not
+   only one already linked to the saved harness — a form previewing a pack it
+   just added has no link row yet); omitting `pack_id` still resolves the
+   saved harness's own pack for `task_type`, while an explicit `pack_id: null`
+   means no pack at all, which only a freeform/chat `task_type` can run
+   without one. It is a **dry run** in the sense that matters — nothing is
+   persisted, `runs` gets no row, and `engine.execute` is never called — but
+   it is not free: each preview makes up to four real short router-model
+   calls on the calling workspace's own provider key, and that spend is never
+   recorded anywhere in tret's own accounting (it appears on the provider's
+   bill and in this endpoint's own log line only). The estimate itself is
+   also partial: it covers the system prompt alone — documents, tool specs,
+   conversation history and the task input all add to what a real run of the
+   same harness will actually send.
 
 5. **Adapting mid-run** (`engine/compaction.py`, `engine/supervisor.py`): the
    model is chosen once, but a run is not stuck with the consequences.

@@ -218,6 +218,76 @@ export interface RoutingDecision {
   decided_at: string
 }
 
+/** `POST /api/routing/preview` request (backend: `api/routing.py`). Either
+ *  `harness_id` (preview a saved harness, optionally with `model_policy`
+ *  overriding its own — the "preview my unsaved edits" case) or `model_policy`
+ *  alone (no harness to save yet) must be given. An inline `model_policy` is
+ *  validated the same way a saved one is. Permission rule, exact: with
+ *  `harness_id`, a non-admin's override is held to that harness's own
+ *  `max_cost_tier`/`allowed` ceiling (403 above it; a `mode: "pinned"` policy
+ *  included — the pinned model's own cost_tier and catalog id are checked,
+ *  not the policy's own `max_cost_tier` field, which the router ignores for
+ *  a pin, and a saved `mode: "pinned"` policy's own ceiling is derived the
+ *  same way rather than trusted from its own likely-unset `max_cost_tier`
+ *  field); *without* `harness_id`, there is no saved ceiling to check
+ *  against, so that path is admin-only outright (403 for anyone below the
+ *  workspace's admin role, whatever `model_policy` says) — harness authoring
+ *  is already admin-gated, and "preview an unsaved new harness" is that same
+ *  workflow. All of this is server-side only; this client type does not
+ *  enforce any of it.
+ *
+ *  `max_output_tokens`/`system_prompt_extra`/`tool_names` each default to the
+ *  named harness's own saved value when omitted — send them whenever the
+ *  form has unsaved edits to them, or the preview silently reverts to what is
+ *  on disk. `system_prompt_extra: null` is a real override (clearing it), not
+ *  "omitted" — omit the key entirely to mean "use the harness's own value".
+ *  Likewise `pack_id: null` means "no pack" (only a freeform/chat task_type
+ *  can run without one); omit the key to have the server resolve the saved
+ *  harness's own pack for `task_type`. */
+export interface RoutingPreviewBody {
+  harness_id?: string
+  model_policy?: ModelPolicy
+  pack_id?: string | null
+  task_type?: string
+  n_documents?: number
+  max_output_tokens?: number
+  system_prompt_extra?: string | null
+  // The enabled tool names this preview would carry — the server derives
+  // web_tools_enabled from these the same way `api/harnesses.py::get_harness`
+  // does (a pack task's own declared tools take precedence), rather than
+  // trusting a client-computed boolean.
+  tool_names?: string[]
+  /** @deprecated superseded by `tool_names`, which the server prefers when
+   *  both are sent — kept only for a caller that has already computed the
+   *  boolean itself. */
+  web_tools_enabled?: boolean
+  /** Also routes every other objective in ROUTING_OBJECTIVES (four total,
+   *  always) instead of just the policy's own — one router call each.
+   *  Requires the workspace's approver role or higher (403 below it). */
+  compare?: boolean
+}
+
+/** One objective's row of a `POST /api/routing/preview` response. `estimate`
+ *  is a range, not a point figure — see `api/routing.py::preview_routing`'s
+ *  own comment on `cost_usd_low`/`cost_usd_high` for the assumption behind
+ *  each end: the low end prices the whole input as a cache *read* plus only
+ *  10% of the output budget used; the high end prices the whole input
+ *  uncached plus the full output budget used. */
+export interface RoutingPreviewResult {
+  objective: RoutingObjective
+  decision: RoutingDecision
+  estimate: {
+    input_tokens: number
+    max_output_tokens: number
+    cost_usd_low: number
+    cost_usd_high: number
+    /** The router's own LLM call, if one was made (0 on every deterministic-
+     *  fallback/override/single-candidate path — see `RoutingDecision.spend`
+     *  server-side, which this is read off). */
+    router_overhead_usd: number
+  }
+}
+
 export interface RunSummary {
   id: string
   project_id: string
@@ -2626,6 +2696,10 @@ export const api = {
     request<Harness>(`/harnesses/${id}`, { method: 'PUT', body }),
   archiveHarness: (id: string) =>
     request<{ ok: boolean }>(`/harnesses/${id}`, { method: 'DELETE' }),
+
+  // routing preview (dry run — see api/routing.py; never persists, never runs)
+  previewRouting: (body: RoutingPreviewBody) =>
+    request<{ results: RoutingPreviewResult[] }>('/routing/preview', { method: 'POST', body }),
 
   // documents + datasets
   uploadDocument: (file: File) => {

@@ -21,6 +21,7 @@ from tret.api import (
     harnesses,
     pack_builder,
     packs,
+    routing,
     runs,
     settings as settings_api,
     workspaces as workspaces_api,
@@ -258,6 +259,11 @@ def create_app() -> FastAPI:
     app.include_router(analytics.router)
     app.include_router(chat.router)
     app.include_router(runs.router)
+    # Dry-run routing preview (tret/api/routing.py) — reads the same router as
+    # a real run but persists nothing; mounted alongside runs.router since it
+    # answers the same question a run's own `routing` event does, just before
+    # a run exists.
+    app.include_router(routing.router)
     app.include_router(harnesses.router)
     app.include_router(documents.router)
     # Reference documentation, read straight out of `docs/` so the methodology the

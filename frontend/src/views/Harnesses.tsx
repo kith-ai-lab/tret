@@ -24,9 +24,12 @@ import {
   type Pack,
   ROUTING_OBJECTIVES,
   type RoutingObjective,
+  type RoutingPreviewBody,
+  type RoutingPreviewResult,
 } from '../api/client'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
-import { QueryError } from '../components/shared/MonoTable'
+import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
+import { RoutingBadge } from '../components/shared/RoutingBadge'
 import { ModelSelect, modelPriceLabel, modelUnavailableLabel } from './Workbench'
 
 const NEW_ID = '__new__'
@@ -221,6 +224,21 @@ function HarnessEditor({
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['harnesses'] }),
   })
 
+  // `compare: true` costs up to four router calls instead of one
+  // (`api/routing.py`'s own cost note) and is gated server-side to the
+  // workspace's approver role or higher — mirrored here only so an analyst
+  // sees a disabled control with a reason instead of a 403 after clicking
+  // Preview. Queried again (rather than threaded down as a prop from
+  // `Harnesses()`) because that component's own `canAuthor` collapses to a
+  // coarser admin-or-owner boolean this checkbox does not want; react-query
+  // dedupes the two `['me']` calls.
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const canCompare = ['owner', 'admin', 'approver'].includes(meQuery.data?.role ?? '')
+  const [compareObjectives, setCompareObjectives] = useState(false)
+  const previewMutation = useMutation({
+    mutationFn: () => api.previewRouting(buildPreviewBody()),
+  })
+
   const packs = packsQuery.data ?? []
   const models = modelsQuery.data ?? []
   const tools = toolsQuery.data ?? []
@@ -244,6 +262,46 @@ function HarnessEditor({
     'freeform',
     ...new Set(linkedPacks.flatMap((p) => p.task_types.map((t) => t.slug))),
   ]
+
+  // The preview body always reflects the *current* form — including edits
+  // never saved — never the saved `harness.model_policy`/`.loop_config`/
+  // `.system_prompt_extra`: that is the whole point of previewing before
+  // Save. Pack resolution mirrors the backend's own `resolve_pack_for_task`
+  // (the task's own pack, else the primary/first linked one), computed here
+  // because the preview endpoint's inline path takes one `pack_id`, not the
+  // harness's ordered `pack_ids`.
+  //
+  // Editing a saved harness (`harness` is set) also sends `harness_id`
+  // alongside every override above — the server checks a non-admin's inline
+  // `model_policy` against *that harness's own* max_cost_tier/allowed
+  // ceiling (`api/routing.py::_check_inline_policy_permission`), which it can
+  // only do if it knows which harness this is meant to be a preview of.
+  // Creating a new harness (`harness` is null) has no such row to check
+  // against, so only the inline fields are sent.
+  const buildPreviewBody = (): RoutingPreviewBody => {
+    const taskType = form.task_profile
+    const pack =
+      linkedPacks.find((p) => p.task_types.some((t) => t.slug === taskType)) ?? linkedPacks[0]
+    const overrides: RoutingPreviewBody = {
+      model_policy: form.model_policy,
+      // Explicit `null` (not an omitted key) when the form has no packs at
+      // all — the server distinguishes the two: omitted means "resolve the
+      // saved harness's own pack", `null` means "no pack", which only an
+      // unsaved/newly-added pack (sent by id below) or a bare freeform/chat
+      // task type can stand in for.
+      pack_id: pack ? pack.id : null,
+      task_type: taskType,
+      max_output_tokens: form.loop_config.max_output_tokens,
+      system_prompt_extra: form.system_prompt_extra,
+      // Sent as the raw tool list, not a client-computed boolean — the
+      // server derives web_tools_enabled itself (pack task tools take
+      // precedence over the harness's own, then withheld_web_tools), the
+      // same precedence `api/harnesses.py::get_harness` applies.
+      tool_names: form.tool_names,
+      compare: compareObjectives && canCompare,
+    }
+    return harness ? { harness_id: harness.id, ...overrides } : overrides
+  }
 
   const addPack = (id: string) => {
     if (!id || form.pack_ids.includes(id)) return
@@ -743,7 +801,7 @@ function HarnessEditor({
         <div className="error-text">{(archiveMutation.error as Error).message}</div>
       )}
 
-      <div className="row">
+      <div className="row" style={{ alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
         <button
           className="btn btn-primary"
           type="submit"
@@ -753,8 +811,139 @@ function HarnessEditor({
           {saveMutation.isPending ? 'Saving…' : harness ? 'Save changes' : 'Create harness'}
         </button>
         {saveMutation.isSuccess && <span className="mono-label" style={{ color: 'var(--green)' }}>saved</span>}
+        <button
+          type="button"
+          className="btn btn-sm"
+          onClick={() => previewMutation.mutate()}
+          // Previewing an unsaved (no harness_id) policy is admin-only
+          // server-side (`api/routing.py::preview_routing`'s no-harness_id
+          // branch — there is no saved harness ceiling for a non-admin to be
+          // held to, so that path requires the workspace's admin role or
+          // higher outright): `canAuthor` is exactly that check, already
+          // computed for the Save/Archive buttons above. Editing a *saved*
+          // harness (`harness` is set) sends `harness_id` and is unaffected —
+          // a non-admin there is still held to the harness's own ceiling, not
+          // shut out entirely.
+          disabled={previewMutation.isPending || (!harness && !canAuthor)}
+          title={
+            !harness && !canAuthor
+              ? 'Previewing an unsaved harness requires the workspace admin role or higher.'
+              : 'Dry run: shows what the router would pick and roughly what it would cost, without starting a run or saving anything.'
+          }
+        >
+          {previewMutation.isPending ? 'Previewing…' : 'Preview routing'}
+        </button>
+        <label
+          className="check-row"
+          style={{ padding: 0 }}
+          title={canCompare ? undefined : 'Comparing every objective requires the approver role or higher.'}
+        >
+          <input
+            type="checkbox"
+            checked={compareObjectives}
+            disabled={!canCompare}
+            onChange={(e) => setCompareObjectives(e.target.checked)}
+          />
+          <span>Compare objectives</span>
+        </label>
       </div>
+
+      {/* Routing preview — a dry run against the form's *current* values
+          (`api/routing.py::preview_routing`). Never persisted, never a run. */}
+      {(previewMutation.isPending || previewMutation.isError || previewMutation.isSuccess) && (
+        <div className="panel">
+          <div className="mono-label" style={{ marginBottom: 10 }}>
+            Routing preview
+          </div>
+          {previewMutation.isPending && <div className="empty pulse">Asking the router…</div>}
+          {previewMutation.isError && (
+            <div className="error-text">
+              {(previewMutation.error as ApiError).status === 409
+                ? `No model is reachable under this policy: ${(previewMutation.error as ApiError).message}`
+                : (previewMutation.error as ApiError).message}
+            </div>
+          )}
+          {previewMutation.data && (
+            <>
+              <RoutingPreviewTable results={previewMutation.data.results} />
+              <div style={{ ...HINT, marginTop: 8 }}>
+                Estimate covers the system prompt only; documents, tools, history and the task
+                input add to a real run.
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </form>
+  )
+}
+
+const ROUTING_PREVIEW_COLUMNS: Column<RoutingPreviewResult>[] = [
+  {
+    key: 'objective',
+    header: 'Objective',
+    render: (r) => r.objective,
+  },
+  {
+    key: 'model',
+    header: 'Model',
+    render: (r) => <RoutingBadge routing={r.decision} />,
+  },
+  {
+    key: 'effort',
+    header: 'Effort',
+    render: (r) => r.decision.effort ?? '—',
+  },
+  {
+    key: 'confidence',
+    header: 'Confidence',
+    render: (r) => r.decision.confidence ?? '—',
+  },
+  {
+    key: 'cost',
+    header: 'Est. cost',
+    align: 'right',
+    render: (r) =>
+      `$${r.estimate.cost_usd_low.toFixed(4)}–$${r.estimate.cost_usd_high.toFixed(4)}`,
+  },
+  {
+    key: 'context_fit',
+    header: 'Context fit',
+    render: (r) => r.decision.context_fit?.mode ?? 'unchecked',
+  },
+  {
+    key: 'reasoning',
+    header: 'Reasoning',
+    render: (r) => (
+      <span
+        title={r.decision.reasoning}
+        style={{
+          display: 'inline-block',
+          maxWidth: 320,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          verticalAlign: 'bottom',
+        }}
+      >
+        {r.decision.reasoning}
+      </span>
+    ),
+  },
+]
+
+/** One row per objective evaluated — one row for a plain preview, four for
+ *  `compare: true`. Reuses `RoutingBadge` (same chip a run's own routing
+ *  decision renders as) for the model column so a preview and a real run's
+ *  decision look identical; everything else is `MonoTable`'s usual dense
+ *  audit-row style. */
+function RoutingPreviewTable({ results }: { results: RoutingPreviewResult[] }) {
+  return (
+    <MonoTable
+      columns={ROUTING_PREVIEW_COLUMNS}
+      rows={results}
+      rowKey={(r) => r.objective}
+    />
   )
 }
 
