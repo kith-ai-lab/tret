@@ -52,6 +52,17 @@ GRID_BASES = (GRID_BASIS_LOCATION, GRID_BASIS_MARKET, GRID_BASIS_UNSPECIFIED)
 # catalog because providers/catalog.py imports this module.
 GRID_FACTOR_PROVIDERS = ("local", "anthropic", "kimi", "openrouter")
 
+# OpenRouter `provider` fields that take a JSON array of provider slugs —
+# `ignore` (deny), `only` (allow), and `order` (preference, still filtered by
+# availability) — all share the same shape and the same by-hand-JSON mistake
+# (a bare string for a single entry), so all three get the same coercion in
+# `Settings._coerce_provider_prefs_lists`. Module-level, not a class
+# attribute: a plain tuple assigned inside a pydantic `BaseSettings` class
+# becomes a `ModelPrivateAttr` placeholder until an instance exists, which
+# `_coerce_provider_prefs_lists` (a `@classmethod`, called from a
+# `@field_validator` before any instance is built) cannot iterate.
+_PROVIDER_PREFS_LIST_FIELDS = ("ignore", "only", "order")
+
 # An operator's label is a note next to a number, not a description. Long enough
 # for "Ontario grid, IESO 2024" and short enough to render in a table cell.
 GRID_FACTOR_LABEL_MAX = 80
@@ -688,6 +699,71 @@ class Settings(BaseSettings):
                 type(value).__name__,
             )
             return None
+        return cls._coerce_provider_prefs_lists(value)
+
+    @classmethod
+    def _coerce_provider_prefs_lists(cls, value: dict) -> dict:
+        """Normalize `ignore`, `only`, and `order` — see
+        `_coerce_provider_prefs_list_field` for what "normalize" means and why
+        it is needed at all.
+        """
+        for field_name in _PROVIDER_PREFS_LIST_FIELDS:
+            value = cls._coerce_provider_prefs_list_field(value, field_name)
+        return value
+
+    @staticmethod
+    def _coerce_provider_prefs_list_field(value: dict, field_name: str) -> dict:
+        """Normalize one list-shaped `provider` field to a list of non-empty,
+        stripped provider-slug strings.
+
+        Each of `ignore`/`only`/`order` is a JSON array in OpenRouter's own
+        API, but an operator writing `TRET_OPENROUTER_PROVIDER_PREFS` by hand
+        naturally reaches for a bare string for a single entry — `{"ignore":
+        "deepinfra"}`. Left as a string, `_provider_body`'s `set(... or [])`
+        (for `ignore`) or OpenRouter's own array parsing (for `only`/`order`)
+        would iterate its *characters* — for `ignore`, silently turning one
+        provider name into a denylist of letters. A bare string becomes a
+        one-element list; a list (or other iterable) keeps only its
+        non-blank string entries — stripped, not just checked for
+        non-blankness, so `" deepinfra "` reaches the wire as `"deepinfra"`
+        rather than a slug OpenRouter has never heard of — warning about and
+        dropping anything else (an int, `None`, a blank string) so one bad
+        entry among several doesn't cost the whole preference; any other type
+        for the field itself is dropped the same way. The field is omitted
+        entirely, not sent as `[]`, once nothing valid is left — matching
+        `_provider_body`'s own "no ignore key" convention, extended here to
+        `only`/`order` for consistency.
+        """
+        if field_name not in value:
+            return value
+        raw = value[field_name]
+        if isinstance(raw, str):
+            cleaned = [raw.strip()] if raw.strip() else []
+        elif isinstance(raw, (list, tuple, set)):
+            cleaned = []
+            for entry in raw:
+                if isinstance(entry, str) and entry.strip():
+                    cleaned.append(entry.strip())
+                else:
+                    log.warning(
+                        "TRET_OPENROUTER_PROVIDER_PREFS.%s entry %r is not a non-empty "
+                        "string; dropping it.",
+                        field_name,
+                        entry,
+                    )
+        else:
+            log.warning(
+                "TRET_OPENROUTER_PROVIDER_PREFS.%s must be a string or a list of strings, "
+                "got %s; dropping it.",
+                field_name,
+                type(raw).__name__,
+            )
+            cleaned = []
+        value = dict(value)
+        if cleaned:
+            value[field_name] = cleaned
+        else:
+            value.pop(field_name, None)
         return value
 
     @field_validator("grid_factors", mode="before")

@@ -55,6 +55,7 @@ from tret.router_llm.priors_base import (
     ModelPrior,
     NoPriors,
     PriorsProvider,
+    poor_endpoints,
 )
 from tret.services.emissions import overhead_call
 from tret.router_llm.prompts import (
@@ -189,6 +190,33 @@ def _evidence_snapshot(
     }
 
 
+def _provider_ignore_for(priors: dict[str, ModelPrior], chosen_model: str) -> list[str]:
+    """Endpoints this decision's own evidence says to steer `chosen_model`
+    away from (`priors_base.poor_endpoints`). `[]` whenever there is nothing
+    to act on: no prior for the chosen model (learning off, cold start, or an
+    override/pin path that never reads `priors` at all), a prior with fewer
+    than two endpoints on record, or one where nothing stands out as poor.
+    Naturally empty for anything but an `openrouter/*` model too —
+    `ModelPrior.endpoints` is only ever populated from `RunOutcome.served_by`,
+    itself only set on OpenRouter runs — so no separate provider check is
+    needed here.
+
+    `ModelPrior.endpoints`' keys, and so the entries this returns, are
+    provider *slugs* ("deepinfra") from here on — `OpenRouterProvider.
+    _resolve_served_by` (providers/openai_compat.py) resolves the display
+    name OpenRouter's metadata carries into a slug before `served_by` is ever
+    recorded, which is also what this list is fed back to OpenRouter as
+    (`provider.ignore` matches on slugs, not display names; see `Provider.
+    stream`'s `provider_ignore` docstring in providers/base.py). `served_by`
+    was not read anywhere before this, so there is no prior display-name
+    data on record to migrate.
+    """
+    prior = priors.get(chosen_model)
+    if prior is None:
+        return []
+    return poor_endpoints(prior)
+
+
 @dataclass
 class RoutingDecision:
     router_model: str | None
@@ -233,6 +261,19 @@ class RoutingDecision:
     # them next month answers a different question than the one this decision
     # was answering.
     evidence: dict | None = None
+    # Endpoints to exclude from OpenRouter's provider selection for this
+    # decision's chosen model, from its own poor-endpoint record (see
+    # `_provider_ignore_for` above and `priors_base.poor_endpoints`). Computed
+    # from the same `priors` snapshot as `evidence`, so it is `[]` under
+    # everything that leaves `evidence` null too — learning off, a cold
+    # start, or the override/pin paths, which never read `priors` at all —
+    # plus any chosen model with fewer than two endpoints on record or none
+    # that stands out as poor. `engine/harness.py` reads this off
+    # `run.routing["provider_ignore"]` and forwards it to `Provider.stream()`
+    # as `provider_ignore`, but only while the run is still on this
+    # decision's own chosen model: a supervisor switch makes the list stale
+    # for whatever model the run moves onto.
+    provider_ignore: list[str] = field(default_factory=list)
     # Whether the chosen model can actually hold this call, set on every path —
     # including the override/pin paths, which are never blocked by it (see
     # `_validated_override`). Shape: `{"required": int, "mode": "fit" |
@@ -541,6 +582,7 @@ class ModelRouter:
                 task_shape=task_shape,
                 max_cost_tier=max_tier,
                 evidence=_evidence_snapshot(priors, [candidates[0].id], est_input_tokens),
+                provider_ignore=_provider_ignore_for(priors, candidates[0].id),
                 context_fit=context_fit,
                 fallback_used=False,
                 effort=default_effort(objective, task_shape),
@@ -642,6 +684,7 @@ class ModelRouter:
                             evidence=_evidence_snapshot(
                                 priors, candidate_ids, est_input_tokens
                             ),
+                            provider_ignore=_provider_ignore_for(priors, chosen),
                             context_fit=context_fit,
                             router_prompt=prompt,
                             router_prompt_sha256=prompt_fingerprint,
@@ -695,6 +738,7 @@ class ModelRouter:
             task_shape=task_shape,
             max_cost_tier=max_tier,
             evidence=_evidence_snapshot(priors, candidate_ids, est_input_tokens),
+            provider_ignore=_provider_ignore_for(priors, chosen),
             context_fit=context_fit,
             # Kept on the fallback path too, and this is where it earns its
             # place: the router was asked something and either failed or

@@ -207,6 +207,27 @@ class Provider(ABC):
         # one run's tool loop lands on the same upstream (OpenRouter's
         # session-affinity routing) instead of hitting a cold cache each turn.
         session_id: str | None = None,
+        # Upstream provider *slugs* to exclude from routing for this call —
+        # e.g. "deepinfra", "google-vertex", never a display name like
+        # "DeepInfra" or "Google" (see `openai_compat._served_by_from_openai`
+        # and `OpenRouterProvider._resolve_served_by` for where a slug is
+        # produced). The routing decision's own `provider_ignore` (see
+        # `router_llm.router.RoutingDecision.provider_ignore`), forwarded by
+        # engine/harness.py only while the run is still on that decision's
+        # chosen model. Ignored by providers with no concept of an upstream
+        # endpoint to steer away from; `OpenAICompatProvider` forwards it to
+        # `_provider_body`, whose OpenRouter override turns it into
+        # `provider.ignore`. Per OpenRouter's own docs, `ignore` matches a tag
+        # literally: a full variant tag ("deepinfra/turbo") excludes only that
+        # variant, while a provider's *base* slug ("deepinfra") excludes every
+        # region/variant endpoint that provider runs. This list only ever
+        # carries base slugs (`openai_compat._choose_base_slug`), which is
+        # coarser than the per-endpoint evidence (`priors_base.poor_endpoints`)
+        # it is built from — but the only choice available: `openrouter_
+        # metadata` (`_served_by_from_openai`) reports just the display name,
+        # never which variant actually served a call, so there is no signal
+        # here to name one endpoint precisely while leaving its siblings alone.
+        provider_ignore: list[str] | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         """Yield TextDelta / ToolCallComplete events, ending with one TurnComplete."""
         ...

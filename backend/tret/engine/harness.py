@@ -1126,6 +1126,15 @@ class HarnessEngine:
         failures_at_raise = 0
         trips_at_raise = 0
         overridden = bool(decision.override)
+        # Set once the `provider_ignore` retry below has actually waived this
+        # run's routing-decision evidence for a "no eligible provider" error.
+        # Without this, the very next iteration recomputes the identical
+        # ignore list from `run.routing["provider_ignore"]` (it never changes)
+        # and sends it straight back into the same failure — a retry loop
+        # rather than a one-time waive. Never cleared once set: the evidence
+        # that made OpenRouter reject every endpoint for this model doesn't
+        # stop being true partway through a run.
+        provider_ignore_waived = False
 
         # ── loop ─────────────────────────────────────────────────────────────
         for iteration in range(1, max_iterations + 1):
@@ -1180,6 +1189,16 @@ class HarnessEngine:
                     compaction_exhausted = record["kind"] == "no_op"
                 wire = wire_view(messages, compaction)
 
+            # Withheld once `provider_ignore_waived` is set (below): recomputing
+            # the same evidence-based list every iteration after it has already
+            # been shown to rule out every endpoint would just resend the list
+            # that failed and fail again on the very next turn.
+            provider_ignore = (
+                (run.routing or {}).get("provider_ignore")
+                if model_info.id == (run.routing or {}).get("chosen_model")
+                and not provider_ignore_waived
+                else None
+            )
             try:
                 async for event in provider.stream(
                     model=model_info.wire_id,
@@ -1200,6 +1219,17 @@ class HarnessEngine:
                     # cold cache on every turn. Providers without session
                     # affinity ignore it.
                     session_id=str(run.id),
+                    # This decision's own poor-endpoint evidence
+                    # (`RoutingDecision.provider_ignore`), but only while the
+                    # run is still on the model that decision actually chose:
+                    # after a supervisor switch (`_switch_model`) the list
+                    # was computed for a different model's endpoints and is
+                    # stale for this one, so it is withheld rather than
+                    # forwarded. `run.routing["chosen_model"]` never changes
+                    # on a switch (see `_switch_model`'s own docstring), so
+                    # this comparison is exactly "has this run switched away
+                    # from its original routing decision yet".
+                    provider_ignore=provider_ignore,
                 ):
                     if isinstance(event, TextDelta):
                         assistant_text.append(event.text)
@@ -1209,74 +1239,156 @@ class HarnessEngine:
                     elif isinstance(event, TurnComplete):
                         turn = event
             except ProviderError as e:
-                # Keep what the provider did say before it died. The turn's text
-                # was already streamed to the watching client, so dropping it
-                # here left the persisted transcript ending one turn earlier than
-                # what the operator saw — and the reasoning that led into the
-                # failure is exactly what an audit of a failed run needs. Tool
-                # calls that arrived but were never executed are recorded as
-                # metadata rather than as `tool_calls`: an unanswered tool_call id
-                # would make the transcript unreplayable.
-                partial = "".join(assistant_text)
-                if partial or tool_calls:
-                    # Providers only yield TurnComplete (the usage carrier) after
-                    # a clean stream, so every token already streamed here was
-                    # paid to the provider and would otherwise go unmetered —
-                    # this run's receipt would understate what it actually cost.
-                    # Estimate what was on the wire and what came back (chars/4,
-                    # the same dependency-free estimator context/compaction use
-                    # for budgeting) and book it through the ordinary catalog
-                    # path, flagged `estimated` rather than folded in as a
-                    # confident figure. See `_book_usage`.
-                    partial_msg = Msg(role="assistant", content=partial or None, tool_calls=tool_calls)
-                    est_input_tokens = estimate_wire_tokens(system, wire, tool_specs)
-                    # The wire prefix a dying turn sent is the same prefix the
-                    # prior turn of this model sent (nothing about the
-                    # conversation-so-far changes between consecutive turns
-                    # except what got appended at the end) — so the last
-                    # *metered* turn's cache_read_tokens is the best available
-                    # proxy for how much of this one was served from cache too.
-                    # With no prior metered turn (segment.last_reported_cache_
-                    # read_tokens is None), there is no proxy and the estimate
-                    # stays the plain chars/4 figure it always was.
-                    carried_cache_read_tokens = min(
-                        segment.last_reported_cache_read_tokens or 0, est_input_tokens
+                # A stale provider_ignore — this decision's own poor-endpoint
+                # evidence (`RoutingDecision.provider_ignore`) — can rule out
+                # every endpoint OpenRouter would otherwise route this model to.
+                # Live probe against OpenRouter (2026-09-10, every endpoint of a
+                # real model excluded via `provider.ignore`): the response is
+                # HTTP 404, body `{"error":{"message":"All providers have been
+                # ignored. ...","code":404,"metadata":{"failed_routing_step":
+                # "Filter by Ignored Providers"}}}` — not the 503 text this
+                # handler used to match on alone, which is what OpenRouter's own
+                # error docs (https://openrouter.ai/docs/api-reference/errors)
+                # describe for the same routing-exhausted case under different
+                # wording. Detection is therefore status-based first: 404 or 503
+                # on a call that actually carried a `provider_ignore` is already
+                # a strong signal by itself, since this is the only call site
+                # that ever sets that argument. The lowercase substring match is
+                # kept as a fallback for wording (or a status) this probe didn't
+                # cover. Retried once with only this decision's own ignore list
+                # dropped; an operator's static
+                # `TRET_OPENROUTER_PROVIDER_PREFS.ignore` is left untouched
+                # (`_provider_body` still merges it in from `_provider_prefs`)
+                # by design — that denylist is a deliberate standing choice, not
+                # evidence this run collected and might be wrong about. A model
+                # genuinely unreachable even without this run's own ignore list
+                # still fails, since the retry's own ProviderError falls
+                # straight into the ordinary partial-turn handling below. Fires
+                # at most once per run (`provider_ignore_waived`, set below) —
+                # see the `provider_ignore` computation above the try/except.
+                error_text = str(e).lower()
+                no_eligible_provider = e.status in (404, 503) or any(
+                    phrase in error_text
+                    for phrase in (
+                        "all providers have been ignored",
+                        "filter by ignored providers",
+                        "no available model provider",
+                        "no endpoints",
                     )
-                    est_usage = Usage(
-                        input_tokens=est_input_tokens - carried_cache_read_tokens,
-                        output_tokens=estimate_message_tokens(partial_msg),
-                        cache_read_tokens=carried_cache_read_tokens,
+                )
+                if provider_ignore and no_eligible_provider:
+                    provider_ignore_waived = True
+                    run.routing = {
+                        **(run.routing or {}),
+                        "provider_ignore_waived": {
+                            "at_iteration": iteration,
+                            "error": str(e),
+                        },
+                    }
+                    await self.bus.publish(
+                        run.id,
+                        RunEvent(
+                            "provider_ignore_waived",
+                            {"iteration": iteration, "error": str(e)},
+                        ),
                     )
-                    self._book_usage(
-                        run=run,
-                        total_usage=total_usage,
-                        segment=segment,
-                        segments=segments,
-                        model_info=model_info,
-                        usage=est_usage,
-                        iteration=iteration,
-                        estimated=True,
-                    )
-                    messages.append(
-                        Msg(
-                            role="assistant",
-                            content=partial or None,
-                            meta={
-                                "iteration": iteration,
-                                "partial": True,
-                                "provider_error": str(e),
-                                "unexecuted_tool_calls": [tc.name for tc in tool_calls],
-                                "estimated_usage": {
-                                    "input_tokens": est_usage.input_tokens,
-                                    "output_tokens": est_usage.output_tokens,
-                                    "cache_read_tokens": est_usage.cache_read_tokens,
-                                },
-                            },
+                    assistant_text = []
+                    tool_calls = []
+                    turn = None
+                    try:
+                        async for event in provider.stream(
+                            model=model_info.wire_id,
+                            system=system,
+                            messages=wire,
+                            tools=tool_specs,
+                            max_tokens=max_output_tokens,
+                            temperature=temperature,
+                            effort=segment.effort,
+                            session_id=str(run.id),
+                            provider_ignore=None,
+                        ):
+                            if isinstance(event, TextDelta):
+                                assistant_text.append(event.text)
+                                await self.bus.publish(
+                                    run.id, RunEvent("text_delta", {"text": event.text})
+                                )
+                            elif isinstance(event, ToolCallComplete):
+                                tool_calls.append(event.tool_call)
+                            elif isinstance(event, TurnComplete):
+                                turn = event
+                    except ProviderError as retry_e:
+                        e = retry_e
+                    else:
+                        e = None
+                if e is not None:
+                    # Keep what the provider did say before it died. The turn's text
+                    # was already streamed to the watching client, so dropping it
+                    # here left the persisted transcript ending one turn earlier than
+                    # what the operator saw — and the reasoning that led into the
+                    # failure is exactly what an audit of a failed run needs. Tool
+                    # calls that arrived but were never executed are recorded as
+                    # metadata rather than as `tool_calls`: an unanswered tool_call id
+                    # would make the transcript unreplayable.
+                    partial = "".join(assistant_text)
+                    if partial or tool_calls:
+                        # Providers only yield TurnComplete (the usage carrier) after
+                        # a clean stream, so every token already streamed here was
+                        # paid to the provider and would otherwise go unmetered —
+                        # this run's receipt would understate what it actually cost.
+                        # Estimate what was on the wire and what came back (chars/4,
+                        # the same dependency-free estimator context/compaction use
+                        # for budgeting) and book it through the ordinary catalog
+                        # path, flagged `estimated` rather than folded in as a
+                        # confident figure. See `_book_usage`.
+                        partial_msg = Msg(role="assistant", content=partial or None, tool_calls=tool_calls)
+                        est_input_tokens = estimate_wire_tokens(system, wire, tool_specs)
+                        # The wire prefix a dying turn sent is the same prefix the
+                        # prior turn of this model sent (nothing about the
+                        # conversation-so-far changes between consecutive turns
+                        # except what got appended at the end) — so the last
+                        # *metered* turn's cache_read_tokens is the best available
+                        # proxy for how much of this one was served from cache too.
+                        # With no prior metered turn (segment.last_reported_cache_
+                        # read_tokens is None), there is no proxy and the estimate
+                        # stays the plain chars/4 figure it always was.
+                        carried_cache_read_tokens = min(
+                            segment.last_reported_cache_read_tokens or 0, est_input_tokens
                         )
-                    )
-                run.status = "failed"
-                run.error = str(e)
-                break
+                        est_usage = Usage(
+                            input_tokens=est_input_tokens - carried_cache_read_tokens,
+                            output_tokens=estimate_message_tokens(partial_msg),
+                            cache_read_tokens=carried_cache_read_tokens,
+                        )
+                        self._book_usage(
+                            run=run,
+                            total_usage=total_usage,
+                            segment=segment,
+                            segments=segments,
+                            model_info=model_info,
+                            usage=est_usage,
+                            iteration=iteration,
+                            estimated=True,
+                        )
+                        messages.append(
+                            Msg(
+                                role="assistant",
+                                content=partial or None,
+                                meta={
+                                    "iteration": iteration,
+                                    "partial": True,
+                                    "provider_error": str(e),
+                                    "unexecuted_tool_calls": [tc.name for tc in tool_calls],
+                                    "estimated_usage": {
+                                        "input_tokens": est_usage.input_tokens,
+                                        "output_tokens": est_usage.output_tokens,
+                                        "cache_read_tokens": est_usage.cache_read_tokens,
+                                    },
+                                },
+                            )
+                        )
+                    run.status = "failed"
+                    run.error = str(e)
+                    break
 
             usage = turn.usage if turn else Usage()
             if turn is not None and turn.served_by:

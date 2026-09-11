@@ -127,6 +127,7 @@ class StubProvider(Provider):
         temperature: float,
         effort: str | None = None,
         session_id: str | None = None,
+        provider_ignore: list[str] | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         idx = len(self.stream_calls)
         self.stream_calls.append(
@@ -137,6 +138,7 @@ class StubProvider(Provider):
                 "tools": tools,
                 "effort": effort,
                 "session_id": session_id,
+                "provider_ignore": provider_ignore,
             }
         )
         turn = self.turns[idx] if idx < len(self.turns) else self.turns[-1]

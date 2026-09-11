@@ -151,6 +151,7 @@ class StubProvider(Provider):
         temperature: float,
         effort: str | None = None,
         session_id: str | None = None,
+        provider_ignore: list[str] | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         self.stream_calls.append(
             {
@@ -160,6 +161,7 @@ class StubProvider(Provider):
                 "tools": tools,
                 "effort": effort,
                 "session_id": session_id,
+                "provider_ignore": provider_ignore,
             }
         )
         for chunk in self.text_chunks:

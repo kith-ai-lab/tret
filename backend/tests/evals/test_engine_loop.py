@@ -14,7 +14,7 @@ Each drives the real engine through the real world fixture; only the model and
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from golden_world import _replay_registry, build_world
@@ -25,12 +25,15 @@ from test_golden_runs import PERIL, SITE, divergence_happy_script
 import tret.engine.harness as harness_module
 from tret.db.models import Harness, Run, RunOutcome
 from tret.engine.harness import HarnessEngine
+from tret.engine.supervisor import KIND_SWITCH, Intervention
 from tret.engine.tools import MAX_DELEGATION_DEPTH
 from tret.packs.links import set_harness_packs
 from tret.packs.loader import install_pack
 from tret.providers.base import TextDelta, ToolCall, ToolCallComplete, TurnComplete, Usage
 from tret.providers.catalog import ModelCatalog
 from tret.router_llm.priors import NoPriors
+from tret.router_llm.prompts import ROUTING_PROMPT_VERSION
+from tret.router_llm.router import RoutingDecision
 
 
 def _lookup(dataset: str, **filters) -> ScriptedCall:
@@ -417,7 +420,17 @@ class SelfDelegatingProvider(ReplayProvider):
         super().__init__([])
 
     async def stream(
-        self, *, model, system, messages, tools, max_tokens, temperature, effort=None, session_id=None
+        self,
+        *,
+        model,
+        system,
+        messages,
+        tools,
+        max_tokens,
+        temperature,
+        effort=None,
+        session_id=None,
+        provider_ignore=None,
     ):
         self.calls.append(
             ProviderCall(
@@ -427,6 +440,7 @@ class SelfDelegatingProvider(ReplayProvider):
                 tool_names=[t.name for t in tools],
                 max_tokens=max_tokens,
                 temperature=temperature,
+                provider_ignore=provider_ignore,
             )
         )
         usage = Usage(input_tokens=900, output_tokens=120)
@@ -799,3 +813,104 @@ async def test_a_document_materialised_mid_run_lands_on_the_persisted_run(
     # `document_ids=[]`) — this document was only ever known to
     # `ctx.document_ids` until the harness wrote it back at completion.
     assert doc.id in result.run.document_ids
+
+
+# ── (e) provider_ignore is forwarded for the routed model, and only that model ──
+# `RoutingDecision.route()` (router_llm/router.py) is where `provider_ignore` is
+# computed from evidence; that is tested directly, and offline, in
+# test_router_provider_ignore.py. What is under test here is the harness's own
+# half: the `provider.stream()` call (engine/harness.py) reads it off
+# `run.routing` and forwards it, but only while the live segment's model is
+# still the one that decision chose — `ModelRouter.route()` itself is patched
+# to hand back a fixed decision, the same technique test_model_switch.py uses
+# for `assess()`, so the evidence-shaped `provider_ignore` here does not
+# depend on any real track record existing.
+def _forced_decision(candidates: list[str], chosen_model: str, provider_ignore: list[str]):
+    return RoutingDecision(
+        router_model=None,
+        routing_prompt_version=ROUTING_PROMPT_VERSION,
+        candidates=candidates,
+        chosen_model=chosen_model,
+        reasoning="forced for this test",
+        provider_ignore=provider_ignore,
+    )
+
+
+async def test_harness_forwards_provider_ignore_while_the_run_stays_on_its_routed_model(world):
+    catalog = ModelCatalog()
+    models = [m for m in catalog.all(curated_only=True) if m.supports_tools][:2]
+    chosen, other = models[0], models[1]
+    decision = _forced_decision([chosen.id, other.id], chosen.id, ["bad-endpoint"])
+
+    harness_id = await world.create_harness(
+        model_policy={"mode": "auto", "allowed": [chosen.id, other.id]},
+    )
+    provider = ReplayProvider(divergence_happy_script())
+
+    with patch("tret.engine.harness.ModelRouter.route", AsyncMock(return_value=decision)):
+        result = await world.run(
+            provider=provider,
+            harness_id=harness_id,
+            task_type="divergence_assessment",
+            task_input={"site_id": SITE, "peril": PERIL},
+        )
+
+    assert result.run.status == "completed", result.run.error
+    assert result.run.routing["chosen_model"] == chosen.id
+    assert result.run.routing["provider_ignore"] == ["bad-endpoint"]
+    assert provider.calls, "the script should have driven at least one call"
+    assert all(c.provider_ignore == ["bad-endpoint"] for c in provider.calls)
+
+
+async def test_harness_withholds_provider_ignore_once_the_run_has_switched_models(world):
+    """After a supervisor switch, the original decision's `provider_ignore` was
+    computed for the model it chose, not the one the run is now on — stale
+    evidence for a different model's endpoints, so the harness must not keep
+    sending it once `model_info.id` no longer matches `run.routing
+    ["chosen_model"]` (see the `provider.stream()` call in engine/harness.py).
+    """
+    catalog = ModelCatalog()
+    models = [m for m in catalog.all(curated_only=True) if m.supports_tools][:2]
+    original, target = models[0], models[1]
+    decision = _forced_decision([original.id, target.id], original.id, ["bad-endpoint"])
+
+    harness_id = await world.create_harness(
+        model_policy={"mode": "auto", "allowed": [original.id, target.id]},
+        max_iterations=16,
+    )
+    provider = ReplayProvider(divergence_happy_script())
+
+    calls = {"n": 0}
+
+    def fake_assess(state, *, candidates, priors=None):
+        calls["n"] += 1
+        other = next((m for m in candidates if m.id != state.model.id), None)
+        if calls["n"] == 2 and other is not None:
+            return Intervention(
+                kind=KIND_SWITCH,
+                target=other,
+                reason="capability_stall",
+                detail="forced by the test",
+                evidence={"from": state.model.id, "to": other.id},
+            )
+        return Intervention()
+
+    with (
+        patch("tret.engine.harness.ModelRouter.route", AsyncMock(return_value=decision)),
+        patch("tret.engine.harness.assess", side_effect=fake_assess),
+    ):
+        result = await world.run(
+            provider=provider,
+            harness_id=harness_id,
+            task_type="divergence_assessment",
+            task_input={"site_id": SITE, "peril": PERIL},
+        )
+
+    assert result.run.status == "completed", result.run.error
+    assert result.run.routing["chosen_model"] == original.id
+    assert result.run.routing["switches"], "the run should have switched models"
+
+    before_switch = provider.calls[0]
+    after_switch = provider.calls[-1]
+    assert before_switch.provider_ignore == ["bad-endpoint"]
+    assert after_switch.provider_ignore is None

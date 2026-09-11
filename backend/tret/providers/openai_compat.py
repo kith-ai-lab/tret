@@ -8,12 +8,13 @@ parts, so writing them is opt-in per subclass via `_apply_cache_control`.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 from decimal import Decimal, InvalidOperation
 
 import httpx
 
-from tret.net import CLASS_PROVIDER, open_client
+from tret.net import CLASS_PROVIDER, EgressDenied, open_client
 
 from tret.providers.base import (
     JsonCompletion,
@@ -136,6 +137,13 @@ def _served_by_from_openai(data: dict) -> str | None:
     `{"endpoints": {"available": [{"model": "openai/gpt-4o", "provider":
     "OpenAI", "selected": true}]}}`. Kimi and other OpenAI-compatible servers
     send neither key, so this reads as None for them.
+
+    That `provider` field is a **display name** ("DeepInfra", "Google"), not
+    the slug OpenRouter's own `provider.ignore` matches against ("deepinfra",
+    "google-vertex") — the metadata schema carries no slug/tag field at all.
+    This function only extracts the raw display name; `OpenRouterProvider.
+    _resolve_served_by` (below) is what turns it into a slug before it is
+    ever stored on a `TurnComplete`/`JsonCompletion`.
     """
     metadata = data.get("openrouter_metadata")
     if not isinstance(metadata, dict):
@@ -243,17 +251,35 @@ class OpenAICompatProvider(Provider):
         """
         return {}
 
-    def _provider_body(self, tools_present: bool) -> dict:
+    async def _resolve_served_by(self, model: str, served_by: str | None) -> str | None:
+        """Hook: normalize a raw `served_by` reading into the namespace the
+        rest of tret expects it in (see `Provider.stream`'s `provider_ignore`
+        docstring in `providers/base.py`: provider *slugs*, not display names).
+
+        Identity by default — Kimi and every other single-upstream
+        OpenAI-compatible server never populates `served_by` at all, so
+        there is nothing to normalize. OpenRouter overrides this to map the
+        display name `_served_by_from_openai` reads off the wire (e.g.
+        "DeepInfra") to the slug (e.g. "deepinfra") its own `provider.ignore`
+        actually matches against.
+        """
+        return served_by
+
+    def _provider_body(
+        self, tools_present: bool, provider_ignore: list[str] | None = None
+    ) -> dict:
         """Hook: the `provider` object (OpenRouter's provider-selection block).
 
         `{}` by default — most OpenAI-compatible servers (Kimi included) have
-        no such field. OpenRouter overrides this to build
-        `{"require_parameters": True}` when tools are present (so a provider
-        that would otherwise silently drop tool calling or the JSON schema is
-        excluded from routing instead) plus whatever an operator configured
-        via `TRET_OPENROUTER_PROVIDER_PREFS`. An empty return means "omit the
-        `provider` key entirely" — sending `{}` is not the same as sending
-        nothing on some upstreams.
+        no such field, so `provider_ignore` is accepted here only to keep the
+        signature uniform and is otherwise unused. OpenRouter overrides this
+        to build `{"require_parameters": True}` when tools are present (so a
+        provider that would otherwise silently drop tool calling or the JSON
+        schema is excluded from routing instead) plus whatever an operator
+        configured via `TRET_OPENROUTER_PROVIDER_PREFS`, plus `provider_ignore`
+        merged into `ignore`. An empty return means "omit the `provider` key
+        entirely" — sending `{}` is not the same as sending nothing on some
+        upstreams.
         """
         return {}
 
@@ -268,6 +294,7 @@ class OpenAICompatProvider(Provider):
         temperature: float,
         effort: str | None = None,
         session_id: str | None = None,
+        provider_ignore: list[str] | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         body: dict = {
             "model": model,
@@ -282,7 +309,7 @@ class OpenAICompatProvider(Provider):
         }
         if tools:
             body["tools"] = _to_openai_tools(tools)
-        provider_body = self._provider_body(bool(tools))
+        provider_body = self._provider_body(bool(tools), provider_ignore)
         if provider_body:
             body["provider"] = provider_body
         self._apply_cache_control(body)
@@ -374,6 +401,11 @@ class OpenAICompatProvider(Provider):
             )
 
         stop = "tool_use" if (pending and finish_reason in ("tool_calls", "tool_use")) else finish_reason
+        # Resolved after the stream is fully read, not per-chunk: the display
+        # name can change chunk to chunk until routing settles (see the
+        # `served_by` local above), and resolving each intermediate value
+        # would spend the endpoints-lookup cache churn on names never kept.
+        served_by = await self._resolve_served_by(model, served_by)
         yield TurnComplete(usage=usage, stop_reason=stop, served_by=served_by)
 
     async def complete_json(
@@ -424,7 +456,7 @@ class OpenAICompatProvider(Provider):
             raise ProviderError(self.name, resp.text[:2000], resp.status_code)
         data = resp.json()
         usage = _usage_from_openai(data.get("usage") or {})
-        served_by = _served_by_from_openai(data)
+        served_by = await self._resolve_served_by(model, _served_by_from_openai(data))
         try:
             calls = data["choices"][0]["message"].get("tool_calls") or []
             for call in calls:
@@ -445,6 +477,37 @@ class KimiProvider(OpenAICompatProvider):
 
     def __init__(self, api_key: str):
         super().__init__(api_key, base_url="https://api.moonshot.ai/v1")
+
+
+def _choose_base_slug(tags: list[str]) -> str:
+    """Deterministically resolve one display name's endpoint tag(s) to the
+    single slug `OpenRouterProvider._provider_body` puts in `provider.ignore`.
+
+    A display name can name more than one tag — OpenRouter's live
+    `/models/{model}/endpoints` returns both "google-vertex" and
+    "google-vertex/us-central1" under the display name "Google" — and the
+    old last-write-wins dict comprehension picked whichever happened to come
+    last in the response, silently changing which one `ignore` matched
+    depending on wire order.
+
+    A tag with no "/" (a *base* provider slug) is preferred over a
+    variant-scoped one when both are present: OpenRouter matches `ignore`
+    against a tag literally, so a variant tag like "deepinfra/turbo" excludes
+    only that variant while the base slug "deepinfra" excludes every
+    region/variant endpoint the provider runs (see the `provider_ignore`
+    docstring in providers/base.py). `openrouter_metadata` — the only signal
+    `_served_by_from_openai` ever reads — reports the display name and
+    nothing else, never which variant actually served a call, so there is no
+    way to pick a variant tag correctly here; the base slug is the only
+    choice this data supports, and it is also the intended one (excluding a
+    poor-quality provider account-wide, not one region of it). Falls back to
+    the shortest tag, ties broken alphabetically for a stable result across
+    runs, only when every candidate is variant-scoped.
+    """
+    bases = sorted(tag for tag in tags if "/" not in tag)
+    if bases:
+        return bases[0]
+    return sorted(tags, key=lambda tag: (len(tag), tag))[0]
 
 
 class OpenRouterProvider(OpenAICompatProvider):
@@ -471,12 +534,26 @@ class OpenRouterProvider(OpenAICompatProvider):
             headers["HTTP-Referer"] = referer
         if title:
             headers["X-Title"] = title
+        # Opt-in to `openrouter_metadata` on the response — verified against
+        # https://openrouter.ai/docs/api-reference/chat-completion: "Opt-in to
+        # surface routing metadata on the response under `openrouter_metadata`.
+        # Defaults to disabled." Without this header every response's
+        # `openrouter_metadata` is absent, `_served_by_from_openai` always
+        # reads None, and the whole served_by/priors/provider_ignore chain
+        # this module builds never sees a value to act on.
+        headers["X-OpenRouter-Metadata"] = "enabled"
         super().__init__(api_key, base_url="https://openrouter.ai/api/v1", default_headers=headers)
         # Operator overrides for the `provider` request object — order, ignore,
         # quantizations, data_collection, zdr, sort — merged on top of
         # `_provider_body`'s own `require_parameters` default. See
         # TRET_OPENROUTER_PROVIDER_PREFS (config.py) for where this is parsed.
         self._provider_prefs = provider_prefs or {}
+        # Per-model cache for `_resolve_served_by`: wire model id -> (expiry
+        # monotonic timestamp, {display name lowercased: provider slug}).
+        # Keyed by model because two models can share an upstream provider
+        # under different endpoint tags (e.g. quantized variants), and the
+        # `/models/{model}/endpoints` lookup is itself per-model.
+        self._endpoint_slug_cache: dict[str, tuple[float, dict[str, str]]] = {}
 
     def _effort_body(self, effort: str | None) -> dict:
         """OpenRouter's unified `reasoning.effort`, forwarded to whichever
@@ -496,7 +573,97 @@ class OpenRouterProvider(OpenAICompatProvider):
         """
         return {"session_id": session_id} if session_id else {}
 
-    def _provider_body(self, tools_present: bool) -> dict:
+    # 24h: long enough that a busy deployment resolves each model's endpoint
+    # slugs once a day at most, short enough that OpenRouter adding or
+    # renaming an endpoint (new region, new quantization) is picked up the
+    # same day rather than needing a restart.
+    _ENDPOINT_SLUG_CACHE_TTL_S = 24 * 60 * 60
+    # 10 minutes: how long a *failed* (or empty) lookup is remembered before
+    # the next served_by resolution tries it again. Short relative to the
+    # success TTL above — an outage or a bad model id should not need a
+    # restart to recover from once OpenRouter is reachable again — but long
+    # enough that a persistently failing lookup isn't retried on every single
+    # turn of every run using this model, each attempt costing up to the
+    # lookup's own ~15s timeout.
+    _ENDPOINT_SLUG_CACHE_FAILURE_TTL_S = 10 * 60
+
+    async def _resolve_served_by(self, model: str, served_by: str | None) -> str | None:
+        """Map `_served_by_from_openai`'s display name to the provider slug
+        `provider.ignore` matches against (see that function's docstring and
+        `_provider_body`'s below) — `openrouter_metadata` never carries the
+        slug itself, only `provider: "DeepInfra"`.
+
+        `served_by` is not read anywhere in production yet (this is the first
+        pass wiring it up), so there is no stored display-name value to
+        migrate — everything recorded from here on is a slug, full stop.
+
+        Best-effort and never raises: a lookup failure, an unrecognized
+        model, or a display name with no matching endpoint (OpenRouter
+        renamed or retired one between the call and this lookup) all resolve
+        to None rather than guessing — a dropped `served_by` costs this run
+        one row of routing evidence; a wrong one would poison priors for
+        every run after it.
+        """
+        if not served_by:
+            return None
+        slug_map = await self._endpoint_slug_map(model)
+        return slug_map.get(served_by.lower())
+
+    async def _endpoint_slug_map(self, model: str) -> dict[str, str]:
+        """`{display name lowercased: provider slug}` for `model`'s current
+        endpoints, from `GET /models/{model}/endpoints` — verified live: each
+        entry carries `provider_name` ("OpenAI", "Azure") and `tag` ("openai",
+        "azure"), which is exactly the display-name-to-slug mapping
+        `openrouter_metadata` itself doesn't provide. Cached per model for
+        `_ENDPOINT_SLUG_CACHE_TTL_S` on a real result, or the shorter
+        `_ENDPOINT_SLUG_CACHE_FAILURE_TTL_S` when the lookup failed or came
+        back with no endpoints — negative-cached the same as a positive one,
+        so a lookup that keeps failing is retried on a timer rather than on
+        every turn of every run.
+
+        Failures fall back to whatever is cached (possibly nothing) rather
+        than raising: this runs after a turn has already completed, so an
+        outage here must not turn a successful turn into a failed one, and a
+        stale mapping is still more useful than none.
+        """
+        now = time.monotonic()
+        cached = self._endpoint_slug_cache.get(model)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        try:
+            async with open_client(
+                self.egress_class, timeout=httpx.Timeout(10.0, connect=5.0)
+            ) as client:
+                resp = await client.get(
+                    f"{self._base_url}/models/{model}/endpoints", headers=self._headers
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            # Group every tag seen under each display name first — a display
+            # name can legitimately name more than one endpoint tag (e.g.
+            # "Google" -> "google-vertex" and "google-vertex/us-central1") —
+            # then `_choose_base_slug` resolves that to one slug deterministically.
+            by_name: dict[str, list[str]] = {}
+            for ep in (data.get("data") or {}).get("endpoints") or []:
+                if (
+                    isinstance(ep, dict)
+                    and isinstance(ep.get("provider_name"), str)
+                    and isinstance(ep.get("tag"), str)
+                ):
+                    by_name.setdefault(ep["provider_name"].lower(), []).append(ep["tag"])
+            mapping = {name: _choose_base_slug(tags) for name, tags in by_name.items()}
+        except (httpx.HTTPError, EgressDenied, ValueError, TypeError, KeyError, AttributeError):
+            ttl = self._ENDPOINT_SLUG_CACHE_FAILURE_TTL_S
+            fallback = cached[1] if cached is not None else {}
+            self._endpoint_slug_cache[model] = (now + ttl, fallback)
+            return fallback
+        ttl = self._ENDPOINT_SLUG_CACHE_TTL_S if mapping else self._ENDPOINT_SLUG_CACHE_FAILURE_TTL_S
+        self._endpoint_slug_cache[model] = (now + ttl, mapping)
+        return mapping
+
+    def _provider_body(
+        self, tools_present: bool, provider_ignore: list[str] | None = None
+    ) -> dict:
         """The `provider` object: https://openrouter.ai/docs/guides/routing/provider-selection.
 
         `require_parameters: true` only when tools are present — it guarantees
@@ -505,9 +672,29 @@ class OpenRouterProvider(OpenAICompatProvider):
         `provider_prefs` is shallow-merged on top so an operator's own
         `order`/`ignore`/`quantizations`/`data_collection`/`zdr`/`sort` always
         wins over this default.
+
+        `provider_ignore` — the calling `RoutingDecision`'s own poor-endpoint
+        evidence (`router_llm.router.RoutingDecision.provider_ignore`) — is
+        then unioned into `ignore` on top of that merge, deduplicated and
+        sorted for a stable wire body, so an operator's static denylist and
+        this call's evidence-driven one both apply rather than one silently
+        replacing the other. The `ignore` key is omitted entirely when the
+        union is empty, matching every other key here: sending `[]` is not
+        the same as sending nothing on some upstreams. Note this never
+        widens `allow_fallbacks` (OpenRouter's own default is already true),
+        so a chosen model whose every endpoint ends up ignored degrades to
+        OpenRouter's "no eligible provider" error rather than resurrecting an
+        endpoint this call meant to avoid — the existing provider-error path
+        in engine/harness.py handles that the same as any other upstream
+        failure.
         """
         body: dict = {"require_parameters": True} if tools_present else {}
         body.update(self._provider_prefs)
+        ignore = sorted(set(self._provider_prefs.get("ignore") or []) | set(provider_ignore or []))
+        if ignore:
+            body["ignore"] = ignore
+        else:
+            body.pop("ignore", None)
         return body
 
     def _apply_cache_control(self, body: dict) -> None:

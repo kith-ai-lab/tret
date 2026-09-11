@@ -165,6 +165,7 @@ class AnthropicProvider(Provider):
         temperature: float,
         effort: str | None = None,
         session_id: str | None = None,  # no equivalent on the Anthropic API; ignored
+        provider_ignore: list[str] | None = None,  # no equivalent either; ignored
     ) -> AsyncIterator[ProviderEvent]:
         system_blocks = [
             {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}

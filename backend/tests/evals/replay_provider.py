@@ -92,6 +92,8 @@ class ProviderCall:
     max_tokens: int
     temperature: float
     effort: str | None = None
+    provider_ignore: list[str] | None = None
+    session_id: str | None = None
 
     @property
     def last_message(self) -> Msg | None:
@@ -131,6 +133,7 @@ class ReplayProvider(Provider):
         temperature: float,
         effort: str | None = None,
         session_id: str | None = None,
+        provider_ignore: list[str] | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         index = len(self.calls)
         offered = [t.name for t in tools]
@@ -143,6 +146,8 @@ class ReplayProvider(Provider):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 effort=effort,
+                provider_ignore=provider_ignore,
+                session_id=session_id,
             )
         )
         if index >= len(self.turns):
