@@ -5,6 +5,7 @@ assembled document. PDF rendering uses WeasyPrint (imported lazily: it needs
 system libraries — pango/cairo — that the Docker image ships but a bare local
 venv may not; the API returns 501 with instructions in that case).
 """
+
 from __future__ import annotations
 
 import html
@@ -22,8 +23,9 @@ from tret.services.html_sanitize import render_markdown
 
 
 def strip_draft_status_banner(markdown: str | None) -> str | None:
-    """Drop a leading "Draft status" paragraph — bold (`**Draft status:** ...`)
-    or plain — up to the first blank line.
+    """Drop every "Draft status" paragraph — bold (`**Draft status:** ...`)
+    or plain — wherever it sits in the section: leading, or under the
+    section's own heading, which is where models most often put it.
 
     Models drafting a `draft_section` finding sometimes open with exactly this
     boilerplate ("This section is a draft awaiting review by a named human
@@ -32,24 +34,29 @@ def strip_draft_status_banner(markdown: str | None) -> str | None:
     approved-only render. Called both at approval time (`api/findings.py`)
     and again here at assembly, defensively, for any section approved before
     that stripping existed.
+
+    A banner glued to body text by a single newline loses only its first
+    line. The function never returns an empty body: if stripping would leave
+    nothing, the markdown comes back unchanged.
     """
     if not markdown:
         return markdown
-    stripped = markdown.lstrip()
-    first_para, sep, rest = stripped.partition("\n\n")
-    probe = first_para.strip().lstrip("*").strip().lower()
-    if not probe.startswith("draft status"):
+    paragraphs = markdown.split("\n\n")
+    kept: list[str] = []
+    changed = False
+    for para in paragraphs:
+        probe = para.strip().lstrip("*").strip().lower()
+        if not probe.startswith("draft status"):
+            kept.append(para)
+            continue
+        changed = True
+        first_line, nl, tail = para.strip().partition("\n")
+        if nl and tail.strip():
+            kept.append(tail)
+    if not changed:
         return markdown
-    if sep and rest.strip():
-        # Banner paragraph, blank line, body: drop the whole paragraph.
-        return rest.lstrip("\n")
-    # No blank line: the banner and the body share a paragraph. Only the
-    # first line is safely attributable to the banner, so drop just that —
-    # and never return an empty body, whatever the banner looks like.
-    first_line, nl, tail = stripped.partition("\n")
-    if nl and tail.strip():
-        return tail.lstrip("\n")
-    return markdown
+    result = "\n\n".join(kept).strip("\n")
+    return result if result.strip() else markdown
 
 
 async def assemble_deliverable(

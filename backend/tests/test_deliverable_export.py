@@ -264,6 +264,14 @@ def test_strip_draft_status_banner_leaves_other_content_untouched():
     assert strip_draft_status_banner(markdown) == markdown
 
 
+def test_strip_draft_status_banner_removes_a_banner_under_the_section_heading():
+    # The live case: the section opens with its own heading, then the banner.
+    markdown = f"## Metrics and Targets\n\n{DRAFT_BANNER}\n\nNo evidence on climate-risk metrics."
+    assert strip_draft_status_banner(markdown) == (
+        "## Metrics and Targets\n\nNo evidence on climate-risk metrics."
+    )
+
+
 def test_strip_draft_status_banner_never_blanks_a_body():
     # Banner and body separated by a single newline: only the banner line goes.
     markdown = f"{DRAFT_BANNER}\nThe flood exposure at Alder Point is material."
