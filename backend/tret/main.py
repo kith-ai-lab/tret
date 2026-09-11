@@ -12,6 +12,7 @@ from starlette.datastructures import MutableHeaders
 from tret.api import (
     analytics,
     auth,
+    budgets as budgets_api,
     chat,
     connections as connections_api,
     docs,
@@ -281,6 +282,9 @@ def create_app() -> FastAPI:
     app.include_router(packs.router)
     app.include_router(settings_api.router)
     app.include_router(emissions_settings_api.router)
+    # Per-workspace period spend budget settings (tret/api/budgets.py) — same
+    # "/api/workspace/settings/..." convention as emissions settings above.
+    app.include_router(budgets_api.router)
     # Workspace connections (Google Drive / Microsoft 365 OAuth) — always
     # mounted, like workspaces_api above: every provider simply reports
     # `configured: false` (GET /api/connections/providers) until an operator

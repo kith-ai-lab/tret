@@ -130,7 +130,13 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    results are never elidable — a model may only cite what it retrieved, so
    eliding a dataset result would fail every finding that cited it.
    `runs.messages` remains the **complete, unedited transcript**; compaction
-   produces a separate wire view, and `runs.compactions` records the gap.
+   produces a separate wire view, and `runs.compactions` records the gap. A
+   model switch (below) is preceded by exactly such a pass, forced on the new
+   model's first turn even when that turn is not itself over budget — the
+   whole transcript is about to be re-sent uncompacted at full price either
+   way, so compacting it first is the cheapest possible moment to do so — and
+   its record's `trigger` reads `model_switch` rather than the ordinary
+   path's `budget`.
    Between iterations a deterministic supervisor may **change model**, either
    because the run is over its window with nothing left to elide or because it
    has stalled (repeated terminal-tool validation failures, the repeated-call
@@ -240,6 +246,29 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    disagree, and `packs/loader.py` additionally rejects at install any task whose
    `terminal_tool` is not among its own `tools`, since a terminal tool the model
    is never offered would strand every run of that task type.
+
+Beyond a single run's own cost cap (item 6 above), an operator may set a
+**per-workspace period spend budget** — daily (the calendar day), weekly (the
+ISO week, Monday 00:00 UTC through the following Monday), or monthly (the
+calendar month), stored as `Workspace.settings["budget"]` — that looks across
+every run in the workspace rather than one at a time. A run is attributed to
+the window it *started* in, not the one it finishes in, so a run that crosses
+a window boundary counts in full against its starting window. `tret/services/
+budgets.py` sums `coalesce(reported_cost_usd, cost_usd)` for runs that
+finished in the current window plus `cost_usd` accrued so far by any still
+running, and registers its own `PreRunGate` (`engine/extensions.py`) that
+refuses a new run (`budget_exhausted`) once that spend plus the run's own
+`max_cost_usd` reservation would exceed the cap — a **soft**, informational
+reservation, not a hold; a hosted deployment's own credit-hold gate remains
+the hard limit, and core's gate is registered first so both run in the same
+fail-open order on every deployment. Router/summarizer overhead
+(`runs.overhead`) is metered and accounted separately from a run's own
+`cost_usd`/`reported_cost_usd`, so period spend is a **lower bound** on what
+the workspace actually spent, not the whole of it. A finished run that pushes
+the workspace's spend past an alert threshold (50/75/100% by default) logs a
+WARNING and publishes a `budget_alert` event on that run's own SSE stream;
+which thresholds have already fired for the current window is tracked in
+`Workspace.settings["budget_state"]` so each fires once per period.
 
 ## Outbound network
 

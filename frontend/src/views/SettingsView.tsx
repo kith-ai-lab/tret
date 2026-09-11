@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { type FormEvent, type ReactNode, useState } from 'react'
+import { type FormEvent, type ReactNode, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import {
   api,
   ApiError,
+  budgetApi,
+  type BudgetPeriod,
   type EgressMode,
   type LocalProviderTest,
   takesApiKey,
@@ -35,11 +37,193 @@ export function SettingsView() {
       <ProviderKeys />
       <ConnectionsTeaser />
       <BillingSection />
+      <SpendBudgetSection />
       <FootprintCard />
       <EmissionsFactorsSection />
       <RouterInfo />
       <NetworkAccess />
       <DataRequests />
+    </div>
+  )
+}
+
+// ── Spend budget ─────────────────────────────────────────────────────────
+// A per-workspace period spend cap on top of a harness's own per-run cost
+// cap (`loop_config.max_cost_usd`) — informational and softly enforced by
+// the backend's own pre-run gate, not a hard stop. Visible to every member
+// as a live "spent $X of $Y" status line; the form to set or clear it is
+// admin/owner only, the same `me.role` gate `EmissionsFactorsSection` below
+// uses for its own workspace-settings form.
+
+const BUDGET_PERIOD_OPTIONS: { value: BudgetPeriod; label: string }[] = [
+  { value: 'daily', label: 'Daily' },
+  { value: 'weekly', label: 'Weekly (Mon–Sun, UTC)' },
+  { value: 'monthly', label: 'Monthly' },
+]
+// Fixed set the form offers, matching the spec's "50/75/100 checkboxes are
+// fine" — a stored budget with other values (set some other way) still shows
+// correctly in the status line and in `alerts_crossed`, just without a
+// checkbox of its own here.
+const ALERT_THRESHOLD_OPTIONS = [0.5, 0.75, 1.0]
+
+function SpendBudgetSection() {
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const canEdit = ['owner', 'admin'].includes(meQuery.data?.role ?? '')
+  const queryClient = useQueryClient()
+  const statusQuery = useQuery({ queryKey: ['budget-settings'], queryFn: budgetApi.getBudgetSettings })
+  const budget = statusQuery.data?.budget ?? null
+
+  const [period, setPeriod] = useState<BudgetPeriod>('monthly')
+  const [capUsd, setCapUsd] = useState('')
+  const [alerts, setAlerts] = useState<number[]>(ALERT_THRESHOLD_OPTIONS)
+
+  // Seed the form from whatever is already configured, once per fetch — the
+  // same pattern BillingSection's UsageHistory uses for its own first page.
+  useEffect(() => {
+    if (budget) {
+      setPeriod(budget.period)
+      setCapUsd(String(budget.cap_usd))
+      // `alerts` is only actually absent from a legacy/degraded response the
+      // TS type doesn't admit but the network can still hand us — fall back
+      // rather than let `alerts.includes` below throw on `undefined`.
+      setAlerts(budget.alerts ?? ALERT_THRESHOLD_OPTIONS)
+    }
+  }, [budget])
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      budgetApi.setBudgetSettings({
+        period,
+        cap_usd: Number(capUsd),
+        alerts: alerts.length ? alerts : ALERT_THRESHOLD_OPTIONS,
+      }),
+    onSuccess: (res) => queryClient.setQueryData(['budget-settings'], res),
+  })
+  const clearMutation = useMutation({
+    mutationFn: () => budgetApi.clearBudgetSettings(),
+    onSuccess: (res) => {
+      queryClient.setQueryData(['budget-settings'], res)
+      setCapUsd('')
+      setAlerts(ALERT_THRESHOLD_OPTIONS)
+    },
+  })
+
+  function toggleAlert(value: number) {
+    setAlerts((prev) =>
+      prev.includes(value) ? prev.filter((a) => a !== value) : [...prev, value].sort((a, b) => a - b),
+    )
+  }
+
+  const saveError = saveMutation.error as ApiError | null
+  const capValue = Number(capUsd)
+  const capIsValid = capUsd.trim() !== '' && Number.isFinite(capValue) && capValue > 0
+
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 8 }}>
+        Spend budget
+      </div>
+      <div className="panel stack" style={{ gap: 14 }}>
+        {statusQuery.isLoading ? (
+          <div className="empty pulse">Loading budget…</div>
+        ) : budget ? (
+          budget.spent_usd == null || budget.fraction == null ? (
+            <div className="mono-body" style={{ color: 'var(--text-muted)' }}>
+              Budget set at ${budget.cap_usd.toFixed(2)} per {budget.period} — current spend is
+              temporarily unavailable.
+            </div>
+          ) : (
+            <div className="mono-body">
+              Spent ${budget.spent_usd.toFixed(2)} of ${budget.cap_usd.toFixed(2)} this {budget.period}{' '}
+              ({Math.round(budget.fraction * 100)}%)
+            </div>
+          )
+        ) : (
+          <div className="mono-body" style={{ color: 'var(--text-muted)' }}>
+            No spend budget is set for this workspace.
+          </div>
+        )}
+
+        {canEdit ? (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              saveMutation.mutate()
+            }}
+          >
+            <div className="row" style={{ alignItems: 'flex-end', flexWrap: 'wrap', gap: 12 }}>
+              <div className="field" style={{ marginBottom: 0, width: 170 }}>
+                <label className="mono-label">Period</label>
+                <select value={period} onChange={(e) => setPeriod(e.target.value as BudgetPeriod)}>
+                  {BUDGET_PERIOD_OPTIONS.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="field" style={{ marginBottom: 0, width: 130 }}>
+                <label className="mono-label">Cap (USD)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={capUsd}
+                  onChange={(e) => setCapUsd(e.target.value)}
+                  placeholder="e.g. 100"
+                />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label className="mono-label">Alerts</label>
+                <div className="row" style={{ gap: 10, height: 32, alignItems: 'center' }}>
+                  {ALERT_THRESHOLD_OPTIONS.map((t) => (
+                    <label
+                      key={t}
+                      className="row"
+                      style={{ gap: 4, alignItems: 'center', fontFamily: 'var(--mono)', fontSize: 12 }}
+                    >
+                      <input type="checkbox" checked={alerts.includes(t)} onChange={() => toggleAlert(t)} />
+                      {Math.round(t * 100)}%
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={saveMutation.isPending || !capIsValid}
+              >
+                {saveMutation.isPending ? 'Saving…' : 'Save'}
+              </button>
+              {budget && (
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={clearMutation.isPending}
+                  onClick={() => clearMutation.mutate()}
+                >
+                  {clearMutation.isPending ? 'Clearing…' : 'Clear'}
+                </button>
+              )}
+            </div>
+            {capIsValid && capValue < 5 && (
+              <div className="mono-body" style={{ marginTop: 8, color: 'var(--text-muted)', fontSize: 12 }}>
+                Runs reserve their own cost cap (default $5) before starting; caps below that rely
+                on the run's actual spend.
+              </div>
+            )}
+            {saveError && (
+              <div className="error-text" style={{ marginTop: 8 }}>
+                {saveError.status === 403 ? 'Requires admin role.' : saveError.message}
+              </div>
+            )}
+          </form>
+        ) : (
+          <div className="mono-body" style={{ color: 'var(--text-muted)' }}>
+            Setting a spend budget requires the admin role.
+          </div>
+        )}
+      </div>
     </div>
   )
 }

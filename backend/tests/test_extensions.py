@@ -604,3 +604,61 @@ def test_load_extensions_imports_and_registers(tmp_path, monkeypatch):
     ext = load_extensions(app=None, module_names=["a_probe_extension"])
     probe = sys.modules["a_probe_extension"]
     assert probe.registered_with == [ext]
+
+
+async def test_load_extensions_registers_core_budget_gate_and_hook_before_an_extension(
+    tmp_path, monkeypatch,
+):
+    """`load_extensions` wires core's own per-workspace budget gate and alert
+    hook (`services/budgets.py`) onto the registry before it ever imports a
+    named extension module and calls that module's own `register(ext)` — see
+    `load_extensions`'s own docstring. Faking the two budgets.py functions
+    (rather than exercising the real, DB-backed ones) mirrors every other
+    gate/hook test in this file; the extension side is a real imported
+    module, the same `a_probe_extension.py`-on-`sys.path` pattern
+    `test_load_extensions_imports_and_registers` above uses, so this proves
+    the actual `load_extensions` import-and-register path, not a hand-built
+    stand-in for it."""
+    import sys
+
+    from tret.services import budgets as budgets_module
+
+    order: list[str] = []
+
+    async def fake_core_gate(db, run, workspace_id):
+        order.append("core_gate")
+        return GateResult(allowed=True)
+
+    async def fake_core_hook(db, run, workspace_id):
+        order.append("core_hook")
+
+    monkeypatch.setattr(budgets_module, "budget_pre_run_gate", fake_core_gate)
+    monkeypatch.setattr(budgets_module, "budget_alert_post_run_hook", fake_core_hook)
+
+    (tmp_path / "a_probe_extension_budget_order.py").write_text(
+        "from tret.engine.extensions import GateResult\n"
+        "\n"
+        "async def ext_gate(db, run, workspace_id):\n"
+        "    shared_order.append('ext_gate')\n"
+        "    return GateResult(allowed=True)\n"
+        "\n"
+        "async def ext_hook(db, run, workspace_id):\n"
+        "    shared_order.append('ext_hook')\n"
+        "\n"
+        "def register(ext):\n"
+        "    ext.add_pre_run_gate(ext_gate)\n"
+        "    ext.add_post_run_hook(ext_hook)\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    ext = load_extensions(app=None, module_names=["a_probe_extension_budget_order"])
+    # Injected after import (so `register` above never needed to know where
+    # it comes from), but read by `ext_gate`/`ext_hook` at call time — a
+    # plain global lookup in the probe module's own namespace, resolved when
+    # those functions actually run, not when they were defined.
+    sys.modules["a_probe_extension_budget_order"].shared_order = order
+
+    await ext.check_pre_run(None, _run(), uuid.uuid4())
+    await ext.run_post_run_hooks(None, _run(), uuid.uuid4())
+
+    assert order == ["core_gate", "ext_gate", "core_hook", "ext_hook"]

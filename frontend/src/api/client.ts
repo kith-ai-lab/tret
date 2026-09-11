@@ -3007,3 +3007,53 @@ export const api = {
   emissionsWhatif: (body: EmissionsWhatifBody) =>
     request<EmissionsWhatifResult>('/analytics/emissions/whatif', { method: 'POST', body }),
 }
+
+// ── workspace spend budgets (Settings → Spend budget) ───────────────────────
+// A per-workspace period cap on top of a harness's own per-run cost cap,
+// enforced softly by tret's own `budget_pre_run_gate`
+// (`backend/tret/services/budgets.py`) and surfaced here from the same GET
+// that gate itself reads. Kept as a second exported object rather than more
+// entries on `api` above, so this addition is a pure end-of-file append —
+// see that (already enormous) object's own growth for why every other
+// feature in this file just adds a key to it instead; budgets is the one
+// exception, added under an explicit instruction to touch only the end of
+// this file. GET is any member; PUT/DELETE require admin/owner and 403
+// otherwise — the same role gating `getEmissionsSettings` and friends above
+// use for their own workspace settings.
+export type BudgetPeriod = 'daily' | 'weekly' | 'monthly'
+
+export interface BudgetSettings {
+  period: BudgetPeriod
+  cap_usd: number
+  alerts: number[]
+}
+
+/** `BudgetSettings` plus the live numbers computed from it right now.
+ *
+ *  `spent_usd`/`remaining_usd`/`fraction`/`alerts_crossed` are `null` on the
+ *  rare response where the config itself (period/cap_usd/alerts) is known
+ *  good — just read back, or just written by a PUT that already committed —
+ *  but computing the live spend against it failed (a DB hiccup in the
+ *  underlying query). `window_start`/`window_end` are pure date math off
+ *  `period` and are always present. */
+export interface BudgetStatus extends BudgetSettings {
+  window_start: string
+  window_end: string
+  spent_usd: number | null
+  remaining_usd: number | null
+  fraction: number | null
+  alerts_crossed: number[] | null
+}
+
+export interface BudgetStatusResponse {
+  /** `null` when this workspace has no spend budget configured. */
+  budget: BudgetStatus | null
+}
+
+export const budgetApi = {
+  getBudgetSettings: () => request<BudgetStatusResponse>('/workspace/settings/budget'),
+  setBudgetSettings: (body: BudgetSettings) =>
+    request<BudgetStatusResponse>('/workspace/settings/budget', { method: 'PUT', body }),
+  clearBudgetSettings: () =>
+    request<BudgetStatusResponse>('/workspace/settings/budget', { method: 'DELETE' }),
+}

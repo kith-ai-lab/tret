@@ -36,10 +36,29 @@ from tret.db.models import Harness, Project, User, Workspace, WorkspaceMember
 from tret.engine.extensions import GateResult, get_extension_registry
 from tret.packs.links import link_all_workspace_packs
 from tret.packs.loader import PackValidationError, install_pack
+from tret.services.budgets import BudgetSettings
 
 log = logging.getLogger("tret.workspace")
 
 WORKSPACE_KINDS = ("team", "personal")
+
+
+def validate_budget_settings(doc: dict) -> dict:
+    """Validate a `Workspace.settings["budget"]` document (`api/budgets.py`'s
+    PUT), returning the normalized dict to store. Raises
+    `pydantic.ValidationError` on anything invalid — period not one of
+    daily/weekly/monthly, `cap_usd` not a positive number, or an empty/
+    out-of-range `alerts` list — which the API turns into a 422 with a plain
+    message (`services/emission_settings.py::validation_detail`, the same
+    helper the emissions settings endpoint uses for its own 422s).
+
+    The schema itself (`BudgetSettings`) lives in `services/budgets.py`
+    alongside the spend query and gate that read the same shape back; this
+    is the one write-path call site, matching the module's own docstring
+    ("Validate on write in services/workspace.py").
+    """
+    validated = BudgetSettings(**doc)
+    return validated.model_dump()
 
 
 async def create_workspace(

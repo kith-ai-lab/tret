@@ -63,9 +63,17 @@ persists — core keeps only the current document plus its own
 contract as a post-run hook: every hook runs, a raising hook is logged and
 never propagates, and no session is opened when nothing is registered.
 
-With no extensions loaded, `get_extension_registry()` returns a default
-`ExtensionAPI` that allows everything and does nothing — the whole surface is
-inert when `TRET_EXTENSIONS` is unset, which is the open-source deployment.
+Before `load_extensions` has ever run, `get_extension_registry()` returns a
+default `ExtensionAPI` that allows everything and does nothing — every seam
+in it is empty and inert. That is no longer the deployed state of the pre-run
+gate and post-run hook lists once `load_extensions` has run, though: it
+always registers core's own budget gate and alert hook (`services/
+budgets.py`) ahead of anything a proprietary extension adds, even with
+`TRET_EXTENSIONS` unset. The workspace gate, factor-layer provider, OAuth
+client provider and workspace-settings hook seams are unaffected by that —
+core registers none of those — so they, and `get_extension_registry()`'s own
+pre-`load_extensions` default, remain the fully inert case described above
+and in each seam's own paragraph below.
 
 Session isolation: gates and hooks never see the engine's own `AsyncSession`,
 even though `check_pre_run`/`run_post_run_hooks` both still accept one as a
@@ -77,8 +85,10 @@ table the engine knows nothing about (a billing table on a deployment whose
 extension migrations haven't run, say) would poison every later statement on
 the engine's own session for the rest of that request — fail-closed for the
 entire process, exactly backwards for a seam whose contract is fail-open. No
-session is opened at all when nothing is registered, so the inert, no-op
-registry never touches the database either.
+session is opened at all when a seam's own list is empty, so the inert, no-op
+registry (and, for the pre-run-gate/post-run-hook seams specifically, only the
+registry `get_extension_registry()` returns before `load_extensions` has run)
+never touches the database either.
 """
 from __future__ import annotations
 
@@ -219,8 +229,11 @@ class ExtensionAPI:
         extension's own migrations haven't run) would otherwise poison every
         later statement on the engine's session — fail-closed for the entire
         process, the opposite of this seam's fail-open contract. No session is
-        opened at all when no gates are registered, so the no-op registry never
-        touches the database.
+        opened at all when no gates are registered — the state of a bare
+        `ExtensionAPI`, or `get_extension_registry()` before `load_extensions`
+        has run, but not of a deployed process: `load_extensions` always
+        registers core's own budget gate first (see its own docstring), so
+        this list is never actually empty once it has run.
         """
         if not self._pre_run_gates:
             return GateResult(allowed=True)
@@ -365,7 +378,11 @@ class ExtensionAPI:
         Postgres. `run` is the engine-session object, already loaded and safe
         to read (the engine's factory uses `expire_on_commit=False`), so hooks
         can freely read `run.*` even though it came from a different session.
-        No session is opened when no hooks are registered.
+        No session is opened when no hooks are registered — a bare
+        `ExtensionAPI`, or `get_extension_registry()` before `load_extensions`
+        has run; `load_extensions` itself always registers core's own budget
+        alert hook first (see its own docstring), so a deployed process never
+        actually reaches this method with an empty list.
         """
         if not self._post_run_hooks:
             return
@@ -421,9 +438,22 @@ def load_extensions(app: FastAPI, module_names: list[str]) -> ExtensionAPI:
     Sets the module-level singleton `get_extension_registry()` returns, so this
     must run before anything asks for it (see `main.create_app`). An empty list
     still sets the singleton — to the default no-op instance.
+
+    Core's own per-workspace spend-budget gate and alert hook
+    (`tret/services/budgets.py`) are registered here, before any proprietary
+    extension's own `register(ext)` runs — so a soft, informational budget
+    cap and (on a hosted deployment) a hard credit hold are both checked, in
+    the same order, on every deployment: open core alone, or core plus
+    tret_cloud. Imported lazily (inside this function, not at module import
+    time) because `services/budgets.py` imports `GateResult` from this
+    module — a module-level import here would cycle.
     """
     global _registry
     ext = ExtensionAPI(app)
+    from tret.services.budgets import budget_alert_post_run_hook, budget_pre_run_gate
+
+    ext.add_pre_run_gate(budget_pre_run_gate)
+    ext.add_post_run_hook(budget_alert_post_run_hook)
     for name in module_names:
         module = importlib.import_module(name)
         module.register(ext)
