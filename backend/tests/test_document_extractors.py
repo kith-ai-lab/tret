@@ -1,12 +1,13 @@
-"""`.xlsx`/`.pptx` text extraction in `tret.services.documents`.
+"""`.xlsx`/`.pptx`/`.docx`/`.pdf` text extraction in `tret.services.documents`.
 
-Every fixture here is built in-memory with openpyxl/python-pptx — no binary
-files live in the repo. The extractor is a third-party parser fed
-third-party bytes, so what matters is: the happy path renders sheets/slides
-into readable text with the right shape recorded in `meta`, a zip crafted to
-inflate far past what it claims on disk is refused before either library
-ever inflates it, and legacy Office formats (`.xls`/`.ppt`/`.doc`) are still
-unsupported.
+Every fixture here is built in-memory with openpyxl/python-pptx/python-docx
+(and, for the two-page PDF, WeasyPrint — already a project dependency) — no
+binary files live in the repo. The extractor is a third-party parser fed
+third-party bytes, so what matters is: the happy path renders sheets/slides/
+paragraphs/pages into readable text with the right shape recorded in `meta`
+and in document order, a zip crafted to inflate far past what it claims on
+disk is refused before either library ever inflates it, and legacy Office
+formats (`.xls`/`.ppt`/`.doc`) are still unsupported.
 """
 from __future__ import annotations
 
@@ -87,6 +88,46 @@ def make_pptx_bytes() -> bytes:
     return buf.getvalue()
 
 
+def make_docx_bytes() -> bytes:
+    import docx
+
+    document = docx.Document()
+    document.add_heading("Report Title", level=1)
+    document.add_paragraph("An introductory paragraph about the report's purpose and scope.")
+    document.add_heading("Findings", level=2)
+    document.add_paragraph("The first finding paragraph, describing what was observed.")
+    document.add_paragraph("A second finding paragraph, immediately after the first one.")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Metric"
+    table.cell(0, 1).text = "Value"
+    table.cell(1, 0).text = "Revenue"
+    table.cell(1, 1).text = "42"
+
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
+
+
+def make_two_page_pdf_bytes() -> bytes:
+    """A real two-page PDF with actual selectable text on each page, built via
+    WeasyPrint (already a project dependency — `tret/services/export.py` uses
+    it for PDF export) rather than a hand-built PDF byte stream. reportlab is
+    not installed in this venv; WeasyPrint fills the same "already available,
+    produces real extractable text" role `extract_text` itself needs pypdf to
+    read back.
+    """
+    from weasyprint import HTML
+
+    html = (
+        "<html><body>"
+        "<p>First page body text about the annual filing.</p>"
+        '<div style="page-break-before: always;">'
+        "<p>Second page body text about the same filing.</p>"
+        "</div></body></html>"
+    )
+    return HTML(string=html).write_pdf()
+
+
 def make_zip_bomb_bytes() -> bytes:
     """A member that decompresses to well over the 200MB wall — cheap to
     build because all-zero bytes compress to almost nothing with DEFLATE.
@@ -159,6 +200,67 @@ def test_pptx_renders_slide_headings_shape_text_tables_and_notes():
     assert text.index("## Slide 1") < text.index("Hello slide one") < text.index(
         "Notes:"
     ) < text.index("## Slide 2")
+
+
+# ── .docx ──────────────────────────────────────────────────────────────────
+def test_docx_renders_headings_paragraphs_and_a_table_in_document_order():
+    text, meta = extract_text("report.docx", make_docx_bytes())
+
+    assert "# Report Title" in text
+    assert "## Findings" in text
+    assert "## Table 1" in text
+    assert "An introductory paragraph about the report's purpose and scope." in text
+    assert "Metric | Value" in text
+    assert "Revenue | 42" in text
+    # meta counts: python-docx's own `.paragraphs`/table-count, unaffected by
+    # the join-character change below.
+    assert meta["paragraphs"] == 5
+    assert meta["tables"] == 1
+
+    # Document order: title, then intro paragraph, then the Findings heading,
+    # then its two paragraphs, then the table — never tables-after-paragraphs
+    # the way python-docx's flat `.paragraphs`/`.tables` accessors would give.
+    for earlier, later in [
+        ("# Report Title", "An introductory paragraph"),
+        ("An introductory paragraph", "## Findings"),
+        ("## Findings", "The first finding paragraph"),
+        ("The first finding paragraph", "A second finding paragraph"),
+        ("A second finding paragraph", "## Table 1"),
+    ]:
+        assert text.index(earlier) < text.index(later), f"{earlier!r} should precede {later!r}"
+
+
+def test_docx_paragraphs_are_blank_line_separated_so_the_chunker_can_pack_them():
+    # A docx has no blank-line convention of its own — every paragraph is
+    # already its own XML element — so `_extract_docx` must insert one
+    # explicitly, or `services/retrieval.py`'s prose chunker (which finds
+    # paragraph breaks by splitting on blank lines) sees one giant run-on
+    # paragraph per section instead of two separate ones.
+    text, _ = extract_text("report.docx", make_docx_bytes())
+
+    first = "The first finding paragraph, describing what was observed."
+    second = "A second finding paragraph, immediately after the first one."
+    between = text[text.index(first) + len(first) : text.index(second)]
+    assert "\n\n" in between, f"expected a blank line between paragraphs, got {between!r}"
+
+    # The fix must not touch table rows: they stay single-newline-joined
+    # within the table's own block, same as every other extractor's tables.
+    table_block = text[text.index("## Table 1") :]
+    assert "Metric | Value\nRevenue | 42" in table_block
+
+
+# ── .pdf ───────────────────────────────────────────────────────────────────
+def test_pdf_pages_get_page_markers_in_document_order():
+    text, meta = extract_text("filing.pdf", make_two_page_pdf_bytes())
+
+    assert "## Page 1" in text
+    assert "## Page 2" in text
+    assert "First page body text about the annual filing." in text
+    assert "Second page body text about the same filing." in text
+    assert text.index("## Page 1") < text.index("First page body text")
+    assert text.index("First page body text") < text.index("## Page 2")
+    assert text.index("## Page 2") < text.index("Second page body text")
+    assert meta["pages"] == 2
 
 
 # ── zip-bomb guard ───────────────────────────────────────────────────────────

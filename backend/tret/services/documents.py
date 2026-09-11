@@ -11,6 +11,7 @@ import asyncio
 import csv
 import io
 import logging
+import re
 import uuid
 from pathlib import Path
 
@@ -71,17 +72,15 @@ def extract_text(filename: str, data: bytes) -> tuple[str, dict]:
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(data))
-        pages = [page.extract_text() or "" for page in reader.pages]
-        return "\n\n".join(pages), {"pages": len(pages)}
+        # A `## Page N` marker ahead of every page — the same heading-marker
+        # convention `_extract_xlsx`/`_extract_pptx` already use for sheets and
+        # slides — is what gives `services/retrieval.py`'s chunker a page
+        # locator to attach to prose that otherwise has no heading structure
+        # of its own (pypdf returns flowing text, not a document tree).
+        parts = [f"## Page {i}\n{page.extract_text() or ''}" for i, page in enumerate(reader.pages, start=1)]
+        return "\n\n".join(parts), {"pages": len(reader.pages)}
     if lower.endswith(".docx"):
-        import docx
-
-        document = docx.Document(io.BytesIO(data))
-        parts = [p.text for p in document.paragraphs]
-        for table in document.tables:
-            for row in table.rows:
-                parts.append(" | ".join(cell.text for cell in row.cells))
-        return "\n".join(parts), {"paragraphs": len(document.paragraphs)}
+        return _extract_docx(data)
     if lower.endswith(".xlsx"):
         return _extract_xlsx(filename, data)
     if lower.endswith(".pptx"):
@@ -97,6 +96,65 @@ def extract_text(filename: str, data: bytes) -> tuple[str, dict]:
     raise ValueError(
         f"Unsupported file type: {filename} (supported: pdf, docx, xlsx, pptx, csv, tsv, md, txt)"
     )
+
+
+_HEADING_STYLE_RE = re.compile(r"^Heading (\d+)$")
+
+
+def _docx_heading_level(style_name: str) -> int:
+    """0 for a body-text style, 1-6 for a heading style ("Title" counts as a
+    top-level heading same as "Heading 1"; "Heading 7"+ clamps to 6, matching
+    the deepest markdown heading `services/retrieval.py`'s chunker recognises).
+    """
+    if style_name == "Title":
+        return 1
+    m = _HEADING_STYLE_RE.match(style_name)
+    return min(6, int(m.group(1))) if m else 0
+
+
+def _extract_docx(data: bytes) -> tuple[str, dict]:
+    """Paragraphs and tables, in document order, with headings and tables
+    marked inline (`# heading text` / `## Table N`) rather than dumped as flat
+    text and every table appended after every paragraph the way python-docx's
+    `.paragraphs`/`.tables` accessors would — document order and heading
+    structure are what let `services/retrieval.py`'s chunker build heading
+    paths and keep tables whole instead of treating the whole file as one
+    undifferentiated block of prose.
+
+    Blocks (one per paragraph, and one per table — heading plus every row) are
+    joined with a blank line between them, not a single newline: a docx has no
+    blank-line convention of its own (each paragraph is already its own XML
+    element), but `services/retrieval.py`'s prose chunker finds paragraph
+    breaks by splitting on blank lines, same as it does for a `.md` upload. A
+    single-newline join would hand it one run-on paragraph per section and
+    default straight to the hard-split path instead of packing paragraphs to
+    the ~250-400 token target. A table's own rows stay single-newline-joined
+    *within* the table's one block, exactly like every other extractor's
+    table/sheet rows — only the blank line between blocks is new.
+    """
+    import docx
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    document = docx.Document(io.BytesIO(data))
+    blocks: list[str] = []
+    table_count = 0
+    for child in document.element.body.iterchildren():
+        if isinstance(child, CT_P):
+            paragraph = Paragraph(child, document)
+            text = paragraph.text
+            if not text.strip():
+                continue
+            level = _docx_heading_level((paragraph.style.name if paragraph.style else "") or "")
+            blocks.append(f"{'#' * level} {text}" if level else text)
+        elif isinstance(child, CT_Tbl):
+            table_count += 1
+            table = Table(child, document)
+            rows = [" | ".join(cell.text for cell in row.cells) for row in table.rows]
+            blocks.append("\n".join([f"## Table {table_count}", *rows]))
+    return "\n\n".join(blocks), {"paragraphs": len(document.paragraphs), "tables": table_count}
 
 
 def _extract_xlsx(filename: str, data: bytes) -> tuple[str, dict]:

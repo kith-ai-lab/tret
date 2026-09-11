@@ -26,7 +26,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy import TIMESTAMP
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -322,6 +322,69 @@ class Document(Base):
     # engine/validation.py still refuses anything that came from one).
     source_kind: Mapped[str] = mapped_column(Text, nullable=False, default="upload")
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at_col()
+
+
+class DocumentChunk(Base):
+    """One structure-aware retrieval unit sliced out of `Document.extracted_text`
+    by `tret.services.retrieval` — the chunked, ranked replacement for scanning
+    the whole document with `str.find()`.
+
+    Written lazily by `services/retrieval.py::ensure_chunks` the first time a
+    document with no chunks yet is searched — an older document, or one
+    ingested moments ago, look identical here. Rows are write-once: nothing is
+    ever updated in place, only inserted (and cascade-deleted with their
+    document), which is what lets `search_vector` below be populated at insert
+    time instead of needing a real trigger-maintained generated column.
+
+    `locator` is what makes a hit resolvable back into the source document
+    without re-searching: `{"heading_path": [str, ...], "page": int|None}` for
+    prose split on headings, `{"table_index": int, "row_start": int, "row_end":
+    int, "page": int|None}` for a table kept whole or split into row blocks,
+    `{"sheet": str, "row_start": int, "row_end": int}` for a spreadsheet row
+    block. `context` is the short contextual prefix (document title + section/
+    sheet/page) prepended per Anthropic's contextual-retrieval pattern, kept as
+    its own column rather than baked into `body` so ranking can weight it and a
+    citation can show it without repeating it inside the body text. `token_est`
+    is a `len(text) // 4`-style estimate, not a real tokenizer count — good
+    enough to size a chunk against the ~250-400 target, not for billing.
+    """
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        UniqueConstraint("document_id", "ordinal", name="uq_document_chunks_document_ordinal"),
+        Index("ix_document_chunks_document_id", "document_id"),
+        # A plain-column GIN index (not a functional/expression one) so it
+        # reflects and autogenerate-compares identically to the JSONB GIN index
+        # on `findings.subject` above — `postgresql_using` is a dialect-specific
+        # kwarg that other dialects' DDL compiler simply drops, so sqlite's
+        # `create_all` (the test/dev fallback) still creates a plain index here.
+        Index("ix_document_chunks_search_vector", "search_vector", postgresql_using="gin"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # text | table | sheet_block
+    locator: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    context: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    token_est: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Postgres only, in effect: `Text` is the type on every other dialect (via
+    # `with_variant`) so sqlite's `create_all` never sees a type it cannot
+    # create, but it is never read or written outside the postgresql branch of
+    # `services/retrieval.py` — sqlite's ranking path is a small in-Python BM25
+    # over `context`/`body` instead. Populated at chunk-insert time with
+    # `to_tsvector('english', context || ' ' || body)`, not a DDL `GENERATED
+    # ALWAYS AS` column: chunk rows are write-once (see class docstring), so an
+    # app-populated column can never go stale the way it could on a table with
+    # in-place updates, and staying a plain column keeps it fully representable
+    # in `Base.metadata` — a real generated column's expression lives only in
+    # the database and would show up as permanent drift against the models in
+    # tests/test_migrations_postgres.py's autogenerate check.
+    search_vector: Mapped[str | None] = mapped_column(Text().with_variant(TSVECTOR(), "postgresql"))
     created_at: Mapped[datetime] = created_at_col()
 
 

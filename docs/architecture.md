@@ -451,3 +451,44 @@ cannot grow a column that no migration adds.
   bounded to the last 500 runs — it is a sample, not a ledger. (Energy in the
   same endpoint is a full `SUM` over the window.)
 - Single workspace; roles are admin / analyst / approver.
+
+`search_documents`/`read_document` retrieve over `document_chunks`
+(`tret/services/retrieval.py`), not a `str.find()` over the whole of
+`Document.extracted_text`. A document is split at ingest-relevant structure —
+headings and paragraph breaks for prose (~250-400 estimated tokens per chunk,
+a small overlap carried across the boundary, including across a hard-split
+slice of one oversized paragraph), a table kept whole or, past a size
+ceiling, split into row blocks with its header row repeated in each one, and
+one row block per chunk (header repeated, sheet name in the locator) for a
+spreadsheet extract — lazily, the first time a document is searched, so an
+older document and one just uploaded chunk the same way the first time either
+is asked about (a document large enough to hit the 2,000-chunk cap gets one
+extra marker chunk saying so, rather than an unindexed tail nobody is told
+about). Every chunk carries a short contextual prefix (document title +
+section/sheet/page) ahead of its own text before ranking, per Anthropic's
+contextual-retrieval pattern, so a chunk that only says "revenue grew 12%" is
+still found by a query naming the quarter or business unit that gives it
+meaning, and every `search_documents` hit prints the chunk's ordinal so
+`read_document(chunk_ordinal=...)` can jump straight to it. Ranking is
+dialect-detected off the session's own bind, and is NOT identical across the
+two: Postgres scores a GIN-indexed `tsvector` column (populated at
+chunk-insert time, not a DDL `GENERATED` column — chunk rows are write-once,
+so it can never go stale) queried with `websearch_to_tsquery`, falling back to
+an OR of the query's own terms when that matches nothing; sqlite (every test,
+and the non-Postgres dev fallback) scores the same rows with a small
+in-Python BM25, which is OR by construction — either dialect returns a chunk
+sharing even one query term. Both apply the same 2x exact-phrase boost on
+top, so a hit containing the query as one phrase outranks one merely
+containing the same words scattered across it on either dialect — but beyond
+that, expect different rankings, not parity: Postgres stems query and
+document terms through its `english` config ("emission"/"emissions" match
+each other), the BM25 path does not, and the two scorers weight term
+frequency and rarity differently besides. Chunking a freshly-uploaded
+document is cheap regardless of dialect — on the order of a few milliseconds
+per MB of extracted text — though a document at the 2,000,000-character
+extraction cap still persists on the order of 1,250 chunk rows (capped
+absolutely at 2,000) in one commit the first time it's searched. No
+embeddings are involved — no embedding provider is configured in this
+deployment — so ranking is lexical only; `rank_chunks` routes its final hit
+list through `rerank_seam`, an identity function today and the marked seam
+for a future embeddings/reranker pass.

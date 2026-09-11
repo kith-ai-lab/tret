@@ -50,7 +50,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.config import get_settings
-from tret.db.models import DataRequest, Dataset, DatasetRow, Document, Finding
+from tret.db.models import DataRequest, Dataset, DatasetRow, Document, DocumentChunk, Finding
 from tret.engine.events import RunEvent, get_event_bus
 from tret.engine.validation import validate_cited_values, validate_payload
 from tret.net import CLASS_RESEARCH, MODE_OFF, MODE_REPLAY, EgressDenied, effective_mode
@@ -65,6 +65,7 @@ from tret.net.fetch import (
 from tret.net.search import SearchUnavailable, get_search_provider
 from tret.providers.base import ToolSpec
 from tret.services import connections as connections_service
+from tret.services import retrieval as retrieval_service
 from tret.services.emissions import energy_wh_field
 
 
@@ -203,9 +204,34 @@ CONNECTED_SOURCE_KIND = "connected"
 
 
 # ── document tools ────────────────────────────────────────────────────────────
+def _document_tier_label(doc: Document) -> str:
+    if doc.source_kind == SOURCE_KIND_WEB:
+        return " UNVERIFIED WEB SOURCE"
+    if doc.source_kind == CONNECTED_SOURCE_KIND:
+        return " CONNECTED SOURCE"
+    return ""
+
+
+def _document_banner(doc: Document) -> str:
+    # The tier travels with every read, not just the fetch that created the row.
+    # A model paging through a long web page on iteration 9 has long since lost
+    # the fetch_url result that said where the text came from.
+    if doc.source_kind == SOURCE_KIND_WEB:
+        meta = doc.meta or {}
+        return f"[{UNVERIFIED_NOTICE} Source: {meta.get('url')}]\n\n"
+    if doc.source_kind == CONNECTED_SOURCE_KIND:
+        meta = doc.meta or {}
+        return (
+            f"[CONNECTED SOURCE: {_frame_safe(meta.get('path') or doc.filename)}, "
+            f"from {_frame_safe(meta.get('source_slug'))}, modified {meta.get('modified')}]\n\n"
+        )
+    return ""
+
+
 @builtin(
     "read_document",
-    "Read the extracted text of an attached document. Use offset/limit to page through long documents.",
+    "Read the extracted text of an attached document. Use offset/limit to page through long "
+    "documents, or chunk_ordinal to jump straight to chunk N as printed by search_documents.",
     {
         "type": "object",
         "required": ["document_id"],
@@ -213,10 +239,22 @@ CONNECTED_SOURCE_KIND = "connected"
             "document_id": {"type": "string", "description": "Document id from the manifest"},
             "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Character offset"},
             "limit": {"type": "integer", "minimum": 100, "maximum": 40000, "default": 20000},
+            "chunk_ordinal": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Jump to one chunk by its ordinal — chunk N as printed by "
+                "search_documents — instead of paging by offset/limit",
+            },
         },
     },
 )
-async def read_document(ctx: RunContext, document_id: str, offset: int = 0, limit: int = 20000) -> str:
+async def read_document(
+    ctx: RunContext,
+    document_id: str,
+    offset: int = 0,
+    limit: int = 20000,
+    chunk_ordinal: int | None = None,
+) -> str:
     try:
         doc_id = uuid.UUID(document_id)
     except ValueError:
@@ -226,69 +264,94 @@ async def read_document(ctx: RunContext, document_id: str, offset: int = 0, limi
     doc = await ctx.db.get(Document, doc_id)
     if doc is None or doc.extracted_text is None:
         raise ToolError("Document not found or text not extracted yet")
+    banner = _document_banner(doc)
+
+    if chunk_ordinal is not None:
+        chunk = (
+            await ctx.db.execute(
+                select(DocumentChunk).where(
+                    DocumentChunk.document_id == doc_id, DocumentChunk.ordinal == chunk_ordinal
+                )
+            )
+        ).scalar_one_or_none()
+        if chunk is None:
+            raise ToolError(
+                f"No chunk with ordinal {chunk_ordinal} for this document — call search_documents "
+                "first, or omit chunk_ordinal to page through the raw text instead."
+            )
+        where = retrieval_service.describe_locator(chunk.kind, chunk.locator)
+        return f"# {doc.filename} — chunk {chunk_ordinal} ({where})\n\n{banner}{chunk.context}\n\n{chunk.body}"
+
     text = doc.extracted_text
-    chunk = text[offset : offset + limit]
+    chunk_text = text[offset : offset + limit]
     remaining = max(0, len(text) - offset - limit)
     suffix = f"\n\n[... {remaining} more characters; call again with offset={offset + limit}]" if remaining else ""
-    # The tier travels with every read, not just the fetch that created the row.
-    # A model paging through a long web page on iteration 9 has long since lost
-    # the fetch_url result that said where the text came from.
-    banner = ""
-    if doc.source_kind == SOURCE_KIND_WEB:
-        meta = doc.meta or {}
-        banner = f"[{UNVERIFIED_NOTICE} Source: {meta.get('url')}]\n\n"
-    elif doc.source_kind == CONNECTED_SOURCE_KIND:
-        meta = doc.meta or {}
-        banner = (
-            f"[CONNECTED SOURCE: {_frame_safe(meta.get('path') or doc.filename)}, "
-            f"from {_frame_safe(meta.get('source_slug'))}, modified {meta.get('modified')}]\n\n"
-        )
     return (
-        f"# {doc.filename} (chars {offset}-{offset + len(chunk)} of {len(text)})\n\n"
-        f"{banner}{chunk}{suffix}"
+        f"# {doc.filename} (chars {offset}-{offset + len(chunk_text)} of {len(text)})\n\n"
+        f"{banner}{chunk_text}{suffix}"
     )
 
 
 @builtin(
     "search_documents",
-    "Search attached documents for a phrase. Returns matching snippets with document ids.",
+    "Search attached documents for a query, ranked by relevance rather than a plain substring "
+    "match. Returns the best-matching chunks with document ids, locators (page, heading, sheet "
+    "or table), and each chunk's ordinal N, so read_document can jump straight to chunk N as "
+    "printed here via chunk_ordinal.",
     {
         "type": "object",
         "required": ["query"],
         "properties": {
             "query": {"type": "string"},
             "max_results": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+            "document_id": {
+                "type": "string",
+                "description": "Restrict the search to one attached document, by id",
+            },
         },
     },
 )
-async def search_documents(ctx: RunContext, query: str, max_results: int = 8) -> str:
+async def search_documents(
+    ctx: RunContext, query: str, max_results: int = 8, document_id: str | None = None
+) -> str:
     if not ctx.document_ids:
         raise ToolError("No documents are attached to this run")
-    rows = (
-        await ctx.db.execute(select(Document).where(Document.id.in_(ctx.document_ids)))
-    ).scalars().all()
-    snippets: list[str] = []
-    q = query.lower()
-    for doc in rows:
-        text = doc.extracted_text or ""
-        low = text.lower()
-        start = 0
-        while len(snippets) < max_results:
-            i = low.find(q, start)
-            if i == -1:
-                break
-            s, e = max(0, i - 150), min(len(text), i + len(query) + 150)
-            if doc.source_kind == SOURCE_KIND_WEB:
-                tier = " UNVERIFIED WEB SOURCE"
-            elif doc.source_kind == CONNECTED_SOURCE_KIND:
-                tier = " CONNECTED SOURCE"
-            else:
-                tier = ""
-            snippets.append(f"[{doc.id} {doc.filename}{tier}] ...{text[s:e]}...")
-            start = i + len(query)
-    if not snippets:
+    target_ids = list(ctx.document_ids)
+    if document_id is not None:
+        try:
+            filter_id = uuid.UUID(document_id)
+        except ValueError:
+            raise ToolError(f"'{document_id}' is not a valid document id")
+        if filter_id not in ctx.document_ids:
+            raise ToolError("Document is not attached to this run")
+        target_ids = [filter_id]
+
+    docs = (await ctx.db.execute(select(Document).where(Document.id.in_(target_ids)))).scalars().all()
+    # Chunk at first use rather than only at ingest: an older document may
+    # predate this table, and a document ingested moments ago has never been
+    # searched before either. Best-effort — a chunking failure on one document
+    # must not stop the search from returning what the others have.
+    for doc in docs:
+        try:
+            await retrieval_service.ensure_chunks(ctx.db, doc)
+        except Exception:
+            continue
+
+    hits = await retrieval_service.rank_chunks(ctx.db, target_ids, query, max_results=int(max_results))
+    if not hits:
         return f"No matches for '{query}' in the attached documents."
-    return "\n\n".join(snippets[:max_results])
+
+    docs_by_id = {doc.id: doc for doc in docs}
+    lines: list[str] = []
+    for hit in hits:
+        doc = docs_by_id.get(hit.document_id)
+        tier = _document_tier_label(doc) if doc is not None else ""
+        where = retrieval_service.describe_locator(hit.kind, hit.locator)
+        lines.append(
+            f"[{hit.document_id} {hit.filename}{tier} — {where} — chunk {hit.ordinal} — "
+            f"score {hit.score:.3f}]\n{hit.context}\n{hit.snippet}"
+        )
+    return "\n\n".join(lines)
 
 
 # ── the web: read-only, unverified, and switchable ────────────────────────────
