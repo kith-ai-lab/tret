@@ -68,6 +68,42 @@ def _utcnow() -> datetime:
 
 
 @dataclass(frozen=True)
+class EndpointPrior:
+    """One upstream endpoint's slice of a model's record.
+
+    Exists because `model_id` alone can hide a bad quantized endpoint behind a
+    good average, or let one bad endpoint demote a model that is fine on every
+    other endpoint it runs on (see `RunOutcome.served_by`, populated from
+    OpenRouter's `openrouter_metadata`).
+
+    Weighted with the same time decay and off-band discount as `ModelPrior`,
+    and the same `_posterior` shrinkage math — but shrunk toward the *model's
+    own* raw mean, not the pooled mean for the whole routing key. The model's
+    mean is itself already a pool across every model on the key; pooling an
+    endpoint a second time toward that same target would blend it with every
+    other model's evidence too, which answers a different question than the
+    one this type exists for — does *this* endpoint underperform *this
+    model's own* record? Shrinking toward the model's mean keeps the
+    comparison local to the model it belongs to.
+    """
+
+    runs: int
+    effective_n: float
+    quality_mean: float  # shrunk toward the model's own raw mean
+    quality_ci_low: float
+    delivered_rate: float
+
+    def to_json(self) -> dict:
+        return {
+            "runs": self.runs,
+            "effective_n": round(self.effective_n, 2),
+            "quality_mean": round(self.quality_mean, 4),
+            "quality_ci_low": round(self.quality_ci_low, 4),
+            "delivered_rate": round(self.delivered_rate, 4),
+        }
+
+
+@dataclass(frozen=True)
 class ModelPrior:
     """One model's record on one routing key, with its uncertainty attached.
 
@@ -93,6 +129,12 @@ class ModelPrior:
     rejections: int
     error_kinds: dict[str, int] = field(default_factory=dict)
     last_seen: str | None = None
+    # Per upstream endpoint, keyed by `served_by` (e.g. an OpenRouter provider
+    # slug). Only populated when at least two distinct endpoints have served
+    # this model — with one (or none), there is nothing to tell apart, and an
+    # empty dict says so plainly rather than reporting a single-endpoint
+    # "breakdown" that breaks down nothing.
+    endpoints: dict[str, EndpointPrior] = field(default_factory=dict)
 
     def to_json(self) -> dict:
         return {
@@ -114,6 +156,7 @@ class ModelPrior:
             "rejections": self.rejections,
             "error_kinds": self.error_kinds,
             "last_seen": self.last_seen,
+            "endpoints": {served_by: ep.to_json() for served_by, ep in self.endpoints.items()},
         }
 
 
@@ -247,6 +290,13 @@ def summarize(
     """
     now = now or _utcnow()
     acc: dict[str, _Accumulator] = {}
+    # Endpoint-level slices, kept apart from `acc` so a model's own totals
+    # never depend on how many distinct endpoints happened to serve it — see
+    # `EndpointPrior`. Rows with no `served_by` (local runs and everything
+    # recorded before that column existed; Anthropic-direct runs always carry
+    # "anthropic") are not evidence about any particular endpoint, so they
+    # never reach this half.
+    endpoint_acc: dict[str, dict[str, _Accumulator]] = {}
 
     for row in rows:
         if row.outcome_class in NON_QUALITY_CLASSES:
@@ -284,6 +334,16 @@ def summarize(
             if a.last_seen is None or observed > a.last_seen:
                 a.last_seen = observed
 
+        if row.served_by:
+            ea = endpoint_acc.setdefault(row.model_id, {}).setdefault(
+                row.served_by, _Accumulator()
+            )
+            ea.runs += 1
+            ea.weight += weight
+            ea.quality += weight * quality
+            ea.quality_sq += weight * quality * quality
+            ea.delivered += weight if row.outcome_class == "delivered" else 0.0
+
     # The pooled mean across every model on this key is what individual models
     # are shrunk toward — not a fixed constant, because "a typical score" is a
     # property of the task, not of the world: 0.4 is a poor record on an easy
@@ -310,6 +370,33 @@ def summarize(
             continue
         raw_mean = a.quality / a.weight
         shrunk, stderr = _posterior(a.quality, a.quality_sq, a.weight, pooled)
+
+        endpoints: dict[str, EndpointPrior] = {}
+        # Same floor as models (`MIN_EFFECTIVE_SAMPLES`), applied before the
+        # "≥2 distinct endpoints" rule below — a stale or single-run endpoint
+        # is not a second endpoint to compare against, it is noise that
+        # happens to carry a `served_by` value.
+        by_endpoint = {
+            served_by: ea
+            for served_by, ea in endpoint_acc.get(model_id, {}).items()
+            if ea.weight >= MIN_EFFECTIVE_SAMPLES
+        }
+        if len(by_endpoint) >= 2:
+            # Shrunk toward this model's own raw mean (`raw_mean`, just
+            # computed above), not the shape-wide `pooled` mean every model on
+            # this key is shrunk toward — see `EndpointPrior`.
+            for served_by, ea in by_endpoint.items():
+                ep_shrunk, ep_stderr = _posterior(
+                    ea.quality, ea.quality_sq, ea.weight, raw_mean
+                )
+                endpoints[served_by] = EndpointPrior(
+                    runs=ea.runs,
+                    effective_n=ea.weight,
+                    quality_mean=ep_shrunk,
+                    quality_ci_low=max(0.0, ep_shrunk - Z_CONSERVATIVE * ep_stderr),
+                    delivered_rate=ea.delivered / ea.weight,
+                )
+
         out[model_id] = ModelPrior(
             model_id=model_id,
             runs=a.runs,
@@ -327,5 +414,62 @@ def summarize(
             rejections=a.rejections,
             error_kinds=dict(sorted(a.error_kinds.items())),
             last_seen=a.last_seen.isoformat() if a.last_seen else None,
+            endpoints=endpoints,
         )
     return out
+
+
+# ── endpoint-level demotion ───────────────────────────────────────────────────
+# How far an endpoint's own lower bound must trail the *model's* own lower
+# bound before the endpoint, not the model, gets the blame. Needed because
+# endpoint means are shrunk toward the model's own mean (`EndpointPrior`'s
+# docstring): on a model whose own record is mediocre (mean ~0.45), every
+# endpoint's shrunk mean sits close to that same ~0.45, and judging endpoints
+# against a fixed absolute floor named every single one of them poor — the
+# model's mediocrity, not any one endpoint's, was crossing the floor. 0.15 is
+# chosen the same way as `MIN_EFFECTIVE_SAMPLES`: the loosest margin that
+# still requires an endpoint to be *meaningfully* worse than its own model,
+# not just marginally so.
+ENDPOINT_POOR_MARGIN = 0.15
+
+
+def poor_endpoints(prior: ModelPrior) -> list[str]:
+    """Which of `prior`'s endpoints look bad on their own, not merely because
+    the model does.
+
+    Judged on `quality_ci_low` rather than `quality_mean`. The model-level poor
+    tier (`objectives.evidence_tier`) reads the mean because it only reorders
+    candidates within a routing decision — a soft, reversible call that does
+    not need certainty. What this feeds — a later change wiring it into
+    OpenRouter's `provider.ignore` — removes an endpoint from consideration
+    outright, so it is judged the same conservative way promotion is: by its
+    lower bound, not its average.
+
+    An endpoint qualifies only by clearing *two* bars, both against its own
+    `quality_ci_low`:
+
+    * it must trail the model's own `quality_ci_low` by at least
+      `ENDPOINT_POOR_MARGIN` — relative, so a mediocre model does not make
+      every endpoint it has "poor" simply by having a mediocre mean; and
+    * it must still sit below `EVIDENCE_POOR_MEAN` in absolute terms — so a
+      model that is uniformly *excellent* does not get one endpoint singled
+      out for being merely very good instead of exceptional.
+
+    Never returns every one of the model's endpoints: if every endpoint would
+    qualify, that is the model's record, not any one endpoint's, and the
+    existing model-level demotion (`objectives.evidence_tier`) already covers
+    it — this helper stays silent rather than pointing at a scapegoat.
+    """
+    # Function-local import: `objectives.py` imports `ModelPrior` from this
+    # module, so importing `objectives` at module scope here would cycle.
+    from tret.router_llm.objectives import EVIDENCE_POOR_MEAN
+
+    poor = sorted(
+        served_by
+        for served_by, endpoint in prior.endpoints.items()
+        if endpoint.quality_ci_low <= EVIDENCE_POOR_MEAN
+        and endpoint.quality_ci_low <= prior.quality_ci_low - ENDPOINT_POOR_MARGIN
+    )
+    if poor and len(poor) == len(prior.endpoints):
+        return []
+    return poor

@@ -153,6 +153,17 @@ async def build_outcomes(db: AsyncSession, run: Run) -> list[RunOutcome]:
                 segment_index=0,
                 model_id=run.model_used,
                 provider=run.provider_used,
+                # `model_timeline` is persisted for the ordinary run whenever a
+                # turn was estimated or a segment picked up a `served_by` (see
+                # engine/harness.py) — read it off the timeline when it is
+                # there, and leave the routing evidence honestly blank (not
+                # guessed) otherwise: a local run has no serving upstream to
+                # disambiguate, and a run that predates this column has no way
+                # to recover it. Anthropic-direct runs *do* carry one — every
+                # `TurnComplete` from providers/anthropic.py sets the constant
+                # `SERVED_BY = "anthropic"` — so a null here means local or
+                # pre-column, never Anthropic.
+                served_by=timeline[0].get("served_by") if timeline else None,
                 outcome_class=final.outcome_class,
                 quality_score=final.quality_score,
                 score_version=final.score_version,
@@ -190,6 +201,7 @@ async def build_outcomes(db: AsyncSession, run: Run) -> list[RunOutcome]:
                 segment_index=index,
                 model_id=segment.get("model"),
                 provider=segment.get("provider"),
+                served_by=segment.get("served_by"),
                 outcome_class=scored.outcome_class,
                 quality_score=scored.quality_score,
                 score_version=scored.score_version,

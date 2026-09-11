@@ -1380,6 +1380,19 @@ export interface RoutingModelPrior {
   rejections: number
   error_kinds: Record<string, number>
   last_seen: string | null
+  /** Per upstream endpoint (an OpenRouter provider slug), only present when at
+   *  least two distinct endpoints have served this model — a bad quantized
+   *  endpoint can otherwise hide behind, or be hidden by, the model's average. */
+  endpoints?: Record<
+    string,
+    {
+      runs: number
+      effective_n: number
+      quality_mean: number
+      quality_ci_low: number
+      delivered_rate: number
+    }
+  >
 }
 
 export interface RoutingGroup {

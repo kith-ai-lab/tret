@@ -158,6 +158,24 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
                           ? ` · ${p.approvals} approved / ${p.rejections} rejected`
                           : ''}
                       </span>
+                      {/* Only present once at least two distinct upstream
+                          endpoints have served this model — a single-endpoint
+                          model has nothing to tell apart from its own average. */}
+                      {p.endpoints &&
+                        Object.entries(p.endpoints)
+                          .sort((a, b) => b[1].quality_mean - a[1].quality_mean)
+                          .map(([servedBy, ep]) => (
+                            <Fragment key={servedBy}>
+                              <span className="k" style={{ paddingLeft: 12, opacity: 0.7 }}>
+                                ↳ {servedBy}
+                              </span>
+                              <span style={{ opacity: 0.7 }}>
+                                quality {ep.quality_mean.toFixed(2)} (floor{' '}
+                                {ep.quality_ci_low.toFixed(2)}) · {ep.runs} runs ·{' '}
+                                {(ep.delivered_rate * 100).toFixed(0)}% delivered
+                              </span>
+                            </Fragment>
+                          ))}
                     </Fragment>
                   ))}
                 {routing.evidence.unrecorded.length > 0 && (

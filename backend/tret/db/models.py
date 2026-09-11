@@ -521,6 +521,15 @@ class RunOutcome(Base):
     size_band: Mapped[str] = mapped_column(Text, nullable=False)
     model_id: Mapped[str] = mapped_column(Text, nullable=False)
     provider: Mapped[str | None] = mapped_column(Text)
+    # The upstream endpoint that actually served this segment
+    # (`ModelSegment.served_by`, read from OpenRouter's `openrouter_metadata`
+    # or, for Anthropic direct, the constant `SERVED_BY = "anthropic"` set on
+    # every `TurnComplete`; see engine/harness.py and providers/anthropic.py).
+    # Null only for a local run (no upstream to disambiguate) and every row
+    # recorded before this column existed — never guessed. Exists so priors
+    # can tell a bad quantized endpoint apart from a bad model instead of
+    # averaging the two together.
+    served_by: Mapped[str | None] = mapped_column(Text)
     # Whether this route came from the LLM router, the deterministic fallback, or
     # an override. A pinned model's record says nothing about the router's
     # judgment, so priors can exclude overrides from what they learn.

@@ -47,6 +47,7 @@ from sqlalchemy import select
 from tret.db.models import RunOutcome
 from tret.router_llm.outcomes import NON_QUALITY_CLASSES
 from tret.router_llm.priors_base import (
+    ENDPOINT_POOR_MARGIN,
     HALF_LIFE_DAYS,
     MIN_EFFECTIVE_SAMPLES,
     NEUTRAL_QUALITY,
@@ -55,14 +56,17 @@ from tret.router_llm.priors_base import (
     PRIORS_VERSION,
     SHRINKAGE_STRENGTH,
     Z_CONSERVATIVE,
+    EndpointPrior,
     ModelPrior,
     NoPriors,
     PriorsProvider,
     _utcnow,
+    poor_endpoints,
     summarize,
 )
 
 __all__ = [
+    "ENDPOINT_POOR_MARGIN",
     "HALF_LIFE_DAYS",
     "MIN_EFFECTIVE_SAMPLES",
     "NEUTRAL_QUALITY",
@@ -71,10 +75,12 @@ __all__ = [
     "PRIORS_VERSION",
     "SHRINKAGE_STRENGTH",
     "Z_CONSERVATIVE",
+    "EndpointPrior",
     "ModelPrior",
     "NoPriors",
     "OutcomePriors",
     "PriorsProvider",
+    "poor_endpoints",
     "summarize",
 ]
 

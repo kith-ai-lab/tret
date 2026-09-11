@@ -1688,6 +1688,13 @@ class HarnessEngine:
         """
         total_usage.input_tokens += usage.input_tokens
         total_usage.output_tokens += usage.output_tokens
+        # A healthy single-segment run never persisted its timeline (see
+        # `_book_usage`), but `served_by` lives only there and `record_outcome`
+        # reads it from there. Write it once, now, so `run_outcomes.served_by`
+        # is populated by ordinary runs and not just by the failures and
+        # switch runs that hit the other persistence conditions.
+        if not run.model_timeline and any(seg.served_by for seg in segments):
+            run.model_timeline = [seg.to_json() for seg in segments]
         total_usage.cache_read_tokens += usage.cache_read_tokens
         total_usage.cache_write_tokens += usage.cache_write_tokens
         # Booked against the model that actually ran the turn. A run may
@@ -1728,11 +1735,15 @@ class HarnessEngine:
         run.energy_wh = Decimal(str(accounting["energy_wh"]))
         run.energy_accounting = accounting
         # Normally kept only once a run has used more than one model (see
-        # ModelSegment's own docstring) — an estimated turn is the exception:
+        # ModelSegment's own docstring) — an estimated turn is one exception:
         # `estimated_usage` lives nowhere else on the run, so the timeline is
         # persisted even for an ordinary single-segment run rather than
         # silently dropping the one signal analytics needs to tell a metered
-        # receipt from a guessed one.
+        # receipt from a guessed one. (A segment's `served_by` is the other
+        # signal that lives only on the timeline; that is written once, at the
+        # finish path just before `record_outcome`, rather than per turn here —
+        # each segment's JSON carries the full energy derivation, so writing it
+        # every iteration would double the run row's JSONB churn.)
         if len(segments) > 1 or estimated:
             run.model_timeline = [seg.to_json() for seg in segments]
         return turn_cost

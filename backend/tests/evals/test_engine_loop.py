@@ -23,7 +23,7 @@ from sqlalchemy import select
 from test_golden_runs import PERIL, SITE, divergence_happy_script
 
 import tret.engine.harness as harness_module
-from tret.db.models import Harness, Run
+from tret.db.models import Harness, Run, RunOutcome
 from tret.engine.harness import HarnessEngine
 from tret.engine.tools import MAX_DELEGATION_DEPTH
 from tret.packs.links import set_harness_packs
@@ -203,6 +203,41 @@ async def test_a_midstream_failure_after_a_metered_turn_carries_forward_cache_re
     naive_cost = model.cost_usd(naive_input_tokens, est["output_tokens"], 0)
     actual_cost = model.cost_usd(est["input_tokens"], est["output_tokens"], est["cache_read_tokens"])
     assert actual_cost < naive_cost
+
+
+async def test_a_healthy_single_segment_run_still_persists_its_served_by(world):
+    """The ordinary case — one segment, no error, no switch — must not be the
+    one case `served_by` gets dropped on.
+
+    `_book_usage` used to persist `model_timeline` only when a run used more
+    than one segment or booked an estimated turn — both of which are signs of
+    trouble (a switch, or a mid-stream failure). A healthy single-segment
+    OpenRouter run tripped neither, so `run.model_timeline` stayed unset and
+    `services/outcomes.build_outcomes` had nothing to read a `served_by` off,
+    even though the provider reported one on every turn. Endpoint priors were
+    then built almost entirely from the unhealthy minority that happened to
+    trip one of the other conditions, shrunk toward a mean that silently
+    counted every unlabelled healthy run as having no opinion at all.
+    """
+    provider = ReplayProvider([ScriptedTurn(text="All done.", served_by="deepinfra/fp8")])
+    result = await world.run(
+        provider=provider,
+        task_type="freeform",
+        task_input={"message": "Say something short."},
+    )
+
+    assert result.run.status == "completed", result.run.error
+    timeline = result.run.model_timeline
+    assert timeline and timeline[0]["served_by"] == "deepinfra/fp8"
+
+    async with world.session_factory() as db:
+        rows = (
+            (await db.execute(select(RunOutcome).where(RunOutcome.run_id == result.run.id)))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].served_by == "deepinfra/fp8"
 
 
 # ── (b) the iteration ceiling does not discard a recorded verdict ─────────────
