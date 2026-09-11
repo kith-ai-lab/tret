@@ -865,10 +865,8 @@ async def test_a_switch_forces_compaction_on_the_new_segments_first_turn(world):
     # 4 bulk reads, then the switch decided after the first divergence-script
     # assess call — so the new segment's first turn (iteration 6) forces a
     # pass with `KEEP_RECENT_ITERATIONS == 3` cutting off at iteration 3: the
-    # 4th read (iteration 4) is recent enough to stay protected, so only 3 of
-    # the 4 reads are actually eligible. What this test pins down is trigger
-    # and wire content, not the exact count — `test_engine_loop.py`'s own
-    # regression test is where the recency boundary itself is asserted.
+    # 4th read (iteration 4) is recent enough to stay protected, so exactly 3
+    # of the 4 reads are elided and the 4th reaches the new model verbatim.
     result, _first, _target, provider = await _run_with_switch_after_reads(world, switch_at=5)
 
     assert result.run.error is None, result.run.error
@@ -886,15 +884,23 @@ async def test_a_switch_forces_compaction_on_the_new_segments_first_turn(world):
     assert len(result.run.compactions) == 1
 
     # The new model's first actual call carried the compacted wire, not the
-    # raw transcript: at least one bulk report is now a marker rather than its
-    # full text.
+    # raw transcript: the three old bulk reports are now markers rather than
+    # their full text, and the most recent one (iteration 4, inside the
+    # `KEEP_RECENT_ITERATIONS` window) is still there in full. `call-{i}-1` is
+    # ReplayProvider's own id scheme, one tool call per scripted turn.
     first_new_call = provider.calls[switch_iteration - 1]  # provider.calls is 0-indexed
+    by_call_id = {
+        m.tool_call_id: m for m in first_new_call.messages if m.role == "tool" and m.tool_call_id
+    }
     elided_tool_msgs = [
         m for m in first_new_call.messages
         if m.role == "tool" and "elided by tret" in (m.content or "")
     ]
-    assert elided_tool_msgs
+    assert len(elided_tool_msgs) == 3
     assert all("read_document" in (m.content or "") for m in elided_tool_msgs)
+    assert {m.tool_call_id for m in elided_tool_msgs} == {"call-1-1", "call-2-1", "call-3-1"}
+    assert "elided by tret" not in (by_call_id["call-4-1"].content or "")
+    assert BULK_REPORT[:200] in (by_call_id["call-4-1"].content or "")
 
     # The persisted transcript itself is never touched by any of this — every
     # report's full text is still there, markers and all.
