@@ -195,6 +195,17 @@ No migration. Three independent fixes:
   installed workspace's own workbook data is unaffected until it reinstalls,
   same as the reason-code change above.
 
+- **New runs are refused while the process drains.** From the moment shutdown
+  begins, `POST /api/runs` and `POST /api/chat/{id}/messages` answer 503 with
+  `Retry-After: 15` instead of accepting work that the orphan sweep would mark
+  `process_restart` seconds later. Clients that create runs around a deploy
+  should retry on 503.
+- **Verdict effort is clamped on every objective.** The LLM router's chosen
+  effort for a verdict-shaped task can no longer exceed the tier table in
+  `default_effort` (economy low, standard medium, premium high) whatever the
+  objective; previously only token_conservation and eco were clamped, so a
+  balanced verdict on a standard-tier model still ran at high.
+
 ## 2026-09-11 · documents, exports and the grounding nudge
 
 No migration. Five independent fixes:

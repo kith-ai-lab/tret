@@ -6,7 +6,7 @@ import binascii
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, select
@@ -19,6 +19,7 @@ from tret.db.models import Document, Harness, Project, Run, User
 from tret.engine.events import get_event_bus
 from tret.engine.harness import get_harness_engine
 from tret.packs.links import packs_for_harness, resolve_pack_for_task
+from tret.services import lifecycle
 from tret.services.emissions import emission_summary_fields, energy_wh_field
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -78,10 +79,12 @@ def _run_summary(run: Run) -> dict:
 @router.post("")
 async def create_run(
     body: CreateRunBody,
+    request: Request,
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
+    lifecycle.refuse_if_draining(request)
     harness = await db.get(Harness, body.harness_id)
     if harness is None or harness.is_archived or harness.workspace_id != ctx.id:
         raise HTTPException(404, "Harness not found")

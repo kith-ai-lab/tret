@@ -142,3 +142,47 @@ async def test_a_run_still_executing_past_the_deadline_is_marked_orphaned(db):
         task.cancel()
         with suppress(asyncio.CancelledError):
             await task
+
+
+# ── new work is refused once the drain has begun ─────────────────────────────
+
+
+def _request_for(app):
+    from starlette.requests import Request as _Request
+
+    return _Request({"type": "http", "app": app, "method": "POST", "path": "/", "headers": []})
+
+
+def test_refuse_if_draining_is_a_no_op_until_shutdown_begins():
+    from fastapi import FastAPI
+
+    from tret.services import lifecycle
+
+    app = FastAPI()
+    lifecycle.refuse_if_draining(_request_for(app))  # no flag at all: no raise
+    lifecycle.mark_draining(app, False)
+    lifecycle.refuse_if_draining(_request_for(app))
+
+
+def test_refuse_if_draining_returns_503_with_retry_after():
+    import pytest
+    from fastapi import FastAPI, HTTPException
+
+    from tret.services import lifecycle
+
+    app = FastAPI()
+    lifecycle.mark_draining(app)
+    with pytest.raises(HTTPException) as info:
+        lifecycle.refuse_if_draining(_request_for(app))
+    assert info.value.status_code == 503
+    assert info.value.headers["Retry-After"] == str(lifecycle.RETRY_AFTER_SECONDS)
+
+
+def test_draining_is_per_app_not_global():
+    from fastapi import FastAPI
+
+    from tret.services import lifecycle
+
+    a, b = FastAPI(), FastAPI()
+    lifecycle.mark_draining(a)
+    lifecycle.refuse_if_draining(_request_for(b))  # untouched app: no raise

@@ -578,6 +578,57 @@ async def test_llm_chosen_effort_is_clamped_under_thrift_objectives():
     assert decision.effort == "medium"  # clamped down from the router's "high"
 
 
+async def test_llm_chosen_effort_on_a_verdict_is_clamped_to_the_tier_ceiling_under_balanced():
+    """Live on Sept 11: balanced verdict runs delegated to kimi-k3 (standard
+    tier) recorded effort "high" because the prompt showed the router the
+    harness's premium-tier default and balanced is not a thrift objective.
+    The verdict tier table is a ceiling for every objective."""
+    provider = _EffortProvider(
+        {
+            "model_id": "anthropic/claude-sonnet-5",  # standard tier
+            "reasoning": "chosen for the test",
+            "confidence": "high",
+            "effort": "high",
+        }
+    )
+    registry = _LLMRegistry({"anthropic", "kimi", "openrouter"}, provider)
+    router = ModelRouter(ModelCatalog(), registry)
+    decision = await router.route(
+        model_policy=_policy(objective="balanced"),
+        task_type="divergence_assessment",
+        task_shape="verdict",
+        task_description="Render a verdict.",
+        output_contract="verdict",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.effort == "medium"
+
+
+async def test_llm_chosen_effort_on_a_non_verdict_shape_is_kept_under_balanced():
+    # Outside the verdict shape, balanced still honours the router's answer.
+    provider = _EffortProvider(
+        {
+            "model_id": "anthropic/claude-sonnet-5",
+            "reasoning": "chosen for the test",
+            "confidence": "high",
+            "effort": "high",
+        }
+    )
+    registry = _LLMRegistry({"anthropic", "kimi", "openrouter"}, provider)
+    router = ModelRouter(ModelCatalog(), registry)
+    decision = await router.route(
+        model_policy=_policy(objective="balanced"),
+        task_type="chat",
+        task_shape="freeform",
+        task_description="Answer a question.",
+        output_contract="freeform",
+        n_documents=0,
+        est_input_tokens=100,
+    )
+    assert decision.effort == "high"
+
+
 async def test_llm_chosen_effort_within_the_thrift_ceiling_is_kept():
     # The thrift default is already "low" for every shape, so a router that
     # names "low" itself is not clamped to anything different.

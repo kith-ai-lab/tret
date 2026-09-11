@@ -12,7 +12,7 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +24,7 @@ from tret.db.models import Conversation, Dataset, Harness, Pack, Run, User
 from tret.engine.harness import get_harness_engine
 from tret.packs.links import pack_map_for_harnesses, packs_for_harness, resolve_pack_for_task
 from tret.router_llm.objectives import OBJECTIVES
+from tret.services import lifecycle
 from tret.services.emissions import emission_summary_fields, energy_wh_field
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -273,10 +274,12 @@ async def get_conversation(
 async def send_message(
     conversation_id: uuid.UUID,
     body: SendMessageBody,
+    request: Request,
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
 ):
+    lifecycle.refuse_if_draining(request)
     conv = await db.get(Conversation, conversation_id)
     if conv is None or await project_in_workspace(db, conv.project_id, ctx.id) is None:
         raise HTTPException(404, "Conversation not found")

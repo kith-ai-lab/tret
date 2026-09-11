@@ -34,6 +34,7 @@ from tret.db.migrate import ensure_schema
 from tret.engine.extensions import get_extension_registry, load_extensions
 from tret.net import log_egress_at_boot
 from tret.providers.catalog import get_catalog
+from tret.services import lifecycle
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tret")
@@ -179,6 +180,7 @@ class SecurityHeadersMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    lifecycle.mark_draining(app, False)  # a fresh process is never draining
     # Enforce the single-instance assumption the run event bus depends on,
     # before anything else touches the database: a deploy handover's brief
     # overlap is retried out (services/instance_lock.py), and only once that
@@ -257,6 +259,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        # First thing: refuse new runs and chat turns for the rest of this
+        # process's life (tret/services/lifecycle.py) — anything accepted
+        # now would only be marked process_restart by the sweep below.
+        lifecycle.mark_draining(app)
         # Shutdown: stop waiting on a network call nobody needs the answer to.
         warm_task.cancel()
         with suppress(asyncio.CancelledError):

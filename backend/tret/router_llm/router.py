@@ -24,6 +24,7 @@ Three invariants hold across every path through `route()`:
   read is snapshotted onto the decision as `evidence`, because the priors move
   and a decision has to stay explicable after they have.
 """
+
 from __future__ import annotations
 
 import random
@@ -144,9 +145,7 @@ def _apply_context_fit(
     fits = [
         m
         for m in candidates
-        if m.cost_tier == "local"
-        or not m.context_window
-        or m.context_window >= min_context_window
+        if m.cost_tier == "local" or not m.context_window or m.context_window >= min_context_window
     ]
     if fits:
         fit_ids = {m.id for m in fits}
@@ -236,12 +235,8 @@ def _evidence_snapshot(
         "version": PRIORS_VERSION,
         "size_band": size_band(est_input_tokens),
         "priors": {mid: p.to_json() for mid, p in shown.items()},
-        "demoted": sorted(
-            mid for mid, p in shown.items() if evidence_tier(p) == TIER_POOR
-        ),
-        "proven": sorted(
-            mid for mid, p in shown.items() if evidence_tier(p) == TIER_PROVEN
-        ),
+        "demoted": sorted(mid for mid, p in shown.items() if evidence_tier(p) == TIER_POOR),
+        "proven": sorted(mid for mid, p in shown.items() if evidence_tier(p) == TIER_PROVEN),
         "unrecorded": sorted(mid for mid in candidate_ids if mid not in shown),
         "cooldown": cooldown or [],
     }
@@ -963,10 +958,14 @@ class ModelRouter:
                         if chosen_effort not in EFFORT_LEVELS:
                             chosen_effort = default
                         elif (
-                            objective in THRIFT_OBJECTIVES
-                            and EFFORT_LEVELS.index(chosen_effort)
-                            > EFFORT_LEVELS.index(default)
-                        ):
+                            objective in THRIFT_OBJECTIVES or task_shape == "verdict"
+                        ) and EFFORT_LEVELS.index(chosen_effort) > EFFORT_LEVELS.index(default):
+                            # The verdict shape's tier table is a ceiling for
+                            # every objective, not only the thrift ones: the
+                            # prompt showed the router the harness's
+                            # max-tier default (the chosen model was not
+                            # known yet), so a standard-tier pick still
+                            # arrived saying "high" — see default_effort.
                             chosen_effort = default
                         return RoutingDecision(
                             router_model=router_model_id,
@@ -1037,9 +1036,7 @@ class ModelRouter:
             objective=objective,
             task_shape=task_shape,
             max_cost_tier=max_tier,
-            evidence=_evidence_snapshot(
-                priors, candidate_ids, est_input_tokens, cooldown_records
-            ),
+            evidence=_evidence_snapshot(priors, candidate_ids, est_input_tokens, cooldown_records),
             provider_ignore=_provider_ignore_for(priors, chosen),
             context_fit=context_fit,
             # Kept on the fallback path too, and this is where it earns its
