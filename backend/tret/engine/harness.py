@@ -88,6 +88,7 @@ from tret.config import get_settings
 from tret.services.emission_settings import factor_set_for, workspace_emissions_layers
 from tret.services.emissions import (
     DEPLOYMENT_LOCAL,
+    LOCAL_PROVIDER,
     combine_accountings,
     deployment_for,
     overhead_block,
@@ -118,6 +119,31 @@ MAX_ITERATIONS_CEILING = 50
 # Soft: crossing it asks the model to finalize now. Hard stop at this multiple of
 # it, so a model that ignores the instruction still cannot run away.
 OUTPUT_BUDGET_HARD_MULTIPLE = Decimal("1.5")
+
+# A turn's `cache_read_tokens` at or below this counts as a cache miss for the
+# ledger below. 0 today — no provider in the catalog has ever been observed to
+# report a nonzero-but-noise figure for a genuine miss — named as a constant
+# rather than a literal `0` so a provider that does turn up with that kind of
+# rounding noise is a one-line fix, not a hunt through `_book_usage`.
+CACHE_MISS_FLOOR_TOKENS = 0
+
+# Providers named here never report a cache figure at all, under any route: a
+# local deployment's usage is the engine's own per-token estimate with no
+# cache concept behind it, and Kimi's *native* API does not return a
+# cached-token count in practice. `kimi` here means that native API
+# specifically, not the model — a Kimi model reached through OpenRouter is a
+# `model_info.provider == "openrouter"` segment, not `"kimi"`, and is not in
+# this set.
+#
+# This set is a cheap shortcut, not the real gate: a provider can also fail to
+# report caching while sitting outside this set entirely (an OpenRouter
+# upstream that omits `cached_tokens`, e.g. a Kimi model served that way), and
+# a prompt below a provider's cacheable minimum reports zero on both sides
+# even when the provider caches perfectly well otherwise. `_book_usage`'s own
+# `cache_is_live` check is what actually decides whether a turn is classified,
+# for every provider including these two — being in this set just means the
+# answer is always "no" without having to look.
+NO_CACHE_STATS_PROVIDERS = frozenset({LOCAL_PROVIDER, "kimi"})
 
 
 def effective_model_policy(harness_policy: dict | None, task_input: dict | None) -> dict:
@@ -230,6 +256,26 @@ class ModelSegment:
     # providers/catalog.py: pricing that 10x too high, straight into
     # `reported_cost_usd`, the billing column).
     last_reported_cache_read_tokens: int | None = None
+    # How many of this segment's turns came back with no cache read (or below
+    # `CACHE_MISS_FLOOR_TOKENS`) for a reason the engine itself caused —
+    # the segment's first turn, the first turn after a compaction pass that
+    # changed the wire view, or the first turn after a top-level effort raise
+    # on an Anthropic model — versus a miss with no such explanation. Both are
+    # real, paid-for cache rebuilds; the distinction is only whether tret can
+    # account for why the prefix changed. Classified in `HarnessEngine.
+    # _book_usage`, one turn at a time, but only once caching has shown itself
+    # to be *live* on this segment — a turn that wrote to the cache, or an
+    # earlier turn that read a nonzero figure back (`cache_is_live` in
+    # `_book_usage`). Both stay 0 for a segment that never shows that
+    # evidence: a provider in `NO_CACHE_STATS_PROVIDERS` (a local deployment,
+    # or Kimi's own native API — not an OpenRouter-hosted Kimi endpoint, which
+    # is excluded by the same live-activity test as any other OpenRouter
+    # upstream that never reports `cached_tokens`, not by name), or simply a
+    # segment whose every prompt so far has been below the provider's
+    # cacheable minimum (reads 0, writes 0 — indistinguishable from "no cache
+    # concept" without the live check).
+    cache_rebuilds_expected: int = 0
+    cache_misses_unexpected: int = 0
     # Set only for a segment whose model is on a local deployment
     # (`deployment_for`) AND a meter is configured (`TRET_LOCAL_ENERGY_METER`):
     # the running `EnergyMeter` while the segment is live (`HarnessEngine.
@@ -327,6 +373,8 @@ class ModelSegment:
             "effort": self.effort,
             "effort_history": list(self.effort_history),
             "served_by": self.served_by,
+            "cache_rebuilds_expected": self.cache_rebuilds_expected,
+            "cache_misses_unexpected": self.cache_misses_unexpected,
             "energy_wh": accounting["energy_wh"],
             # The full per-model derivation, kept segment by segment. The
             # run-level roll-up nulls whatever the segments disagreed on, so this
@@ -1126,6 +1174,23 @@ class HarnessEngine:
         failures_at_raise = 0
         trips_at_raise = 0
         overridden = bool(decision.override)
+        # Set the moment a switch is applied (below), so the very first turn
+        # the new model sees is compacted even if that turn is nowhere near
+        # its own window — a switch already voids the cache and re-sends the
+        # whole transcript at full input price; sending it uncompacted too
+        # would pay for both misses on the same turn when one pass could have
+        # bundled them. Consumed (and cleared) at the top of the very next
+        # iteration, whether or not that iteration turns out to need it.
+        compact_before_next_turn = False
+        # Set when the quality trigger's effort rung (`KIND_EFFORT`, below)
+        # raises effort on an Anthropic segment, so the cache-ledger
+        # classification in `_book_usage` reads that segment's next turn as an
+        # expected rebuild rather than an unexplained one — a top-level effort
+        # change voids Anthropic's prompt cache the same as a real switch,
+        # just for the one turn that carries it rather than the rest of the
+        # segment. Consumed at the top of the next iteration, same as
+        # `compact_before_next_turn`.
+        cache_void_pending = False
         # Set once the `provider_ignore` retry below has actually waived this
         # run's routing-decision evidence for a "no eligible provider" error.
         # Without this, the very next iteration recomputes the identical
@@ -1145,6 +1210,12 @@ class HarnessEngine:
             assistant_text: list[str] = []
             tool_calls: list[ToolCall] = []
             turn: TurnComplete | None = None
+            # This turn's own cache-ledger context, consumed here regardless of
+            # how the turn ends up going (compacted, erroring out, or neither)
+            # — an effort raise voids the cache for exactly the next turn, not
+            # for however many iterations pass before one happens to book.
+            voided_by_effort_this_turn = cache_void_pending
+            cache_void_pending = False
 
             # ── stay inside the window ───────────────────────────────────────
             # Checked before every call, not after a failure: a run that exceeds
@@ -1152,20 +1223,25 @@ class HarnessEngine:
             # explaining it, and by then the turn has already been paid for.
             wire = wire_view(messages, compaction)
             est_tokens = estimate_wire_tokens(system, wire, tool_specs)
-            if adaptive.compaction != "off" and over_budget(est_tokens, context_limit):
-                await self.bus.publish(
-                    run.id,
-                    RunEvent(
-                        "context_pressure",
-                        {
-                            "iteration": iteration,
-                            "est_input_tokens": est_tokens,
-                            "limit_est_tokens": context_limit,
-                            "context_window": model_info.context_window,
-                            "estimator": TOKEN_ESTIMATOR,
-                        },
-                    ),
-                )
+            forced_switch_compaction = compact_before_next_turn and adaptive.compaction != "off"
+            compact_before_next_turn = False
+            compaction_changed_wire = False
+            over_window = adaptive.compaction != "off" and over_budget(est_tokens, context_limit)
+            if over_window or forced_switch_compaction:
+                if over_window:
+                    await self.bus.publish(
+                        run.id,
+                        RunEvent(
+                            "context_pressure",
+                            {
+                                "iteration": iteration,
+                                "est_input_tokens": est_tokens,
+                                "limit_est_tokens": context_limit,
+                                "context_window": model_info.context_window,
+                                "estimator": TOKEN_ESTIMATOR,
+                            },
+                        ),
+                    )
                 record = await self._compact(
                     run=run,
                     messages=messages,
@@ -1178,6 +1254,7 @@ class HarnessEngine:
                     max_tier=model_policy.get("max_cost_tier") or "premium",
                     overhead=overhead_calls,
                     emissions=emissions,
+                    trigger="model_switch" if forced_switch_compaction else "budget",
                 )
                 if record is not None:
                     compaction_records.append(record)
@@ -1185,8 +1262,20 @@ class HarnessEngine:
                     run.overhead = overhead_block(overhead_calls)
                     await self.bus.publish(run.id, RunEvent("compaction", record))
                     # Over the budget with only protected material left. The
-                    # supervisor's cue that a bigger window is the only remedy.
-                    compaction_exhausted = record["kind"] == "no_op"
+                    # supervisor's cue that a bigger window is the only remedy —
+                    # only meaningful for the ordinary budget-triggered path. A
+                    # forced `model_switch` pass being a no-op says nothing
+                    # about whether the run is anywhere near its window (it can
+                    # be, and usually is, nowhere close — see `_compact`'s own
+                    # trigger-aware note), so it must never touch this flag:
+                    # leave it exactly as the switch itself already set it.
+                    if record["trigger"] == "budget":
+                        compaction_exhausted = record["kind"] == "no_op"
+                    # Did this pass actually change what the model is about to
+                    # see? A no-op (nothing left eligible) leaves the wire
+                    # exactly as it was, so a cache miss on this turn is not
+                    # this pass's doing.
+                    compaction_changed_wire = record["kind"] != "no_op"
                 wire = wire_view(messages, compaction)
 
             # Withheld once `provider_ignore_waived` is set (below): recomputing
@@ -1401,6 +1490,8 @@ class HarnessEngine:
                 model_info=model_info,
                 usage=usage,
                 iteration=iteration,
+                wire_changed_by_compaction=compaction_changed_wire,
+                cache_voided_by_effort_raise=voided_by_effort_this_turn,
             )
 
             messages.append(
@@ -1564,7 +1655,15 @@ class HarnessEngine:
                         "the data you need — proceed to your terminal action "
                         f"({ctx.terminal_tool or 'your final answer'}) now.]"
                     )
-                meta = {"error": is_error}
+                # `iteration` is what `plan_compaction`'s `KEEP_RECENT_ITERATIONS`
+                # protection reads (`_iteration_of`, engine/compaction.py) — left
+                # off here, every tool result read back as iteration 0, so the
+                # "recent" cutoff (always > 0 once a run is old enough to compact
+                # at all) never matched anything and the protection never once
+                # applied to a real run. Concretely: a forced pass after a model
+                # switch could elide the very document read from one turn earlier
+                # and hand the new model nothing but a marker for it.
+                meta = {"error": is_error, "iteration": iteration}
                 if repeated:
                     meta[REPEATED_CALL_KEY] = repeated
                 messages.append(
@@ -1703,6 +1802,14 @@ class HarnessEngine:
                 effort_raised_at = iteration
                 failures_at_raise = consecutive_terminal_failures
                 trips_at_raise = repeated_call_trips
+                # Anthropic is the one provider where this still voids the
+                # cache (see the comment above and `KIND_EFFORT`'s own
+                # docstring in engine/supervisor.py) — so it is the one
+                # provider where the next turn's cache-ledger classification
+                # (`_book_usage`) needs to know a miss there is expected, not
+                # unexplained.
+                if model_info.provider == "anthropic":
+                    cache_void_pending = True
                 await self.bus.publish(
                     run.id,
                     RunEvent("effort_raised", run.routing["effort_changes"][-1]),
@@ -1733,6 +1840,13 @@ class HarnessEngine:
                 # this prefix, so the next turn re-pays full input price. The
                 # supervisor priced that in before choosing to switch.
                 compaction_exhausted = False
+                # ...and since the whole transcript is about to be re-sent
+                # uncompacted at that full price anyway, this is the cheapest
+                # possible moment to also shrink it: force a compaction pass on
+                # the new model's first turn even though that turn is not, on
+                # its own, over budget (see the "stay inside the window"
+                # section at the top of the loop).
+                compact_before_next_turn = True
                 consecutive_terminal_failures = 0
                 repeated_call_trips = 0
                 # `effort_raised` itself is left alone: the rung fires at most
@@ -1847,9 +1961,38 @@ class HarnessEngine:
         # would report only the tokens/cost/energy up to the raise while the
         # run's own totals kept growing underneath it — exactly the frozen
         # timeline api/analytics.py's what-if recompute would otherwise read
-        # as the run's whole story.
-        if any(seg.served_by or seg.effort_history for seg in segments):
+        # as the run's whole story. The cache-ledger counters are the same
+        # argument a third time: `_book_usage` classifies them mid-run but
+        # never persists them (nothing mid-run reads them, so there is no
+        # reason to pay that JSONB write every turn — see its own note), so an
+        # ordinary single-segment run with a nonzero count would otherwise
+        # finish with a timeline nothing ever wrote the ledger onto.
+        if any(
+            seg.served_by or seg.effort_history or seg.cache_rebuilds_expected
+            or seg.cache_misses_unexpected
+            for seg in segments
+        ):
             run.model_timeline = [seg.to_json() for seg in segments]
+        # The run-level roll-up of the same counters, written once here rather
+        # than recomputed every turn (see `_book_usage`'s own note) — cheap
+        # either way, but nothing mid-run reads it, so there is no reason to
+        # pay the write on every iteration. Lives on `run.routing` alongside
+        # the other per-run routing facts this engine already writes there
+        # (`switches`, `effort_changes`) — there is no established top-level
+        # "spend summary" column this run assembles that `combine_accountings`
+        # would carry a *summed* pair of plain ints through unscathed (its
+        # per-segment merge treats an unlisted key as one that must AGREE
+        # across segments, which two segments with different rebuild counts
+        # almost never do — see its own "handled" set), so it is written here
+        # rather than folded into `run.energy_accounting`. Only written once
+        # there is something to say, same reasoning as `model_timeline` above.
+        if any(seg.cache_rebuilds_expected or seg.cache_misses_unexpected for seg in segments):
+            routing = dict(run.routing or {})
+            routing["cache_ledger"] = {
+                "cache_rebuilds_expected": sum(seg.cache_rebuilds_expected for seg in segments),
+                "cache_misses_unexpected": sum(seg.cache_misses_unexpected for seg in segments),
+            }
+            run.routing = routing
         # Evidence for the next routing decision, folded into the run's own final
         # commit. `record_outcome` never raises and returns None for runs that
         # carry no lesson (cancelled, or never routed) — see services/outcomes.py.
@@ -1900,6 +2043,8 @@ class HarnessEngine:
         usage: Usage,
         iteration: int,
         estimated: bool = False,
+        wire_changed_by_compaction: bool = False,
+        cache_voided_by_effort_raise: bool = False,
     ) -> Decimal:
         """Fold one turn's usage into the run's running totals, cost and energy.
 
@@ -1912,11 +2057,57 @@ class HarnessEngine:
         accounting below are identical either way; only the provenance recorded
         on the model segment (`ModelSegment.estimated_usage`) differs. Returns
         the turn's own cost in USD.
+
+        `wire_changed_by_compaction` and `cache_voided_by_effort_raise` are the
+        two engine-caused reasons — beyond a segment's own first turn — that a
+        cache miss on this turn is an *expected* rebuild rather than an
+        unexplained one; see the cache-ledger block below and `ModelSegment.
+        cache_rebuilds_expected`'s own docstring. Both default False so the
+        `ProviderError` estimate call site (which never classifies — see
+        below) need not pass them.
         """
         total_usage.input_tokens += usage.input_tokens
         total_usage.output_tokens += usage.output_tokens
         total_usage.cache_read_tokens += usage.cache_read_tokens
         total_usage.cache_write_tokens += usage.cache_write_tokens
+        # ── the cache ledger ─────────────────────────────────────────────────
+        # Read `segment.from_iteration` *before* `segment.add()` below moves it
+        # off its unset 0 — that field is exactly "has this segment booked a
+        # turn yet", which is what "the first turn of the segment" means here.
+        # Skipped entirely for an estimated turn: a mid-stream death's usage is
+        # a chars/4 guess with a carried-forward cache figure (see the
+        # `ProviderError` handler above), never a cache_read_tokens the
+        # provider actually reported, so classifying it would misread a guess
+        # as measured evidence of a rebuild. Also skipped for a provider with
+        # no cache concept at all (`NO_CACHE_STATS_PROVIDERS`): a 0 there means
+        # "never wired up", not "this prefix missed".
+        if not estimated and model_info.provider not in NO_CACHE_STATS_PROVIDERS:
+            # A read/write of 0/0 is ambiguous on its own: it is what a genuine
+            # cache miss looks like on a provider that never reports writes
+            # either, but it is *also* what an OpenRouter upstream that omits
+            # `cached_tokens` reports on every turn (e.g. an OpenRouter-hosted
+            # Kimi endpoint — `model_info.provider == "openrouter"`, so
+            # `NO_CACHE_STATS_PROVIDERS` alone does not catch it), and what a
+            # prompt below the provider's cacheable minimum reports too. All
+            # three would otherwise read as an "unexpected miss" that never
+            # actually happened. `cache_is_live` is the disambiguator: this
+            # turn wrote to the cache (proof caching is being attempted right
+            # now), or an earlier turn on this segment read a nonzero figure
+            # back (proof it has worked before, so a subsequent 0 is a real
+            # rebuild/miss rather than silence). Neither true, and this turn is
+            # left unclassified rather than guessed at.
+            cache_is_live = usage.cache_write_tokens > 0 or bool(
+                segment.last_reported_cache_read_tokens
+            )
+            if cache_is_live and usage.cache_read_tokens <= CACHE_MISS_FLOOR_TOKENS:
+                if (
+                    segment.from_iteration == 0
+                    or wire_changed_by_compaction
+                    or cache_voided_by_effort_raise
+                ):
+                    segment.cache_rebuilds_expected += 1
+                else:
+                    segment.cache_misses_unexpected += 1
         # Booked against the model that actually ran the turn. A run may
         # change model part-way (see the supervisor below), and every figure
         # downstream — price, energy class, PUE, grid factor — is a property
@@ -1970,7 +2161,12 @@ class HarnessEngine:
         # once, at the finish path just before `record_outcome`, rather than
         # per turn here — each segment's JSON carries the full energy
         # derivation, so writing it every iteration would double the run
-        # row's JSONB churn.)
+        # row's JSONB churn. The cache-ledger counters are the same argument:
+        # nothing mid-run reads them (the classification above only ever
+        # *writes* to the live `ModelSegment`, never back off the persisted
+        # row), so they are folded into the same once-at-finish write rather
+        # than persisted here on every turn — see the finish path, just
+        # before `record_outcome`.
         if len(segments) > 1 or estimated or any(seg.effort_history for seg in segments):
             run.model_timeline = [seg.to_json() for seg in segments]
         return turn_cost
@@ -2108,12 +2304,20 @@ class HarnessEngine:
         max_tier: str,
         overhead: list[dict],
         emissions: "_EmissionsContext",
+        trigger: str = "budget",
     ) -> dict | None:
         """Shrink what the provider sees, and say exactly what was shrunk.
 
         `messages` is not modified. Compaction produces a wire view; the
         transcript stays the complete record of what happened, and the dict
         returned here is what states the difference (see engine/compaction.py).
+
+        `trigger` says *why* this pass ran — `"budget"` for the ordinary path
+        (the wire view itself was over the window) or `"model_switch"` for the
+        pass a supervisor switch forces on the new model's first turn before it
+        ever sees the transcript (`compact_before_next_turn`, above). It never
+        changes what gets elided — the elision rules are the same either way —
+        only what the record says caused this particular pass to run.
 
         Returns None when there was nothing left to elide — which is a real
         outcome, not a failure: a run can be over its window on protected
@@ -2128,16 +2332,31 @@ class HarnessEngine:
             terminal_tool=terminal_tool,
         )
         if plan.empty:
-            return {
-                "kind": "no_op",
-                "iteration": iteration,
-                "before_est_tokens": before_tokens,
-                "after_est_tokens": before_tokens,
-                "note": (
+            # The two triggers earn different honest sentences. A budget pass
+            # that comes back empty means the run really is over its window
+            # with nothing left to give — the supervisor's cue that a bigger
+            # window is the only remedy (see `compaction_exhausted`, above).
+            # A forced `model_switch` pass coming back empty says nothing of
+            # the kind: it runs whether or not the run is anywhere near its
+            # window (usually it is not), so claiming "over the context
+            # budget" for it would be false on the run's own numbers.
+            note = (
+                "model switch: nothing eligible to elide — every result still on the "
+                "transcript is protected, recent, or too short to be worth a marker"
+                if trigger == "model_switch"
+                else (
                     "over the context budget with nothing elidable left: what remains is "
                     "retrieved values, recorded results and instructions, none of which "
                     "may be dropped"
-                ),
+                )
+            )
+            return {
+                "kind": "no_op",
+                "iteration": iteration,
+                "trigger": trigger,
+                "before_est_tokens": before_tokens,
+                "after_est_tokens": before_tokens,
+                "note": note,
                 "estimator": TOKEN_ESTIMATOR,
             }
 
@@ -2167,6 +2386,7 @@ class HarnessEngine:
         return {
             "kind": "elision",
             "iteration": iteration,
+            "trigger": trigger,
             "before_est_tokens": before_tokens,
             "after_est_tokens": after_tokens,
             "elided_messages": len(plan.elide),

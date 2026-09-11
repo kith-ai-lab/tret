@@ -9,6 +9,7 @@ an order of magnitude out.
 """
 from __future__ import annotations
 
+import dataclasses
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -182,7 +183,11 @@ async def test_the_transcript_stays_replayable_across_the_switch(world):
 
 async def test_a_run_that_never_switches_records_no_timeline(world):
     # The cold path. An ordinary single-model run must not acquire a different
-    # accounting record just because this feature exists.
+    # accounting record just because this feature exists. The replay script
+    # never scripts a cache write or a cache hit (see `ScriptedTurn`'s own
+    # defaults), so `_book_usage`'s `cache_is_live` check never sees evidence
+    # caching is active either — the cache ledger stays unclassified, the same
+    # cold path as the switch machinery, for a different reason.
     result, _first, _target = await _run_with_switch(world, switch_at=999)
 
     assert result.run.model_timeline is None
@@ -439,10 +444,12 @@ async def _run_forcing_intervention(world, model_ids: list[str], *, build_interv
         max_iterations=16,
     )
     provider = ReplayProvider(
-        [
-            ScriptedTurn(text="Reading.", tool_calls=[_read(documents[0])]),
-            *divergence_happy_script(),
-        ]
+        _with_cache_writes(
+            [
+                ScriptedTurn(text="Reading.", tool_calls=[_read(documents[0])]),
+                *divergence_happy_script(),
+            ]
+        )
     )
     calls = {"n": 0}
 
@@ -753,3 +760,350 @@ async def test_zero_switches_without_effort_support_never_pays_for_candidates(wo
     assert result.run.status == "completed"
     spy.assert_not_called()
     assert result.events_of("switch_refused") == []
+
+
+# ── compact before switching, and the cache ledger ──────────────────────────
+# A switch already voids the prompt cache and re-sends the whole transcript at
+# full input price (see engine/supervisor.py). Two more things ought to be
+# true of that moment, and both are engine-level, not planning-level —
+# `tests/test_compaction.py` already covers the elision rules themselves:
+#
+# * the new model's first turn should see a *compacted* wire, not the raw
+#   transcript, since the transcript is being re-sent uncompacted at full
+#   price anyway;
+# * a cache miss the engine itself caused (a switch, a forced compaction pass,
+#   a top-level effort raise on Anthropic) should read as an *expected*
+#   rebuild rather than an unexplained one.
+BULK_REPORT = "The site assessment narrative continues. " * 900
+
+
+def _with_cache_writes(turns: list[ScriptedTurn], *, write_tokens: int = 1000) -> list[ScriptedTurn]:
+    """Give every turn a nonzero cache write.
+
+    `_book_usage`'s `cache_is_live` check (engine/harness.py) only classifies a
+    turn once caching has shown itself active on the segment — a write, or an
+    earlier turn's nonzero read. A scenario built to exercise the cache ledger
+    has to script that itself: left at `ScriptedTurn`'s own default of 0/0, a
+    replay run reports the exact shape of "nothing to classify" (a prompt
+    below the provider's cacheable minimum), not "caching is live but every
+    read misses" — the shape these scenarios actually mean to test. Every turn
+    getting one, not just the first, models a provider whose prefix keeps
+    changing enough that it never gets to read back what it just wrote (write
+    > 0, read == 0 every time) — a genuine, explainable-or-not rebuild each
+    turn, per `cache_is_live`'s own docstring.
+    """
+    return [dataclasses.replace(t, cache_write_tokens=write_tokens) for t in turns]
+
+
+async def _run_with_switch_after_reads(world, *, switch_at: int, n_documents: int = 4):
+    """`_run_with_switch`, but preceded by several bulk document reads so that,
+    by the time the switch lands, there is old — and therefore eligible —
+    material for the forced compaction pass to actually elide. `_run_with_switch`
+    itself has nothing that old: its one `read_document` call never ages past
+    `KEEP_RECENT_ITERATIONS`, so a forced pass on it would only ever be a
+    legitimate no-op, not a test of the elision actually happening.
+    """
+    catalog = ModelCatalog()
+    models = [m for m in catalog.all(curated_only=True) if m.supports_tools][:2]
+    documents = [
+        await world.create_document(filename=f"report-{i}.txt", text=f"REPORT {i}\n{BULK_REPORT}")
+        for i in range(n_documents)
+    ]
+    harness_id = await world.create_harness(
+        name="Switching Analyst (compact before switch)",
+        model_policy={"mode": "auto", "allowed": [m.id for m in models]},
+        tool_names=[
+            "read_document",
+            "search_documents",
+            "lookup_dataset",
+            "record_verdict",
+            "file_data_request",
+        ],
+        max_iterations=16,
+    )
+    provider = ReplayProvider(
+        _with_cache_writes(
+            [
+                *[
+                    ScriptedTurn(text=f"Reading report {i}.", tool_calls=[_read(d)])
+                    for i, d in enumerate(documents)
+                ],
+                *divergence_happy_script(),
+            ]
+        )
+    )
+    chosen: dict = {}
+    calls = {"n": 0}
+
+    def fake_assess(state, *, candidates, priors=None):
+        calls["n"] += 1
+        other = next((m for m in candidates if m.id != state.model.id), None)
+        if calls["n"] == switch_at and other is not None:
+            chosen["from"] = state.model
+            chosen["to"] = other
+            return Intervention(
+                kind=KIND_SWITCH,
+                target=other,
+                reason="capability_stall",
+                detail="forced by the test",
+                evidence={"from": state.model.id, "to": other.id},
+            )
+        return Intervention()
+
+    with patch("tret.engine.harness.assess", side_effect=fake_assess):
+        result = await world.run(
+            provider=provider,
+            harness_id=harness_id,
+            task_type="divergence_assessment",
+            task_input={"site_id": SITE, "peril": PERIL},
+            document_ids=documents,
+        )
+    return result, chosen.get("from"), chosen.get("to"), provider
+
+
+async def test_a_switch_forces_compaction_on_the_new_segments_first_turn(world):
+    # 4 bulk reads, then the switch decided after the first divergence-script
+    # assess call — so the new segment's first turn (iteration 6) forces a
+    # pass with `KEEP_RECENT_ITERATIONS == 3` cutting off at iteration 3: the
+    # 4th read (iteration 4) is recent enough to stay protected, so only 3 of
+    # the 4 reads are actually eligible. What this test pins down is trigger
+    # and wire content, not the exact count — `test_engine_loop.py`'s own
+    # regression test is where the recency boundary itself is asserted.
+    result, _first, _target, provider = await _run_with_switch_after_reads(world, switch_at=5)
+
+    assert result.run.error is None, result.run.error
+    timeline = result.run.model_timeline
+    assert timeline is not None and len(timeline) == 2
+    switch_iteration = timeline[1]["from_iteration"]
+
+    records = [c for c in (result.run.compactions or []) if c.get("trigger") == "model_switch"]
+    assert len(records) == 1
+    assert records[0]["iteration"] == switch_iteration
+    assert records[0]["kind"] == "elision"
+    assert records[0]["elided_tools"] == ["read_document"]
+    # Nothing about this run ever got close to a real window, so the only
+    # compaction that happened at all is the forced one.
+    assert len(result.run.compactions) == 1
+
+    # The new model's first actual call carried the compacted wire, not the
+    # raw transcript: at least one bulk report is now a marker rather than its
+    # full text.
+    first_new_call = provider.calls[switch_iteration - 1]  # provider.calls is 0-indexed
+    elided_tool_msgs = [
+        m for m in first_new_call.messages
+        if m.role == "tool" and "elided by tret" in (m.content or "")
+    ]
+    assert elided_tool_msgs
+    assert all("read_document" in (m.content or "") for m in elided_tool_msgs)
+
+    # The persisted transcript itself is never touched by any of this — every
+    # report's full text is still there, markers and all.
+    transcript_tool_msgs = [m for m in result.run.messages if m["role"] == "tool"]
+    assert sum(BULK_REPORT[:200] in (m.get("content") or "") for m in transcript_tool_msgs) == 4
+    assert not any("elided by tret" in (m.get("content") or "") for m in transcript_tool_msgs)
+
+
+async def test_a_switch_with_nothing_eligible_records_no_op_honestly(world):
+    # Only the protected `lookup_dataset` lane runs before the switch — no
+    # `read_document`/`search_documents` at all — so the forced pass has
+    # nothing it may elide and must say so rather than claim it elided
+    # something. Two more things must be true of that no-op, and both are the
+    # point of this test: the note must say *why* honestly (this run is
+    # nowhere near its context window — a forced switch pass runs regardless,
+    # so "over the context budget" would be false on this run's own numbers),
+    # and the no-op must not poison `compaction_exhausted` — the supervisor's
+    # cue that a bigger window is the only remedy — for a run that was never
+    # over budget to begin with.
+    catalog = ModelCatalog()
+    models = [m for m in catalog.all(curated_only=True) if m.supports_tools][:2]
+    harness_id = await world.create_harness(
+        name="Switching Analyst (nothing eligible)",
+        model_policy={"mode": "auto", "allowed": [m.id for m in models]},
+        tool_names=["lookup_dataset", "record_verdict", "file_data_request"],
+        max_iterations=16,
+    )
+    provider = ReplayProvider(divergence_happy_script())
+    calls = {"n": 0}
+    states = []
+
+    def fake_assess(state, *, candidates, priors=None):
+        calls["n"] += 1
+        states.append(state)
+        other = next((m for m in candidates if m.id != state.model.id), None)
+        if calls["n"] == 1 and other is not None:
+            return Intervention(
+                kind=KIND_SWITCH,
+                target=other,
+                reason="capability_stall",
+                detail="forced by the test",
+                evidence={"from": state.model.id, "to": other.id},
+            )
+        return Intervention()
+
+    with patch("tret.engine.harness.assess", side_effect=fake_assess):
+        result = await world.run(
+            provider=provider,
+            harness_id=harness_id,
+            task_type="divergence_assessment",
+            task_input={"site_id": SITE, "peril": PERIL},
+        )
+
+    assert result.run.error is None, result.run.error
+    records = [c for c in (result.run.compactions or []) if c.get("trigger") == "model_switch"]
+    assert len(records) == 1
+    assert records[0]["kind"] == "no_op"
+    assert records[0]["note"] == (
+        "model switch: nothing eligible to elide — every result still on the "
+        "transcript is protected, recent, or too short to be worth a marker"
+    )
+    assert "context budget" not in records[0]["note"]
+
+    # `states[0]` is the call that decided the switch; `states[1]` is the very
+    # next one, on the new model, right after the forced pass above ran. It
+    # must not have been told the run is exhausted by a no-op that was never
+    # about the budget in the first place.
+    assert len(states) >= 2
+    assert states[1].compaction_exhausted is False
+
+
+async def test_a_switched_segments_first_turn_is_an_expected_cache_rebuild(world):
+    # Every scripted turn defaults to `cache_read_tokens=0` (ReplayProvider
+    # never scripts a hit), so on two Anthropic-family models this is a strong
+    # signal either way: the new segment's very first turn is explained by the
+    # switch itself (and, per the test above, by the forced compaction pass
+    # too), and every turn on it after that has no such explanation.
+    result, first, target, _provider = await _run_with_switch_after_reads(world, switch_at=5)
+
+    timeline = result.run.model_timeline
+    assert timeline is not None and len(timeline) == 2
+    old_segment, new_segment = timeline
+    assert old_segment["model"] == first.id
+    assert new_segment["model"] == target.id
+
+    # Old segment: iteration 1 is its own first turn (expected); iterations
+    # 2-5 have no explanation at all.
+    assert old_segment["cache_rebuilds_expected"] == 1
+    assert old_segment["cache_misses_unexpected"] == 4
+
+    # New segment: iteration 6 is expected (new segment AND forced compaction);
+    # iterations 7-9 (the rest of the happy-path script) have no explanation.
+    assert new_segment["cache_rebuilds_expected"] == 1
+    assert new_segment["cache_misses_unexpected"] == 3
+
+    # And the run-level roll-up the run already writes agrees with the sum of
+    # the segments' own counters.
+    ledger = result.run.routing["cache_ledger"]
+    assert ledger["cache_rebuilds_expected"] == 2
+    assert ledger["cache_misses_unexpected"] == 7
+
+
+async def test_an_effort_raise_on_anthropic_marks_the_next_turn_expected(world):
+    # `_EFFORT_MODEL` is Anthropic — a top-level effort change voids its cache
+    # (engine/supervisor.py's `KIND_EFFORT` docstring) — so the turn right
+    # after the raise should read as an explained rebuild, and every other
+    # non-first turn on the segment (no raise, no switch, no compaction)
+    # should not.
+    result, provider = await _run_forcing_intervention(
+        world,
+        [_EFFORT_MODEL],
+        build_intervention=lambda state, candidates: Intervention(
+            kind=KIND_EFFORT,
+            target="high",
+            reason="quality_signal",
+            detail="forced by the test",
+            evidence={"from_effort": state.effort, "to_effort": "high"},
+        ),
+    )
+
+    assert result.run.error is None, result.run.error
+    timeline = result.run.model_timeline
+    assert timeline is not None and len(timeline) == 1
+    segment = timeline[0]
+    # Iteration 1 (the segment's own first turn) and iteration 3 (the turn
+    # right after the raise) are both expected; iterations 2, 4, 5, 6 are not.
+    assert segment["cache_rebuilds_expected"] == 2
+    assert segment["cache_misses_unexpected"] == 4
+    assert result.run.routing["cache_ledger"] == {
+        "cache_rebuilds_expected": 2,
+        "cache_misses_unexpected": 4,
+    }
+
+
+async def test_local_and_kimi_segments_are_never_classified(world):
+    # Neither provider reports a cache figure at all (see
+    # `NO_CACHE_STATS_PROVIDERS`), so a run entirely on one must come back with
+    # a clean ledger — not a run full of "misses" nothing ever actually
+    # measured.
+    harness_id = await world.create_harness(
+        name="Kimi Analyst",
+        model="kimi/kimi-k2",
+        tool_names=[
+            "read_document",
+            "search_documents",
+            "lookup_dataset",
+            "record_verdict",
+            "file_data_request",
+        ],
+        max_iterations=16,
+    )
+    provider = ReplayProvider(divergence_happy_script())
+
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+
+    assert result.run.error is None, result.run.error
+    assert result.run.model_used == "kimi/kimi-k2"
+    assert "cache_ledger" not in (result.run.routing or {})
+    timeline = result.run.model_timeline
+    if timeline is not None:
+        assert all(
+            seg["cache_rebuilds_expected"] == 0 and seg["cache_misses_unexpected"] == 0
+            for seg in timeline
+        )
+
+
+async def test_a_cache_hit_then_a_later_miss_is_one_unexpected_miss(world):
+    """`cache_is_live`'s whole point, the positive case: a miss only counts
+    once caching has been *shown* to work on this segment, not merely assumed.
+
+    Turn 1 writes with nothing yet to read (its own segment-first rebuild —
+    expected, and not what this test is about). Turn 2 gets a genuine hit
+    (`cache_read_tokens > 0`), proving the cache is live. Turn 3 misses with
+    none of the engine's own explanations (not the segment's first turn, no
+    compaction, no effort raise) — only now, with liveness already
+    established by turn 2's hit, does that miss count as unexpected. Turn 4
+    (`record_verdict`) and turn 5 (the closing text) both read back to 0/0
+    with no live evidence carried forward from turn 3's own miss, so neither
+    adds anything further to the ledger.
+    """
+    script = divergence_happy_script()
+    script[0] = dataclasses.replace(script[0], cache_write_tokens=1000)
+    script[1] = dataclasses.replace(script[1], cache_read_tokens=500)
+    provider = ReplayProvider(script)
+    harness_id = await world.create_harness(
+        name="Cache Hit Then Miss",
+        model=_EFFORT_MODEL,
+        tool_names=["lookup_dataset", "record_verdict", "file_data_request"],
+        max_iterations=16,
+    )
+
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+
+    assert result.run.error is None, result.run.error
+    timeline = result.run.model_timeline
+    assert timeline is not None and len(timeline) == 1
+    assert timeline[0]["cache_rebuilds_expected"] == 1
+    assert timeline[0]["cache_misses_unexpected"] == 1
+    assert result.run.routing["cache_ledger"] == {
+        "cache_rebuilds_expected": 1,
+        "cache_misses_unexpected": 1,
+    }

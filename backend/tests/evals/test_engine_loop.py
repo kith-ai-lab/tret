@@ -914,3 +914,94 @@ async def test_harness_withholds_provider_ignore_once_the_run_has_switched_model
     after_switch = provider.calls[-1]
     assert before_switch.provider_ignore == ["bad-endpoint"]
     assert after_switch.provider_ignore is None
+
+
+# ── (f) a forced switch pass respects KEEP_RECENT_ITERATIONS ──────────────────
+# Regression for a bug an Opus review caught: the tool-result `Msg` the engine
+# builds after every tool call carried `meta={"error": is_error}` with no
+# `iteration` — so `plan_compaction`'s `KEEP_RECENT_ITERATIONS` protection
+# (engine/compaction.py) read every tool result as iteration 0 and the
+# "recent" cutoff (always > 0 once a run is old enough to compact at all)
+# never matched anything. In practice this meant the forced pass on a model
+# switch's first turn (`compact_before_next_turn`) could elide a document read
+# from just one iteration earlier and hand the new model nothing but a marker
+# for material it still needed. Fixed by stamping the iteration onto that meta
+# dict; this is the engine-level proof the recency boundary now actually
+# holds, as distinct from `tests/test_compaction.py`'s pure-function coverage
+# of `plan_compaction` itself (which was never wrong — it always read whatever
+# iteration a message's `meta` claimed, it just never got a real one).
+_RECENCY_BULK = "Detail the engine must not elide too eagerly. " * 20  # > MIN_ELIDABLE_CHARS
+
+
+async def test_a_forced_switch_pass_protects_the_immediately_preceding_iteration(world):
+    """Five `read_document` calls, one per iteration, then a switch forced
+    right after the fifth. `KEEP_RECENT_ITERATIONS == 3`, so the forced pass on
+    the new segment's first turn (iteration 6) cuts off at iteration 3: the
+    iteration-5 read is recent enough to stay protected, while the iteration-1
+    read is old enough to be elided.
+    """
+    catalog = ModelCatalog()
+    models = [m for m in catalog.all(curated_only=True) if m.supports_tools][:2]
+    documents = [
+        await world.create_document(filename=f"doc-{i}.txt", text=f"DOC {i}\n{_RECENCY_BULK}")
+        for i in range(5)
+    ]
+    harness_id = await world.create_harness(
+        name="Compaction Recency Guard",
+        model_policy={"mode": "auto", "allowed": [m.id for m in models]},
+        tool_names=["read_document"],
+        max_iterations=16,
+    )
+    provider = ReplayProvider(
+        [
+            ScriptedTurn(
+                text=f"Reading document {i}.",
+                tool_calls=[ScriptedCall("read_document", {"document_id": str(documents[i])})],
+            )
+            for i in range(5)
+        ]
+        + [ScriptedTurn(text="Nothing further to read.")]
+    )
+    calls = {"n": 0}
+
+    def fake_assess(state, *, candidates, priors=None):
+        calls["n"] += 1
+        other = next((m for m in candidates if m.id != state.model.id), None)
+        if calls["n"] == 5 and other is not None:
+            return Intervention(
+                kind=KIND_SWITCH,
+                target=other,
+                reason="capability_stall",
+                detail="forced by the test",
+                evidence={"from": state.model.id, "to": other.id},
+            )
+        return Intervention()
+
+    with patch("tret.engine.harness.assess", side_effect=fake_assess):
+        result = await world.run(
+            provider=provider,
+            harness_id=harness_id,
+            task_type="freeform",
+            task_input={"message": "Read every document, in order."},
+            document_ids=documents,
+        )
+
+    assert result.run.status == "completed", result.run.error
+    timeline = result.run.model_timeline
+    assert timeline is not None and len(timeline) == 2
+    switch_iteration = timeline[1]["from_iteration"]
+
+    records = [c for c in (result.run.compactions or []) if c.get("trigger") == "model_switch"]
+    assert len(records) == 1
+    assert records[0]["kind"] == "elision"
+
+    # `provider.calls` is 0-indexed; the new segment's first call carried the
+    # forced pass's compacted wire.
+    first_new_call = provider.calls[switch_iteration - 1]
+    by_call_id = {
+        m.tool_call_id: m for m in first_new_call.messages if m.role == "tool"
+    }
+    # `call-{iteration}-1`: ReplayProvider's own id scheme, one tool call per
+    # scripted turn (see `ReplayProvider.stream`).
+    assert "elided by tret" not in (by_call_id["call-5-1"].content or "")
+    assert "elided by tret" in (by_call_id["call-1-1"].content or "")

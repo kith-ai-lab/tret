@@ -529,7 +529,12 @@ async def _run_agentic_loop(
                     raise RuntimeError("tool spec offered without a tool context")
                 result_text, is_error = await _execute_tool(tool_ctx, spec, tc.arguments)
             messages.append(
-                Msg(role="tool", content=result_text, tool_call_id=tc.id, meta={"error": is_error})
+                Msg(
+                    role="tool",
+                    content=result_text,
+                    tool_call_id=tc.id,
+                    meta={"error": is_error, "iteration": iteration},
+                )
             )
     else:
         # The for/else fires only when the loop was never `break`-ed out of —

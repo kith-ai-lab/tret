@@ -67,6 +67,12 @@ class ScriptedTurn:
     input_tokens: int = 1200
     output_tokens: int = 240
     cache_read_tokens: int = 0
+    # 0 (the default) means "this turn wrote nothing to the cache" — true of
+    # most scripted turns, which say nothing about caching either way. Set it
+    # to script a turn as a genuine cache write (`_book_usage`'s `cache_is_live`
+    # check in engine/harness.py reads a nonzero figure here as proof caching
+    # is being attempted this turn, the same as a live provider's own report).
+    cache_write_tokens: int = 0
     stop_reason: str | None = None  # defaults from whether tools were called
     provider_error: str | None = None
     # None (the default) means "this turn's provider reported nothing", the same
@@ -190,6 +196,7 @@ class ReplayProvider(Provider):
                 input_tokens=turn.input_tokens,
                 output_tokens=turn.output_tokens,
                 cache_read_tokens=turn.cache_read_tokens,
+                cache_write_tokens=turn.cache_write_tokens,
                 reported_cost_usd=turn.reported_cost_usd,
             ),
             stop_reason=turn.stop_reason or ("tool_use" if calls else "end_turn"),

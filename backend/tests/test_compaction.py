@@ -11,6 +11,8 @@ defend one of them:
 """
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from tret.engine.compaction import (
@@ -29,6 +31,7 @@ from tret.engine.compaction import (
     trim_history,
     wire_view,
 )
+from tret.engine.harness import HarnessEngine
 from tret.engine.tools import get_builtin_tools
 from tret.providers.base import JsonCompletion, Msg, ProviderError, ToolCall, ToolSpec, Usage
 from tret.providers.catalog import ModelCatalog
@@ -355,3 +358,89 @@ def test_the_summarizer_is_shown_only_what_was_elided():
     source = elided_source_text(messages, plan)
     assert BULK in source
     assert len(plan.elide) == 1  # the dataset result was protected, so not sent
+
+
+# ── forcing a pass ahead of a model switch ──────────────────────────────────
+# `HarnessEngine._compact` (engine/harness.py) is what the engine calls for
+# both the ordinary over-budget path and the pass a supervisor switch forces
+# on the new model's first turn even when that turn is not, on its own, over
+# budget (`compact_before_next_turn`). The elision rules are identical either
+# way — the same `plan_compaction` tested above — so what these tests defend
+# is that a forced pass elides exactly what a budget-triggered one would,
+# never touches a protected result, is honest when there is nothing left, and
+# says which of the two caused it via the `trigger` it records.
+def _iteration_after(messages: list[Msg]) -> int:
+    last = max((m.meta or {}).get("iteration", 0) for m in messages)
+    return last + KEEP_RECENT_ITERATIONS + 1
+
+
+async def _forced_pass(messages: list[Msg], state: CompactionState, *, before_tokens: int = 1) -> dict:
+    """Call `_compact` the way a forced switch pass does: `trigger="model_switch"`,
+    on an engine whose router is stubbed to skip the summarizer entirely — the
+    summary is an optional improvement on top of the elision (see `_compact`'s
+    own docstring), never a precondition for it, so a unit test of the elision
+    itself has no need to reach for a real provider.
+    """
+    engine = HarnessEngine()
+    with patch.object(engine.router, "_resolve_router_model", return_value=None):
+        return await engine._compact(
+            run=None,
+            messages=messages,
+            state=state,
+            iteration=_iteration_after(messages),
+            before_tokens=before_tokens,
+            system="sys",
+            tool_specs=[],
+            terminal_tool=None,
+            max_tier="premium",
+            overhead=[],
+            emissions=None,
+            trigger="model_switch",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_forced_pass_elides_eligible_results_even_under_budget():
+    messages = _transcript("read_document", "search_documents")
+    state = CompactionState()
+    record = await _forced_pass(messages, state, before_tokens=1)
+
+    assert record["kind"] == "elision"
+    assert record["trigger"] == "model_switch"
+    assert sorted(record["elided_tools"]) == ["read_document", "search_documents"]
+    wire = wire_view(messages, state)
+    assert sum("elided by tret" in (m.content or "") for m in wire) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_forced_pass_never_elides_a_protected_result():
+    messages = _transcript("lookup_dataset", "read_document")
+    state = CompactionState()
+    record = await _forced_pass(messages, state)
+
+    assert record["elided_tools"] == ["read_document"]
+    wire = wire_view(messages, state)
+    protected = next(m for m in wire if (m.tool_call_id or "").endswith("lookup_dataset"))
+    assert protected.content == BULK  # untouched, not replaced by a marker
+
+
+@pytest.mark.asyncio
+async def test_a_forced_pass_with_nothing_left_records_a_no_op_honestly():
+    # Only protected content — nothing eligible, forced or not.
+    messages = _transcript("lookup_dataset")
+    state = CompactionState()
+    record = await _forced_pass(messages, state, before_tokens=42)
+
+    assert record["kind"] == "no_op"
+    assert record["trigger"] == "model_switch"
+    assert record["before_est_tokens"] == 42
+    assert record["after_est_tokens"] == 42
+    assert not state.active  # nothing was ever elided
+    # A forced pass is not the budget path: this run may be nowhere near its
+    # window (a `model_switch` pass runs regardless), so the note must not
+    # borrow the budget path's "over the context budget" wording.
+    assert record["note"] == (
+        "model switch: nothing eligible to elide — every result still on the "
+        "transcript is protected, recent, or too short to be worth a marker"
+    )
+    assert "context budget" not in record["note"]

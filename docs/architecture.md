@@ -158,7 +158,21 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    model's own spend and its own energy accounting; `runs.energy_accounting`
    becomes a roll-up whose per-model factors are null wherever the segments
    disagreed, and `model_used` means *the model that produced the final
-   answer*.
+   answer*. Each segment also keeps a small cache ledger, but only once
+   caching has shown itself *live* on that segment — a turn that wrote to the
+   cache, or an earlier turn that read a nonzero figure back. From there, a
+   turn whose cache read comes back empty for a reason the engine itself
+   caused — the segment's own first turn, the forced compaction pass above,
+   or a top-level effort raise on Anthropic (which still voids its prompt
+   cache) — counts as an *expected* rebuild, while an empty read with none of
+   those explanations counts as an *unexpected* miss. Nothing is classified
+   before caching has shown itself live: a segment whose every prompt so far
+   has been below the provider's cacheable minimum reads 0/0 and stays
+   unclassified, the same as a provider that reports no cache figure at all —
+   a local deployment, or Kimi's own native API. An OpenRouter-hosted Kimi
+   endpoint is *not* excluded by name; it is excluded (when it is) by the same
+   live-activity test as any other OpenRouter upstream that never reports
+   `cached_tokens`, and would be classified the moment it did.
    `model_policy.adaptive.escalation` (default **`on_quality`**) adds an earlier,
    cheaper trigger ahead of that stall: 2 consecutive terminal-tool validation
    failures, or 1 repeated-call breaker trip — both short of the stall
@@ -425,7 +439,6 @@ cannot grow a column that no migration adds.
 ## Known v1 constraints
 
 - Single backend worker (in-process event bus) — fine for a team install.
-- `search_documents` is substring search; pgvector RAG is the v2 path.
 - PDF export uses WeasyPrint; its native libs (pango/cairo) ship in the
   Docker image. A bare local venv without them returns 501 with instructions.
 - Pack-authored **tools** (`tools.py`) are deliberately not loaded — arbitrary

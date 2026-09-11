@@ -54,6 +54,10 @@ export function ModelTimeline({ segments }: { segments: ModelSegment[] }) {
               {s.energy_accounting?.energy_class ?? '—'}
               {s.effort ? ` · effort ${s.effort}` : ''}
               {s.served_by ? ` · via ${s.served_by}` : ''}
+              {s.cache_rebuilds_expected || s.cache_misses_unexpected
+                ? ` · cache: ${s.cache_rebuilds_expected ?? 0} expected rebuilds, ` +
+                  `${s.cache_misses_unexpected ?? 0} unexpected misses`
+                : ''}
             </div>
           </div>
         ))}

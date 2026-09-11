@@ -733,6 +733,21 @@ export interface ModelSegment {
    *  AnthropicProvider, or null — Kimi and other OpenAI-compatible servers
    *  report nothing, and so does a segment from before this field existed. */
   served_by?: string | null
+  /** How many of this segment's turns came back with no cache read for a
+   *  reason the engine itself caused (the segment's first turn, a compaction
+   *  pass that changed the wire, or a top-level effort raise on Anthropic)
+   *  versus one with no such explanation. Both are real, paid-for rebuilds —
+   *  the distinction is only whether tret can account for why the prefix
+   *  changed. Counted only once caching has shown itself live on this segment
+   *  (a write, or an earlier read back above 0) — so always 0/0 for a segment
+   *  that never shows that evidence, whether because its provider reports no
+   *  cache figure at all (a local deployment, or Kimi's own native API — an
+   *  OpenRouter-hosted Kimi endpoint is not excluded by name, only by the
+   *  same live-activity test any OpenRouter upstream is held to), because
+   *  every prompt so far has been below its cacheable minimum, or because the
+   *  segment predates this ledger. */
+  cache_rebuilds_expected?: number
+  cache_misses_unexpected?: number
   energy_wh: number
   energy_accounting: EnergyAccounting
 }
