@@ -210,6 +210,17 @@ services:
       # its own — a self-hosted, non-multi-tenant deployment still falls
       # back to requiring an invitation in that case.
       TRET_OIDC_ALLOWED_EMAIL_DOMAINS: ${TRET_OIDC_ALLOWED_EMAIL_DOMAINS:-}
+      # A second, opt-in way into the API: an OIDC access token as
+      # `Authorization: Bearer <jwt>` (tret/api/oidc_bearer.py). Empty (the
+      # default) is the entire switch — bearer auth is off.
+      TRET_OIDC_API_AUDIENCE: ${TRET_OIDC_API_AUDIENCE:-}
+      TRET_OIDC_ROLES_CLAIM: ${TRET_OIDC_ROLES_CLAIM:-}
+      TRET_OIDC_ADMIN_ROLE: ${TRET_OIDC_ADMIN_ROLE:-}
+      # Which clients may mint a bearer token this API accepts, comma-separated
+      # client ids (checked against `azp`, falling back to `client_id`). Empty
+      # (the default) means trusting every client your IdP tenant authorized
+      # for the API audience above, not just the one you intend.
+      TRET_OIDC_BEARER_CLIENT_IDS: ${TRET_OIDC_BEARER_CLIENT_IDS:-}
       # This deployment's own public base URL — used only to build an invite
       # link that gets emailed out, never to reach anything.
       TRET_APP_URL: ${TRET_APP_URL:-http://localhost:8000}

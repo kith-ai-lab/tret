@@ -69,10 +69,21 @@ async def current_workspace(
     workspace since the cookie was minted, or the cookie is simply stale) is
     not fatal: it falls through to the sole-membership path exactly as if no
     `wid` were present, rather than 401ing a session that is otherwise valid.
+
+    A bearer caller (api/auth.py::current_user's other door) carries no
+    session cookie at all, so `payload` is always `None` for one and it would
+    409 on this exact "more than one workspace, nothing selected" branch on
+    every request. `X-Tret-Workspace` is the bearer equivalent of `wid`: read
+    only when the session payload didn't already supply one, and validated
+    against this user's own memberships exactly as `wid` is below — it lets a
+    caller pick among workspaces they already belong to, never grants
+    membership in one they don't. A malformed or non-member value falls
+    through to the same sole-membership/409 path a bad `wid` already does,
+    not a 500.
     """
     memberships = await user_memberships(db, user.id)
     payload = _session_payload(request)
-    wid = payload.get("wid") if payload else None
+    wid = (payload.get("wid") if payload else None) or request.headers.get("X-Tret-Workspace")
     if wid:
         try:
             workspace_id = uuid.UUID(wid)

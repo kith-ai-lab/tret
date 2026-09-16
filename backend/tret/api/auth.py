@@ -11,9 +11,22 @@ moment it no longer matches. Two independent things can move that fingerprint:
 * the password hash — changed by a self-service change (`POST /api/auth/password`)
   or an admin rotation (`POST /api/auth/users/{id}/password`);
 * `session_epoch` — bumped explicitly by `POST /api/auth/users/{id}/revoke-sessions`,
-  for ending every session an account holds *without* touching its password
-  (and the only lever an OIDC-only account, which has no password hash at all,
-  will ever have).
+  for ending every *cookie* session an account holds *without* touching its
+  password (and the only lever an OIDC-only account, which has no password
+  hash at all, will ever have).
+
+**This story is cookie-only.** `session_epoch` is an opaque counter (see
+`db/models.py`'s `User.session_epoch`) with no time semantics — nothing on a
+bearer access token can be compared against it, unlike, say, an `iat` against
+a stored timestamp. A bearer caller (`api/oidc_bearer.py::authenticate_bearer`)
+is therefore not covered by either lever above: it checks only `sub` and
+`disabled`, so an access token already issued keeps working, unaffected by a
+password change *or* a revoke-sessions call, until its own `exp`. That is a
+real gap between what this module's revocation story promises and what it
+delivers for that door — see `revoke_sessions`'s docstring — and the fix, if
+tret ever needs one, is short-lived access tokens plus IdP-side revocation
+(e.g. Auth0's client-grant/refresh-token revocation), not a mapping invented
+here between an opaque counter and a token that carries no equivalent field.
 
 Deactivation (`POST /api/auth/users/{id}/deactivate`) is a separate signal,
 `User.disabled`, checked before the fingerprint at all: the account's password
@@ -47,6 +60,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tret.api.oidc_bearer import authenticate_bearer, bearer_auth_enabled
 from tret.config import Settings, get_settings
 from tret.db.engine import get_db
 from tret.db.models import User, Workspace, WorkspaceMember
@@ -196,6 +210,16 @@ def _session_payload(request: Request) -> dict | None:
 async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
+        # No session cookie: the only other door in is a bearer access token,
+        # and only once an operator has opted into it (`TRET_OIDC_API_
+        # AUDIENCE` — see oidc_bearer.py's module docstring). Both gates
+        # (enabled, header actually present) must hold before this ever does
+        # anything network- or database-visible, so a deployment that hasn't
+        # set the setting is byte-for-byte unaffected by its existence.
+        settings = get_settings()
+        scheme, _, credential = request.headers.get("Authorization", "").partition(" ")
+        if bearer_auth_enabled(settings) and scheme.lower() == "bearer" and credential:
+            return await authenticate_bearer(request, credential, db, settings)
         raise HTTPException(401, "Not authenticated")
     # Cookies minted before credential-bound sessions carried a bare user id
     # string, and any signature failure, land here as one 401: honouring the
@@ -218,12 +242,26 @@ async def current_user(request: Request, db: AsyncSession = Depends(get_db)) -> 
     return user
 
 
-async def require_admin(user: User = Depends(current_user)) -> User:
+async def require_admin(request: Request, user: User = Depends(current_user)) -> User:
     """Instance-wide admin. Gates only /api/auth/users* (creating, listing and
     managing user accounts across the whole deployment) — anything scoped to
     one workspace's own data uses api/workspace.py's `require_workspace_admin`
-    instead, even for a user whose global role also happens to be admin."""
-    if user.role != "admin":
+    instead, even for a user whose global role also happens to be admin.
+
+    `request.state.oidc_admin` is the other way to satisfy this: a bearer
+    caller whose token roles claim contains `oidc_admin_role`
+    (oidc_bearer.py::authenticate_bearer). That flag is request-scoped only
+    — never written to `user.role` — so this check, not a database column,
+    is where that elevation actually takes effect.
+
+    This elevation is instance-scope only: `require_approver` below and
+    `api/workspace.py`'s `require_workspace_admin` deliberately do not
+    consult `request.state.oidc_admin` either, since an instance-admin role
+    claim says nothing about a workspace membership or an approver role, so
+    both intentionally keep requiring the real thing from a bearer caller —
+    fails closed on purpose, not an oversight to "fix" into consistency.
+    """
+    if user.role != "admin" and not getattr(request.state, "oidc_admin", False):
         raise HTTPException(403, "Admin role required")
     return user
 
@@ -664,12 +702,22 @@ async def revoke_sessions(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """End every session this account currently holds, without touching its
-    password or its `disabled` state. Bumps `session_epoch`, which
-    `credential_version` folds in — every outstanding cookie's fingerprint
-    stops matching immediately. The lever an OIDC-only account (no password
-    to rotate) will have for "sign me out everywhere", and the one to reach
-    for after an incident when the password itself is not suspected.
+    """End every *cookie* session this account currently holds, without
+    touching its password or its `disabled` state. Bumps `session_epoch`,
+    which `credential_version` folds in — every outstanding cookie's
+    fingerprint stops matching immediately. The lever an OIDC-only account
+    (no password to rotate) will have for "sign me out everywhere", and the
+    one to reach for after an incident when the password itself is not
+    suspected.
+
+    Does NOT revoke an OIDC bearer access token already issued for this
+    account (`api/oidc_bearer.py::authenticate_bearer`) — `session_epoch` is
+    an opaque counter with no time semantics to compare a token's `iat`
+    against, so a bearer caller has nothing here to check it against. Such a
+    token keeps working until its own `exp`. An incident responder relying
+    on this endpoint to cut a compromised account off entirely must also
+    revoke the token at the IdP (or wait out its lifetime) when bearer auth
+    is enabled — this endpoint alone is not sufficient in that case.
     """
     target = await db.get(User, user_id)
     if target is None:

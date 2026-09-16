@@ -261,6 +261,47 @@ class Settings(BaseSettings):
     # if this list changes later.
     oidc_allowed_email_domains: list[str] | None = None
 
+    # ── OIDC bearer tokens (api/oidc_bearer.py) ───────────────────────────────
+    # A second, opt-in way into the API alongside the `tret_session` cookie: an
+    # already-signed-in caller's OIDC access token, presented as `Authorization:
+    # Bearer <jwt>`, for a non-interactive client (e.g. an external admin
+    # console) acting on that human's behalf. This is the "API Identifier" an
+    # access token's `aud` must carry — an id_token's `aud` (checked against
+    # `oidc_client_id` in api/oidc.py) is a different audience and a different
+    # token, so this is deliberately its own setting rather than reusing that
+    # one. EMPTY (the default) IS THE ENTIRE SWITCH: bearer verification is
+    # skipped and any `Authorization` header is ignored, so every deployment
+    # that doesn't set this is completely unaffected — see
+    # `oidc_bearer.bearer_auth_enabled`.
+    oidc_api_audience: str = ""
+    # Name of the claim on a verified access token holding the caller's
+    # roles, e.g. a namespaced `https://example.com/roles` (Auth0 access
+    # tokens carry custom claims only under a namespaced URI). No vendor
+    # default — a generic setting for a generic feature. Its value is
+    # expected to be a list of strings; a single bare string is tolerated
+    # too, since that's how a token with exactly one role is commonly shaped.
+    oidc_roles_claim: str = ""
+    # When non-empty, a bearer caller whose `oidc_roles_claim` value contains
+    # this string is treated as an instance admin *for that request only* —
+    # see `require_admin` in api/auth.py and oidc_bearer.py's module
+    # docstring for why this never touches the database. Generic name, no
+    # vendor default, same as the claim setting above.
+    oidc_admin_role: str = ""
+    # Which clients may mint a bearer token this API accepts, comma-separated
+    # client ids. Checked against the token's `azp` claim (falling back to
+    # `client_id` when `azp` is absent — not every IdP emits it). The
+    # interactive login path (api/oidc.py) already pins an id_token's `azp`
+    # to `oidc_client_id`; a bearer access token has no equivalent unless this
+    # is set, so LEAVING THIS EMPTY MEANS TRUSTING EVERY CLIENT REGISTERED IN
+    # THE TENANT: any application authorized for `oidc_api_audience` above,
+    # not just the one tret expects, can mint a token this API will accept —
+    # and if its holder carries `oidc_admin_role`, that token is instance-
+    # admin. That is the decision an operator who leaves this blank is
+    # making. No default client id is assumed even when `oidc_client_id` is
+    # also set: the login client and the clients allowed to call the API on a
+    # user's behalf are not the same thing by default.
+    oidc_bearer_client_ids: str = ""
+
     @field_validator("oidc_allowed_email_domains", mode="before")
     @classmethod
     def _parse_oidc_allowed_email_domains(cls, value):

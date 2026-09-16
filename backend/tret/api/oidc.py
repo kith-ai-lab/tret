@@ -396,7 +396,6 @@ async def oidc_callback(
         raise HTTPException(401, "The identity provider did not return an id_token")
 
     jwks = await _jwks(metadata["jwks_uri"])
-    key_set = JsonWebKey.import_key_set(jwks)
     # Pinned to the issuer's own advertised algorithms when it advertises
     # any (see `_signing_algorithms`); otherwise the same fixed default set
     # authlib's shared `jwt` object already accepts. Passing `algorithms`
@@ -406,6 +405,13 @@ async def oidc_callback(
     allowed_algs = _signing_algorithms(metadata)
     token_verifier = jwt if allowed_algs is None else JsonWebToken(allowed_algs)
     try:
+        # `import_key_set` belongs inside this `try`, not before it: a
+        # `jwks_uri` returning something malformed makes authlib raise a bare
+        # `ValueError`/`KeyError` building the key set, before verification
+        # even starts, and that document is already cached for
+        # `_CACHE_TTL_SECONDS` by `_jwks` above — outside this guard that's an
+        # unhandled 500 on every login for up to an hour, not just this one.
+        key_set = JsonWebKey.import_key_set(jwks)
         claims = token_verifier.decode(
             id_token,
             key_set,
