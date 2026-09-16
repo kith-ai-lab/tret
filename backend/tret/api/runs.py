@@ -41,6 +41,10 @@ def _run_summary(run: Run) -> dict:
         "id": str(run.id),
         "project_id": str(run.project_id),
         "harness_id": str(run.harness_id),
+        # The chat turn (or delegation off one) that produced this run. Null
+        # for a run that never began as a chat turn (workbench, a scheduled
+        # task) — permanently, not a gap to be backfilled later.
+        "conversation_id": str(run.conversation_id) if run.conversation_id else None,
         "task_type": run.task_type,
         "status": run.status,
         "model_used": run.model_used,

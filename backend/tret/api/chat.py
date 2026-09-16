@@ -308,6 +308,7 @@ async def send_message(
         project_id=conv.project_id,
         harness_id=conv.harness_id,
         pack_id=pack.id if pack else None,
+        conversation_id=conv.id,
         task_type="chat",
         task_input=_run_task_input(
             text,

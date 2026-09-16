@@ -28,6 +28,7 @@ What is asserted, and why each one matters:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 
@@ -46,7 +47,10 @@ from tret.db.migrate import (
     plan_schema_upgrade,
     read_database_state,
 )
+from tret.api.chat import _assistant_message
 from tret.db.models import Base
+from tret.db.models import Run as RunRow
+from tret.providers.base import Msg, ToolCall
 
 ADMIN_URL = os.environ.get("TRET_TEST_POSTGRES_URL", "")
 
@@ -301,6 +305,374 @@ async def test_workspace_member_backfill_promotes_no_one_without_an_admin(engine
     async with engine.connect() as conn:
         roles = (await conn.execute(text("SELECT role FROM workspace_members"))).scalars().all()
     assert roles == ["analyst"]
+
+
+async def _insert_workspace_project_harness(conn, workspace_id, project_id, harness_id) -> None:
+    await conn.execute(
+        text(
+            "INSERT INTO workspaces (id, name, settings, created_at) "
+            f"VALUES ('{workspace_id}', 'W', '{{}}'::jsonb, now())"
+        )
+    )
+    await conn.execute(
+        text(
+            "INSERT INTO projects (id, workspace_id, name, created_at) "
+            f"VALUES ('{project_id}', '{workspace_id}', 'P', now())"
+        )
+    )
+    await conn.execute(
+        text(
+            "INSERT INTO harnesses (id, workspace_id, name, task_profile, model_policy, "
+            "tool_names, loop_config, is_archived, created_at, updated_at) "
+            f"VALUES ('{harness_id}', '{workspace_id}', 'H', 'chat', '{{}}'::jsonb, "
+            "'{}'::text[], '{}'::jsonb, false, now(), now())"
+        )
+    )
+
+
+async def _insert_run(conn, run_id, project_id, harness_id, *, messages="[]") -> None:
+    """Insert a run with the given `messages` — no `conversation_id` column:
+    these fixtures are built against schema `5540e56092f1`, the revision just
+    before this migration adds that column, so a run can only be attributed
+    by the migration itself (via `conversations.messages`, for pass 1) rather
+    than pre-seeded with one.
+    """
+    await conn.execute(
+        text(
+            "INSERT INTO runs (id, project_id, harness_id, task_type, task_input, "
+            "document_ids, status, messages, input_tokens, output_tokens, cost_usd, "
+            "iterations, created_at) "
+            f"VALUES ('{run_id}', '{project_id}', '{harness_id}', 'chat', '{{}}'::jsonb, "
+            f"'{{}}'::uuid[], 'completed', '{messages}'::jsonb, 0, 0, 0, 0, now())"
+        )
+    )
+
+
+def _tool_result_message(child_run_id: str, *, tool_call_id: str = "tc1") -> dict:
+    """The exact JSON `run_harness_task` (engine/tools.py) returns as its tool
+    result, wrapped the way `engine/harness.py` actually persists it — a
+    `{"role": "tool", ...}` entry built from the real `Msg` dataclass
+    (providers/base.py), not a hand-typed dict — so this fixture is the real
+    persisted shape, not a guess at it."""
+    result = {
+        "child_run_id": child_run_id,
+        "status": "completed",
+        "model_used": "test-model",
+        "cost_usd": 0.01,
+        "energy_wh": None,
+        "co2e_g": None,
+        "error": None,
+        "findings": [],
+        "note": "Findings are DRAFTS awaiting human approval — say so when you report them.",
+    }
+    return Msg(role="tool", content=json.dumps(result), tool_call_id=tool_call_id).to_json()
+
+
+def _assistant_turn_message(run_id: str) -> dict:
+    """The exact JSON a completed chat turn's assistant entry gets in
+    `conversations.messages`, built by calling the real
+    `api/chat.py::_assistant_message` against a transient (unpersisted) `Run`
+    — proof, not assumption, that its `activity` entries never carry a
+    `child_run_id` (see the migration's own docstring)."""
+    run = RunRow(
+        id=uuid.UUID(run_id),
+        status="completed",
+        task_input={},
+        compactions=[],
+        messages=[
+            Msg(
+                role="assistant",
+                content="Done.",
+                tool_calls=[ToolCall(id="tc1", name="run_harness_task", arguments={"task_type": "x"})],
+            ).to_json(),
+            {"role": "tool", "content": "irrelevant", "tool_call_id": "tc1"},
+            Msg(role="assistant", content="Done.").to_json(),
+        ],
+        model_used="test-model",
+        cost_usd=0,
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        energy_wh=None,
+        energy_accounting=None,
+        routing=None,
+        grounding=None,
+    )
+    out = _assistant_message(run)
+    out["run_id"] = run_id  # _assistant_message always stamps its own run's id
+    return out
+
+
+async def test_conversation_id_backfill_attributes_the_top_level_turn(engine):
+    """Pass 1 of 9ba228f09f91's backfill: a conversation's own `messages`
+    names the run for its turn via `run_id`. The assistant entry is built
+    through the real `_assistant_message` to also prove, positively, that its
+    `activity` list carries no `child_run_id` for the backfill's second pass
+    to (wrongly) rely on — see `test_conversation_id_backfill_propagates_to_
+    delegated_runs_via_parent_messages` for how a delegated run is actually
+    reached."""
+    workspace_id = "10000000-0000-0000-0000-000000000001"
+    project_id = "10000000-0000-0000-0000-000000000002"
+    harness_id = "10000000-0000-0000-0000-000000000003"
+    conversation_id = "10000000-0000-0000-0000-000000000004"
+    turn_run_id = "10000000-0000-0000-0000-000000000005"
+    orphan_run_id = "10000000-0000-0000-0000-000000000007"
+
+    assistant_entry = _assistant_turn_message(turn_run_id)
+    assert assistant_entry["activity"] and "child_run_id" not in assistant_entry["activity"][0]
+    messages = json.dumps(
+        [{"role": "user", "content": "hi", "run_id": None}, assistant_entry]
+    )
+
+    async with engine.connect() as conn:
+        await conn.run_sync(_upgrade, "5540e56092f1")  # just before conversation_id exists
+        await _insert_workspace_project_harness(conn, workspace_id, project_id, harness_id)
+        await conn.execute(
+            text(
+                "INSERT INTO conversations "
+                "(id, project_id, harness_id, title, messages, created_at, updated_at) "
+                f"VALUES ('{conversation_id}', '{project_id}', '{harness_id}', 'Convo', "
+                f"'{messages}'::jsonb, now(), now())"
+            )
+        )
+        await _insert_run(conn, turn_run_id, project_id, harness_id)
+        await _insert_run(conn, orphan_run_id, project_id, harness_id)
+        await conn.commit()
+
+        await conn.run_sync(_upgrade, "9ba228f09f91")
+        await conn.commit()
+
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("SELECT id, conversation_id FROM runs"))).all()
+    attributed = {str(rid): str(cid) if cid else None for rid, cid in rows}
+    assert attributed[turn_run_id] == conversation_id
+    assert attributed[orphan_run_id] is None
+
+
+async def test_conversation_id_backfill_propagates_to_delegated_runs_via_parent_messages(engine):
+    """9ba228f09f91's second pass: a delegated run's id is NOT in
+    `conversations.messages` (nothing ever writes it there — see the
+    migration's docstring and the previous test). It IS in the delegating
+    run's own `messages`, as the `child_run_id` field of the `run_harness_task`
+    tool result. This backfills a child from its parent's messages, and a
+    grandchild from the child's — proving the pass repeats far enough to match
+    `MAX_DELEGATION_DEPTH` (engine/tools.py)."""
+    workspace_id = "11000000-0000-0000-0000-000000000001"
+    project_id = "11000000-0000-0000-0000-000000000002"
+    harness_id = "11000000-0000-0000-0000-000000000003"
+    conversation_id = "11000000-0000-0000-0000-000000000004"
+    parent_run_id = "11000000-0000-0000-0000-000000000005"
+    child_run_id = "11000000-0000-0000-0000-000000000006"
+    grandchild_run_id = "11000000-0000-0000-0000-000000000007"
+    unrelated_run_id = "11000000-0000-0000-0000-000000000008"
+
+    # parent_run_id is attributed by pass 1, the normal way (its conversation
+    # names it via `run_id`) — propagation then has a starting point to walk
+    # from for the rest of this test, exactly as it would for a real
+    # already-attributed run.
+    parent_messages = json.dumps(
+        [
+            {"role": "user", "content": "go", "tool_calls": [], "tool_call_id": None, "meta": {}},
+            _tool_result_message(child_run_id),
+        ]
+    )
+    child_messages = json.dumps([_tool_result_message(grandchild_run_id, tool_call_id="tc2")])
+
+    async with engine.connect() as conn:
+        await conn.run_sync(_upgrade, "5540e56092f1")
+        await _insert_workspace_project_harness(conn, workspace_id, project_id, harness_id)
+        await conn.execute(
+            text(
+                "INSERT INTO conversations "
+                "(id, project_id, harness_id, title, messages, created_at, updated_at) "
+                f"VALUES ('{conversation_id}', '{project_id}', '{harness_id}', 'Convo', "
+                f"'{json.dumps([_assistant_turn_message(parent_run_id)])}'::jsonb, now(), now())"
+            )
+        )
+        await _insert_run(conn, parent_run_id, project_id, harness_id, messages=parent_messages)
+        await _insert_run(conn, child_run_id, project_id, harness_id, messages=child_messages)
+        await _insert_run(conn, grandchild_run_id, project_id, harness_id)
+        await _insert_run(conn, unrelated_run_id, project_id, harness_id)
+        await conn.commit()
+
+        await conn.run_sync(_upgrade, "9ba228f09f91")
+        await conn.commit()
+
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("SELECT id, conversation_id FROM runs"))).all()
+    attributed = {str(rid): str(cid) if cid else None for rid, cid in rows}
+    assert attributed[parent_run_id] == conversation_id
+    assert attributed[child_run_id] == conversation_id
+    assert attributed[grandchild_run_id] == conversation_id
+    assert attributed[unrelated_run_id] is None
+
+
+async def test_conversation_id_backfill_survives_malformed_messages(engine):
+    """A `conversations.messages` or `runs.messages` value that is not a JSON
+    array (a hand edit, a partial restore) must not abort the migration — the
+    `jsonb_typeof` guard on both should make the migration complete and skip
+    only that row's contribution, not crash the whole batch's transaction."""
+    workspace_id = "12000000-0000-0000-0000-000000000001"
+    project_id = "12000000-0000-0000-0000-000000000002"
+    harness_id = "12000000-0000-0000-0000-000000000003"
+    bad_conversation_id = "12000000-0000-0000-0000-000000000004"
+    good_conversation_id = "12000000-0000-0000-0000-000000000009"
+    # Attributed by pass 1 (a well-formed conversation names it), then its
+    # OWN `messages` — the malformed value pass 2 must survive — is scanned
+    # as a delegation parent once that attribution lands.
+    malformed_run_id = "12000000-0000-0000-0000-000000000005"
+
+    async with engine.connect() as conn:
+        await conn.run_sync(_upgrade, "5540e56092f1")
+        await _insert_workspace_project_harness(conn, workspace_id, project_id, harness_id)
+        # messages is a bare JSON object, not an array — must not abort pass 1.
+        await conn.execute(
+            text(
+                "INSERT INTO conversations "
+                "(id, project_id, harness_id, title, messages, created_at, updated_at) "
+                f"VALUES ('{bad_conversation_id}', '{project_id}', '{harness_id}', 'Convo', "
+                "'{\"not\": \"an array\"}'::jsonb, now(), now())"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO conversations "
+                "(id, project_id, harness_id, title, messages, created_at, updated_at) "
+                f"VALUES ('{good_conversation_id}', '{project_id}', '{harness_id}', 'Convo', "
+                f"'{json.dumps([_assistant_turn_message(malformed_run_id)])}'::jsonb, now(), now())"
+            )
+        )
+        # This run's own messages is a bare JSON object, not an array — must
+        # not abort pass 2 once this run is a delegation-parent candidate.
+        await _insert_run(
+            conn, malformed_run_id, project_id, harness_id,
+            messages='{"not": "an array either"}',
+        )
+        await conn.commit()
+
+        # The point of this test: this must not raise.
+        await conn.run_sync(_upgrade, "9ba228f09f91")
+        await conn.commit()
+
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("SELECT id, conversation_id FROM runs"))).all()
+    assert {str(rid): str(cid) if cid else None for rid, cid in rows} == {
+        malformed_run_id: good_conversation_id
+    }
+
+
+async def test_conversation_id_backfill_ignores_malformed_run_ids(engine):
+    """A `run_id`/`child_run_id` that is not uuid-shaped must not abort the
+    migration (the uuid cast is gated inside a CASE, structurally unreachable
+    for a non-matching value) — the migration completes and simply leaves
+    that entry unattributed."""
+    workspace_id = "13000000-0000-0000-0000-000000000001"
+    project_id = "13000000-0000-0000-0000-000000000002"
+    harness_id = "13000000-0000-0000-0000-000000000003"
+    conversation_id = "13000000-0000-0000-0000-000000000004"
+    parent_run_id = "13000000-0000-0000-0000-000000000005"
+
+    # A malformed top-level run_id, alongside the well-formed entry that
+    # attributes parent_run_id via pass 1 so pass 2 has a real parent to walk
+    # from.
+    messages = json.dumps(
+        [
+            {"role": "user", "content": "hi", "run_id": "not-a-uuid"},
+            _assistant_turn_message(parent_run_id),
+        ]
+    )
+    parent_messages = json.dumps([_tool_result_message("also-not-a-uuid")])
+
+    async with engine.connect() as conn:
+        await conn.run_sync(_upgrade, "5540e56092f1")
+        await _insert_workspace_project_harness(conn, workspace_id, project_id, harness_id)
+        await conn.execute(
+            text(
+                "INSERT INTO conversations "
+                "(id, project_id, harness_id, title, messages, created_at, updated_at) "
+                f"VALUES ('{conversation_id}', '{project_id}', '{harness_id}', 'Convo', "
+                f"'{messages}'::jsonb, now(), now())"
+            )
+        )
+        await _insert_run(conn, parent_run_id, project_id, harness_id, messages=parent_messages)
+        await conn.commit()
+
+        await conn.run_sync(_upgrade, "9ba228f09f91")  # must not raise
+        await conn.commit()
+
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("SELECT id, conversation_id FROM runs"))).all()
+    assert {str(rid): str(cid) if cid else None for rid, cid in rows} == {
+        parent_run_id: conversation_id
+    }
+
+
+async def test_conversation_id_backfill_is_batched_across_many_conversations(engine):
+    """The backfill pages through `conversations` rather than joining the
+    whole table in one statement — assert it still attributes every run
+    correctly across more conversations than one batch (BATCH_SIZE=500 in the
+    migration; a small multiple here keeps the test itself fast)."""
+    n = 12
+    async with engine.connect() as conn:
+        await conn.run_sync(_upgrade, "5540e56092f1")
+        await conn.execute(
+            text(
+                "INSERT INTO workspaces (id, name, settings, created_at) "
+                "VALUES ('20000000-0000-0000-0000-000000000001', 'W', '{}'::jsonb, now())"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO projects (id, workspace_id, name, created_at) "
+                "VALUES ('20000000-0000-0000-0000-000000000002', "
+                "'20000000-0000-0000-0000-000000000001', 'P', now())"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO harnesses (id, workspace_id, name, task_profile, model_policy, "
+                "tool_names, loop_config, is_archived, created_at, updated_at) "
+                "VALUES ('20000000-0000-0000-0000-000000000003', "
+                "'20000000-0000-0000-0000-000000000001', 'H', 'chat', '{}'::jsonb, "
+                "'{}'::text[], '{}'::jsonb, false, now(), now())"
+            )
+        )
+        pairs = []
+        for i in range(n):
+            conv_id = f"30000000-0000-0000-0000-{i:012d}"
+            run_id = f"40000000-0000-0000-0000-{i:012d}"
+            pairs.append((conv_id, run_id))
+            await conn.execute(
+                text(
+                    "INSERT INTO conversations "
+                    "(id, project_id, harness_id, title, messages, created_at, updated_at) "
+                    f"VALUES ('{conv_id}', '20000000-0000-0000-0000-000000000002', "
+                    "'20000000-0000-0000-0000-000000000003', 'Convo', "
+                    f"'[{{\"role\": \"assistant\", \"content\": \"ok\", "
+                    f"\"run_id\": \"{run_id}\"}}]'::jsonb, now(), now())"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO runs (id, project_id, harness_id, task_type, task_input, "
+                    "document_ids, status, messages, input_tokens, output_tokens, cost_usd, "
+                    "iterations, created_at) "
+                    f"VALUES ('{run_id}', '20000000-0000-0000-0000-000000000002', "
+                    "'20000000-0000-0000-0000-000000000003', 'chat', '{}'::jsonb, "
+                    "'{}'::uuid[], 'completed', '[]'::jsonb, 0, 0, 0, 0, now())"
+                )
+            )
+        await conn.commit()
+
+        await conn.run_sync(_upgrade, "9ba228f09f91")
+        await conn.commit()
+
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("SELECT id, conversation_id FROM runs"))).all()
+    attributed = {str(rid): str(cid) for rid, cid in rows}
+    for conv_id, run_id in pairs:
+        assert attributed[run_id] == conv_id
 
 
 async def test_legacy_database_already_at_head_is_stamped_without_migrating(engine):

@@ -22,6 +22,12 @@ Three aggregates, all deliberately cheap:
 sums each run's **stored, as-recorded** figures instead of recomputing anything
 at today's settings. See `emissions()`.
 
+`GET /spend/conversations` is dollar spend grouped by conversation instead of
+by harness — "what did this chat conversation cost" — summed in SQL from
+`runs.conversation_id` (`Run.conversation_id` is null for a run that never
+began as a chat turn; those land in one reconciliation row rather than being
+dropped). See `spend_by_conversation()`.
+
 Read-only; any authenticated user may look.
 """
 from __future__ import annotations
@@ -45,7 +51,7 @@ from tret.config import (
     get_settings,
 )
 from tret.db.engine import get_db
-from tret.db.models import EgressCall, Harness, MethodRun, Run, RunOutcome, User, utcnow
+from tret.db.models import Conversation, EgressCall, Harness, MethodRun, Run, RunOutcome, User, utcnow
 from tret.engine.extensions import get_extension_registry
 from tret.net import egress_status
 from tret.providers.catalog import co2e_grams, get_catalog
@@ -1739,3 +1745,189 @@ async def _routing_history_response(
             ),
         },
     }
+
+
+# ── spend by conversation ────────────────────────────────────────────────────
+# "What did this chat conversation cost" — answerable only because Run now
+# carries its own conversation_id (set on every chat turn's Run in api/chat.py,
+# and inherited down a delegation chain by engine/tools.py::run_harness_task,
+# so a specialist run a chat turn delegated to counts against the conversation
+# that caused it, not against nothing). Before that column existed the only
+# link ran the other way — Conversation.messages carrying a run_id per turn —
+# which meant attributing spend required pulling every conversation's JSONB
+# into Python and joining by hand; N+1 against a database that has thrashed
+# under load. This is one GROUP BY instead.
+#
+# `limit` bounds the named-conversation rows returned, applied in the SQL
+# itself (a LIMIT clause, not a Python slice) so a request never materialises
+# every conversation's rollup just to discard most of it. It never bounds the
+# null-conversation reconciliation row (its own query, `_null_conversation_row`)
+# or `totals` (`_conversation_spend_totals`, summed over every group in the
+# window) — an operator reconciling a customer's bill needs the real period
+# total regardless of how many named conversations came back.
+CONVERSATION_SPEND_LIMIT_MAX = 200
+
+
+def _spend_agg_columns():
+    """The aggregate columns shared by the named-conversation rows, the
+    null-conversation reconciliation row, and the all-groups `totals` block —
+    written once so the three can never drift into computing "cost" three
+    slightly different ways.
+    """
+    return (
+        func.count().label("run_count"),
+        func.min(Run.created_at).label("first_run_at"),
+        func.max(Run.created_at).label("last_run_at"),
+        func.sum(Run.input_tokens).label("input_tokens"),
+        func.sum(Run.output_tokens).label("output_tokens"),
+        func.sum(Run.cost_usd).label("cost_usd"),
+        func.sum(Run.reported_cost_usd).label("reported_cost_usd"),
+    )
+
+
+def _spend_row_json(*, conversation_id, title, row) -> dict:
+    return {
+        "conversation_id": str(conversation_id) if conversation_id else None,
+        "title": title,
+        "run_count": row.run_count,
+        "first_run_at": row.first_run_at.isoformat() if row.first_run_at else None,
+        "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
+        "input_tokens": int(row.input_tokens or 0),
+        "output_tokens": int(row.output_tokens or 0),
+        "cost_usd": float(round(_d(row.cost_usd or 0), 6)),
+        # SUM ignores each run's own NULL exactly the way a hand-rolled total
+        # would skip it. Run.reported_cost_usd's own doc says null on a run
+        # means "this run has accrued no cost at all yet" — not that its
+        # actual is a confirmed zero — so a *group* where every run is still
+        # like that (SQL SUM of an all-NULL column is NULL) has accrued
+        # nothing *yet* either, which is honestly unknown-so-far, not a
+        # confirmed zero. Emitting 0.0 here used to make an in-flight run
+        # indistinguishable from a genuinely free one; None (the console
+        # renders it as "—") is the honest word for "no bill posted yet".
+        "reported_cost_usd": (
+            float(round(_d(row.reported_cost_usd), 6)) if row.reported_cost_usd is not None else None
+        ),
+    }
+
+
+async def _named_conversation_rows(
+    db: AsyncSession, project_id: uuid.UUID | None, since, limit: int
+) -> list:
+    """The `limit` highest-spending *named* conversations, newest-spending
+    first — `limit` applied in SQL so the database only ever materialises the
+    rows the response actually returns, not the full per-conversation
+    GROUP BY. The null-conversation bucket is a different query
+    (`_null_conversation_row`) precisely so it is never subject to this cap.
+
+    Ordering sorts NULL `reported_cost_usd` groups (every run still in
+    flight) after every group with a real figure, then by that figure
+    descending, then by `conversation_id` as a deterministic tiebreaker —
+    without it, two conversations tied on cost could swap places between
+    otherwise-identical requests depending on scan order.
+    """
+    reported_sum = func.sum(Run.reported_cost_usd)
+    q = (
+        select(Run.conversation_id, Conversation.title, *_spend_agg_columns())
+        .join(Conversation, Run.conversation_id == Conversation.id)
+        .where(Run.conversation_id.is_not(None))
+        .group_by(Run.conversation_id, Conversation.title)
+        .order_by(reported_sum.is_(None), reported_sum.desc(), Run.conversation_id.asc())
+        .limit(limit)
+    )
+    if project_id is not None:
+        q = q.where(Run.project_id == project_id)
+    if since is not None:
+        q = q.where(Run.created_at >= since)
+    return (await db.execute(q)).all()
+
+
+async def _null_conversation_row(db: AsyncSession, project_id: uuid.UUID | None, since):
+    """The reconciliation row for runs that never began as a chat turn — a
+    single un-grouped aggregate over `Run.conversation_id IS NULL`, kept out
+    of `_named_conversation_rows` entirely so `limit` can never touch it.
+    None when the window has no such run (nothing to reconcile).
+    """
+    q = select(*_spend_agg_columns()).where(Run.conversation_id.is_(None))
+    if project_id is not None:
+        q = q.where(Run.project_id == project_id)
+    if since is not None:
+        q = q.where(Run.created_at >= since)
+    row = (await db.execute(q)).one()
+    return row if row.run_count else None
+
+
+async def _conversation_spend_totals(db: AsyncSession, project_id: uuid.UUID | None, since) -> dict:
+    """Sums over **every** group in the window, `limit` ignored entirely —
+    the number an operator reconciles the returned rows against. Computed
+    from the same un-grouped scan `_null_conversation_row` uses, minus the
+    `conversation_id IS NULL` filter, plus a distinct count of the named
+    conversations touched.
+    """
+    q = select(
+        func.count(func.distinct(Run.conversation_id)).label("conversation_count"),
+        *_spend_agg_columns(),
+    )
+    if project_id is not None:
+        q = q.where(Run.project_id == project_id)
+    if since is not None:
+        q = q.where(Run.created_at >= since)
+    row = (await db.execute(q)).one()
+    return {
+        "conversation_count": row.conversation_count,
+        "run_count": row.run_count,
+        "input_tokens": int(row.input_tokens or 0),
+        "output_tokens": int(row.output_tokens or 0),
+        "cost_usd": float(round(_d(row.cost_usd or 0), 6)),
+        "reported_cost_usd": (
+            float(round(_d(row.reported_cost_usd), 6)) if row.reported_cost_usd is not None else None
+        ),
+    }
+
+
+@router.get("/spend/conversations")
+async def spend_by_conversation(
+    project_id: uuid.UUID | None = None,
+    days: int = Query(default=30, ge=1, le=3650),
+    limit: int = Query(default=50, ge=1, le=CONVERSATION_SPEND_LIMIT_MAX),
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """Spend, grouped by the conversation that caused it, newest-spending first.
+
+    A thin workspace-scoping wrapper — see `_conversation_spend_response`, and
+    `_guardrails_response`'s neighbouring docstring for why the split exists.
+    Available to any authenticated workspace member, not just admins: spend
+    visibility here matches the runs list it complements (`GET /api/runs`),
+    which every member can already read.
+    """
+    return await _conversation_spend_response(
+        project_id=await _scoped_project_id(db, ctx, project_id), days=days, limit=limit, db=db
+    )
+
+
+async def _conversation_spend_response(
+    project_id: uuid.UUID | None,
+    days: int,
+    limit: int,
+    db: AsyncSession,
+) -> dict:
+    since = utcnow() - timedelta(days=days)
+    named_rows = await _named_conversation_rows(db, project_id, since, limit)
+    null_row = await _null_conversation_row(db, project_id, since)
+    totals = await _conversation_spend_totals(db, project_id, since)
+
+    conversations = [
+        _spend_row_json(conversation_id=row.conversation_id, title=row.title, row=row)
+        for row in named_rows
+    ]
+    # The null-conversation row (if the window has any run outside a chat
+    # turn) is the reconciliation line: rows must sum to the workspace's real
+    # total spend, so it is never subject to `limit` the way a named
+    # conversation is — a chatty workspace with 51 conversations but also
+    # some workbench spend must not have that spend silently vanish because
+    # it lost a popularity contest it was never entered into.
+    if null_row is not None:
+        conversations.append(_spend_row_json(conversation_id=None, title=None, row=null_row))
+
+    return {"period_days": days, "conversations": conversations, "totals": totals}

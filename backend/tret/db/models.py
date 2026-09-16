@@ -293,7 +293,16 @@ class Conversation(Base):
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False)
     harness_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("harnesses.id"), nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False, default="New conversation")
-    # entries: {role, content, run_id?, ts, activity?: [{tool, summary, child_run_id?, finding_ids?}]}
+    # entries: {role, content, run_id?, ts, activity?: [{tool, summary}]}. Note
+    # what is NOT here: a delegated tool call's `activity` entry carries only
+    # `tool`/`summary` (api/chat.py::_assistant_message) — the child run's id
+    # never lands in this JSONB. It exists only in the transient
+    # `delegation_started`/`delegation_finished` SSE events and in the
+    # delegating run's OWN `runs.messages` (the tool result `run_harness_task`
+    # returns, engine/tools.py). Do not add a `child_run_id` field here without
+    # also writing it in `_assistant_message` — a doc comment promising a shape
+    # nothing writes is how the 9ba228f09f91 migration's dead backfill branch
+    # happened.
     messages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = created_at_col()
@@ -413,12 +422,42 @@ class DatasetRow(Base):
 
 class Run(Base):
     __tablename__ = "runs"
-    __table_args__ = (Index("runs_project_created", "project_id", "created_at"),)
+    __table_args__ = (
+        Index("runs_project_created", "project_id", "created_at"),
+        # The spend-by-conversation rollup (api/analytics.py::_named_conversation_rows,
+        # ::_null_conversation_row, ::_conversation_spend_totals) filters on
+        # (project_id, created_at) exactly like the index above and groups by
+        # conversation_id — this composite serves the filter and the grouping
+        # directly instead of falling back to the bare index above plus a sort.
+        # Not an index-only scan: the rollup also selects input_tokens,
+        # output_tokens, cost_usd and reported_cost_usd, none of which are in
+        # this index, so Postgres still visits the heap for those. Leading on
+        # project_id, not conversation_id, because every caller of this rollup
+        # already has a project/workspace to scope by and none looks up a
+        # conversation's runs without one.
+        Index("runs_project_conversation_created", "project_id", "conversation_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False)
     harness_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("harnesses.id"), nullable=False)
     pack_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("packs.id"))
+    # The chat turn (or delegation chain off one) that produced this run — see
+    # Conversation.messages' docstring for how a turn's run_id and a delegated
+    # tool call's child_run_id both land here. Nullable *permanently*, not a
+    # migration artifact awaiting a backfill-everything follow-up: a workbench
+    # run started from `POST /api/runs`, a run kicked off by a scheduled task,
+    # and any other run that never began as a chat turn genuinely belongs to no
+    # conversation, and NOT NULL would have nothing honest to put there. Do not
+    # "tighten" this later — read a null here as "not a chat run", never as
+    # missing data. `ondelete="SET NULL"`: nothing deletes a Conversation
+    # today, but a run outliving the conversation that caused it is exactly
+    # the same "not a chat run" state as never having one — deleting the
+    # conversation must not cascade into deleting (or blocking deletion of)
+    # the runs it caused.
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversations.id", ondelete="SET NULL")
+    )
     doctrine_sha: Mapped[str | None] = mapped_column(Text)  # snapshot at run time
     task_type: Mapped[str] = mapped_column(Text, nullable=False)
     task_input: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

@@ -62,6 +62,44 @@ Three fixes, no migration:
   now fetches 50 at a time behind a "Load more" button instead of 200 in one
   shot.
 
+## Per-conversation spend attribution (2026-09-16)
+
+`Run` had no link to `Conversation` — the only association ran the other way
+(`Conversation.messages` carries a `run_id` per turn), so answering "what did
+this chat conversation cost" meant fetching every conversation and joining in
+the client. `runs.conversation_id` (nullable FK to `conversations.id`, indexed
+together with `project_id`/`created_at` for the rollup below) closes that: set
+on every chat turn's `Run` (`api/chat.py`), and inherited by any run a turn
+delegates to (`run_harness_task`, `tret/engine/tools.py`) — a specialist run a
+chat turn caused counts against that conversation too, not against nothing.
+Null is permanent, not a gap to backfill further: a workbench run, a
+scheduled task, or anything else that never began as a chat turn genuinely
+belongs to no conversation.
+
+The migration backfills `conversation_id` in two passes, both batched (over
+conversations, then over runs) so neither loads a whole table's JSONB at
+once — but each pass still lands in one transaction rather than committing
+per batch; see the migration's own docstring for why (running inside
+`db/migrate.py::ensure_schema`'s already-open transaction rules out
+`autocommit_block()`). Pass 1 reads existing conversations' `messages` for
+each turn's own `run_id`. Pass 2 reads existing runs' own `messages` for a
+delegated call's `child_run_id` (`run_harness_task`'s tool result, persisted
+into the *delegating* run's own message history, not the conversation's) and
+repeats enough times to reach a delegation's own delegation, not just its
+immediate child. A conversation's `activity` log never carries a
+`child_run_id` — checked directly against what `api/chat.py` writes, not
+assumed — so there was nothing to read there.
+
+New: `GET /api/analytics/spend/conversations?days=&limit=` — dollar spend
+grouped by conversation (aggregated in SQL, not summed in the client),
+newest-spending first, with one `conversation_id: null` row reconciling
+runs that belong to no conversation against total workspace spend, and a
+`totals` block summed over every conversation in the period regardless of
+`limit`. `reported_cost_usd` is nullable on both a row and in `totals` — null
+means no run in that group has posted an actual cost yet, not that the actual
+is zero. Open to any authenticated workspace member. `GET /api/runs`'s
+summaries and `GET /api/runs/{id}` now also carry `conversation_id`.
+
 ## Chat replies get a grounding check (2026-09-11)
 
 Chat and freeform prose had no equivalent of the `cited_values` cross-check a

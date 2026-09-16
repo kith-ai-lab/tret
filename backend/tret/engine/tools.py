@@ -88,6 +88,15 @@ class RunContext:
     # nothing to check a connection against, so they report unavailable rather
     # than guessing a workspace.
     workspace_id: uuid.UUID | None = None
+    # This run's own conversation_id, carried so `run_harness_task` below can
+    # stamp it onto the child run it creates — a delegation chain off a chat
+    # turn is still spend that turn's conversation caused, and the spend-by-
+    # conversation rollup (api/analytics.py) would otherwise silently dump
+    # every delegated run's cost into the "no conversation" bucket. None for
+    # every run that isn't itself part of a conversation (the ordinary case),
+    # in which case the child inherits None too — delegation never invents an
+    # attribution its parent didn't have.
+    conversation_id: uuid.UUID | None = None
     pack_manifest: dict | None = None  # stored manifest (methods, task types)
     pack_dir: str | None = None
     terminal_tool: str | None = None
@@ -1770,6 +1779,7 @@ async def run_harness_task(
         project_id=ctx.project_id,
         harness_id=harness.id,
         pack_id=declaring.id if declaring else None,
+        conversation_id=ctx.conversation_id,
         task_type=task_type,
         # The hop counter travels with the child, so the chain is bounded however
         # it was reached; the engine reads it back off task_input.
