@@ -29,12 +29,16 @@ protocol's smoke set plus the emissions surfaces this batch changed.
 
 | # | Severity | What | Where | Status |
 |---|---|---|---|---|
-| U1 | S2 | Identical grid factors split into two "signatures" because runs recorded before 2026-09-04 lack the `grid_co2e_layer` and `grid_temporal` keys. The location-based row (441 runs, all 470 g/kWh, PUE 1.2, global default) withholds carbon and the note says "2 different grid-factor signatures within the same GHG basis (470.0 gCO2e/kWh)" | `emissions.py::grid_comparison_signature` includes source/label/layer in the identity | fix in progress |
-| U2 | S2 | Same root cause in the deliverable footprint: "5.2 Wh · — at 470 g/kWh, over 3 runs" for three legacy runs on one factor | `export.py::_deliverable_footprint` compatibility check | fix in progress |
-| U3 | S3 | OpenRouter reports the upstream as `google-vertex/eu`; the alias map keys on `google-vertex`, so the managed Google PUE (1.09) never selects and runs stay at 1.2 global default. Per-call `served_by` is recorded correctly | `emission_factors.py` alias lookup | fix in progress |
-| U4 | S3 | Settings "Footprint" panel shows "runs with an estimate 0 / without 0" beside 761 Wh, and prints a garbled sentence ("Recorded under the Estimated from stored per-run accounting … basis. No basis was recorded on these runs") | cloud footprint card | fix in progress |
-| U5 | S4 | Per-run PUE factor note still cites "AWS 1.15, Microsoft 1.16" | `emissions.py` PUE reference note | fix in progress |
+| U1 | S2 | Identical grid factors split into two "signatures" because runs recorded before 2026-09-04 lack the `grid_co2e_layer` and `grid_temporal` keys. The location-based row (441 runs, all 470 g/kWh, PUE 1.2, global default) withholds carbon and the note says "2 different grid-factor signatures within the same GHG basis (470.0 gCO2e/kWh)" | `emissions.py::grid_comparison_signature` includes source/label/layer in the identity | fixed in core c7f051e; verified on release 47: location-based row now splits only on the genuine 458.49 vs 470 change, terra/luna rows regained carbon |
+| U2 | S2 | Same root cause in the deliverable footprint: "5.2 Wh · — at 470 g/kWh, over 3 runs" for three legacy runs on one factor | `export.py::_deliverable_footprint` compatibility check | fixed in c7f051e; verified: "5.2 Wh · 2.9 g CO₂e at 470 g/kWh, over 3 runs" |
+| U3 | S3 | OpenRouter reports the upstream as `google-vertex/eu`; the alias map keys on `google-vertex`, so the managed Google PUE (1.09) never selects and runs stay at 1.2 global default. Per-call `served_by` is recorded correctly | `emission_factors.py` alias lookup | fixed in c7f051e; verified with run 07bdf52f on release 47: PUE 1.09, layer managed, Google disclosure attached, upstream google-vertex/eu |
+| U4 | S3 | Settings "Footprint" panel shows "runs with an estimate 0 / without 0" beside 761 Wh, and prints a garbled sentence ("Recorded under the Estimated from stored per-run accounting … basis. No basis was recorded on these runs") | cloud footprint card (tret-cloud 26a9e07) | fixed; verified: 419 runs with an estimate, 31 without, no garbled sentence |
+| U5 | S4 | Per-run PUE factor note still cites "AWS 1.15, Microsoft 1.16" | `emissions.py` PUE reference note | fixed in c7f051e |
 | U6 | note | CHAT-01's oracle expects a `lookup_dataset` activity; with the capability block in context the model answers without a tool call and grounding reports `skipped`. Protocol wording, not a product defect | protocol | record |
+
+## Fix deployment
+
+Core `c7f051e` and cloud `26a9e07` pushed; kith-tret-cloud release 47 and kith-bench redeployed 2026-09-18; health 200 on both. Spend for the pass including the verification run: about $0.02.
 
 ## Not run
 
