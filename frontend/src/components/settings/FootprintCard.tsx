@@ -94,9 +94,20 @@ function FootprintBody({ data }: { data: BillingFootprint }) {
         </div>
       </div>
 
-      <div className="fine-print" title={gridBasisWhat(data.basis)}>
-        Recorded under the {gridBasisLabel(data.basis)} basis. {gridBasisWhat(data.basis)}
+      <div className="fine-print" title={data.disclaimer}>
+        {data.disclaimer}
       </div>
+
+      {/* A mixed window has no single recorded basis to name here — the
+          per-basis breakdown below already says which bases it spans, so
+          this sentence (and its "no basis was recorded" fallback, which
+          would otherwise be wrong: these rows plainly do carry bases) is
+          only meaningful for a uniform window. */}
+      {!mixedBases && (
+        <div className="fine-print" title={gridBasisWhat(data.basis)}>
+          Recorded under the {gridBasisLabel(data.basis)} basis. {gridBasisWhat(data.basis)}
+        </div>
+      )}
 
       {!summable && mixedBases && data.by_basis && (
         <>

@@ -1653,10 +1653,10 @@ def factor_records(
     pue_note = {
         PUE_PROFILE_CLOUD: (
             "1.2 for hyperscaler cloud. Above every self-report (Google 1.09, "
-            "AWS 1.15, Microsoft 1.16) and well below the 1.56 industry "
-            "average, i.e. deliberately conservative for a facility tret "
-            "cannot see. Self-reported figures are fleet averages, not the "
-            "building that served this request."
+            "AWS 1.14) and well below the 1.56 industry average, i.e. "
+            "deliberately conservative for a facility tret cannot see. "
+            "Self-reported figures are fleet averages, not the building "
+            "that served this request."
         ),
         PUE_PROFILE_WORKSTATION: (
             "1.05 for a desktop or workstation: fans and a share of room "
@@ -3329,18 +3329,19 @@ def grid_comparison_signature(accounting: dict) -> tuple:
     # because one recorded `None` and the other `"unspecified"`, which would
     # make even two runs priced under the identical default un-summable.
     # Fields that carry a real value are untouched: identity still requires
-    # an exact match on grid_co2e_g_per_kwh/basis/source/label/layer and on
-    # any metadata field that is actually known.
+    # an exact match on grid_co2e_g_per_kwh/basis and on any metadata field
+    # that is actually known. `grid_co2e_source`, `grid_co2e_label` and
+    # `grid_co2e_layer` are provenance (where the number came from), not part
+    # of what the number means, so they never enter the identity tuple: two
+    # records recording the identical value/basis/metadata are the same
+    # factor even if one was tagged with a layer and the other predates that
+    # field entirely.
     normalized_metadata = tuple(
         "unknown" if value in unknown else value for value in metadata
     )
     return (
         "identity",
         accounting.get("grid_co2e_g_per_kwh"),
-        accounting.get("grid_co2e_basis"),
-        accounting.get("grid_co2e_source"),
-        accounting.get("grid_co2e_label"),
-        accounting.get("grid_co2e_layer"),
         *normalized_metadata,
     )
 

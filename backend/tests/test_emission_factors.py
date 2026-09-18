@@ -100,6 +100,24 @@ def test_amazon_bedrock_served_by_selects_the_aws_disclosure():
     assert unmapped.pue.value != Decimal("1.14")
 
 
+def test_google_vertex_region_suffixed_slug_still_selects_the_google_disclosure():
+    """Defect 2: live runs record `served_by: "google-vertex/eu"` — the region
+    suffix must not stop the alias lookup from reaching the `google` upstream
+    disclosure, and the raw region-suffixed slug must still be what a caller
+    that asked for `served_by` back would see (provenance untouched)."""
+    managed = {
+        "pue": {"upstreams": {"google": {
+            "value": 1.09, "label": "Google fleet average",
+            "url": "https://www.gstatic.com/gumdrop/sustainability/", "as_of": "2025-12-31",
+        }}}
+    }
+    selected = build_factor_set(
+        provider="openrouter", managed_settings=managed, served_by="google-vertex/eu"
+    )
+    assert selected.pue.value == Decimal("1.09")
+    assert selected.pue.disclosure["statistic"] == "operating_fleet_average"
+
+
 def test_time_allocation_is_added_once_and_supplier_double_count_is_rejected():
     allocation = {
         "method_id": "time_resource_share_v1", "complete_total_g": 1.25,

@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.db.models import Finding, Run
-from tret.services.emissions import energy_wh_field
+from tret.services.emissions import energy_wh_field, grid_comparison_signature
 from tret.services.emissions_validation import number
 from tret.services.html_sanitize import render_markdown
 
@@ -192,20 +192,21 @@ def _deliverable_footprint(runs) -> dict:
     carbon = [float(number(a["co2e_g"], "co2e_g")) for a in accounts
               if a.get("co2e_g") is not None]
 
-    def known(value):
-        return "unknown" if value is None or value == "" else value
-
-    bases = {(known(a.get("grid_co2e_basis")),
-              known(a.get("grid_factor_boundary", a.get("factor_boundary"))),
-              known(a.get("grid_gas_coverage", a.get("gas_coverage"))),
-              known(a.get("grid_gwp_horizon_years")),
-              known(a.get("grid_gwp_assessment_basis", a.get("gwp_basis"))),
-              known(a.get("grid_includes_td_losses")),
-              known(a.get("grid_electricity_mix_basis"))) for a in accounts}
+    # Carbon is summable when every accounted run priced electricity the same
+    # way: one GHG basis, and — via `grid_comparison_signature` (the same
+    # comparison `combine_accountings` and the analytics rollup use) — one
+    # grid-factor method or identical exact factor. That signature already
+    # treats missing provenance (source/label/layer) as *not* part of
+    # identity and collapses every "we don't know" spelling in the metadata
+    # to one sentinel, so legacy rows priced at the identical factor compare
+    # equal even though they predate boundary/dataset-version labelling.
+    # `grid_co2e_source`/`label`/`layer` are provenance, not identity, so a
+    # basis check plus the signature is sufficient here too — no separate
+    # "all metadata known" gate.
     single_run = len(energy) == 1
-    known_compatible = len(bases) == 1 and (
-        single_run or "unknown" not in next(iter(bases), ())
-    )
+    bases = {a.get("grid_co2e_basis") for a in accounts}
+    signatures = {grid_comparison_signature(a) for a in accounts}
+    known_compatible = len(bases) == 1 and len(signatures) == 1
     grids = {
         float(number(a["grid_co2e_g_per_kwh"], "grid_co2e_g_per_kwh"))
         if a.get("grid_co2e_g_per_kwh") is not None else None

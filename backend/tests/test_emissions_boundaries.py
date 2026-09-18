@@ -326,6 +326,25 @@ def test_grid_signature_differs_by_dataset_version():
     assert grid_comparison_signature(base) != grid_comparison_signature(other)
 
 
+def test_grid_signature_treats_legacy_provenance_as_equal_to_later_provenance():
+    """Defect 1: a 2026-08-28 run recorded no `grid_co2e_layer`/`grid_temporal`
+    keys at all; a 2026-09-11 run recorded `grid_co2e_layer: "global_default"`.
+    Both were priced at 470 gCO2e/kWh, location_based, source global_default —
+    provenance (source/label/layer), not identity, so they must compare equal."""
+    from tret.services.emissions import grid_comparison_signature
+
+    legacy = {
+        "grid_co2e_g_per_kwh": 470.0, "grid_co2e_basis": "location_based",
+        "grid_co2e_source": "global_default",
+    }
+    later = {
+        "grid_co2e_g_per_kwh": 470.0, "grid_co2e_basis": "location_based",
+        "grid_co2e_source": "global_default", "grid_co2e_label": "Global default",
+        "grid_co2e_layer": "global_default", "grid_temporal": "annual_average",
+    }
+    assert grid_comparison_signature(legacy) == grid_comparison_signature(later)
+
+
 def test_combine_accountings_included_wins_over_excluded_contradiction():
     a = energy_accounting(_model(), 1000, 100)
     b = energy_accounting(_model(id="anthropic/test-boundary-5"), 1000, 100)

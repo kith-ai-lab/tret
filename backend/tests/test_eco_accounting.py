@@ -481,10 +481,79 @@ def test_footprint_sums_distinct_runs_and_keeps_the_run_time_grid():
     # than being withheld (the export.py `_deliverable_footprint` docstring).
     assert footprint["energy_wh"] == pytest.approx(12.5)
     assert footprint["energy_boundary_legacy_qualifier"] is True
-    assert footprint["co2e_g"] is None
+    # Both runs also priced the identical grid factor (400 g/kWh, same
+    # unknown-everything-else metadata), so carbon sums too: provenance
+    # (or its absence) is not identity (grid_comparison_signature).
+    assert footprint["co2e_g"] == pytest.approx(5.0)
+    assert footprint["carbon_compatible"] is True
     assert footprint["energy_boundary"] == "unknown"
     assert footprint["grid_co2e_g_per_kwh"] == 400.0
     assert footprint["estimated"] is True
+
+
+def test_footprint_three_legacy_runs_at_470_location_based_sum_carbon():
+    """Defect 3: legacy rows (no boundary/gas-coverage/GWP/mix-basis/dataset
+    metadata at all) priced at the identical 470 gCO2e/kWh location_based
+    factor must sum carbon, not withhold it — provenance is not identity."""
+    def _legacy(wh: str, co2e: float) -> Run:
+        return _run(
+            energy_wh=Decimal(wh),
+            energy_accounting={
+                "co2e_g": co2e, "grid_co2e_g_per_kwh": 470.0,
+                "grid_co2e_basis": "location_based",
+            },
+        )
+
+    runs = [_legacy("1.0", 0.47), _legacy("2.0", 0.94), _legacy("2.0", 0.94)]
+    footprint = _deliverable_footprint(runs)
+    assert footprint["runs"] == 3
+    assert footprint["co2e_g"] == pytest.approx(2.35)
+    assert footprint["carbon_compatible"] is True
+    assert footprint["grid_co2e_g_per_kwh"] == 470.0
+
+
+def test_footprint_legacy_470_plus_new_45849_withholds_carbon_with_subtotals():
+    """A legacy 470 gCO2e/kWh row and a fully-labelled 458.49 gCO2e/kWh row
+    are genuinely different factors, so carbon is withheld even though both
+    used the same basis."""
+    legacy = _run(
+        energy_wh=Decimal("1.0"),
+        energy_accounting={
+            "co2e_g": 0.47, "grid_co2e_g_per_kwh": 470.0,
+            "grid_co2e_basis": "location_based",
+        },
+    )
+    new = _run(
+        energy_wh=Decimal("2.0"),
+        energy_accounting={
+            "co2e_g": 0.91698, "grid_co2e_g_per_kwh": 458.49,
+            "grid_co2e_basis": "location_based",
+            "grid_factor_boundary": "lifecycle_electricity_generation",
+            "grid_gas_coverage": "co2e", "grid_gwp_horizon_years": 100,
+            "grid_gwp_assessment_basis": "ar6",
+            "grid_includes_td_losses": False,
+            "grid_electricity_mix_basis": "production",
+        },
+    )
+    footprint = _deliverable_footprint([legacy, new])
+    assert footprint["runs"] == 2
+    assert footprint["co2e_g"] is None
+    assert footprint["carbon_compatible"] is False
+
+
+def test_footprint_a_single_legacy_run_still_sums_carbon():
+    footprint = _deliverable_footprint([
+        _run(
+            energy_wh=Decimal("1.0"),
+            energy_accounting={
+                "co2e_g": 0.47, "grid_co2e_g_per_kwh": 470.0,
+                "grid_co2e_basis": "location_based",
+            },
+        )
+    ])
+    assert footprint["runs"] == 1
+    assert footprint["co2e_g"] == pytest.approx(0.47)
+    assert footprint["carbon_compatible"] is True
 
 
 def test_footprint_counts_missing_estimates_instead_of_zeroing_them():

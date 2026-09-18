@@ -117,10 +117,13 @@ def section(
     )
 
 
-def run(energy_wh=None, co2e_g=None, run_id=None, energy_boundary=None, method_id=None) -> Run:
+def run(
+    energy_wh=None, co2e_g=None, run_id=None, energy_boundary=None, method_id=None,
+    grid_co2e_g_per_kwh: float = 400.0,
+) -> Run:
     accounting = None
     if energy_wh is not None:
-        accounting = {"co2e_g": co2e_g, "grid_co2e_g_per_kwh": 400.0,
+        accounting = {"co2e_g": co2e_g, "grid_co2e_g_per_kwh": grid_co2e_g_per_kwh,
                       "grid_co2e_basis": "location_based",
                       "grid_factor_boundary": "lifecycle_electricity_generation",
                       "grid_gas_coverage": "co2e", "grid_gwp_horizon_years": 100,
@@ -145,6 +148,31 @@ def run(energy_wh=None, co2e_g=None, run_id=None, energy_boundary=None, method_i
         messages=[],
         energy_wh=Decimal(str(energy_wh)) if energy_wh is not None else None,
         energy_accounting=accounting,
+    )
+
+
+def legacy_run(
+    energy_wh, co2e_g, run_id=None,
+    grid_co2e_g_per_kwh: float = 470.0, grid_co2e_basis: str = "location_based",
+) -> Run:
+    """A pre-provenance run: only the grid value and basis are recorded — none
+    of the boundary/gas-coverage/GWP/mix metadata a v2 run carries, and no
+    `grid_co2e_layer`. Same shape as the live 2026-08-28 runs behind defect 3."""
+    return Run(
+        id=run_id or uuid.uuid4(),
+        project_id=PROJECT_ID,
+        harness_id=uuid.uuid4(),
+        task_type="draft_section",
+        task_input={},
+        document_ids=[],
+        status="completed",
+        messages=[],
+        energy_wh=Decimal(str(energy_wh)),
+        energy_accounting={
+            "co2e_g": co2e_g,
+            "grid_co2e_g_per_kwh": grid_co2e_g_per_kwh,
+            "grid_co2e_basis": grid_co2e_basis,
+        },
     )
 
 
@@ -435,6 +463,72 @@ async def test_a_legacy_run_and_a_v2_run_withhold_the_sum_but_keep_the_paragraph
     assert "compute footprint" in result["markdown"]
     assert "withheld" in result["markdown"]
     assert "node_it" in result["markdown"] and "legacy_unresolved" in result["markdown"]
+
+
+# ── defect 3: legacy rows on one identical grid factor must sum carbon ───────
+async def test_three_legacy_runs_on_one_identical_factor_sum_carbon():
+    """Live bug: a 3-run deliverable, all priced at 470 gCO2e/kWh
+    location_based with no boundary/dataset-version provenance, showed
+    "5.2 Wh · — at 470 g/kWh, over 3 runs" — carbon withheld even though
+    every row used the identical factor. Missing provenance is not a reason
+    to treat identical factors as incompatible (see grid_comparison_signature)."""
+    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    db = FakeSession(
+        findings=[
+            section("governance", run_id=a),
+            section("strategy", run_id=b, minutes=1),
+            section("risk", run_id=c, minutes=2),
+        ],
+        runs=[
+            legacy_run(1.0, 0.47, run_id=a),
+            legacy_run(2.0, 0.94, run_id=b),
+            legacy_run(2.0, 0.94, run_id=c),
+        ],
+    )
+    result = await assemble(db)
+    footprint = result["energy"]
+    assert footprint["runs"] == 3
+    assert footprint["energy_wh"] == pytest.approx(5.0)
+    assert footprint["co2e_g"] == pytest.approx(2.35)
+    assert footprint["carbon_compatible"] is True
+    assert footprint["grid_co2e_g_per_kwh"] == 470.0
+    assert "gCO2e" in result["markdown"]
+
+
+async def test_legacy_run_and_a_different_factor_withhold_carbon_with_subtotals():
+    """A legacy 470 gCO2e/kWh row and a new-provenance 458.49 gCO2e/kWh row are
+    genuinely different factors, so carbon stays withheld — the paragraph is
+    still printed, energy still sums (same basis, no boundary conflict)."""
+    legacy, new = uuid.uuid4(), uuid.uuid4()
+    db = FakeSession(
+        findings=[section("governance", run_id=legacy), section("strategy", run_id=new, minutes=1)],
+        runs=[
+            legacy_run(1.0, 0.47, run_id=legacy),
+            run(energy_wh=2.0, co2e_g=0.91698, run_id=new, grid_co2e_g_per_kwh=458.49),
+        ],
+    )
+    result = await assemble(db)
+    footprint = result["energy"]
+    assert footprint["runs"] == 2
+    assert footprint["energy_wh"] == pytest.approx(3.0)
+    assert footprint["co2e_g"] is None
+    assert footprint["carbon_compatible"] is False
+    assert "combined carbon withheld" in result["markdown"]
+
+
+async def test_a_single_legacy_run_sums_carbon_same_as_before():
+    """A lone legacy run has nothing to disagree with, so its carbon has
+    always summed — this must remain true after the signature-based fix."""
+    only = uuid.uuid4()
+    db = FakeSession(
+        findings=[section("governance", run_id=only)],
+        runs=[legacy_run(1.0, 0.47, run_id=only)],
+    )
+    result = await assemble(db)
+    footprint = result["energy"]
+    assert footprint["runs"] == 1
+    assert footprint["co2e_g"] == pytest.approx(0.47)
+    assert footprint["carbon_compatible"] is True
 
 
 # ── the PDF provenance appendix ──────────────────────────────────────────────

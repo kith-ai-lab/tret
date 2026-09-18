@@ -2179,7 +2179,15 @@ export interface BillingFootprint {
   totals: EmissionsTotals
   by_basis?: EmissionsByBasis[]
   credits_usd_consumed: number
-  basis: string
+  /** The single GHG Protocol basis every rolled-up run in this window shares
+   *  — null when the window has no runs, no run recorded a basis, or (see
+   *  `totals.carbon_is_summable`) it mixes more than one, in which case
+   *  `by_basis` carries the per-basis breakdown instead. Never the fixed
+   *  disclosure line below. */
+  basis: GridBasis
+  /** The endpoint's fixed disclosure line. Rendered verbatim, never as a
+   *  basis name. */
+  disclaimer: string
 }
 
 // ── Connections (Google Drive / Microsoft 365 workspace integrations) ──────

@@ -1549,9 +1549,12 @@ def build_factor_set(
         at=at, interval_end=interval_end,
     )
     # OpenRouter's reviewed canonical identity for cloud-hosted calls (see
-    # `UPSTREAM_PUE_ALIASES`). Keep the raw value in call provenance while
-    # selecting the aliased upstream's disclosure.
-    pue_served_by = UPSTREAM_PUE_ALIASES.get(served_by, served_by)
+    # `UPSTREAM_PUE_ALIASES`). OpenRouter slugs can carry a region suffix
+    # (e.g. `google-vertex/eu`), so the alias lookup keys off just the first
+    # path segment; `served_by` itself — the raw slug — stays untouched and
+    # is what call provenance records.
+    pue_upstream_key = served_by.split("/", 1)[0] if served_by else served_by
+    pue_served_by = UPSTREAM_PUE_ALIASES.get(pue_upstream_key, pue_upstream_key)
     pue = _resolve_pue(
         deployment, profile, settings, run_overrides, harness, workspace, managed,
         pue_served_by if pue_served_by in {"aws", "google"} else None,
