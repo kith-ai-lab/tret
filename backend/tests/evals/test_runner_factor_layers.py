@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field as dc_field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from itertools import count
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -62,11 +63,9 @@ async def test_a_workspace_override_is_recorded_as_the_workspace_layer(world):
     assert run.energy_accounting["grid_co2e_g_per_kwh"] == 90.0
 
 
-async def test_a_workspace_hourly_table_is_recorded_as_hourly(world):
+async def test_a_workspace_hourly_table_is_integrated_over_calls(world):
     """A workspace `grid.tables` entry referenced by the default entry
-    applies at the run's actual start time — a 24-row diurnal profile always
-    has a value for whatever hour the run happens to start in, so this needs
-    no clock mocking to assert `grid_temporal == "hourly"`.
+    applies over each recorded call interval, with a constant-power assumption.
     """
     from replay_provider import ReplayProvider
 
@@ -100,21 +99,16 @@ async def test_a_workspace_hourly_table_is_recorded_as_hourly(world):
     )
     run = result.run
     assert run.status == "completed", run.error
-    assert run.energy_accounting["grid_temporal"] == "hourly"
+    assert run.energy_accounting["grid_temporal"] == "interval_weighted"
     assert run.energy_accounting["factors"]
     grid_factor = next(f for f in run.energy_accounting["factors"] if f["key"] == "grid_intensity")
     assert grid_factor["table"] == "diurnal"
 
 
-async def test_a_naive_stored_created_at_is_treated_as_utc_not_now(world):
-    """SQLite (what `world` runs on) has no genuine timezone-aware storage, so
-    a `Run.created_at` round-trips naive there (see `reconcile.py`'s own
-    `_as_aware_utc` docstring). The runner must treat that naive value as
-    already being UTC — the same way the what-if endpoint's `_aware_utc`
-    treats a naive stored `created_at` — never substitute `_utcnow()` for it:
-    an hourly `grid.tables` entry would otherwise resolve against whatever
-    hour the run happens to *execute* in rather than the hour it was actually
-    created at.
+async def test_call_time_grid_uses_execution_not_old_queue_creation_time(world):
+    """A queued run may be created long before inference. New call intervals
+    resolve the captured factor configuration at actual execution time; naive
+    stored creation timestamps remain accepted for the initial snapshot.
     """
     from replay_provider import ReplayProvider
     from tret.engine.harness import HarnessEngine
@@ -160,15 +154,21 @@ async def test_a_naive_stored_created_at_is_treated_as_utc_not_now(world):
 
     provider = ReplayProvider(divergence_happy_script())
     engine = HarnessEngine(catalog=ModelCatalog(), priors=NoPriors())
-    with patch("tret.engine.harness.ProviderRegistry", _replay_registry(provider)):
+    ticks = count()
+    executing_at = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
+    with (
+        patch("tret.engine.harness.ProviderRegistry", _replay_registry(provider)),
+        patch("tret.engine.harness._utcnow",
+              side_effect=lambda: executing_at + timedelta(seconds=next(ticks))),
+    ):
         await engine.execute(run_id)
 
     result = await world.read_back(run_id, provider=provider)
     run = result.run
     assert run.status == "completed", run.error
-    assert run.energy_accounting["grid_temporal"] == "hourly"
+    assert run.energy_accounting["grid_temporal"] == "interval_weighted"
     grid_factor = next(f for f in run.energy_accounting["factors"] if f["key"] == "grid_intensity")
-    assert grid_factor["value"] == 103.0  # hour 3 -> 100 + 3, from the frozen created_at
+    assert grid_factor["value"] == 110.0  # hour 10 execution, not hour 3 queue creation
 
 
 async def test_with_no_workspace_doc_the_layer_falls_back_to_env_or_global_default(world):
@@ -572,7 +572,9 @@ async def test_a_meter_that_raises_still_completes_with_the_estimate(world, monk
 
     assert run.status == "completed", run.error
     assert run.energy_accounting["energy_source"] == "estimated"
-    assert "energy_meter" not in run.energy_accounting
+    assert run.energy_accounting["energy_meter"]["status"] == "error"
+    assert run.energy_accounting["energy_meter"]["complete"] is False
+    assert "failed to start" in run.energy_accounting["energy_meter"]["attempt_reason"]
 
 
 async def test_a_meter_that_returns_none_falls_back_to_the_estimate(world, monkeypatch):
@@ -602,7 +604,9 @@ async def test_a_meter_that_returns_none_falls_back_to_the_estimate(world, monke
 
     assert run.status == "completed", run.error
     assert run.energy_accounting["energy_source"] == "estimated"
-    assert "energy_meter" not in run.energy_accounting
+    assert run.energy_accounting["energy_meter"]["status"] == "unavailable"
+    assert run.energy_accounting["energy_meter"]["complete"] is False
+    assert run.energy_accounting["energy_meter"]["attempt_reason"] == "meter_unavailable"
 
 
 # ── measured energy: the meter must not outlive the run that started it ────

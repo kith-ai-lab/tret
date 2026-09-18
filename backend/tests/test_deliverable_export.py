@@ -117,10 +117,23 @@ def section(
     )
 
 
-def run(energy_wh=None, co2e_g=None, run_id=None) -> Run:
+def run(energy_wh=None, co2e_g=None, run_id=None, energy_boundary=None, method_id=None) -> Run:
     accounting = None
     if energy_wh is not None:
-        accounting = {"co2e_g": co2e_g, "grid_co2e_g_per_kwh": 400.0}
+        accounting = {"co2e_g": co2e_g, "grid_co2e_g_per_kwh": 400.0,
+                      "grid_co2e_basis": "location_based",
+                      "grid_factor_boundary": "lifecycle_electricity_generation",
+                      "grid_gas_coverage": "co2e", "grid_gwp_horizon_years": 100,
+                      "grid_gwp_assessment_basis": "ar6",
+                      "grid_includes_td_losses": False,
+                      "grid_electricity_mix_basis": "production"}
+        # `energy_boundary` is deliberately absent unless a test asks for it — a
+        # missing key is exactly what a pre-batch (legacy) run looks like; see
+        # the footprint tests below (F5).
+        if energy_boundary is not None:
+            accounting["energy_boundary"] = energy_boundary
+        if method_id is not None:
+            accounting["method_id"] = method_id
     return Run(
         id=run_id or uuid.uuid4(),
         project_id=PROJECT_ID,
@@ -373,6 +386,55 @@ async def test_the_footprint_is_labelled_an_estimate():
     assert result["energy"]["estimated"] is True
     assert "not a measurement" in result["markdown"]
     assert "Heuristic estimate" in result["markdown"]
+
+
+# ── F5: a multi-run legacy deliverable must not lose its footprint paragraph ──
+async def test_two_legacy_runs_still_sum_with_a_qualifier():
+    """Every pre-batch run lacks `energy_boundary` entirely. Two of them behind
+    one deliverable used to drop the whole footprint paragraph; they must now
+    sum, with a sentence naming the boundary as legacy and unresolved."""
+    a, b = uuid.uuid4(), uuid.uuid4()
+    db = FakeSession(
+        findings=[section("governance", run_id=a), section("strategy", run_id=b, minutes=1)],
+        runs=[
+            run(energy_wh=2.0, co2e_g=0.8, run_id=a),
+            run(energy_wh=3.0, co2e_g=1.2, run_id=b),
+        ],
+    )
+    result = await assemble(db)
+    footprint = result["energy"]
+    assert footprint["runs"] == 2
+    assert footprint["energy_wh"] == pytest.approx(5.0)
+    assert footprint["energy_boundary_legacy_qualifier"] is True
+    assert "compute footprint" in result["markdown"]
+    assert "5 Wh" in result["markdown"]
+    assert "legacy, unresolved" in result["markdown"]
+
+
+async def test_a_legacy_run_and_a_v2_run_withhold_the_sum_but_keep_the_paragraph():
+    """One pre-batch run plus one boundary-labelled `node_it` run: the runs
+    genuinely disagree on energy boundary, so the combined figure is withheld
+    — but the paragraph must still appear, with per-boundary subtotals, rather
+    than being dropped as it was before F5."""
+    legacy, v2 = uuid.uuid4(), uuid.uuid4()
+    db = FakeSession(
+        findings=[section("governance", run_id=legacy), section("strategy", run_id=v2, minutes=1)],
+        runs=[
+            run(energy_wh=2.0, co2e_g=0.8, run_id=legacy),
+            run(energy_wh=4.0, co2e_g=1.6, run_id=v2, energy_boundary="node_it", method_id="class_ladder_v2"),
+        ],
+    )
+    result = await assemble(db)
+    footprint = result["energy"]
+    assert footprint["runs"] == 2
+    assert footprint["energy_wh"] is None
+    assert footprint["energy_boundary_legacy_qualifier"] is False
+    subtotals = {s["boundary"]: (s["energy_wh"], s["runs"]) for s in footprint["energy_boundary_subtotals"]}
+    assert subtotals["legacy_unresolved"] == (2.0, 1)
+    assert subtotals["node_it"] == (4.0, 1)
+    assert "compute footprint" in result["markdown"]
+    assert "withheld" in result["markdown"]
+    assert "node_it" in result["markdown"] and "legacy_unresolved" in result["markdown"]
 
 
 # ── the PDF provenance appendix ──────────────────────────────────────────────

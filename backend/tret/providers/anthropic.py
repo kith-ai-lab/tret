@@ -34,6 +34,7 @@ from tret.providers.base import (
     is_retryable_status,
     looks_like_html,
     mark_cache_breakpoint,
+    normalize_call_slug,
     summarize_html_error,
 )
 
@@ -57,7 +58,7 @@ COUNT_TOKENS_TIMEOUT = 5.0
 # constant rather than something read off the response. Recorded anyway so the
 # field is uniform across providers instead of "populated for OpenRouter,
 # absent everywhere else".
-SERVED_BY = "anthropic"
+SERVED_BY = normalize_call_slug("anthropic")
 
 
 class _StreamFailure(Exception):
@@ -257,12 +258,42 @@ def _usage_of(raw) -> Usage:
     """
     if raw is None:
         return Usage()
+    details = getattr(raw, "output_tokens_details", None)
+    if isinstance(details, dict):
+        thinking_raw = details.get("thinking_tokens")
+    else:
+        thinking_raw = getattr(details, "thinking_tokens", None)
+    thinking_tokens = (
+        thinking_raw
+        if isinstance(thinking_raw, int)
+        and not isinstance(thinking_raw, bool)
+        and thinking_raw >= 0
+        else None
+    )
     return Usage(
         input_tokens=getattr(raw, "input_tokens", 0) or 0,
         output_tokens=getattr(raw, "output_tokens", 0) or 0,
         cache_read_tokens=getattr(raw, "cache_read_input_tokens", 0) or 0,
         cache_write_tokens=getattr(raw, "cache_creation_input_tokens", 0) or 0,
+        reasoning_tokens=thinking_tokens,
+        reasoning_accounting=("counted_in_output" if thinking_tokens is not None else None),
     )
+
+
+def _inference_geo_of(raw) -> str | None:
+    """Provider-reported execution geography, `usage` first.
+
+    The plan cited `usage.inference_geo`; only a top-level attribute was ever
+    exercised in tests, so a live response nesting it under `usage` (as the
+    Anthropic API does for other per-call fields) would silently read as
+    `None`. Checked here first, with the message/body top level kept as a
+    fallback for a shape that puts it there instead.
+    """
+    usage = getattr(raw, "usage", None)
+    value = getattr(usage, "inference_geo", None) if usage is not None else None
+    if not (isinstance(value, str) and value.strip()):
+        value = getattr(raw, "inference_geo", None)
+    return normalize_call_slug(value) if isinstance(value, str) else None
 
 
 class AnthropicProvider(Provider):
@@ -373,6 +404,7 @@ class AnthropicProvider(Provider):
                     usage=_usage_of(final.usage),
                     stop_reason=final.stop_reason or "end_turn",
                     served_by=SERVED_BY,
+                    inference_geo=_inference_geo_of(final),
                 )
         except anthropic.APIError as e:
             raise _failure_from_api_error(e) from e
@@ -418,6 +450,7 @@ class AnthropicProvider(Provider):
                     usage=_usage_of(getattr(msg, "usage", None)),
                     model=model,
                     served_by=SERVED_BY,
+                    inference_geo=_inference_geo_of(msg),
                 )
         raise ProviderError("anthropic", "No tool_use block in structured completion")
 

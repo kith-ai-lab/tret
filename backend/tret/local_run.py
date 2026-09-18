@@ -52,7 +52,7 @@ from tret.router_llm.router import (
     RoutingDecision,
     RoutingUnavailable,
 )
-from tret.sdk import Receipt, _build_receipt, _usage_is_empty
+from tret.sdk import Receipt, _build_receipt, _usage_is_empty, _validate_measurement
 
 __all__ = [
     "LocalRunResult",
@@ -409,7 +409,7 @@ async def _run_agentic_loop(
     effort: str | None = None,
     session_id: str | None = None,
     on_tool_call: Callable[[ToolCall], None] | None = None,
-) -> tuple[str, str, Usage, str, int, bool, bool, str | None]:
+) -> tuple[str, str, Usage, str, int, bool, bool, list[dict], str | None]:
     """route → stream → execute tool calls → append messages → repeat.
 
     The message protocol below is copied from engine/harness.py's loop, not
@@ -426,7 +426,7 @@ async def _run_agentic_loop(
       pack-task concept this freeform loop has no equivalent of).
 
     Returns (text, stop_reason, total_usage, status, iterations_used,
-    usage_reported, usage_estimated, error).
+    usage_reported, usage_estimated, call_records, error).
     """
     messages: list[Msg] = [Msg(role="user", content=task)]
     total_usage = Usage()
@@ -446,8 +446,10 @@ async def _run_agentic_loop(
     # handler below) — the receipt is still priced (real tokens were spent),
     # but flagged `estimated` so it is never mistaken for a metered figure.
     usage_estimated = False
+    call_records: list[dict] = []
 
     for iteration in range(1, max_iterations + 1):
+        call_started_at = datetime.now(timezone.utc)
         assistant_text: list[str] = []
         tool_calls: list[ToolCall] = []
         turn: TurnComplete | None = None
@@ -499,6 +501,39 @@ async def _run_agentic_loop(
                 total_usage.input_tokens += est.input_tokens
                 total_usage.output_tokens += est.output_tokens
                 usage_estimated = True
+                call_records.append(
+                    {
+                        "iteration": iteration,
+                        "started_at": call_started_at.isoformat(),
+                        "ended_at": datetime.now(timezone.utc).isoformat(),
+                        "input_tokens": est.input_tokens,
+                        "output_tokens": est.output_tokens,
+                        "cache_read_tokens": est.cache_read_tokens,
+                        "cache_write_tokens": est.cache_write_tokens,
+                        "reasoning_tokens": None,
+                        "reasoning_accounting": None,
+                        "served_by": None,
+                        "inference_geo": None,
+                        "usage_status": "estimated",
+                    }
+                )
+            else:
+                call_records.append(
+                    {
+                        "iteration": iteration,
+                        "started_at": call_started_at.isoformat(),
+                        "ended_at": datetime.now(timezone.utc).isoformat(),
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cache_read_tokens": 0,
+                        "cache_write_tokens": 0,
+                        "reasoning_tokens": None,
+                        "reasoning_accounting": None,
+                        "served_by": None,
+                        "inference_geo": None,
+                        "usage_status": "unavailable",
+                    }
+                )
             break
 
         usage = turn.usage if turn else Usage()
@@ -509,6 +544,22 @@ async def _run_agentic_loop(
         total_usage.output_tokens += usage.output_tokens
         total_usage.cache_read_tokens += usage.cache_read_tokens
         total_usage.cache_write_tokens += usage.cache_write_tokens
+        call_records.append(
+            {
+                "iteration": iteration,
+                "started_at": call_started_at.isoformat(),
+                "ended_at": datetime.now(timezone.utc).isoformat(),
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_read_tokens": usage.cache_read_tokens,
+                "cache_write_tokens": usage.cache_write_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
+                "reasoning_accounting": usage.reasoning_accounting,
+                "served_by": turn.served_by if turn is not None else None,
+                "inference_geo": turn.inference_geo if turn is not None else None,
+                "usage_status": "reported" if turn is not None else "missing",
+            }
+        )
 
         text_so_far = "".join(assistant_text)
         stop_reason = turn.stop_reason if turn else stop_reason
@@ -561,6 +612,10 @@ async def _run_agentic_loop(
     usage_reported = (turns_completed > 0 and all_turns_reported) or (
         turns_completed == 0 and usage_estimated
     )
+    if call_records and all(record["reasoning_tokens"] is not None for record in call_records):
+        total_usage.reasoning_tokens = sum(record["reasoning_tokens"] for record in call_records)
+        semantics = {record["reasoning_accounting"] for record in call_records}
+        total_usage.reasoning_accounting = semantics.pop() if len(semantics) == 1 else "unknown"
     return (
         text_so_far,
         stop_reason,
@@ -569,6 +624,7 @@ async def _run_agentic_loop(
         iteration,
         usage_reported,
         usage_estimated,
+        call_records,
         error,
     )
 
@@ -614,6 +670,8 @@ def _ledger_entry(
         # cannot tell a confidently priced line from one that is a
         # best-effort guess for a run that failed mid-stream.
         "estimated": receipt.estimated,
+        "call_records": receipt.call_records,
+        "energy_accounting": receipt.raw,
         "out": out,
     }
 
@@ -658,6 +716,7 @@ async def arun(
     max_tokens: int = 4096,
     temperature: float = 0.2,
     measured_energy_wh: float | None = None,
+    measured_energy_boundary: str = "node_it",
     on_route: Callable[[RoutingDecision], None] | None = None,
     on_tool_call: Callable[[ToolCall], None] | None = None,
 ) -> LocalRunResult:
@@ -674,7 +733,9 @@ async def arun(
     `energy_accounting` call, exactly as `tret.sdk.Router.arun`'s own
     parameter of the same name is. It replaces the per-token estimate for
     `energy_wh`; `--measured-wh` on the CLI is this parameter. Must be `>=
-    0`; a negative value raises `ValueError`.
+    0`; a negative value raises `ValueError`. Declare its boundary with
+    `measured_energy_boundary` (`node_it` by default, `facility` when facility
+    overhead is included, or `gpu` for a GPU-only reading).
     """
     if max_cost_tier not in TIER_ORDER:
         valid = ", ".join(sorted(TIER_ORDER, key=TIER_ORDER.__getitem__))
@@ -682,8 +743,7 @@ async def arun(
     if objective not in OBJECTIVES:
         valid = ", ".join(OBJECTIVES)
         raise ValueError(f"objective={objective!r} is not valid; choose one of: {valid}")
-    if measured_energy_wh is not None and measured_energy_wh < 0:
-        raise ValueError(f"measured_energy_wh must be >= 0, got {measured_energy_wh!r}")
+    _validate_measurement(measured_energy_wh, measured_energy_boundary)
 
     root: Path | None = None
     if path is not None:
@@ -746,6 +806,7 @@ async def arun(
         iterations,
         usage_reported,
         usage_estimated,
+        call_records,
         error,
     ) = await _run_agentic_loop(
         provider,
@@ -777,6 +838,8 @@ async def arun(
         usage_reported,
         estimated=usage_estimated,
         measured_energy_wh=measured_energy_wh,
+        measured_energy_boundary=measured_energy_boundary,
+        call_records=call_records,
     )
 
     entry = _ledger_entry(

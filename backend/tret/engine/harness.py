@@ -97,7 +97,8 @@ from tret.services.emissions import (
     emission_event_fields,
     energy_wh_field,
 )
-from tret.services.energy_meter import meter_for_settings
+from tret.services.energy_collector import collected_meter
+from tret.services.energy_meter import NvidiaSmiMeter, NvmlEnergyMeter, meter_for_settings
 from tret.services.lessons import approved_lessons, lessons_enabled
 from tret.services.outcomes import record_outcome
 from tret.services.transcript import (
@@ -383,6 +384,10 @@ class ModelSegment:
     # TurnComplete to read a served_by off, so the segment just keeps whatever
     # its last metered turn reported.
     served_by: str | None = None
+    # One record per attempted provider call. Segment totals remain the legacy
+    # billing view; this preserves call-specific upstream/geography/reasoning
+    # evidence without applying the latest endpoint to earlier calls.
+    call_records: list[dict] = field(default_factory=list)
     # The most recent *metered* (non-estimated) turn's cache_read_tokens for
     # this model in this run, or None if this model has not yet completed a
     # metered turn. A mid-stream death's estimate (see the `ProviderError`
@@ -433,7 +438,34 @@ class ModelSegment:
     # `energy_meter` block on every call after that.
     meter_describe: dict | None = field(default=None, repr=False, compare=False)
 
-    def add(self, usage: Usage, iteration: int, *, estimated: bool = False) -> None:
+    @property
+    def known_additional_reasoning_tokens(self) -> int:
+        """Reasoning tokens known to sit outside provider output totals.
+
+        This deliberately remains available when another call in the segment
+        has unknown reasoning metadata.  ``usage.reasoning_tokens`` describes
+        whether the aggregate metadata is complete; this value is only the
+        confirmed additive portion needed by energy estimation.
+        """
+        return sum(
+            int(record["reasoning_tokens"])
+            for record in self.call_records
+            if record["reasoning_accounting"] == "additional"
+            and record["reasoning_tokens"] is not None
+        )
+
+    def add(
+        self,
+        usage: Usage,
+        iteration: int,
+        *,
+        estimated: bool = False,
+        served_by: str | None = None,
+        inference_geo: str | None = None,
+        usage_status: str = "reported",
+        started_at: datetime | None = None,
+        ended_at: datetime | None = None,
+    ) -> None:
         if not self.from_iteration:
             self.from_iteration = iteration
         self.to_iteration = iteration
@@ -450,8 +482,62 @@ class ModelSegment:
         self.estimated_usage = self.estimated_usage or estimated
         if not estimated:
             self.last_reported_cache_read_tokens = usage.cache_read_tokens
+        self.call_records.append(
+            {
+                "iteration": iteration,
+                "started_at": started_at.isoformat() if started_at else None,
+                "ended_at": ended_at.isoformat() if ended_at else None,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_read_tokens": usage.cache_read_tokens,
+                "cache_write_tokens": usage.cache_write_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
+                "reasoning_accounting": usage.reasoning_accounting,
+                "served_by": served_by,
+                "inference_geo": inference_geo,
+                "usage_status": usage_status,
+            }
+        )
+        if all(record["reasoning_tokens"] is not None for record in self.call_records):
+            self.usage.reasoning_tokens = sum(
+                record["reasoning_tokens"] for record in self.call_records
+            )
+            semantics = {record["reasoning_accounting"] for record in self.call_records}
+            self.usage.reasoning_accounting = (
+                semantics.pop() if len(semantics) == 1 else "unknown"
+            )
+        else:
+            self.usage.reasoning_tokens = None
+            self.usage.reasoning_accounting = None
 
-    def accounting(self) -> dict:
+    def accounting(self, emissions: "_EmissionsContext | None" = None) -> dict:
+        """`emissions` — this run's `_EmissionsContext`, when the caller has
+        one in scope — lets per-call factor resolution below share its cache
+        instead of re-resolving the ladder for every call record (see
+        `_EmissionsContext.resolve_call_factors`'s own docstring). `None` (the
+        SDK's own accounting path, and any caller with no run context) falls
+        back to the plain, uncached `factor_set_for_call` — correct either
+        way, just not memoised.
+        """
+        if (
+            self.meter_reading is None
+            and self.call_records
+            and self.model.provider != "local"
+        ):
+            from tret.services.emission_calls import account_call_records
+            from tret.services.emission_factors import build_factor_set
+
+            per_call = account_call_records(
+                self.model, self.call_records, billed_usage=self.usage,
+                factors=self.factors or build_factor_set(
+                    provider=self.model.provider, model_id=self.model.id
+                ),
+                resolve_call_factors=(
+                    emissions.resolve_call_factors if emissions is not None else None
+                ),
+            )
+            if per_call is not None:
+                return per_call
         accounting = energy_accounting(
             self.model,
             self.usage.input_tokens,
@@ -462,6 +548,14 @@ class ModelSegment:
             measured_energy_wh=(
                 float(self.meter_reading.wh) if self.meter_reading is not None else None
             ),
+            measured_energy_boundary=(
+                self.meter_reading.energy_boundary if self.meter_reading is not None else "node_it"
+            ),
+            energy_output_tokens=(
+                self.usage.output_tokens + self.known_additional_reasoning_tokens
+            ),
+            reasoning_tokens=self.usage.reasoning_tokens,
+            reasoning_accounting=self.usage.reasoning_accounting,
         )
         # Additive, on top of everything `energy_accounting` itself already
         # did with `measured_energy_wh` (energy_source: "measured", the
@@ -469,34 +563,39 @@ class ModelSegment:
         # see its own docstring). This is the metering *provenance* —
         # which meter, how many samples, over how long — that a run-level
         # library call has no way to know about on its own.
+        if self.meter_describe is not None:
+            accounting["energy_meter"] = dict(self.meter_describe)
         if self.meter_reading is not None:
             reading = self.meter_reading
             accounting["energy_meter"] = {
+                **(accounting.get("energy_meter") or {}),
                 "kind": reading.kind,
+                "energy_boundary": reading.energy_boundary,
                 "samples": reading.samples,
                 "duration_s": reading.duration_s,
                 "interval_s": (self.meter_describe or {}).get("interval_s"),
                 "shared_device": reading.shared_device,
                 "note": reading.note,
+                **reading.describe(),
             }
             if reading.shared_device:
                 accounting["caveats"] = [
                     *accounting["caveats"],
                     {
                         "key": "shared_device_measurement",
-                        "label": "Measured energy is host-level, not per-process",
+                        "label": "Measured energy includes shared-device work",
                         "direction": "overstates",
                         "applies": True,
                         "note": (
-                            "Host-level power includes other processes on the same "
-                            "accelerator."
+                            "The meter includes other work sharing the measured devices; "
+                            "it does not isolate this run's energy."
                         ),
                     },
                 ]
         return accounting
 
-    def to_json(self) -> dict:
-        accounting = self.accounting()
+    def to_json(self, emissions: "_EmissionsContext | None" = None) -> dict:
+        accounting = self.accounting(emissions)
         return {
             "model": self.model.id,
             "provider": self.model.provider,
@@ -507,10 +606,14 @@ class ModelSegment:
             "output_tokens": self.usage.output_tokens,
             "cache_read_tokens": self.usage.cache_read_tokens,
             "cache_write_tokens": self.usage.cache_write_tokens,
+            "reasoning_tokens": self.usage.reasoning_tokens,
+            "reasoning_accounting": self.usage.reasoning_accounting,
+            "known_additional_reasoning_tokens": self.known_additional_reasoning_tokens,
             "cost_usd": float(self.cost_usd),
             "effort": self.effort,
             "effort_history": list(self.effort_history),
             "served_by": self.served_by,
+            "call_records": list(self.call_records),
             "cache_rebuilds_expected": self.cache_rebuilds_expected,
             "cache_misses_unexpected": self.cache_misses_unexpected,
             "energy_wh": accounting["energy_wh"],
@@ -523,6 +626,42 @@ class ModelSegment:
             # figure.
             "estimated": self.estimated_usage,
         }
+
+
+def _combine_segments(
+    segments: list[ModelSegment], emissions: "_EmissionsContext | None" = None
+) -> dict:
+    """Roll up segment accounting while retaining meter-attempt quality.
+
+    `emissions`, when given, is threaded into each segment's own
+    `accounting()` so per-call factor resolution shares this run's cache
+    (see `ModelSegment.accounting` / `_EmissionsContext.resolve_call_factors`)
+    instead of re-resolving the ladder from scratch on every call — this
+    function is exactly the recompute `_book_usage` runs once per turn.
+    """
+    blocks = [segment.accounting(emissions) for segment in segments]
+    combined = combine_accountings(blocks)
+    assert combined is not None
+    attempts = [block["energy_meter"] for block in blocks if block.get("energy_meter")]
+    if attempts:
+        combined["energy_meter_attempts"] = attempts
+        if len(attempts) == 1:
+            combined["energy_meter"] = {
+                **(combined.get("energy_meter") or {}),
+                **attempts[0],
+            }
+        else:
+            statuses = {attempt.get("status") for attempt in attempts}
+            reasons = [attempt.get("attempt_reason") for attempt in attempts]
+            combined["energy_meter"] = {
+                **(combined.get("energy_meter") or {}),
+                "status": statuses.pop() if len(statuses) == 1 else "mixed",
+                "complete": all(attempt.get("complete") is True for attempt in attempts),
+                "attempt_reason": next(
+                    (reason for reason in reasons if reason is not None), None
+                ),
+            }
+    return combined
 
 
 @dataclass
@@ -580,6 +719,70 @@ class _EmissionsContext:
     # live when `_execute_inner` raised or its task was cancelled, without
     # `_execute_inner` needing its own try/finally around the run loop.
     current_segment: "ModelSegment | None" = field(default=None, repr=False)
+    # Retained so execute()'s outer finally can persist final meter diagnostics
+    # even when an engine exception or cancellation skips the normal finish
+    # path inside `_execute_inner`.
+    segments: list["ModelSegment"] = field(default_factory=list, repr=False)
+    # Per-call `FactorSet` resolutions (`services/emission_calls.
+    # account_call_records`'s `resolve_call_factors` hook), keyed by
+    # (provider, model_id, served_by, hour bucket of `at`, id of the
+    # segment-level factors' own `resolution_context`). `account_call_records`
+    # used to call `factor_set_for_call` -> `build_factor_set` once per call
+    # record on *every* turn — turn k re-resolving all k calls, ~5,000
+    # resolutions on a 100-turn run, each re-parsing the override documents.
+    # Scoped to this run (not `HarnessEngine`, which is process-wide and
+    # shared across concurrent runs — see this class's own docstring) so nothing
+    # here ever crosses from one workspace's run into another's.
+    _call_factor_sets: dict[tuple, "FactorSet | None"] = field(
+        default_factory=dict, repr=False
+    )
+
+    def resolve_call_factors(
+        self,
+        factors: "FactorSet",
+        *,
+        provider: str | None,
+        model_id: str | None,
+        served_by: str | None,
+        at: datetime | None = None,
+        interval_end: datetime | None = None,
+    ) -> "FactorSet | None":
+        """Cached, never-raising stand-in for `factor_set_for_call`.
+
+        Same signature (`account_call_records` calls this exactly the way it
+        would call `factor_set_for_call` directly), so it can replace it as
+        the resolver for every call record in a segment without changing the
+        loop that walks them. `interval_end` is passed through to the actual
+        resolution but, deliberately, not part of the cache key — two calls a
+        few seconds apart within the same hour bucket share a resolution
+        rather than each re-parsing the override documents for a difference
+        an hourly grid table cannot see anyway.
+
+        A raising `build_factor_set` (a hand-edited override document, same
+        failure `_factors_for` above already guards against) is logged once
+        and falls back to the segment-level `factors` already resolved for
+        this call's segment — the accounting estimate path, never a raise
+        into the turn that is trying to book its usage.
+        """
+        from tret.services.emission_factors import factor_set_for_call
+
+        hour = at.replace(minute=0, second=0, microsecond=0) if at is not None else None
+        key = (provider, model_id, served_by, hour, id(factors.resolution_context))
+        if key in self._call_factor_sets:
+            return self._call_factor_sets[key]
+        try:
+            resolved = factor_set_for_call(
+                factors, provider=provider, model_id=model_id, served_by=served_by,
+                at=at, interval_end=interval_end,
+            )
+        except Exception:
+            log.exception(
+                "failed to resolve per-call emissions factors for provider %r; "
+                "falling back to this segment's own factor set", provider,
+            )
+            resolved = factors
+        self._call_factor_sets[key] = resolved
+        return resolved
 
 
 class HarnessEngine:
@@ -678,24 +881,50 @@ class HarnessEngine:
             return
         try:
             meter = meter_for_settings(settings)
-        except Exception:
+        except Exception as exc:
             log.exception(
                 "failed to construct an energy meter for a local segment (%s); "
                 "this segment will fall back to the per-token estimate",
                 segment.model.id,
             )
+            segment.meter_describe = {
+                **(segment.meter_describe or {}),
+                "status": "error",
+                "complete": False,
+                "attempt_reason": f"{type(exc).__name__}: {exc}",
+            }
             return
         if meter is None:
             return
+        if isinstance(meter, (NvidiaSmiMeter, NvmlEnergyMeter)):
+            gpu_index, interval_s = meter.gpu_index, meter.interval_s
+
+            def _new_nvidia_meter():
+                candidate = meter_for_settings(settings)
+                if not isinstance(candidate, (NvidiaSmiMeter, NvmlEnergyMeter)):
+                    raise RuntimeError("nvidia_smi meter settings changed during collection")
+                return candidate
+
+            meter = collected_meter(
+                _new_nvidia_meter,
+                key=(type(meter).__name__, gpu_index, interval_s),
+            )
         segment.meter_describe = meter.describe()
         try:
-            await meter.start()
-        except Exception:
+            interval_s = (segment.meter_describe or {}).get("interval_s") or 1.0
+            await asyncio.wait_for(meter.start(), timeout=max(2.0, interval_s * 2))
+        except Exception as exc:
             log.exception(
                 "energy meter failed to start for a local segment (%s); falling back "
                 "to the per-token estimate",
                 segment.model.id,
             )
+            segment.meter_describe = {
+                **(segment.meter_describe or {}),
+                "status": "error",
+                "complete": False,
+                "attempt_reason": f"{type(exc).__name__}: {exc}",
+            }
             return
         segment.meter = meter
         # Recorded so `execute()`'s own `finally` can stop this segment on an
@@ -723,15 +952,68 @@ class HarnessEngine:
         timeout_s = max(2.0, interval_s * 2)
         try:
             reading = await asyncio.wait_for(meter.stop(), timeout=timeout_s)
-        except Exception:
+        except Exception as exc:
             log.exception(
                 "energy meter failed to stop for a local segment (%s); falling back "
                 "to the per-token estimate",
                 segment.model.id,
             )
             reading = None
-        if reading is not None:
+            segment.meter_describe = {
+                **(segment.meter_describe or {}),
+                "status": "error",
+                "complete": False,
+                "attempt_reason": f"{type(exc).__name__}: {exc}",
+            }
+        else:
+            # Some meters learn coverage/status only while stopping. Refresh
+            # the captured description before dropping the meter object.
+            try:
+                refreshed = meter.describe()
+            except Exception:
+                refreshed = {}
+            segment.meter_describe = {**(segment.meter_describe or {}), **refreshed}
+        if reading is not None and reading.complete:
             segment.meter_reading = reading
+            segment.meter_describe = {
+                **(segment.meter_describe or {}),
+                **reading.describe(),
+                "attempt_reason": None,
+            }
+        elif reading is not None:
+            segment.meter_describe = {
+                **(segment.meter_describe or {}),
+                **reading.describe(),
+                "attempt_reason": "incomplete_coverage",
+            }
+        elif (segment.meter_describe or {}).get("status") == "error":
+            # Already fully described by the `except` handler above (its own
+            # "error" status and exception-derived `attempt_reason`) — leave
+            # it exactly as set rather than rewrite it below.
+            pass
+        elif (segment.meter_describe or {}).get("status") not in (None, ""):
+            # Any real collector/meter status — "incomplete",
+            # "unallocated_concurrency", "incomplete_claim_interval",
+            # "meter_failure", "meter_start_failure", "collector_unavailable",
+            # and anything else `CollectedMeter.describe()` (services/
+            # energy_collector.py) or a plain meter's own `describe()` emits —
+            # is passed through as-is rather than rewritten. Losing the
+            # collector's own diagnosis here is exactly what erased the A6
+            # detail the accounting record needs when metering degrades.
+            segment.meter_describe = {
+                **(segment.meter_describe or {}),
+                "attempt_reason": "incomplete_coverage",
+            }
+        else:
+            # Genuinely no status to report — the meter never produced one at
+            # all (nothing above set `segment.meter_describe["status"]`).
+            # This is the only case "unavailable" still applies.
+            segment.meter_describe = {
+                **(segment.meter_describe or {}),
+                "status": "unavailable",
+                "complete": False,
+                "attempt_reason": "meter_unavailable",
+            }
         # This segment is no longer the one `execute()`'s `finally` needs to
         # stop on its way out — guarded by identity so a stale call (this
         # segment was already superseded by a later `_start_meter`) never
@@ -931,19 +1213,63 @@ class HarnessEngine:
                 # (a no-op on a segment already stopped), so this never
                 # conflicts with the stop `_execute_inner` already did on its
                 # own normal-completion path.
-                seg = emissions.current_segment
-                if seg is not None:
-                    await self._stop_meter(seg, emissions)
-                # Every path out of this method — the normal finish inside
-                # `_execute_inner`, `_fail_before_start`'s early return from it
-                # (still inside the `try` above, since it never raises), and
-                # the crash handler just above — reaches this exactly once.
-                # Before this `finally` existed, only the normal finish path
-                # discarded `run.id` (see `_execute_inner`'s own comment further
-                # down): a run cancelled while it was, say, failing a pre-flight
-                # check would leave its id sitting in `_cancelled` forever, with
-                # no later code path ever reaching back to clean it up.
-                self._cancelled.discard(run_id)
+                # Guarded: `_combine_segments` (its own `assert`) and
+                # `db.commit()` used to run unguarded here, so a bad segment
+                # or a commit error after a failed run skipped straight past
+                # `self._cancelled.discard(run_id)` below and leaked the id —
+                # every later `cancel()` on a *different* run sharing no
+                # state with this one would then see it still "cancelled".
+                # This accounting finalize is best-effort, exactly like the
+                # `_stop_meter` it wraps: never let it stop the run's id from
+                # being released.
+                try:
+                    try:
+                        seg = emissions.current_segment
+                        if seg is not None:
+                            await self._stop_meter(seg, emissions)
+                        if emissions.segments and any(
+                            item.meter_describe is not None for item in emissions.segments
+                        ):
+                            accounting = _combine_segments(emissions.segments, emissions)
+                            run.energy_wh = Decimal(str(accounting["energy_wh"]))
+                            run.energy_accounting = accounting
+                            run.model_timeline = [
+                                item.to_json(emissions) for item in emissions.segments
+                            ]
+                            await db.commit()
+                    except Exception:
+                        log.exception(
+                            "failed to finalize energy accounting while stopping run %s's "
+                            "meter; the run's own status/result is unaffected, but this "
+                            "run's measured energy may be missing from the persisted record",
+                            run_id,
+                        )
+                        try:
+                            await db.rollback()
+                        except Exception:
+                            log.exception(
+                                "rollback after a failed accounting finalize also failed "
+                                "for run %s", run_id,
+                            )
+                finally:
+                    # Every path out of this method — the normal finish inside
+                    # `_execute_inner`, `_fail_before_start`'s early return from it
+                    # (still inside the `try` above, since it never raises), and
+                    # the crash handler just above — reaches this exactly once.
+                    # Before this `finally` existed, only the normal finish path
+                    # discarded `run.id` (see `_execute_inner`'s own comment further
+                    # down): a run cancelled while it was, say, failing a pre-flight
+                    # check would leave its id sitting in `_cancelled` forever, with
+                    # no later code path ever reaching back to clean it up.
+                    #
+                    # This is a nested `finally`, not the `except Exception`
+                    # above it: a `CancelledError` raised while awaiting
+                    # inside the guarded block is a `BaseException` that
+                    # `except Exception` never sees, and it must still
+                    # propagate — but only after releasing this run's id,
+                    # never leaking it for a later, unrelated `cancel()` to
+                    # find still marked cancelled.
+                    self._cancelled.discard(run_id)
 
     async def _execute_inner(self, db, run: Run, emissions: "_EmissionsContext") -> None:
         harness = await db.get(Harness, run.harness_id)
@@ -1265,6 +1591,7 @@ class HarnessEngine:
                 effort=decision.effort if model_info.supports_effort else None,
             )
         ]
+        emissions.segments = segments
         segment = segments[0]
         # Read once per run, same as the workspace/managed emissions layers
         # above — a local segment's meter (tret/services/energy_meter.py) is
@@ -1553,6 +1880,7 @@ class HarnessEngine:
                 and not provider_ignore_waived
                 else None
             )
+            call_started_at = _utcnow()
             try:
                 async for event in provider.stream(
                     model=model_info.wire_id,
@@ -1721,7 +2049,13 @@ class HarnessEngine:
                             model_info=model_info,
                             usage=est_usage,
                             iteration=iteration,
+                            emissions=emissions,
                             estimated=True,
+                            served_by=None,
+                            inference_geo=None,
+                            usage_status="estimated",
+                            started_at=call_started_at,
+                            ended_at=_utcnow(),
                         )
                         messages.append(
                             Msg(
@@ -1740,6 +2074,28 @@ class HarnessEngine:
                                 },
                             )
                         )
+                    else:
+                        # The request failed before enough response evidence
+                        # existed to estimate usage. Preserve the attempted
+                        # call with explicitly unknown routing metadata; never
+                        # inherit the preceding successful call's endpoint or
+                        # geography.
+                        segment.call_records.append(
+                            {
+                                "iteration": iteration,
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                                "cache_read_tokens": 0,
+                                "cache_write_tokens": 0,
+                                "reasoning_tokens": None,
+                                "reasoning_accounting": None,
+                                "served_by": None,
+                                "inference_geo": None,
+                                "usage_status": "unavailable",
+                                "started_at": call_started_at.isoformat(),
+                                "ended_at": _utcnow().isoformat(),
+                            }
+                        )
                     run.status = "failed"
                     run.error = str(e)
                     break
@@ -1755,6 +2111,12 @@ class HarnessEngine:
                 model_info=model_info,
                 usage=usage,
                 iteration=iteration,
+                emissions=emissions,
+                served_by=turn.served_by if turn is not None else None,
+                inference_geo=turn.inference_geo if turn is not None else None,
+                usage_status="reported" if turn is not None else "missing",
+                started_at=call_started_at,
+                ended_at=_utcnow(),
                 wire_changed_by_compaction=compaction_changed_wire,
                 cache_voided_by_effort_raise=voided_by_effort_this_turn,
             )
@@ -2268,14 +2630,11 @@ class HarnessEngine:
         # out of the loop above skips straight past this to `execute()`'s
         # own `finally`, which stops it from there instead).
         await self._stop_meter(segment, emissions)
-        # Any segment's meter having produced a reading (not just the final
-        # one) means at least part of this run was measured, not merely
-        # estimated — e.g. a local segment that was metered, then switched to
-        # cloud and the run was cancelled before that cloud segment booked a
-        # turn. Recomputing from every segment, not just gating on the last
-        # one, is what keeps that measurement from being silently discarded.
-        if any(seg.meter_reading is not None for seg in segments):
-            accounting = combine_accountings([seg.accounting() for seg in segments])
+        # Recompute after every attempted meter stops. Successful readings can
+        # replace the estimate; failed/incomplete attempts still gained final
+        # status and coverage diagnostics during stop and must be persisted.
+        if any(seg.meter_describe is not None for seg in segments):
+            accounting = _combine_segments(segments, emissions)
             run.energy_wh = Decimal(str(accounting["energy_wh"]))
             run.energy_accounting = accounting
             # Rewritten unconditionally on a recompute — the same way
@@ -2283,7 +2642,7 @@ class HarnessEngine:
             # `len(segments) > 1`: a single-segment run that was measured
             # deserves a `model_timeline` that agrees with `energy_accounting`
             # too, not just the multi-segment case.
-            run.model_timeline = [seg.to_json() for seg in segments]
+            run.model_timeline = [seg.to_json(emissions) for seg in segments]
 
         # `run.grounding` is normally set inside the loop, on the turn whose
         # reply finally goes unchallenged (engine/grounding.py "the reply
@@ -2348,10 +2707,10 @@ class HarnessEngine:
         # finish with a timeline nothing ever wrote the ledger onto.
         if any(
             seg.served_by or seg.effort_history or seg.cache_rebuilds_expected
-            or seg.cache_misses_unexpected
+            or seg.cache_misses_unexpected or seg.call_records
             for seg in segments
         ):
-            run.model_timeline = [seg.to_json() for seg in segments]
+            run.model_timeline = [seg.to_json(emissions) for seg in segments]
         # The run-level roll-up of the same counters, written once here rather
         # than recomputed every turn (see `_book_usage`'s own note) — cheap
         # either way, but nothing mid-run reads it, so there is no reason to
@@ -2421,7 +2780,13 @@ class HarnessEngine:
         model_info: ModelInfo,
         usage: Usage,
         iteration: int,
+        emissions: "_EmissionsContext | None" = None,
         estimated: bool = False,
+        served_by: str | None = None,
+        inference_geo: str | None = None,
+        usage_status: str = "reported",
+        started_at: datetime | None = None,
+        ended_at: datetime | None = None,
         wire_changed_by_compaction: bool = False,
         cache_voided_by_effort_raise: bool = False,
     ) -> Decimal:
@@ -2491,7 +2856,28 @@ class HarnessEngine:
         # change model part-way (see the supervisor below), and every figure
         # downstream — price, energy class, PUE, grid factor — is a property
         # of *which* model spent the tokens, not of the run as a whole.
-        segment.add(usage, iteration, estimated=estimated)
+        segment.add(
+            usage,
+            iteration,
+            estimated=estimated,
+            served_by=served_by,
+            inference_geo=inference_geo,
+            usage_status=usage_status,
+            started_at=started_at,
+            ended_at=ended_at,
+        )
+        all_calls = [record for item in segments for record in item.call_records]
+        if all_calls and all(record["reasoning_tokens"] is not None for record in all_calls):
+            total_usage.reasoning_tokens = sum(
+                record["reasoning_tokens"] for record in all_calls
+            )
+            semantics = {record["reasoning_accounting"] for record in all_calls}
+            total_usage.reasoning_accounting = (
+                semantics.pop() if len(semantics) == 1 else "unknown"
+            )
+        else:
+            total_usage.reasoning_tokens = None
+            total_usage.reasoning_accounting = None
         turn_cost = model_info.cost_usd(
             usage.input_tokens,
             usage.output_tokens,
@@ -2521,7 +2907,7 @@ class HarnessEngine:
         # its turns. The run-level block is the roll-up across segments, which
         # for the ordinary single-model run is byte-identical to the single
         # segment's own block (services/emissions.combine_accountings).
-        accounting = combine_accountings([seg.accounting() for seg in segments])
+        accounting = _combine_segments(segments, emissions)
         run.energy_wh = Decimal(str(accounting["energy_wh"]))
         run.energy_accounting = accounting
         # Normally kept only once a run has used more than one model (see
@@ -2546,8 +2932,12 @@ class HarnessEngine:
         # row), so they are folded into the same once-at-finish write rather
         # than persisted here on every turn — see the finish path, just
         # before `record_outcome`.
-        if len(segments) > 1 or estimated or any(seg.effort_history for seg in segments):
-            run.model_timeline = [seg.to_json() for seg in segments]
+        if (
+            len(segments) > 1
+            or estimated
+            or any(seg.effort_history or seg.call_records for seg in segments)
+        ):
+            run.model_timeline = [seg.to_json(emissions) for seg in segments]
         return turn_cost
 
     def _raise_effort(
@@ -2666,7 +3056,7 @@ class HarnessEngine:
         run.routing = routing
         run.model_used = target.id
         run.provider_used = target.provider
-        run.model_timeline = [seg.to_json() for seg in segments]
+        run.model_timeline = [seg.to_json(emissions) for seg in segments]
         return target, self.registry.get(target.provider), segments[-1]
 
     async def _compact(

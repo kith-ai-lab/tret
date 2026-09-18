@@ -42,6 +42,16 @@ def test_grams_per_run_defaults_match_amortized_defaults():
 
 
 # ── validation, direct construction ───────────────────────────────────────────
+@pytest.mark.parametrize("field,value", [
+    ("gpus", 1.5), ("gpus", True), ("runs_over_lifetime", "100"),
+    ("batch_size", 1.5), ("include_server", "false"), ("include_server", 0),
+    ("gpu_model", 2), ("label", " "), ("label", True),
+])
+def test_profile_json_rejects_coercible_but_wrong_types(field, value):
+    with pytest.raises(ProfileError, match=field):
+        profile_from_dict({"gpus": 1, "runs_over_lifetime": 100, field: value})
+
+
 def test_negative_gpus_rejected_naming_the_key():
     with pytest.raises(ProfileError, match="gpus"):
         EmbodiedProfile(gpus=-1, runs_over_lifetime=1000)

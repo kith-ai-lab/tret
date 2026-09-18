@@ -82,12 +82,17 @@ function factorDetail(factor: EmissionsFactor): string | null {
     // Phase 3, additive: an operator-pinned region, and whether this run's
     // value came from an hourly table or the plain annual figure.
     if (factor.grid_region) parts.push(`region: ${factor.grid_region}`)
-    if (factor.temporal === 'hourly' && factor.table) {
+    if (factor.region_resolution_status === 'fallback_unknown_region') {
+      parts.push(`unsupported pin: ${factor.requested_region}; fallback applied`)
+    }
+    if (factor.temporal === 'interval_weighted' && factor.table) {
+      parts.push(`time-weighted: ${factor.table} (constant power within each call)`)
+    } else if (factor.temporal === 'hourly' && factor.table) {
       parts.push(`hourly: ${factor.table}`)
     } else if (factor.table) {
       parts.push(`annual (hourly table ${factor.table} configured)`)
     }
-    if (factor.table_miss) parts.push('table miss, fell back to annual')
+    if (factor.table_miss) parts.push('uncovered table periods use the annual fallback')
   }
   if (factor.key === 'embodied_hardware' && factor.profile && typeof factor.profile === 'object') {
     parts.push(embodiedProfileText(factor.profile))

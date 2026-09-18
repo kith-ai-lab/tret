@@ -719,6 +719,357 @@ async def test_multi_model_run_is_recomputed_segment_by_segment(client, seed):
     )
 
 
+# ── preserve_measured_energy mode ────────────────────────────────────────────
+async def test_preserve_noop_keeps_historical_row_without_catalog_lookup(client, seed):
+    _, user, project, harness = await make_tenant(seed, name="Co", email="preserve-noop@example.com")
+    accounting = energy_accounting(
+        GHOST_MODEL, 10, 2, settings=FIXED_SETTINGS, catalog=FAKE_CATALOG,
+        measured_energy_wh=0.0, measured_energy_boundary="unknown",
+    )
+    await seed(make_run(
+        project_id=project.id, harness_id=harness.id, created_by=user.id,
+        model_used="ghost/nope", accounting=accounting, input_tokens=10, output_tokens=2,
+    ))
+    await login(client, user.email)
+    response = await client.post(
+        "/api/analytics/emissions/whatif",
+        json={"mode": "preserve_measured_energy", "factors": {}},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["runs_preserved"] == 1
+    assert body["runs_recomputed"] == body["runs_skipped"] == 0
+    assert body["scenario"]["totals"] == body["recorded"]["totals"]
+
+
+async def test_preserve_grid_reprices_node_measurement_without_changing_wh_or_pue(client, seed):
+    _, user, project, harness = await make_tenant(seed, name="Co", email="preserve-grid@example.com")
+    settings = Settings(
+        emissions_baseline_model=MODEL_ID, datacenter_pue=1.7,
+        grid_co2e_g_per_kwh=500, embodied_g_per_run=4,
+    )
+    accounting = energy_accounting(
+        MODEL, 100, 20, settings=settings, catalog=FAKE_CATALOG,
+        measured_energy_wh=10.0, measured_energy_boundary="node_it",
+    )
+    await seed(make_run(
+        project_id=project.id, harness_id=harness.id, created_by=user.id,
+        model_used=MODEL_ID, accounting=accounting, input_tokens=100, output_tokens=20,
+    ))
+    await login(client, user.email)
+    response = await client.post(
+        "/api/analytics/emissions/whatif",
+        json={"mode": "preserve_measured_energy", "factors": {
+            "grid": {"default": {"g_per_kwh": 50, "label": "scenario"}}
+        }},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["scenario"]["totals"]["energy_wh_compute"] == 10.0
+    assert body["scenario"]["totals"]["energy_wh"] == 17.0
+    assert body["scenario"]["totals"]["co2e_g"] < body["recorded"]["totals"]["co2e_g"]
+    assert body["mode"] == "preserve_measured_energy"
+
+
+async def test_preserve_facility_allows_grid_but_rejects_pue_atomically(client, seed):
+    _, user, project, harness = await make_tenant(seed, name="Co", email="facility@example.com")
+    accounting = energy_accounting(
+        MODEL, 100, 20, settings=FIXED_SETTINGS, catalog=FAKE_CATALOG,
+        measured_energy_wh=8.0, measured_energy_boundary="facility",
+    )
+    await seed(make_run(
+        project_id=project.id, harness_id=harness.id, created_by=user.id,
+        model_used=MODEL_ID, accounting=accounting, input_tokens=100, output_tokens=20,
+    ))
+    await login(client, user.email)
+    grid = await client.post(
+        "/api/analytics/emissions/whatif",
+        json={"mode": "preserve_measured_energy", "factors": {
+            "grid": {"default": {"g_per_kwh": 25, "label": "scenario"}}
+        }},
+    )
+    assert grid.status_code == 200, grid.text
+    assert grid.json()["scenario"]["totals"]["energy_wh"] == 8.0
+
+    pue = await client.post(
+        "/api/analytics/emissions/whatif",
+        json={"mode": "preserve_measured_energy", "factors": {
+            "pue": {"cloud": 1.5, "label": "scenario"}
+        }},
+    )
+    assert pue.status_code == 422
+    assert "facility-boundary" in pue.text
+
+
+async def test_preserve_mode_notes_the_method_change_for_reestimated_estimated_runs(client, seed):
+    """Audit note ("What-if preserve mode"): preserve mode only preserves
+    *measured* energy. A run recorded as "estimated" under an older method
+    falls through to a full re-estimate under today's default ladder, so its
+    delta mixes a method change in with the factor change that was actually
+    requested. The response must say so, in both `basis` and the scenario's
+    `layer_note`."""
+    _, user, project, harness = await make_tenant(seed, name="Co", email="preserve-method@example.com")
+    accounting = _account(MODEL, FIXED_SETTINGS, (100, 20, 0, 0))
+    assert accounting["energy_source"] == "estimated"
+    assert accounting["method_id"] == "class_ladder_v2"
+    # Simulate a run recorded before the v2 ladder shipped as this workspace's
+    # default — same shape, older method_id.
+    accounting["method_id"] = "class_ladder_v1"
+    await seed(make_run(
+        project_id=project.id, harness_id=harness.id, created_by=user.id,
+        model_used=MODEL_ID, accounting=accounting, input_tokens=100, output_tokens=20,
+    ))
+    await login(client, user.email)
+    response = await client.post(
+        "/api/analytics/emissions/whatif",
+        json={"mode": "preserve_measured_energy", "factors": {
+            "grid": {"default": {"g_per_kwh": 50, "label": "scenario"}}
+        }},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["runs_recomputed"] == 1
+    assert "1 estimated run(s)" in body["basis"]
+    assert "class_ladder_v1" in body["basis"] and "class_ladder_v2" in body["basis"]
+    assert "method change" in body["basis"]
+    assert "class_ladder_v1" in body["scenario"]["layer_note"]
+    assert "method change" in body["scenario"]["layer_note"]
+
+
+async def test_preserve_mode_treats_unstamped_legacy_rows_as_class_ladder_v1(client, seed):
+    """A pre-batch row recorded before `method_id` was stamped has none —
+    but it was still computed by the only estimator that existed then
+    (class_ladder_v1), so it must count toward the method-change note the
+    same as an explicitly-stamped class_ladder_v1 row would."""
+    _, user, project, harness = await make_tenant(seed, name="Co", email="preserve-legacy-method@example.com")
+    accounting = _account(MODEL, FIXED_SETTINGS, (100, 20, 0, 0))
+    assert accounting["energy_source"] == "estimated"
+    # Simulate a pre-batch row: no method_id was ever stamped on it.
+    accounting.pop("method_id", None)
+    await seed(make_run(
+        project_id=project.id, harness_id=harness.id, created_by=user.id,
+        model_used=MODEL_ID, accounting=accounting, input_tokens=100, output_tokens=20,
+    ))
+    await login(client, user.email)
+    response = await client.post(
+        "/api/analytics/emissions/whatif",
+        json={"mode": "preserve_measured_energy", "factors": {
+            "grid": {"default": {"g_per_kwh": 50, "label": "scenario"}}
+        }},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["runs_recomputed"] == 1
+    assert "1 estimated run(s)" in body["basis"]
+    assert "class_ladder_v1 (legacy, method not stamped)" in body["basis"]
+    assert "method change" in body["basis"]
+    assert "class_ladder_v1 (legacy, method not stamped)" in body["scenario"]["layer_note"]
+
+
+async def test_preserve_mode_omits_the_method_change_note_for_measured_runs(client, seed):
+    """A genuinely measured run is preserved, not re-estimated — no method
+    changed, so no note about one."""
+    _, user, project, harness = await make_tenant(seed, name="Co", email="preserve-measured-note@example.com")
+    accounting = energy_accounting(
+        MODEL, 100, 20, settings=FIXED_SETTINGS, catalog=FAKE_CATALOG,
+        measured_energy_wh=10.0, measured_energy_boundary="node_it",
+    )
+    await seed(make_run(
+        project_id=project.id, harness_id=harness.id, created_by=user.id,
+        model_used=MODEL_ID, accounting=accounting, input_tokens=100, output_tokens=20,
+    ))
+    await login(client, user.email)
+    response = await client.post(
+        "/api/analytics/emissions/whatif",
+        json={"mode": "preserve_measured_energy", "factors": {
+            "grid": {"default": {"g_per_kwh": 50, "label": "scenario"}}
+        }},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "method change" not in body["basis"]
+    assert "method change" not in body["scenario"]["layer_note"]
+
+
+async def test_preserve_rejects_energy_model_changes_and_invalid_mode(client, seed):
+    _, user, _, _ = await make_tenant(seed, name="Co", email="invalid-mode@example.com")
+    await login(client, user.email)
+    invalid_factor = await client.post(
+        "/api/analytics/emissions/whatif",
+        json={"mode": "preserve_measured_energy", "factors": {"energy_strategy": "active_params"}},
+    )
+    assert invalid_factor.status_code == 422
+    assert "supports only grid and PUE" in invalid_factor.text
+
+    invalid_mode = await client.post(
+        "/api/analytics/emissions/whatif", json={"mode": "invent_measurement", "factors": {}}
+    )
+    assert invalid_mode.status_code == 422
+
+
+def test_preserved_gpu_and_zero_measurements_keep_boundary_and_raw_wh():
+    for boundary, wh in (("gpu", 3.5), ("node_it", 0.0)):
+        recorded = energy_accounting(
+            MODEL, 100, 20, settings=FIXED_SETTINGS, catalog=FAKE_CATALOG,
+            measured_energy_wh=wh, measured_energy_boundary=boundary,
+        )
+        scenario = analytics_module._preserved_measured_accounting(
+            recorded=recorded, model=MODEL, tokens=(100, 20, 0, 0),
+            workspace_doc=None, managed_doc=None,
+            factors_doc=emission_factors_module.EmissionsOverrides(**{
+                "grid": {"default": {"g_per_kwh": 40, "label": "scenario"}}
+            }),
+            created_at=utcnow(), catalog=FAKE_CATALOG,
+        )
+        assert scenario["energy_wh"] == wh
+        assert scenario["energy_boundary"] == boundary
+        if boundary == "gpu":
+            assert scenario["energy_boundary_complete"] is False
+            assert "non_gpu_it" in scenario["excluded_components"]
+
+
+def test_preserve_does_not_synthesize_missing_historical_detail_blocks():
+    recorded = energy_accounting(
+        MODEL, 100, 20, settings=FIXED_SETTINGS, catalog=FAKE_CATALOG,
+        measured_energy_wh=2.0, measured_energy_boundary="node_it",
+    )
+    for key in ("uncertainty", "energy_wh_estimated", "energy_wh_by_bucket", "energy_meter"):
+        recorded.pop(key, None)
+    scenario = analytics_module._preserved_measured_accounting(
+        recorded=recorded, model=MODEL, tokens=(100, 20, 0, 0),
+        workspace_doc=None, managed_doc=None,
+        factors_doc=emission_factors_module.EmissionsOverrides(**{
+            "grid": {"default": {"g_per_kwh": 40, "label": "scenario"}}
+        }), created_at=utcnow(), catalog=FAKE_CATALOG,
+    )
+    for key in ("uncertainty", "energy_wh_estimated", "energy_wh_by_bucket", "energy_meter"):
+        assert key not in scenario
+
+
+def test_preserve_keeps_unrequested_factor_metadata_and_withholds_incompatible_baseline():
+    recorded = energy_accounting(
+        MODEL, 100, 20, settings=FIXED_SETTINGS, catalog=FAKE_CATALOG,
+        measured_energy_wh=2.0, measured_energy_boundary="node_it",
+    )
+    original_grid = {
+        key: recorded.get(key)
+        for key in (
+            "grid_factor_boundary", "grid_gas_coverage", "grid_gwp_horizon_years",
+            "grid_gwp_assessment_basis", "grid_includes_td_losses",
+            "grid_electricity_mix_basis", "grid_dataset_version", "grid_observation_year",
+        )
+    }
+    recorded["baseline"]["grid_gas_coverage"] = "co2"
+    scenario = analytics_module._preserved_measured_accounting(
+        recorded=recorded, model=MODEL, tokens=(100, 20, 0, 0),
+        workspace_doc=None, managed_doc=None,
+        factors_doc=emission_factors_module.EmissionsOverrides(**{
+            "pue": {"cloud": 1.3, "label": "scenario PUE"}
+        }), created_at=utcnow(), catalog=FAKE_CATALOG,
+    )
+    assert {key: scenario.get(key) for key in original_grid} == original_grid
+    assert scenario["baseline"]["avoided_co2e_g"] is None
+    assert scenario["baseline"]["avoided_pct"] is None
+
+    disclosure = {
+        "value": 1.14, "label": "AWS", "url": "https://example.test/aws",
+        "as_of": "2025-12-31", "evidence_type": "provider_asserted",
+        "statistic": "operating_fleet_average",
+    }
+    recorded["pue_disclosure"] = disclosure
+    recorded_profile = recorded["pue_profile"]
+    grid_scenario = analytics_module._preserved_measured_accounting(
+        recorded=recorded, model=MODEL, tokens=(100, 20, 0, 0),
+        workspace_doc=None, managed_doc=None,
+        factors_doc=emission_factors_module.EmissionsOverrides(**{
+            "grid": {"default": {"g_per_kwh": 40, "label": "scenario grid"}}
+        }), created_at=utcnow(), catalog=FAKE_CATALOG,
+    )
+    assert grid_scenario["pue_disclosure"] == disclosure
+    assert grid_scenario["pue_profile"] == recorded_profile
+
+
+def test_mixed_timeline_preserves_measured_leg_and_reestimates_estimated_leg():
+    measured = energy_accounting(
+        MODEL, 100, 20, settings=FIXED_SETTINGS, catalog=FAKE_CATALOG,
+        measured_energy_wh=4.0, measured_energy_boundary="node_it",
+    )
+    estimated = _account(LOCAL_MODEL, FIXED_SETTINGS, (200, 30, 0, 0))
+    recorded = combine_accountings([measured, estimated])
+    timeline = [
+        {"model": MODEL_ID, "input_tokens": 100, "output_tokens": 20,
+         "cache_read_tokens": 0, "cache_write_tokens": 0, "energy_accounting": measured},
+        {"model": LOCAL_MODEL_ID, "input_tokens": 200, "output_tokens": 30,
+         "cache_read_tokens": 0, "cache_write_tokens": 0, "energy_accounting": estimated},
+    ]
+    scenario, reason = analytics_module._preserve_whatif_accounting(
+        recorded=recorded, model_used=MODEL_ID, model_timeline=timeline,
+        input_tokens=300, output_tokens=50, cache_read_tokens=0, cache_write_tokens=0,
+        catalog=FAKE_CATALOG, workspace_doc=None, managed_doc=None,
+        factors_doc=emission_factors_module.EmissionsOverrides(**{
+            "grid": {"default": {"g_per_kwh": 40, "label": "scenario"}}
+        }), created_at=utcnow(),
+    )
+    assert reason is None
+    assert scenario["energy_source"] == "mixed"
+    assert scenario["energy_wh"] == pytest.approx(4.0 + estimated["energy_wh"])
+    assert scenario["energy_boundary"] == "node_it"
+
+
+async def test_ambiguous_old_mixed_run_is_excluded_symmetrically(client, seed):
+    _, user, project, harness = await make_tenant(seed, name="Co", email="old-mixed@example.com")
+    accounting = _account(MODEL, FIXED_SETTINGS, (100, 20, 0, 0))
+    accounting["energy_source"] = "mixed"
+    accounting.pop("energy_boundary", None)
+    await seed(make_run(
+        project_id=project.id, harness_id=harness.id, created_by=user.id,
+        model_used=MODEL_ID, accounting=accounting, input_tokens=100, output_tokens=20,
+    ))
+    await login(client, user.email)
+    response = await client.post(
+        "/api/analytics/emissions/whatif",
+        json={"mode": "preserve_measured_energy", "factors": {
+            "grid": {"default": {"g_per_kwh": 40, "label": "scenario"}}
+        }},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["runs_skipped"] == 1
+    assert body["recorded"]["totals"]["runs"] == 0
+    assert body["scenario"]["totals"]["runs"] == 0
+    assert body["exclusions"] == [{
+        "reason": "mixed measured/estimated run has no per-segment accounting", "runs": 1,
+    }]
+
+
+async def test_old_unknown_measurement_with_pue_baked_in_is_excluded_from_grid_scenario(client, seed):
+    _, user, project, harness = await make_tenant(seed, name="Co", email="unknown-boundary@example.com")
+    accounting = energy_accounting(
+        MODEL, 100, 20, settings=FIXED_SETTINGS, catalog=FAKE_CATALOG,
+        measured_energy_wh=10, measured_energy_boundary="node_it",
+    )
+    accounting.pop("energy_boundary", None)
+    accounting.pop("pue_applied", None)
+    accounting["energy_wh_total"] = 12.0
+    await seed(make_run(
+        project_id=project.id, harness_id=harness.id, created_by=user.id,
+        model_used=MODEL_ID, accounting=accounting, input_tokens=100, output_tokens=20,
+    ))
+    await login(client, user.email)
+    response = await client.post(
+        "/api/analytics/emissions/whatif",
+        json={"mode": "preserve_measured_energy", "factors": {
+            "grid": {"default": {"g_per_kwh": 40, "label": "scenario"}}
+        }},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["runs_skipped"] == 1
+    assert body["exclusions"] == [
+        {"reason": "ambiguous historical measurement boundary", "runs": 1}
+    ]
+
+
 # ── Phase 3: an hourly grid table resolves per run, not per recompute call ───
 def test_whatif_accounting_resolves_an_hourly_table_per_runs_own_created_at():
     """`_whatif_accounting`'s `fs_cache` used to key on `(provider, model_id)`

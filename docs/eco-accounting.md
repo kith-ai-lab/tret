@@ -130,21 +130,37 @@ have always found it):
 
 | class | Wh/Mtok | typical members |
 |---|---|---|
-| S | 250 | small, distilled, or quantized weights — including local models |
-| M | 1,200 | mid-size served models |
-| L | 2,600 | large frontier models |
-| XL | 6,000 | largest non-reasoning frontier models |
-| R | 21,000 | the reasoning tier |
+| S | 210.3398 | small, distilled, or quantized weights — including local models |
+| M | 855.6651 | mid-size served models |
+| L | 2,399.3371 | large frontier models |
+| XL | 6,727.8875 | largest non-reasoning frontier models |
+| R | 17,713.3258 | the reasoning tier |
 
 The unit is Wh per million **output-equivalent** tokens (see the per-run maths
 below): generation costs roughly 20x reading, so the buckets are not summed 1:1.
 
-**Where the numbers come from.** Each class except XL is a least-squares fit of
-`Wh = a x input + b x output` against Jegham et al., arXiv:2505.09598 — S from
-GPT-4.1 nano, M from GPT-4o, L from Claude 3.7 Sonnet, R from o3. XL has no
-measured anchor and is interpolated one step above L. Two of the five fits came
-out degenerate, and the input weight is therefore a documented assumption rather
-than a measurement. The full working, the residuals and the caveats are in
+These v2 figures replaced v1's shipped constants (S 250, M 1,200, L 2,600,
+R 21,000) through three separate changes, not one: v1's hand-rounding was
+dropped, the fitted mean was divided by its source PUE (−10.7% (S, M, R;
+PUE 1.12) to −12.3% (L; PUE 1.14) per class on its own), and the fit switched
+from a two-parameter OLS to a
+single nonnegative coefficient against `output + 0.05 × input`. The three
+moves don't track together — class L's fit-method change pushes it back up
+more than PUE division removes it. Per class, in Wh/Mtok:
+
+| Class | v1 shipped | v1 fitted mean | ÷ source PUE | v2 shipped |
+|---|---:|---:|---:|---:|
+| S | 250 | 271.9 | 242.7 | 210.3398 |
+| M | 1,200 | 1,233.1 | 1,101.0 | 855.6651 |
+| L | 2,600 | 2,634.7 | 2,311.1 | 2,399.3371 |
+| R | 21,000 | 20,850.4 | 18,616.5 | 17,713.3258 |
+
+**Where the numbers come from.** Each class except XL is a nonnegative,
+source-PUE-normalized fixed-weight fit against Jegham et al., arXiv:2505.09598v1
+— S from GPT-4.1 nano, M from GPT-4o, L from Claude 3.7 Sonnet, R from o3. XL
+has no measured anchor and uses the reproducible `L²/M` interpolation. The
+input/output weight remains a documented assumption rather than a measurement,
+and the reasoning-token denominator is unverified. The full working is in
 [emissions-methodology.md](emissions-methodology.md) — read it before quoting a
 class figure.
 
@@ -192,8 +208,8 @@ are all in [emissions-methodology.md](emissions-methodology.md).
 
 ### Grid intensity
 
-`TRET_GRID_CO2E_G_PER_KWH` (setting `grid_co2e_g_per_kwh`, default `470.0`)
-converts energy to carbon. 470 gCO2e/kWh is the IEA's 2024 global power-sector
+`TRET_GRID_CO2E_G_PER_KWH` (setting `grid_co2e_g_per_kwh`, default `458.49`)
+converts energy to carbon. 458.49 gCO2e/kWh is Ember's pinned 2025 World
 average; a regional or supplier-specific figure is much better (~30 for Sweden,
 ~350 for the US average, ~750 for a coal-heavy grid, and EPA eGRID subregions
 span more than 10x). `TRET_LOCAL_GRID_CO2E_G_PER_KWH` optionally overrides it for

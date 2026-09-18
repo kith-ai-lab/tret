@@ -8,6 +8,7 @@ import json
 import logging
 import math
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -92,6 +93,16 @@ class GridFactor(BaseModel):
     # number came from, in the operator's own words ("Ontario grid, IESO 2024",
     # "provider PPA disclosure"). Optional; blank means none.
     label: str | None = None
+    factor_boundary: Literal[
+        "generation", "upstream", "lifecycle", "lifecycle_electricity_generation", "unknown"
+    ] = "unknown"
+    gas_coverage: Literal["co2", "co2e", "unknown"] = "unknown"
+    gwp_horizon_years: int | None = None
+    gwp_assessment_basis: Literal["ar4", "ar5", "ar6", "unknown"] = "unknown"
+    includes_td_losses: bool | None = None
+    electricity_mix_basis: Literal["production", "consumption", "unknown"] = "unknown"
+    dataset_version: str | None = None
+    observation_year: int | None = None
 
     @field_validator("g_per_kwh", mode="after")
     @classmethod
@@ -103,6 +114,13 @@ class GridFactor(BaseModel):
                 f"g_per_kwh must be greater than 0, got {value}. A zero or negative grid "
                 "factor would claim electricity with no (or negative) emissions."
             )
+        return value
+
+    @field_validator("gwp_horizon_years", mode="after")
+    @classmethod
+    def _positive_horizon(cls, value: int | None) -> int | None:
+        if value is not None and (isinstance(value, bool) or value <= 0):
+            raise ValueError("gwp_horizon_years must be a positive integer")
         return value
 
     @field_validator("basis", mode="before")
@@ -522,16 +540,16 @@ class Settings(BaseSettings):
     # docs/emissions-methodology.md.
     #
     # Grams of CO2e per kWh of electricity, used to turn a run's estimated energy
-    # into an estimated carbon figure. 470 is the IEA's 2024 global power-sector
-    # average (Electricity 2025 reports ~460–480; 470 is the midpoint). Set your
+    # into an estimated carbon figure. 458.49 is the pinned Ember World 2025
+    # lifecycle GHG100 electricity-intensity record. Set your
     # own region's or supplier's figure for a less wrong number — eGRID
     # subregions span more than 10x.
-    grid_co2e_g_per_kwh: float = 470.0
+    grid_co2e_g_per_kwh: float = 458.49
     # GHG Protocol Scope 2 basis of the factor above: location_based (the
     # physical grid that served the load), market_based (contractual renewable
     # claims — PPAs, RECs, GOs), or unspecified. The two are not interchangeable
     # and must never be summed, so the label is recorded per run. The shipped
-    # default is an IEA physical-grid average, hence location_based.
+    # default is an Ember production-mix physical-grid average, hence location_based.
     grid_co2e_basis: str = "location_based"
     # Per-provider / per-deployment grid factors, as JSON keyed by tret provider
     # name (local | anthropic | kimi | openrouter):
@@ -656,7 +674,7 @@ class Settings(BaseSettings):
     # samples `nvidia-smi --query-gpu=power.draw` on an interval and integrates
     # it into Wh for the run's own `energy_wh`, replacing the estimate exactly
     # as `energy_accounting(measured_energy_wh=...)` always has. It reports
-    # HOST-LEVEL power, not a per-process figure, so on a box running anything
+    # GPU-board power, not complete host or per-process power, so on a box running anything
     # else besides the one model server it OVERSTATES this run's own share —
     # every reading is recorded `shared_device: true` and carries the
     # `shared_device_measurement` caveat because of it. Ollama running inside
@@ -666,8 +684,9 @@ class Settings(BaseSettings):
     # supported here — `powermetrics` needs sudo, which a server process has
     # no business asking for — meter externally instead and pass the reading
     # through `Router.run`/`arun(measured_energy_wh=...)` or `tret run
-    # --measured-wh`.
-    local_energy_meter: str = "off"  # off | nvidia_smi
+    # --measured-wh`, declaring its boundary. nvml uses an optional cumulative
+    # GPU counter, with sampled fallback for unsupported initial counters.
+    local_energy_meter: str = "off"  # off | nvidia_smi | nvml
     # Sampling interval for nvidia_smi, in seconds. Clamped to a 0.2s floor —
     # see MIN_INTERVAL_S in energy_meter.py for why.
     local_energy_meter_interval_s: float = 1.0

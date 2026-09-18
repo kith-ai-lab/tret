@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "method_id": "class_ladder_v2",
+  "calibration_id": "jegham_2025_v2_node_it_fixed_weight",
+  "source_manifest": "jegham_2025_v1.json",
+  "energy_boundary": "node_it",
+  "included_components": ["gpu", "modeled_non_gpu_it"],
+  "excluded_components": ["facility_overhead", "unused_gpu_idle", "embodied_hardware"],
+  "allocation_method": "output_tokens + 0.05 * input_tokens; nonnegative one-parameter least squares; zero intercept",
+  "idle_reserve_multiplier": 1.0,
+  "reasoning_denominator": "unverified",
+  "selected_wh_per_mtok": {
+    "S": 210.3398,
+    "M": 855.6651,
+    "L": 2399.3371,
+    "XL": 6727.8875,
+    "R": 17713.3258
+  },
+  "anchors": {
+    "S": "GPT-4.1 nano",
+    "M": "GPT-4o",
+    "L": "Claude 3.7 Sonnet",
+    "R": "o3",
+    "XL": "interpolation: L squared divided by M"
+  },
+  "diagnostics": {
+    "GPT-4.1 nano": {"fixed_rmse_wh": 0.02201315, "nnls_input": 3.855733, "nnls_output": 244.246075, "nnls_rmse_wh": 0.01114934, "intercept_fit_status": "diagnostic_only_exact_three_parameter_fit"},
+    "GPT-4o": {"fixed_rmse_wh": 0.14237363, "nnls_input": 0.0, "nnls_output": 1075.251283, "nnls_rmse_wh": 0.03260162, "intercept_fit_status": "diagnostic_only_exact_three_parameter_fit"},
+    "Claude 3.7 Sonnet": {"fixed_rmse_wh": 0.05200056, "nnls_input": 137.328086, "nnls_output": 2310.967299, "nnls_rmse_wh": 0.01602539, "intercept_fit_status": "diagnostic_only_exact_three_parameter_fit"},
+    "o3": {"fixed_rmse_wh": 0.63088261, "nnls_input": 707.803013, "nnls_output": 18618.6612, "nnls_rmse_wh": 0.37570907, "intercept_fit_status": "diagnostic_only_exact_three_parameter_fit"},
+    "DeepSeek-R1": {"fixed_rmse_wh": 9.29585698, "nnls_input": 0.0, "nnls_output": 20414.800321, "nnls_rmse_wh": 7.7982746, "deployment_status": "diagnostic_only_not_class_R_anchor", "intercept_fit_status": "diagnostic_only_exact_three_parameter_fit"}
+  }
+}

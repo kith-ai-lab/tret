@@ -101,6 +101,14 @@ def _local_model(energy_class: str = "S") -> ModelInfo:
 def _account(model: ModelInfo, settings: Settings | None = None, **kw) -> dict:
     """One million input tokens through `model`, unless overridden."""
     tokens = kw.pop("tokens", (1_000_000, 0, 0, 0))
+    if "factors" not in kw:
+        from tret.services.emission_factors import build_factor_set
+        kw["factors"] = build_factor_set(
+            provider=model.provider,
+            settings=settings or _settings(),
+            run_overrides={"energy_strategy": "class_ladder_v1"},
+            model_id=model.id,
+        )
     return energy_accounting(
         model, *tokens, settings=settings or _settings(), catalog=CATALOG, **kw
     )
@@ -187,7 +195,7 @@ def test_self_hosted_electricity_is_scope_2():
     # Wh, at 470 g/kWh = 6.16875 g.
     assert report["energy_wh"] == 12.5
     assert report["energy_wh_total"] == 13.125
-    assert report["scopes"]["scope2_g"] == pytest.approx(6.16875)
+    assert report["scopes"]["scope2_g"] == pytest.approx(6.017681)
     assert report["scopes"]["scope3_g"] == 0.0  # nothing embodied by default
     assert report["co2e_g"] == report["scopes"]["scope2_g"]
 
@@ -438,13 +446,13 @@ def test_the_provenance_record_explains_which_rule_applied_and_why():
     assert "Precedence:" in factor["note"]
 
 
-def test_the_default_factor_still_cites_the_iea_and_names_its_precedence():
+def test_the_default_factor_cites_ember_and_names_its_precedence():
     factor = next(
         f for f in _account(_model("L"))["factors"] if f["key"] == "grid_intensity"
     )
     assert factor["source_key"] == "global_default"
     assert factor["source_label"] is None
-    assert "IEA" in factor["source"]
+    assert "Ember" in factor["source"]
     # The setting named is the one that actually applied, not a list of the three
     # that might have. Where the precedence order matters, the note carries it.
     assert factor["setting"] == "TRET_GRID_CO2E_G_PER_KWH"
@@ -459,9 +467,7 @@ def test_the_default_factor_still_cites_the_iea_and_names_its_precedence():
     assert handed["source_key"] == "run_override"
 
 
-def test_a_baseline_on_a_different_basis_is_named_as_a_caveat_not_absorbed():
-    """A cross-basis comparison is not a GHG Protocol difference. It is allowed to
-    exist — it is the model-selection signal — but it has to say so."""
+def test_a_baseline_on_a_different_basis_withholds_carbon_savings():
     settings = _settings(
         emissions_baseline_model="anthropic/claude-fable-5",
         grid_factors='{"local": {"g_per_kwh": 42, "basis": "location_based"}}',
@@ -470,13 +476,21 @@ def test_a_baseline_on_a_different_basis_is_named_as_a_caveat_not_absorbed():
     report = _account(_local_model(), settings)
     assert report["grid_co2e_basis"] == "location_based"
     assert report["baseline"]["grid_co2e_basis"] == "market_based"
+    assert report["baseline"]["avoided_co2e_g"] is None
+    assert report["baseline"]["avoided_pct"] is None
+    assert report["baseline"]["avoided_usd"] is not None
     caveat = next(
         c for c in report["caveats"] if c["key"] == "baseline_crosses_grid_basis"
     )
     assert "may not be summed or netted" in caveat["note"]
-    # Same basis on both sides: no caveat to raise.
+    # Same full factor signature on both sides: the carbon comparison remains.
     same = _account(_model("L"), _settings(emissions_baseline_model="anthropic/claude-fable-5"))
-    assert all(c["key"] != "baseline_crosses_grid_basis" for c in same["caveats"])
+    assert same["baseline"]["avoided_co2e_g"] is not None
+    assert all(
+        not c["applies"]
+        for c in same["caveats"]
+        if c["key"] == "baseline_crosses_grid_basis"
+    )
 
 
 # ── PUE ──────────────────────────────────────────────────────────────────────
@@ -489,8 +503,8 @@ def test_pue_inflates_the_total_and_never_the_compute_figure():
     assert report["pue"] == 1.5
     assert report["energy_wh_total"] == 90.0
     # Carbon comes off the *total*, not the compute figure.
-    assert report["co2e_g"] == pytest.approx(float(co2e_grams(Decimal("90"), 470.0)))
-    assert report["co2e_g"] == pytest.approx(42.3)
+    assert report["co2e_g"] == pytest.approx(float(co2e_grams(Decimal("90"), 458.49)))
+    assert report["co2e_g"] == pytest.approx(41.2641)
     assert report["co2e_g"] != pytest.approx(float(co2e_grams(Decimal("60"), 470.0)))
 
 
@@ -503,7 +517,7 @@ def test_defaults_are_the_documented_cited_figures():
     assert settings.local_pue == 1.05  # a desktop has almost no facility overhead
     assert settings.onprem_pue == 1.56  # Uptime Institute 2024, 879 operators
     assert settings.local_deployment_profile == "workstation"
-    assert settings.grid_co2e_g_per_kwh == 470.0  # IEA 2024 global average
+    assert settings.grid_co2e_g_per_kwh == 458.49  # Ember World 2025
     assert settings.grid_co2e_basis == "location_based"
     assert settings.embodied_g_per_run == 0.0
     assert settings.local_grid_co2e_g_per_kwh is None
@@ -536,7 +550,7 @@ def test_the_resolved_profile_and_its_source_travel_with_the_run():
     assert onprem["pue"] == 1.56
     # 12.5 Wh compute x 1.56 = 19.5 Wh, at 470 g/kWh = 9.165 g.
     assert onprem["energy_wh_total"] == pytest.approx(19.5)
-    assert onprem["scopes"]["scope2_g"] == pytest.approx(9.165)
+    assert onprem["scopes"]["scope2_g"] == pytest.approx(8.940555)
     factor = next(f for f in onprem["factors"] if f["key"] == "pue")
     assert factor["value"] == 1.56
     assert factor["profile"] == PUE_PROFILE_ONPREM
@@ -568,7 +582,7 @@ def test_embodied_carbon_defaults_to_zero_and_only_applies_to_local():
 def test_configured_embodied_carbon_lands_in_scope_3_for_local_runs():
     report = _account(_local_model(), _settings(embodied_g_per_run=8.0))
     assert report["embodied_g"] == 8.0
-    assert report["scopes"]["scope2_g"] == pytest.approx(6.16875)  # electricity
+    assert report["scopes"]["scope2_g"] == pytest.approx(6.017681)  # electricity
     assert report["scopes"]["scope3_g"] == 8.0  # capital goods
     assert Decimal(str(report["co2e_g"])) == _scope_sum(report)
     assert "capital goods" in report["scopes"]["basis"]
@@ -618,9 +632,9 @@ def test_baseline_is_a_same_token_counterfactual_and_says_so():
     # compute, x1.2 PUE = 1260 Wh, at 470 g/kWh = 592.2 g.
     assert baseline["energy_class"] == "R"
     assert baseline["energy_wh"] == 1050.0
-    assert baseline["co2e_g"] == pytest.approx(592.2)
-    assert baseline["avoided_co2e_g"] == pytest.approx(592.2 - report["co2e_g"])
-    assert baseline["avoided_co2e_g"] == pytest.approx(558.36)
+    assert baseline["co2e_g"] == pytest.approx(577.6974)
+    assert baseline["avoided_co2e_g"] == pytest.approx(577.6974 - report["co2e_g"])
+    assert baseline["avoided_co2e_g"] == pytest.approx(544.68612)
     assert baseline["avoided_pct"] == pytest.approx(94.286, abs=1e-3)
     for phrase in ("not an offset", "efficiency indicator", "not usable for statutory"):
         assert phrase in baseline["basis"]
@@ -658,9 +672,9 @@ def test_a_local_run_is_compared_against_a_cloud_baseline_including_embodied():
     baseline = report["baseline"]
     # The run's own total carries the embodied grams; the cloud baseline does not.
     assert report["embodied_g"] == 5.0
-    assert baseline["co2e_g"] == pytest.approx(592.2)
-    assert report["co2e_g"] == pytest.approx(11.16875)  # 6.16875 electricity + 5
-    assert baseline["avoided_co2e_g"] == pytest.approx(581.03125)
+    assert baseline["co2e_g"] == pytest.approx(577.6974)
+    assert report["co2e_g"] == pytest.approx(11.017681)  # 6.017681 electricity + 5
+    assert baseline["avoided_co2e_g"] == pytest.approx(566.679719)
 
 
 # ── the existing contract ────────────────────────────────────────────────────
@@ -678,11 +692,11 @@ def test_every_original_key_survives_with_its_original_meaning():
     assert report["cache_read_weight"] == 0.005
     assert report["cache_write_weight"] == 0.05
     assert report["energy_wh"] == 62.4  # compute only, same meaning as before
-    assert report["grid_co2e_g_per_kwh"] == 470.0
+    assert report["grid_co2e_g_per_kwh"] == 458.49
     assert "estimate, not a measurement" in report["basis"]
     # co2e_g is still the run total — PUE-inclusive and scope-decomposed.
-    assert report["co2e_g"] == pytest.approx(62.4 * 1.2 * 0.47)
-    assert report["co2e_g"] == pytest.approx(35.1936)
+    assert report["co2e_g"] == pytest.approx(62.4 * 1.2 * 0.45849)
+    assert report["co2e_g"] == pytest.approx(34.331731)
 
 
 def test_the_additive_keys_are_all_present_and_self_consistent():
@@ -736,8 +750,8 @@ def test_the_band_is_monotonic_around_the_central_estimate():
     band = report["uncertainty"]
     assert band["band_factor_low"] == band["band_factor_high"] == 2.5
     # 35.1936 / 2.5 .. 35.1936 x 2.5
-    assert band["co2e_g_low"] == pytest.approx(35.1936 / 2.5)
-    assert band["co2e_g_high"] == pytest.approx(35.1936 * 2.5)
+    assert band["co2e_g_low"] == pytest.approx(34.33173 / 2.5)
+    assert band["co2e_g_high"] == pytest.approx(34.33173 * 2.5)
     assert band["co2e_g_low"] < report["co2e_g"] < band["co2e_g_high"]
     assert band["energy_wh_low"] < report["energy_wh"] < band["energy_wh_high"]
     assert (
@@ -832,11 +846,11 @@ def test_the_reasoning_tier_is_flagged_and_dwarfs_the_rest_of_the_ladder():
     assert reasoning["co2e_g"] > 8 * large["co2e_g"]
     # The bias is stated on the run, not left to the docs.
     caveat = next(
-        c for c in reasoning["caveats"] if c["key"] == "reasoning_token_accounting"
+        c for c in reasoning["caveats"] if c["key"] == "reasoning_hidden"
     )
-    assert caveat["direction"] == "understates"
-    assert "hidden reasoning tokens" in caveat["note"]
-    assert "applies directly" in caveat["note"]
+    assert caveat["direction"] == "either"
+    assert "missing does not mean zero" in caveat["note"]
+    assert "calibration's reasoning denominator remains unresolved" in caveat["note"]
     factor = next(f for f in reasoning["factors"] if f["key"] == "energy_class")
     assert factor["reasoning_tier"] is True
     assert "hidden thinking tokens" in factor["note"]
@@ -1060,7 +1074,7 @@ def test_the_named_biases_travel_with_the_run():
     assert "unbatched_local_inference" in local
     assert "cloud_embodied_excluded" not in local
     for key in (
-        "reasoning_token_accounting",
+        "reasoning_hidden",
         "prompt_shape_residual",
         "same_token_counterfactual",
         "training_excluded",
@@ -1445,25 +1459,21 @@ async def test_a_basis_mixed_window_reports_no_carbon_total_only_subtotals():
     assert "co2e_g" not in {k for k in totals if totals[k] is not None}
 
 
-async def test_a_single_basis_window_still_reports_one_carbon_total():
-    """The other half of the contract: separating bases must not cost an operator
-    with one basis their totals. Differing factors within one basis (a corrected
-    grid figure) still sum, and still flag mixed_factors."""
+async def test_a_single_basis_window_with_unknown_methods_withholds_mixed_factors():
+    """A shared basis alone does not prove two partially-described factors compatible."""
     coarse = _account(_model("L"), _settings(grid_co2e_g_per_kwh=400.0))
     corrected = _account(_model("L"), _settings(grid_co2e_g_per_kwh=30.0))
     out = await _emissions_response(
         project_id=None, days=30, user=None, db=_EmissionRows([_row(coarse), _row(corrected)])
     )
     totals = out["totals"]
-    assert totals["carbon_is_summable"] is True
+    assert totals["carbon_is_summable"] is False
     assert totals["grid_bases"] == ["location_based"]
-    assert totals["co2e_g"] == pytest.approx(coarse["co2e_g"] + corrected["co2e_g"])
-    assert totals["not_summable_note"] is None
-    assert "NO SINGLE CARBON TOTAL" not in out["disclaimer"]
-    # Two different factors on one basis: no single factor behind the total, but a
-    # legitimate total. The two flags are different claims and stay separate.
+    assert totals["co2e_g"] is None
+    assert totals["not_summable_note"] is not None
+    assert "NO SINGLE CARBON TOTAL" in out["disclaimer"]
     assert out["factors"]["mixed_factors"] is True
-    assert out["factors"]["mixed_grid_bases"] is False
+    assert out["factors"]["mixed_grid_bases"] is True
     assert len(out["by_basis"]) == 1
     assert out["by_basis"][0]["basis"] == "location_based"
     assert out["by_basis"][0]["runs"] == 2
@@ -1618,7 +1628,8 @@ async def test_avoided_pct_is_signed_and_safe_when_there_is_no_baseline():
         "runs": 0,
         "runs_with_estimate": 0,
         "runs_without_estimate": 0,
-        "runs_without_scope_split": 0,
+            "runs_without_scope_split": 0,
+            "runs_without_carbon_total": 0,
         "runs_without_baseline": 0,
         "runs_without_money_comparison": 0,
         "runs_without_uncertainty_band": 0,
@@ -1755,10 +1766,10 @@ def _documents(text: str, value) -> bool:
 
 
 def test_the_doc_carries_every_class_constant_and_its_anchor():
-    from tret.services.emissions import ENERGY_CLASS_CALIBRATION, ENERGY_CLASS_WH_PER_MTOK
+    from tret.services.emissions import ENERGY_CLASS_CALIBRATION, ENERGY_CLASS_WH_PER_MTOK_V1
 
     text = _methodology_text()
-    for cls, value in ENERGY_CLASS_WH_PER_MTOK.items():
+    for cls, value in ENERGY_CLASS_WH_PER_MTOK_V1.items():
         rendered = f"{int(value):,}"
         assert rendered in text, f"class {cls} value {rendered} missing from the doc"
         anchor = ENERGY_CLASS_CALIBRATION[cls]["anchor_model"]

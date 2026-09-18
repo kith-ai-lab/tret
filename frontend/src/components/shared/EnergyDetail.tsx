@@ -1,7 +1,4 @@
-/** A run's estimated footprint at a glance, with the full derivation one
- *  keystroke away. Everything here is a heuristic estimate — the energy class is
- *  calibrated against five models' inferred hardware, not a meter reading, and the
- *  word "measured" appears nowhere.
+/** A run's carbon estimate and its measured or modeled energy evidence.
  *
  *  Carbon is shown with its judgment band, because a single figure implies a
  *  precision this model does not have. Money is shown exactly, because per-token
@@ -69,27 +66,28 @@ export function EnergyDetail({ energy }: { energy: EnergyAccounting }) {
 
       <div className="config-stats" style={{ gap: 30 }}>
         <Stat
-          label="CO₂e total (est.)"
+          label={energy.coverage?.complete_total === null ? 'CO₂e covered subtotal (est.)' : 'CO₂e total (est.)'}
           value={orDash(formatCo2e(energy.co2e_g))}
           sub={formatCo2eBand(band?.co2e_g_low, band?.co2e_g_high)}
           subTitle={BAND_SHORT}
           title="The run total, equal to the sum of its three GHG Protocol scopes."
         />
         <Stat
-          label="Energy total (est.)"
+          label="Energy used for carbon"
           value={orDash(formatWh(totalWh))}
           sub={formatWhBand(band?.energy_wh_total_low, band?.energy_wh_total_high)}
           subTitle={BAND_SHORT}
           title={
-            energy.pue === undefined
-              ? 'Compute (IT-load) energy. This run carries no PUE, so no facility overhead is included.'
-              : `Compute energy x PUE ${energy.pue} — includes facility overhead.`
+            energy.pue_applied === false
+              ? 'No additional PUE was applied. Facility readings already include overhead; partial or unknown readings lack a safe conversion boundary.'
+              : `Recorded energy with PUE ${energy.pue ?? 'unknown'}. Missing host components remain outside its coverage.`
           }
         />
         <Stat
-          label="Compute only (est.)"
+          label={`Energy (${energy.energy_source ?? 'legacy'})`}
           value={orDash(formatWh(energy.energy_wh))}
-          title="IT load, before data-centre overhead."
+          sub={`Coverage: ${(energy.energy_boundary ?? 'unknown').replace(/_/g, ' ')}`}
+          title="Energy within the recorded boundary. GPU readings exclude CPU, memory and other host components."
         />
         <Stat
           label="Energy class"
@@ -135,6 +133,30 @@ export function EnergyDetail({ energy }: { energy: EnergyAccounting }) {
           title={`${money.note} ${MONEY_PCT_PRECISION_NOTE}`}
         />
       </div>
+
+      {energy.coverage && (
+        <details className="tool-row" style={{ marginTop: 12 }}>
+          <summary>Accounting coverage · {energy.coverage.functional_unit.replace(/_/g, ' ')}</summary>
+          <div className="fine-print" style={{ padding: 10 }}>
+            {energy.coverage.complete_total === null && (
+              <p>A complete lifecycle total is unavailable. Missing: {energy.coverage.missing.map(v => v.replace(/_/g, ' ')).join(', ')}.</p>
+            )}
+            <ul>{energy.coverage.components.map(component => (
+              <li key={component.component_id}>
+                {component.component_id.replace(/_/g, ' ')}: {component.status}
+                {component.value === null ? ' · unknown amount' : ` · ${component.value.toPrecision(3)} ${component.unit}`}
+              </li>
+            ))}</ul>
+            <p>Grid: {energy.grid_factor_boundary ?? 'unknown boundary'}; {energy.grid_gas_coverage ?? 'unknown gases'};
+              {' '}observation year {energy.grid_observation_year ?? 'unknown'}. Standards conformity has not been established.</p>
+          </div>
+        </details>
+      )}
+      {energy.energy_method_shadow && (
+        <p className="fine-print" style={{ marginTop: 12 }}>
+          A legacy estimate is retained for method comparison. Changes caused by the corrected method are not emissions savings.
+        </p>
+      )}
 
       {scopes && (
         <div style={{ marginTop: 12 }}>

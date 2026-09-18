@@ -97,6 +97,7 @@ from tret.services.grid_regions import (
 )
 from tret.services.grid_tables import GridTable, GridTableError, parse_grid_table
 from tret.services.grid_zones import grid_entry_for_region
+from tret.services.grid_ember import entry_for_region as ember_entry_for_region
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +417,7 @@ class PueBlock(BaseModel):
     local: float | None = None
     local_profile: str | None = None
     label: str | None = None
+    upstreams: dict[str, "PueDisclosure"] | None = None
 
     @field_validator("cloud", "local", mode="after")
     @classmethod
@@ -441,6 +443,30 @@ class PueBlock(BaseModel):
         if (self.cloud is not None or self.local is not None) and not (self.label or "").strip():
             raise ValueError("pue.label is required when pue.cloud or pue.local is set")
         return self
+
+
+class PueDisclosure(BaseModel):
+    """An upstream operator's disclosed fleet-average PUE."""
+
+    model_config = ConfigDict(extra="forbid")
+    value: float
+    label: str
+    url: str
+    as_of: str
+    evidence_type: Literal["provider_asserted"] = "provider_asserted"
+    statistic: Literal["operating_fleet_average"] = "operating_fleet_average"
+
+    @field_validator("value", mode="after")
+    @classmethod
+    def _valid_value(cls, value: float) -> float:
+        if not math.isfinite(value) or value < 1:
+            raise ValueError("upstream PUE must be finite and >= 1")
+        return value
+
+    @field_validator("as_of", mode="after")
+    @classmethod
+    def _valid_date(cls, value: str) -> str:
+        return _iso_date(value) or ""
 
 
 class EmbodiedProfileBlock(BaseModel):
@@ -520,7 +546,9 @@ class EmbodiedBlock(BaseModel):
 # signal that per-model measured constants (`model_overrides`) are expected to be
 # kept current for this workspace — it does not by itself change the arithmetic
 # beyond what a `model_overrides` entry already would (see emissions.py).
-EnergyStrategy = Literal["class_ladder", "active_params", "measured"]
+EnergyStrategy = Literal[
+    "class_ladder", "class_ladder_v1", "class_ladder_v2", "active_params", "measured"
+]
 
 
 class ModelOverride(BaseModel):
@@ -697,6 +725,8 @@ class Resolved:
     # in a matched `provider@region` key), or None when no region pinned this
     # particular value (see `_resolve_grid`/`grid_regions.py`).
     region: str | None = None
+    requested_region: str | None = None
+    region_resolution_status: str | None = None
     # Grid only: "annual_average" (no table, or `at` wasn't given, or the
     # table had no value for `at`) or "hourly" (the table had one) — see
     # `_apply_grid_table`. Left None on every non-grid factor.
@@ -721,6 +751,15 @@ class Resolved:
     # run's headline uncertainty band is evidence-derived rather than the
     # plain configured low/high — see `_resolve_band_derived`.
     derived: bool = False
+    factor_boundary: str = "unknown"
+    gas_coverage: str = "unknown"
+    gwp_horizon_years: int | None = None
+    gwp_assessment_basis: str = "unknown"
+    includes_td_losses: bool | None = None
+    electricity_mix_basis: str = "unknown"
+    dataset_version: str | None = None
+    observation_year: int | None = None
+    disclosure: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -753,7 +792,7 @@ class FactorSet:
     # never `env`.
     energy_strategy: Resolved = field(
         default_factory=lambda: Resolved(
-            "class_ladder", LAYER_GLOBAL_DEFAULT, LAYER_GLOBAL_DEFAULT, None, None, None, None
+            "class_ladder_v2", LAYER_GLOBAL_DEFAULT, LAYER_GLOBAL_DEFAULT, None, None, None, None
         )
     )
     # The `model_overrides` entry for *this run's* model (by catalog id), from
@@ -762,6 +801,130 @@ class FactorSet:
     # default and no env rung: a model with no configured override simply uses
     # whatever `energy_strategy` and the catalog otherwise resolve.
     model_override: Resolved | None = None
+    # Inputs retained solely so a counterfactual model can resolve through the
+    # exact same ladder (including region/hourly data) at the same instant.
+    # Excluded from equality/repr to preserve the public value-object contract.
+    resolution_context: "FactorResolutionContext | None" = field(
+        default=None, compare=False, repr=False
+    )
+
+
+@dataclass(frozen=True)
+class FactorResolutionContext:
+    settings_values: tuple
+    settings_fields_set: tuple[str, ...]
+    workspace_settings: tuple | None
+    managed_settings: tuple | None
+    harness_settings: tuple | None
+    run_overrides: tuple
+    at: datetime | None
+    interval_end: datetime | None
+
+
+# Observed OpenRouter endpoint slugs that report a hosting identity distinct
+# from the model's own provider — never model brands, and never the direct
+# (non-OpenRouter) provider name: `anthropic` is deliberately absent, because
+# the direct Anthropic API is not hosted by either upstream disclosure below.
+UPSTREAM_PUE_ALIASES = {
+    "google-vertex": "google",
+    "amazon-bedrock": "aws",
+}
+
+
+_CONTEXT_SETTINGS_FIELDS = {
+    "grid_co2e_g_per_kwh", "grid_co2e_basis", "grid_factors",
+    "local_grid_co2e_g_per_kwh", "local_grid_co2e_basis",
+    "datacenter_pue", "local_pue", "onprem_pue", "local_deployment_profile",
+    "embodied_g_per_run", "uncertainty_band_low", "uncertainty_band_high",
+    "emissions_baseline_model",
+}
+
+
+def _freeze(value: Any):
+    if isinstance(value, dict):
+        return tuple(sorted((key, _freeze(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value):
+    if isinstance(value, tuple):
+        if all(isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str) for item in value):
+            return {key: _thaw(item) for key, item in value}
+        return [_thaw(item) for item in value]
+    return value
+
+
+def _context_settings(context: FactorResolutionContext) -> Settings:
+    settings = Settings(**_thaw(context.settings_values))
+    object.__setattr__(settings, "__pydantic_fields_set__", set(context.settings_fields_set))
+    return settings
+
+
+def context_with_run_overrides(
+    context: FactorResolutionContext, updates: dict[str, Any]
+) -> FactorResolutionContext:
+    values = _thaw(context.run_overrides)
+    values.update(updates)
+    return replace(context, run_overrides=_freeze(values))
+
+
+def factor_set_for_model(
+    factors: FactorSet, *, provider: str | None, model_id: str | None
+) -> FactorSet | None:
+    """Re-resolve ``factors`` for another model through its original ladder.
+
+    Manually constructed legacy ``FactorSet`` objects have no context.  They
+    return ``None`` rather than pretending their provider-specific wins apply
+    to a counterfactual provider.
+    """
+    context = factors.resolution_context
+    if context is None:
+        return None
+    return build_factor_set(
+        provider=provider,
+        settings=_context_settings(context),
+        workspace_settings=_thaw(context.workspace_settings),
+        managed_settings=_thaw(context.managed_settings),
+        harness_settings=_thaw(context.harness_settings),
+        run_overrides=_thaw(context.run_overrides),
+        model_id=model_id,
+        at=context.at,
+        interval_end=context.interval_end,
+    )
+
+
+def factor_set_for_call(
+    factors: FactorSet,
+    *,
+    provider: str | None,
+    model_id: str | None,
+    served_by: str | None,
+    at: datetime | None = None,
+    interval_end: datetime | None = None,
+) -> FactorSet | None:
+    """Replay a segment's immutable factor context for one upstream call.
+
+    Only the exact supported ``served_by`` identity can select an upstream
+    disclosure. Geography remains evidence and is never used for resolution.
+    Manually constructed factor sets have no replayable context and return None.
+    """
+    context = factors.resolution_context
+    if context is None:
+        return None
+    return build_factor_set(
+        provider=provider,
+        settings=_context_settings(context),
+        workspace_settings=_thaw(context.workspace_settings),
+        managed_settings=_thaw(context.managed_settings),
+        harness_settings=_thaw(context.harness_settings),
+        run_overrides=_thaw(context.run_overrides),
+        model_id=model_id,
+        at=at if at is not None else context.at,
+        interval_end=(interval_end if interval_end is not None else context.interval_end),
+        served_by=served_by,
+    )
 
 
 # ── per-layer lookups ─────────────────────────────────────────────────────────
@@ -846,10 +1009,10 @@ def _grid_from_doc(doc: EmissionsOverrides, provider: str | None, region: str | 
         )
         if hit is not None:
             key, e = hit
-            return (Decimal(str(e.g_per_kwh)), e.basis, e.label, e.url, e.as_of, key, e.table)
+            return (Decimal(str(e.g_per_kwh)), e.basis, e.label, e.url, e.as_of, key, e.table, e)
     if block.default is not None:
         e = block.default
-        return (Decimal(str(e.g_per_kwh)), e.basis, e.label, e.url, e.as_of, None, e.table)
+        return (Decimal(str(e.g_per_kwh)), e.basis, e.label, e.url, e.as_of, None, e.table, e)
     return None
 
 
@@ -859,6 +1022,7 @@ def _apply_grid_table(
     table_name: str | None,
     doc: EmissionsOverrides,
     at: datetime | None,
+    interval_end: datetime | None = None,
 ) -> tuple[Decimal, str, str, str | None, dict | None, bool]:
     """`(value, basis, temporal, table, table_summary, table_miss)` for a
     winning grid entry that may reference an hourly table.
@@ -885,6 +1049,17 @@ def _apply_grid_table(
     summary = table.summary()
     if at is None:
         return value, basis, "annual_average", table_name, summary, False
+    if interval_end is not None:
+        mean, coverage = table.average(at, interval_end, fallback=value)
+        summary = {
+            **summary,
+            "coverage_fraction": coverage,
+            "uniform_power_assumption": True,
+        }
+        if coverage < 1 and entry.basis != basis:
+            summary["interval_fallback_reason"] = "partial_coverage_incompatible_basis"
+            return value, basis, "annual_average", table_name, summary, True
+        return mean, entry.basis, "interval_weighted", table_name, summary, coverage < 1
     hit = table.lookup(at)
     if hit is not None:
         return hit, entry.basis, "hourly", table_name, summary, False
@@ -900,6 +1075,7 @@ def _resolve_grid(
     workspace: EmissionsOverrides | None,
     managed: EmissionsOverrides | None,
     at: datetime | None = None,
+    interval_end: datetime | None = None,
 ) -> tuple[Resolved, str]:
     override = run_overrides.get("grid_g_per_kwh")
     if override is not None:
@@ -914,7 +1090,7 @@ def _resolve_grid(
         harness, workspace, managed, lambda d: _grid_from_doc(d, provider, region)
     )
     if hit is not None:
-        layer, doc, (value, basis, label, url, as_of, matched, table_name) = hit
+        layer, doc, (value, basis, label, url, as_of, matched, table_name, entry_meta) = hit
         source = _layer_source(layer, doc, matched)
         setting = (
             f"{layer}.emissions.grid.providers.{matched}"
@@ -923,12 +1099,20 @@ def _resolve_grid(
         )
         region_used = matched.split("@", 1)[1] if matched and "@" in matched else None
         value, basis, temporal, table, table_summary, table_miss = _apply_grid_table(
-            value, basis, table_name, doc, at
+            value, basis, table_name, doc, at, interval_end
         )
         resolved = Resolved(
             value, layer, source, label, url, as_of, setting,
             region=region_used, temporal=temporal, table=table,
             table_summary=table_summary, table_miss=table_miss,
+            factor_boundary=entry_meta.factor_boundary,
+            gas_coverage=entry_meta.gas_coverage,
+            gwp_horizon_years=entry_meta.gwp_horizon_years,
+            gwp_assessment_basis=entry_meta.gwp_assessment_basis,
+            includes_td_losses=entry_meta.includes_td_losses,
+            electricity_mix_basis=entry_meta.electricity_mix_basis,
+            dataset_version=entry_meta.dataset_version,
+            observation_year=entry_meta.observation_year,
         )
         return resolved, basis
 
@@ -947,6 +1131,26 @@ def _resolve_grid(
     # or a table that cannot be read at all, falls through unchanged.
     if region and layer == LAYER_GLOBAL_DEFAULT:
         try:
+            ember_hit = ember_entry_for_region(region)
+        except (OSError, ValueError) as exc:
+            logger.warning("bundled ember grid table unavailable (%s); using %s", exc, layer)
+            ember_hit = None
+        if ember_hit is not None:
+            iso3, entry = ember_hit
+            return Resolved(
+                Decimal(str(entry["g_per_kwh"])), LAYER_DATASET, f"dataset:ember:country-{iso3}",
+                entry["label"], entry["url"], entry["as_of"],
+                f"dataset.grid_ember.country-{iso3}", region=region,
+                requested_region=region, region_resolution_status="resolved",
+                temporal="annual_average",
+                factor_boundary=entry["factor_boundary"], gas_coverage=entry["gas_coverage"],
+                gwp_horizon_years=entry["gwp_horizon_years"],
+                gwp_assessment_basis=entry["gwp_assessment_basis"],
+                includes_td_losses=entry["includes_td_losses"],
+                electricity_mix_basis=entry["electricity_mix_basis"],
+                dataset_version=entry["dataset_version"], observation_year=entry["observation_year"],
+            ), entry["basis"]
+        try:
             zone_hit = grid_entry_for_region(region)
         except (OSError, ValueError) as exc:
             logger.warning("bundled grid zone table unavailable (%s); using %s", exc, layer)
@@ -956,7 +1160,16 @@ def _resolve_grid(
             resolved = Resolved(
                 Decimal(str(entry["g_per_kwh"])), LAYER_DATASET, f"dataset:zone:{zone}",
                 entry["label"], entry["url"], entry["as_of"], f"dataset.grid_zones.{zone}",
-                region=region, temporal="annual_average",
+                region=region, requested_region=region, region_resolution_status="resolved",
+                temporal="annual_average",
+                factor_boundary=entry["factor_boundary"],
+                gas_coverage=entry["gas_coverage"],
+                gwp_horizon_years=entry["gwp_horizon_years"],
+                gwp_assessment_basis=entry["gwp_assessment_basis"],
+                includes_td_losses=entry["includes_td_losses"],
+                electricity_mix_basis=entry["electricity_mix_basis"],
+                dataset_version=entry["dataset_version"],
+                observation_year=entry["observation_year"],
             )
             return resolved, entry["basis"]
 
@@ -964,6 +1177,16 @@ def _resolve_grid(
         Decimal(str(resolution["value"])), layer, resolution["source"],
         resolution["label"], None, None, resolution["setting"],
         temporal="annual_average",
+        factor_boundary=("lifecycle_electricity_generation" if layer == LAYER_GLOBAL_DEFAULT else "unknown"),
+        gas_coverage=("co2e" if layer == LAYER_GLOBAL_DEFAULT else "unknown"),
+        gwp_horizon_years=(100 if layer == LAYER_GLOBAL_DEFAULT else None),
+        gwp_assessment_basis="unknown",
+        includes_td_losses=None,
+        electricity_mix_basis=("production" if layer == LAYER_GLOBAL_DEFAULT else "unknown"),
+        dataset_version=("ember-yearly-2026-release" if layer == LAYER_GLOBAL_DEFAULT else None),
+        observation_year=(2025 if layer == LAYER_GLOBAL_DEFAULT else None),
+        requested_region=region,
+        region_resolution_status=("fallback_unknown_region" if region else None),
     )
     return resolved, resolution["basis"]
 
@@ -999,6 +1222,7 @@ def _resolve_pue(
     harness: EmissionsOverrides | None,
     workspace: EmissionsOverrides | None,
     managed: EmissionsOverrides | None,
+    served_by: str | None,
 ) -> Resolved:
     override = run_overrides.get("pue")
     if override is not None:
@@ -1010,14 +1234,28 @@ def _resolve_pue(
     def _getter(doc: EmissionsOverrides):
         if doc.pue is None:
             return None
+        if served_by and doc.pue.upstreams and served_by in doc.pue.upstreams:
+            disclosure = doc.pue.upstreams[served_by]
+            return (
+                Decimal(str(disclosure.value)),
+                disclosure.label,
+                disclosure.model_dump(),
+                f"upstreams.{served_by}",
+            )
         value = getattr(doc.pue, key)
-        return None if value is None else (Decimal(str(value)), doc.pue.label)
+        return None if value is None else (Decimal(str(value)), doc.pue.label, None, key)
 
     hit = _first_doc_hit(harness, workspace, managed, _getter)
     if hit is not None:
-        layer, doc, (value, label) = hit
+        layer, doc, (value, label, disclosure, setting_key) = hit
         source = _layer_source(layer, doc, None)
-        return Resolved(value, layer, source, label, None, None, f"{layer}.emissions.pue.{key}")
+        return Resolved(
+            value, layer, source, label,
+            disclosure.get("url") if disclosure else None,
+            disclosure.get("as_of") if disclosure else None,
+            f"{layer}.emissions.pue.{setting_key}",
+            disclosure=disclosure,
+        )
 
     raw = pue_for(deployment, settings)
     field_name, env_name = _PUE_ENV_FIELD[profile]
@@ -1034,13 +1272,6 @@ def _resolve_embodied(
     workspace: EmissionsOverrides | None,
     managed: EmissionsOverrides | None,
 ) -> Resolved:
-    # Only self-hosted inference is ever amortized against the operator's own
-    # hardware (see `embodied_g_for`) — no layer changes that, so a cloud run's
-    # figure is unconditionally 0 with nothing to configure.
-    if deployment != DEPLOYMENT_LOCAL:
-        return Resolved(Decimal(0), LAYER_GLOBAL_DEFAULT, LAYER_GLOBAL_DEFAULT,
-                         None, None, None, "TRET_EMBODIED_G_PER_RUN")
-
     override = run_overrides.get("embodied_g")
     if override is not None:
         return Resolved(Decimal(str(override)), LAYER_RUN_OVERRIDE, GRID_SOURCE_RUN_OVERRIDE,
@@ -1071,6 +1302,13 @@ def _resolve_embodied(
             f"{layer}.emissions.embodied.{which}",
             profile=profile_dict,
         )
+
+    # Cloud hardware is unknown by default. Keep the historical numeric zero
+    # for compatibility, but only after all explicit run/document layers have
+    # had a chance to supply a supported allocation.
+    if deployment != DEPLOYMENT_LOCAL:
+        return Resolved(Decimal(0), LAYER_GLOBAL_DEFAULT, LAYER_GLOBAL_DEFAULT,
+                         None, None, None, "TRET_EMBODIED_G_PER_RUN")
 
     raw = embodied_g_for(deployment, settings)
     layer = LAYER_ENV if "embodied_g_per_run" in settings.model_fields_set else LAYER_GLOBAL_DEFAULT
@@ -1198,7 +1436,7 @@ def _resolve_energy_strategy(
         return Resolved(str(value), layer, source, None, None, None,
                          f"{layer}.emissions.energy_strategy")
 
-    return Resolved("class_ladder", LAYER_GLOBAL_DEFAULT, LAYER_GLOBAL_DEFAULT,
+    return Resolved("class_ladder_v2", LAYER_GLOBAL_DEFAULT, LAYER_GLOBAL_DEFAULT,
                      None, None, None, None)
 
 
@@ -1242,6 +1480,8 @@ def build_factor_set(
     run_overrides: dict[str, Any] | None = None,
     model_id: str | None = None,
     at: datetime | None = None,
+    interval_end: datetime | None = None,
+    served_by: str | None = None,
 ) -> FactorSet:
     """Resolve every accounting constant for one run, layer by layer.
 
@@ -1288,6 +1528,11 @@ def build_factor_set(
     """
     if at is not None and at.tzinfo is None:
         raise ValueError("build_factor_set(at=...) requires a timezone-aware datetime")
+    if interval_end is not None:
+        if interval_end.tzinfo is None:
+            raise ValueError("build_factor_set(interval_end=...) requires a timezone-aware datetime")
+        if at is None or interval_end <= at:
+            raise ValueError("interval_end requires at and must be later than at")
 
     settings = settings or get_settings()
     run_overrides = run_overrides or {}
@@ -1300,9 +1545,17 @@ def build_factor_set(
     profile = _effective_local_profile(deployment, settings, harness, workspace, managed)
 
     grid, grid_basis = _resolve_grid(
-        provider, deployment, settings, run_overrides, harness, workspace, managed, at=at
+        provider, deployment, settings, run_overrides, harness, workspace, managed,
+        at=at, interval_end=interval_end,
     )
-    pue = _resolve_pue(deployment, profile, settings, run_overrides, harness, workspace, managed)
+    # OpenRouter's reviewed canonical identity for cloud-hosted calls (see
+    # `UPSTREAM_PUE_ALIASES`). Keep the raw value in call provenance while
+    # selecting the aliased upstream's disclosure.
+    pue_served_by = UPSTREAM_PUE_ALIASES.get(served_by, served_by)
+    pue = _resolve_pue(
+        deployment, profile, settings, run_overrides, harness, workspace, managed,
+        pue_served_by if pue_served_by in {"aws", "google"} else None,
+    )
     embodied_g = _resolve_embodied(deployment, settings, run_overrides, harness, workspace, managed)
     both = band_factors(settings)
     band_low = _resolve_band_side(
@@ -1338,4 +1591,14 @@ def build_factor_set(
         layers_present=layers_present,
         energy_strategy=energy_strategy,
         model_override=model_override,
+        resolution_context=FactorResolutionContext(
+            settings_values=_freeze(settings.model_dump(include=_CONTEXT_SETTINGS_FIELDS)),
+            settings_fields_set=tuple(sorted(settings.model_fields_set & _CONTEXT_SETTINGS_FIELDS)),
+            workspace_settings=_freeze(workspace.model_dump()) if workspace else None,
+            managed_settings=_freeze(managed.model_dump()) if managed else None,
+            harness_settings=_freeze(harness.model_dump()) if harness else None,
+            run_overrides=_freeze(run_overrides),
+            at=at,
+            interval_end=interval_end,
+        ),
     )

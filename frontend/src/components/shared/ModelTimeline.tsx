@@ -50,7 +50,7 @@ export function ModelTimeline({ segments }: { segments: ModelSegment[] }) {
             </div>
             <div className="mono-body" style={{ marginTop: 4, fontSize: 11.5 }}>
               {formatTokens(s.input_tokens)} in · {formatTokens(s.output_tokens)} out · $
-              {s.cost_usd.toFixed(4)} · {s.energy_wh.toFixed(3)} Wh (est.) ·{' '}
+              {s.cost_usd.toFixed(4)} · {s.energy_wh.toFixed(3)} Wh ({s.energy_accounting?.energy_source ?? 'legacy'}; {s.energy_accounting?.energy_boundary ?? 'unknown'} coverage) ·{' '}
               {s.energy_accounting?.energy_class ?? '—'}
               {s.effort ? ` · effort ${s.effort}` : ''}
               {s.served_by ? ` · via ${s.served_by}` : ''}

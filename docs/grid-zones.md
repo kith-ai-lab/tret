@@ -128,7 +128,7 @@ not the legacy `TRET_LOCAL_GRID_CO2E_G_PER_KWH`, and not an explicitly set
 down for this deployment, and a region pin says where the load ran, not
 that the operator's figure (or its GHG Protocol basis — a market-based PPA
 figure must never be silently swapped for a location-based average) should
-be discarded. The dataset therefore displaces only tret's shipped IEA global
+be discarded. The dataset therefore displaces only tret's shipped Ember world
 default. A pinned region the table has no zone for, or a table that cannot
 be read, falls through to `global_default` exactly as before. An unpinned
 provider never touches this rung.

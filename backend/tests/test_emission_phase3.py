@@ -24,6 +24,7 @@ from tret.providers.catalog import ModelCatalog, ModelInfo
 from tret.services.embodied_profiles import EmbodiedProfile, grams_per_run
 from tret.services.emission_factors import EmissionsOverrides, build_factor_set
 from tret.services.emissions import energy_accounting
+from tret.services.uncertainty_derivation import Evidence
 
 CATALOG = ModelCatalog()
 
@@ -325,11 +326,11 @@ def test_the_embodied_factor_record_carries_the_profile_summary():
     assert record["confidence"] == "placeholder"
 
 
-def test_a_profile_does_not_apply_to_cloud_deployment():
+def test_an_explicit_profile_applies_to_cloud_deployment():
     doc = {"embodied": {"profile": {"gpus": 2, "runs_over_lifetime": 50_000, "label": "site box"}}}
     fs = build_factor_set(provider="anthropic", workspace_settings=doc)
-    assert fs.embodied_g.value == Decimal(0)
-    assert fs.embodied_g.layer == "global_default"
+    assert fs.embodied_g.value > Decimal(0)
+    assert fs.embodied_g.layer == "workspace"
 
 
 # ── Feature D: evidence-narrowed band ─────────────────────────────────────────
@@ -348,7 +349,12 @@ def _evidenced_doc() -> dict:
 
 def test_a_fully_evidenced_run_narrows_the_band_to_the_dominant_contribution():
     fs = build_factor_set(provider="anthropic", workspace_settings=_evidenced_doc())
-    report = _account(_model("L"), factors=fs, measured_energy_wh=5.0)
+    report = _account(
+        _model("L"), factors=fs, measured_energy_wh=5.0,
+        validated_evidence=Evidence(
+            energy_measured=True, pue_metered=True, grid_sourced_dated=True
+        ),
+    )
     uncertainty = report["uncertainty"]
     assert uncertainty["band_factor_low"] == pytest.approx(1.4286, abs=2e-3)
     assert uncertainty["band_factor_high"] == 1.3

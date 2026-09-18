@@ -113,12 +113,13 @@ def test_explicit_catalog_constant_beats_active_params_even_when_configured():
     )
     constant = energy_constant_for_model(model, factors)
     assert constant.wh_per_mtok == Decimal("777")
-    assert constant.strategy == "class_ladder"
+    assert constant.strategy == "catalog_override"
 
     report = _account(model, factors=factors)
     record = next(f for f in report["factors"] if f["key"] == "energy_class")
     assert record["value"] == 777.0
-    assert record["strategy"] == "class_ladder"
+    assert record["strategy"] == "catalog_override"
+    assert record["source"] == "Explicit model catalog energy constant"
     assert record["layer"] == "global_default"
 
 
@@ -141,7 +142,7 @@ def test_ladder_is_the_final_fallback_when_nothing_else_applies():
     model = _model()
     factors = build_factor_set(provider=model.provider)  # default strategy: class_ladder
     constant = energy_constant_for_model(model, factors)
-    assert constant.strategy == "class_ladder"
+    assert constant.strategy == "class_ladder_v2"
     assert constant.wh_per_mtok == wh_per_mtok_for_model(model)
 
 
@@ -226,7 +227,7 @@ def test_catalog_loaded_model_with_an_explicit_constant_wins_regardless_of_strat
         provider=model.provider, run_overrides={"energy_strategy": "active_params"}
     )
     constant = energy_constant_for_model(model, factors)
-    assert constant.strategy == "class_ladder"
+    assert constant.strategy == "catalog_override"
     assert constant.wh_per_mtok == Decimal("777")
 
 
@@ -312,7 +313,7 @@ def test_missing_active_params_b_falls_back_to_the_ladder_with_a_caveat():
         provider=model.provider, run_overrides={"energy_strategy": "active_params"}
     )
     constant = energy_constant_for_model(model, factors)
-    assert constant.strategy == "class_ladder"
+    assert constant.strategy == "class_ladder_v2"
 
     report = _account(model, factors=factors)
     caveat = next(c for c in report["caveats"] if c["key"] == "active_params_unknown")
@@ -339,8 +340,8 @@ def test_measured_energy_replaces_the_estimate_and_composes_exactly():
     bucket_sum = sum(report["energy_wh_by_bucket"].values())
     assert bucket_sum == pytest.approx(1000.0, abs=1e-3)
 
-    # pue=1.05 (workstation default), grid=470.0 (global default), embodied=5.0
-    expected_co2e = 1000.0 * 1.05 * 470.0 / 1000.0 + 5.0
+    # pue=1.05 (workstation default), grid=458.49 (global default), embodied=5.0
+    expected_co2e = 1000.0 * 1.05 * 458.49 / 1000.0 + 5.0
     assert report["co2e_g"] == pytest.approx(expected_co2e, abs=1e-3)
     scopes = report["scopes"]
     assert (
@@ -349,7 +350,7 @@ def test_measured_energy_replaces_the_estimate_and_composes_exactly():
     )
 
 
-def test_measured_energy_flips_caveats_and_narrows_contributions():
+def test_unvalidated_measurement_does_not_claim_instrument_accuracy():
     model = _local_model()
     report = _account(model, measured_energy_wh=500.0)
 
@@ -360,15 +361,32 @@ def test_measured_energy_flips_caveats_and_narrows_contributions():
     assert "measured" in caveats["prompt_shape_residual"]["note"].lower()
 
     contributions = {c["key"]: c for c in report["uncertainty"]["contributions"]}
-    assert contributions["energy_class"]["low_multiplier"] == 0.9
-    assert contributions["energy_class"]["high_multiplier"] == 1.1
-    assert contributions["batching"]["low_multiplier"] == 0.9
-    assert contributions["batching"]["high_multiplier"] == 1.1
+    assert contributions["energy_class"]["low_multiplier"] == 0.33
+    assert contributions["energy_class"]["high_multiplier"] == 3.0
+    assert contributions["batching"]["low_multiplier"] == 0.55
+    assert contributions["batching"]["high_multiplier"] == 1.45
 
     record = next(f for f in report["factors"] if f["key"] == "energy_class")
     assert record["confidence"] == "measured"
-    assert record["source"] == "Operator-supplied measurement (IT-load Wh)"
+    assert record["source"] == "Measured energy (node_it boundary Wh)"
+    assert report["energy_boundary"] == "node_it"
     assert record["measured"] is True
+
+
+def test_additional_reasoning_changes_energy_without_repricing_billed_output():
+    model = _model()
+    plain = energy_accounting(model, 100, 200)
+    extra = energy_accounting(model, 100, 200, energy_output_tokens=300,
+                              reasoning_tokens=100, reasoning_accounting="additional")
+    included = energy_accounting(model, 100, 200, energy_output_tokens=200,
+                                 reasoning_tokens=100, reasoning_accounting="counted_in_output")
+    assert extra["energy_wh"] > plain["energy_wh"]
+    assert included["energy_wh"] == plain["energy_wh"]
+    assert extra["cost"] == plain["cost"]
+    assert extra["tokens"] == plain["tokens"]
+    assert extra["energy_output_tokens"] == 300
+    assert any(c["key"] == "reasoning_counted_in_output" for c in included["caveats"])
+    assert not any(c["key"] == "reasoning_hidden" for c in included["caveats"])
 
 
 def test_a_cloud_run_keeps_its_own_caveats_when_measured():

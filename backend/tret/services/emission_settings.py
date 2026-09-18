@@ -175,6 +175,14 @@ def _resolved_json(resolved: Resolved) -> dict[str, Any]:
         "table": resolved.table,
         "profile": resolved.profile,
         "derived": resolved.derived,
+        "factor_boundary": resolved.factor_boundary,
+        "gas_coverage": resolved.gas_coverage,
+        "gwp_horizon_years": resolved.gwp_horizon_years,
+        "gwp_assessment_basis": resolved.gwp_assessment_basis,
+        "includes_td_losses": resolved.includes_td_losses,
+        "electricity_mix_basis": resolved.electricity_mix_basis,
+        "dataset_version": resolved.dataset_version,
+        "observation_year": resolved.observation_year,
     }
 
 
@@ -193,6 +201,7 @@ def factor_set_json(factors: FactorSet) -> dict[str, Any]:
         "band_low": _resolved_json(factors.band_low),
         "band_high": _resolved_json(factors.band_high),
         "baseline_model": _resolved_json(factors.baseline_model),
+        "energy_strategy": _resolved_json(factors.energy_strategy),
     }
 
 
@@ -242,11 +251,25 @@ def shipped_defaults() -> dict[str, dict[str, Any]]:
     grid_ref = GRID_REFERENCE["default"]
     band_citation = "; ".join(f"{s['name']}: {s['claim']}" for s in UNCERTAINTY_SOURCES)
     return {
+        "energy_method": {
+            "method_id": "class_ladder_v2",
+            "method_version": 2,
+            "energy_boundary": "node_it",
+            "label": "Source-PUE-corrected node-IT class ladder",
+        },
         "grid_default": {
             "value": grid_ref["value"],
-            "label": "IEA global power-sector average",
+            "label": (
+                "Ember Yearly Electricity Data, World 2025 CO2 intensity "
+                "(lifecycle, all GHG, 100-year CO2e), CC BY 4.0"
+            ),
             "source": grid_ref["source"],
             "url": grid_ref["url"],
+            **{key: grid_ref[key] for key in (
+                "factor_boundary", "gas_coverage", "gwp_horizon_years",
+                "gwp_assessment_basis", "includes_td_losses",
+                "electricity_mix_basis", "dataset_version", "observation_year",
+            )},
         },
         # No shipped per-provider grid default — TRET_GRID_FACTORS ships empty.
         "grid_providers": {},
@@ -254,7 +277,7 @@ def shipped_defaults() -> dict[str, dict[str, Any]]:
             "value": _field_default("datacenter_pue"),
             "label": (
                 "Hyperscaler cloud — conservative versus self-reported figures "
-                "(Google 1.09, AWS 1.15, Microsoft 1.16)"
+                "(Google 1.09, AWS 1.14)"
             ),
             "source": PUE_REFERENCE["google"]["source"],
             "url": PUE_REFERENCE["google"]["url"],

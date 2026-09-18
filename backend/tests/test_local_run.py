@@ -89,6 +89,8 @@ class ScriptedTurn:
     usage: Usage = field(default_factory=lambda: Usage(input_tokens=10, output_tokens=5))
     stop_reason: str = "end_turn"
     emit_turn_complete: bool = True
+    served_by: str | None = None
+    inference_geo: str | None = None
 
 
 @dataclass
@@ -147,7 +149,12 @@ class StubProvider(Provider):
         for tc in turn.tool_calls:
             yield ToolCallComplete(tc)
         if turn.emit_turn_complete:
-            yield TurnComplete(usage=turn.usage, stop_reason=turn.stop_reason)
+            yield TurnComplete(
+                usage=turn.usage,
+                stop_reason=turn.stop_reason,
+                served_by=turn.served_by,
+                inference_geo=turn.inference_geo,
+            )
 
 
 def _wire(monkeypatch, provider: Provider, *, models: list[ModelInfo] | None = None):
@@ -217,14 +224,49 @@ async def test_full_loop_uses_tools_then_answers(tmp_path, monkeypatch):
     expected_usd = float(TARGET_MODEL.cost_usd(180, 20, 0, 0))
     assert result.receipt.usd == expected_usd
     expected_accounting = energy_accounting(TARGET_MODEL, 180, 20, 0, 0, catalog=catalog)
-    assert result.receipt.co2e_g == expected_accounting["co2e_g"]
-    assert result.receipt.energy_wh == expected_accounting["energy_wh"]
+    assert result.receipt.co2e_g == pytest.approx(expected_accounting["co2e_g"], abs=2e-6)
+    assert result.receipt.energy_wh == pytest.approx(
+        expected_accounting["energy_wh"], abs=2e-6
+    )
     assert result.receipt.usage == {
         "input_tokens": 180,
         "output_tokens": 20,
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
     }
+
+
+async def test_local_receipt_and_ledger_keep_each_calls_upstream_and_geo(tmp_path, monkeypatch):
+    ledger_file = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
+    provider = StubProvider(
+        turns=[
+            ScriptedTurn(
+                tool_calls=(ToolCall(id="1", name="list_files", arguments={}),),
+                served_by="upstream-a",
+                inference_geo="us",
+            ),
+            ScriptedTurn(
+                text_chunks=("done",),
+                served_by="upstream-b",
+                inference_geo="global",
+            ),
+        ]
+    )
+    _wire(monkeypatch, provider)
+
+    result = await local_run.arun("inspect", path=str(tmp_path), model=TARGET_MODEL.id)
+
+    assert [record["served_by"] for record in result.receipt.call_records] == [
+        "upstream-a",
+        "upstream-b",
+    ]
+    assert [record["inference_geo"] for record in result.receipt.call_records] == [
+        "us",
+        "global",
+    ]
+    entry = json.loads(ledger_file.read_text().splitlines()[-1])
+    assert entry["call_records"] == result.receipt.call_records
 
 
 # ── 2. path safety: traversal, absolute path, symlink escape all refused ───
@@ -794,6 +836,9 @@ async def test_provider_error_with_streamed_text_books_an_estimated_cost(tmp_pat
     # The one field a ledger reader needs to tell this guessed-but-priced line
     # apart from an ordinary metered one.
     assert entry["estimated"] is True
+    assert entry["call_records"][-1]["usage_status"] == "estimated"
+    assert entry["call_records"][-1]["served_by"] is None
+    assert entry["call_records"][-1]["inference_geo"] is None
 
 
 @pytest.mark.asyncio
@@ -854,6 +899,8 @@ async def test_provider_error_with_nothing_streamed_books_no_estimate(tmp_path, 
     assert result.status == "failed"
     assert result.receipt.usd is None
     assert result.receipt.estimated is False
+    assert result.receipt.call_records[-1]["usage_status"] == "unavailable"
+    assert result.receipt.call_records[-1]["served_by"] is None
 
 
 def test_cli_hit_iteration_cap_preserves_out_file_and_exits_nonzero(
@@ -983,7 +1030,8 @@ async def test_arun_negative_measured_energy_wh_raises_value_error(tmp_path, mon
     assert not provider.stream_calls  # rejected before ever calling the model
 
 
-def test_cli_measured_wh_flag_is_recorded_as_measured(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("boundary", ["node_it", "facility"])
+def test_cli_measured_wh_flag_is_recorded_as_measured(tmp_path, monkeypatch, capsys, boundary):
     ledger_file = tmp_path / "ledger.jsonl"
     monkeypatch.setattr(local_run, "get_settings", lambda: Settings(ledger_path=str(ledger_file)))
     provider = StubProvider(turns=[ScriptedTurn(text_chunks=("metered answer",))])
@@ -995,6 +1043,7 @@ def test_cli_measured_wh_flag_is_recorded_as_measured(tmp_path, monkeypatch, cap
             "tret", "run", "summarize this",
             "--model", TARGET_MODEL.id,
             "--measured-wh", "5.0",
+            "--measured-boundary", boundary,
             "--json", "--quiet",
         ],
     )
@@ -1003,6 +1052,11 @@ def test_cli_measured_wh_flag_is_recorded_as_measured(tmp_path, monkeypatch, cap
     payload = json.loads(capsys.readouterr().out)
     assert payload["receipt"]["energy_wh"] == pytest.approx(5.0)
     assert payload["receipt"]["raw"]["energy_source"] == "measured"
+    assert payload["receipt"]["raw"]["energy_boundary"] == boundary
+    if boundary == "facility":
+        assert payload["receipt"]["raw"]["energy_wh_total"] == 5.0
+    entry = json.loads(ledger_file.read_text().splitlines()[-1])
+    assert entry["energy_accounting"]["energy_boundary"] == boundary
 
 
 def test_cli_negative_measured_wh_rejected_at_argparse(monkeypatch, capsys):

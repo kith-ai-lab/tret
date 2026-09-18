@@ -8,6 +8,7 @@ from decimal import Decimal
 
 import pytest
 
+from tret.engine.harness import ModelSegment
 from tret.providers import anthropic as anthropic_module
 from tret.providers import base as base_module
 from tret.providers import openai_compat
@@ -15,7 +16,9 @@ from tret.providers.anthropic import (
     MAX_CACHE_BREAKPOINTS,
     MESSAGE_CACHE_BREAKPOINTS,
     _apply_conversation_cache,
+    _inference_geo_of,
     _to_anthropic_messages,
+    _usage_of,
 )
 from tret.providers.base import Msg, ToolCall, ToolCallComplete, ToolSpec, TextDelta, Usage
 from tret.providers.catalog import (
@@ -306,6 +309,161 @@ def test_cached_tokens_are_subtracted_from_prompt_total():
 def test_usage_without_cache_details_is_all_uncached():
     usage = _usage_from_openai({"prompt_tokens": 1000, "completion_tokens": 40})
     assert (usage.input_tokens, usage.cache_read_tokens) == (1000, 0)
+
+
+def test_openai_reasoning_is_nullable_and_semantics_are_explicit():
+    raw = {
+        "prompt_tokens": 10,
+        "completion_tokens": 8,
+        "completion_tokens_details": {"reasoning_tokens": 3},
+    }
+    known = _usage_from_openai(raw, reasoning_accounting="counted_in_output")
+    unknown = _usage_from_openai(raw)
+
+    assert known.reasoning_tokens == 3
+    assert known.reasoning_accounting == "counted_in_output"
+    assert known.energy_output_tokens == 8  # no double counting
+    assert unknown.reasoning_accounting == "unknown"
+    assert _usage_from_openai({"completion_tokens": 8}).reasoning_tokens is None
+
+
+@pytest.mark.parametrize("invalid", [True, 1.5, -1, "3"])
+def test_openai_reasoning_rejects_non_integer_counts(invalid):
+    usage = _usage_from_openai(
+        {
+            "completion_tokens": 8,
+            "completion_tokens_details": {"reasoning_tokens": invalid},
+        }
+    )
+    assert usage.reasoning_tokens is None
+    assert usage.reasoning_accounting is None
+
+
+def test_anthropic_thinking_tokens_are_counted_inside_output():
+    class Details:
+        thinking_tokens = 4
+
+    class Raw:
+        input_tokens = 10
+        output_tokens = 9
+        cache_read_input_tokens = 0
+        cache_creation_input_tokens = 0
+        output_tokens_details = Details()
+
+    usage = _usage_of(Raw())
+    assert usage.reasoning_tokens == 4
+    assert usage.reasoning_accounting == "counted_in_output"
+    assert usage.energy_output_tokens == 9
+
+
+@pytest.mark.parametrize("invalid", [True, 1.5, -1, "3"])
+def test_anthropic_thinking_rejects_non_integer_counts(invalid):
+    class Details:
+        thinking_tokens = invalid
+
+    class Raw:
+        output_tokens_details = Details()
+
+    usage = _usage_of(Raw())
+    assert usage.reasoning_tokens is None
+    assert usage.reasoning_accounting is None
+
+
+def test_anthropic_geo_is_only_taken_from_explicit_response_metadata():
+    class Response:
+        inference_geo = "us"
+
+    assert _inference_geo_of(Response()) == "us"
+    assert _inference_geo_of(object()) is None
+
+
+def test_anthropic_geo_prefers_usage_over_the_message_top_level():
+    class Usage_:
+        inference_geo = "us-east-1"
+
+    class Response:
+        usage = Usage_()
+        inference_geo = "eu-west-1"  # must lose to usage.inference_geo
+
+    assert _inference_geo_of(Response()) == "us-east-1"
+
+    class NoUsageGeo:
+        class Usage2:
+            pass
+
+        usage = Usage2()
+        inference_geo = "eu-west-1"
+
+    assert _inference_geo_of(NoUsageGeo()) == "eu-west-1"
+
+
+def test_anthropic_geo_is_capped_and_charset_restricted():
+    class Oversize:
+        inference_geo = "us-" + "x" * 70
+
+    class Junk:
+        inference_geo = "US East 1!!"
+
+    class Slug:
+        inference_geo = "US-East_1"
+
+    assert _inference_geo_of(Oversize()) is None
+    assert _inference_geo_of(Junk()) is None
+    assert _inference_geo_of(Slug()) == "us-east_1"
+
+
+def test_openai_geo_prefers_usage_over_body_top_level():
+    from tret.providers.openai_compat import _inference_geo_from_openai
+
+    assert _inference_geo_from_openai(
+        {"usage": {"inference_geo": "us-east-1"}, "inference_geo": "eu-west-1"}
+    ) == "us-east-1"
+    assert _inference_geo_from_openai({"inference_geo": "eu-west-1"}) == "eu-west-1"
+    assert _inference_geo_from_openai({"usage": {}, "inference_geo": None}) is None
+
+
+def test_openai_geo_is_capped_and_charset_restricted():
+    from tret.providers.openai_compat import _inference_geo_from_openai
+
+    assert _inference_geo_from_openai({"inference_geo": "x" * 65}) is None
+    assert _inference_geo_from_openai({"inference_geo": "bad geo!"}) is None
+    assert _inference_geo_from_openai({"inference_geo": "US-East-1"}) == "us-east-1"
+
+
+def test_normalize_call_slug_caps_length_and_charset():
+    from tret.providers.base import normalize_call_slug
+
+    assert normalize_call_slug("  Deepinfra  ") == "deepinfra"
+    assert normalize_call_slug("a" * 65) is None
+    assert normalize_call_slug("not a slug!") is None
+    assert normalize_call_slug(None) is None
+    assert normalize_call_slug("aws") == "aws"
+
+
+def test_energy_output_tokens_adds_only_confirmed_additional_reasoning():
+    usage = Usage(output_tokens=9, reasoning_tokens=4, reasoning_accounting="additional")
+    assert usage.energy_output_tokens == 13
+
+
+def test_usage_preserves_the_original_fifth_positional_cost_argument():
+    usage = Usage(1, 2, 3, 4, Decimal("0.25"))
+    assert usage.reported_cost_usd == Decimal("0.25")
+    assert usage.reasoning_tokens is None
+
+
+def test_segment_keeps_confirmed_additional_reasoning_when_another_call_is_unknown():
+    segment = ModelSegment(model=_model(), reason="test")
+    segment.add(
+        Usage(output_tokens=9, reasoning_tokens=4, reasoning_accounting="additional"),
+        1,
+    )
+    segment.add(Usage(output_tokens=3), 2)
+
+    # Aggregate reasoning completeness is unknown, while the lower-bound
+    # additive amount remains usable by the energy estimator.
+    assert segment.usage.reasoning_tokens is None
+    assert segment.known_additional_reasoning_tokens == 4
+    assert segment.to_json()["known_additional_reasoning_tokens"] == 4
 
 
 def test_cached_tokens_cannot_exceed_prompt_tokens():

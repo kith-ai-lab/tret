@@ -110,6 +110,48 @@ class GridTable:
             "mean_g_per_kwh": float(sum(values) / len(values)) if values else None,
         }
 
+    def average(
+        self, start: datetime, end: datetime, *, fallback: Decimal,
+        max_gap: timedelta = timedelta(hours=2),
+    ) -> tuple[Decimal, float]:
+        """Time-weighted intensity assuming constant power within this interval.
+
+        Split at every factor transition and stale-series expiry. The returned
+        coverage is the fraction supplied by this table; uncovered time uses
+        the explicit fallback. This is a temporal allocation assumption, not
+        a claim that request power was measured uniformly.
+        """
+        if start.tzinfo is None or end.tzinfo is None or end <= start:
+            raise ValueError("average requires an increasing timezone-aware interval")
+        if not fallback.is_finite() or fallback < 0 or max_gap.total_seconds() <= 0:
+            raise ValueError("fallback and max_gap must be valid nonnegative/positive values")
+        start, end = start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+        boundaries = {start, end}
+        if self.kind == "diurnal":
+            point = start.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            # Bound memory and work for accidentally enormous supplied windows.
+            if (end - start).total_seconds() > 366 * 86400:
+                raise ValueError("interval may span at most 366 days")
+            while point < end:
+                boundaries.add(point)
+                point += timedelta(hours=1)
+        else:
+            for timestamp, _ in self.rows:
+                for point in (timestamp, timestamp + max_gap):
+                    if start < point < end:
+                        boundaries.add(point)
+        points = sorted(boundaries)
+        weighted = Decimal(0)
+        covered = Decimal(0)
+        duration = Decimal(str((end - start).total_seconds()))
+        for left, right in zip(points, points[1:]):
+            seconds = Decimal(str((right - left).total_seconds()))
+            value = self.lookup(left + (right - left) / 2, max_gap=max_gap)
+            if value is not None:
+                covered += seconds
+            weighted += seconds * (fallback if value is None else value)
+        return weighted / duration, float(covered / duration)
+
 
 def _parse_value(raw: str, row_num: int, *, column: str = "g_per_kwh") -> Decimal:
     try:

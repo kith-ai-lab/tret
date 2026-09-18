@@ -328,7 +328,7 @@ def test_energy_is_shown_only_where_the_objective_reasons_about_it():
         prompt = _prompt(objective, n=5)
         # L is the calibrated class fitted from Claude 3.7 Sonnet, in Wh per
         # million output-equivalent tokens (services/emissions.py).
-        assert "| energy: L (~2600 Wh/Mtok, est.)" in prompt
+        assert "| energy: L (~2399.3371 Wh/Mtok, est.)" in prompt
     for objective in ("balanced", "quality"):
         assert "Wh/Mtok" not in _prompt(objective, n=5)
 

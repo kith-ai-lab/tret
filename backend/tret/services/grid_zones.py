@@ -349,6 +349,17 @@ def grid_entry_for_region(region: str, table: ZoneTable | None = None) -> tuple[
         "label": label[:80],
         "url": f"https://app.electricitymaps.com/zone/{factor.zone}/all/yearly",
         "as_of": f"{factor.year}-12-31",
+        # Electricity Maps labels the exported value as lifecycle gCO2eq.
+        # Its GWP horizon, assessment basis, transmission losses, and mix basis
+        # are not asserted by the bundled table, so they remain unknown.
+        "factor_boundary": "lifecycle_electricity_generation",
+        "gas_coverage": "co2e",
+        "gwp_horizon_years": None,
+        "gwp_assessment_basis": "unknown",
+        "includes_td_losses": None,
+        "electricity_mix_basis": "unknown",
+        "dataset_version": "electricity-maps-bundled-yearly",
+        "observation_year": factor.year,
     }
     return factor.zone, entry
 

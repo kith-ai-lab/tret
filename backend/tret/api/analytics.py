@@ -32,10 +32,12 @@ Read-only; any authenticated user may look.
 """
 from __future__ import annotations
 
+import dataclasses
+import math
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, ValidationError
@@ -63,13 +65,18 @@ from tret.router_llm.priors import (
     summarize,
 )
 from tret.services import transcript
-from tret.services.emission_factors import EmissionsOverrides, build_factor_set
+from tret.services.emission_factors import EmissionsOverrides, Resolved, build_factor_set
 from tret.services.emission_settings import (
     MAX_EMISSIONS_BODY_BYTES,
     validation_detail as _validation_detail,
     workspace_emissions_layers,
 )
-from tret.services.emissions import combine_accountings, energy_accounting, resolve_baseline_model
+from tret.services.emissions import (
+    combine_accountings,
+    energy_accounting,
+    grid_comparison_signature,
+    resolve_baseline_model,
+)
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -479,17 +486,28 @@ def _recorded_emissions(accounting) -> dict | None:
     if not isinstance(accounting, dict):
         return None
     co2e = accounting.get("co2e_g")
-    if co2e is None:
+    structured_partial = (
+        co2e is None
+        and accounting.get("carbon_summable") is False
+        and isinstance(accounting.get("by_basis"), list)
+        and (accounting.get("energy_wh_total") is not None or accounting.get("energy_wh") is not None)
+    )
+    if co2e is None and not structured_partial:
         return None
     scopes = accounting.get("scopes") if isinstance(accounting.get("scopes"), dict) else None
     baseline = accounting.get("baseline") if isinstance(accounting.get("baseline"), dict) else None
+    cost = accounting.get("cost") if isinstance(accounting.get("cost"), dict) else None
     band = accounting.get("uncertainty") if isinstance(accounting.get("uncertainty"), dict) else None
     compute_wh = _d(accounting.get("energy_wh") or 0)
     total_wh = accounting.get("energy_wh_total")
     baseline_co2e = baseline.get("co2e_g") if baseline else None
     avoided = baseline.get("avoided_co2e_g") if baseline else None
-    avoided_usd = baseline.get("avoided_usd") if baseline else None
-    baseline_usd = baseline.get("cost_usd") if baseline else None
+    avoided_usd = cost.get("avoided_usd") if cost else None
+    baseline_usd = cost.get("baseline_usd") if cost else None
+    if avoided_usd is None and baseline:
+        avoided_usd = baseline.get("avoided_usd")
+    if baseline_usd is None and baseline:
+        baseline_usd = baseline.get("cost_usd")
     return {
         "model": accounting.get("model"),
         "energy_class": accounting.get("energy_class"),
@@ -499,6 +517,8 @@ def _recorded_emissions(accounting) -> dict | None:
         # mixing location-based and market-based factors has no summable total,
         # so it joins the factor key below rather than being averaged over.
         "grid_co2e_basis": accounting.get("grid_co2e_basis"),
+        "factor_signature": grid_comparison_signature(accounting),
+        "carbon_available": not structured_partial,
         # Added: which precedence rule chose the factor (`provider:anthropic`,
         # `local_setting`, `global_default`, `run_override`) and the operator's own
         # label for it. Both null on runs recorded before per-provider factors
@@ -510,7 +530,11 @@ def _recorded_emissions(accounting) -> dict | None:
         # Pre-PUE rows have no total; their compute figure is the whole of what
         # was recorded, so it stands in rather than dropping the run.
         "energy_wh": _d(total_wh) if total_wh is not None else compute_wh,
-        "co2e_g": _d(co2e),
+        # N1: None, never a masked Decimal(0) — a structured-partial row (co2e
+        # None, carbon_available False) has *no* carbon figure, not a zero one.
+        # `carbon_available` already keeps it out of every published sum; the
+        # zero must not exist for a consumer to accidentally add in.
+        "co2e_g": _d(co2e) if co2e is not None else None,
         "scope1_g": _d(scopes.get("scope1_g") or 0) if scopes else None,
         "scope2_g": _d(scopes.get("scope2_g") or 0) if scopes else None,
         "scope3_g": _d(scopes.get("scope3_g") or 0) if scopes else None,
@@ -547,10 +571,50 @@ def _recorded_emissions(accounting) -> dict | None:
 # assuming it does would be the same error in the other direction.
 NOT_SUMMABLE_NOTE = (
     "Carbon is not reported at this scale because the runs behind it were "
-    "accounted under more than one GHG Protocol basis, which may not be summed. "
+    "accounted under incompatible GHG bases or electricity-factor methodologies, "
+    "which may not be summed. "
     "Energy (Wh) and dollars are reported — those are summable across bases. Read "
     "the per-basis subtotals in `by_basis` instead."
 )
+
+# F4: a bucket can also be non-summable *within* one basis, when its runs were
+# priced under different grid-factor signatures (a changed default, a
+# per-provider override, a corrected factor). That is a narrower, more
+# actionable situation than a cross-basis mix — energy and money still sum,
+# and POST /api/analytics/emissions/whatif restates the window under one
+# labelled factor — so it gets its own note rather than the generic one.
+def _grid_factor_note(bucket: dict) -> str:
+    signatures = bucket.get("factor_signatures") or ()
+    n = len(signatures)
+    prices = sorted(p for p in bucket.get("grid_prices", ()) if p is not None)
+    values = f" ({', '.join(str(p) for p in prices)} gCO2e/kWh)" if 0 < len(prices) <= 4 else ""
+    return (
+        f"Carbon is not reported at this scale because the runs behind it were priced "
+        f"under {n} different grid-factor signatures within the same GHG basis{values}. "
+        "Energy (Wh) and dollars still sum across them — only the carbon total does not. "
+        "POST /api/analytics/emissions/whatif restates this window under one labelled "
+        "factor so the totals compare cleanly."
+    )
+
+
+def _not_summable_note(bucket: dict) -> str | None:
+    """Why this bucket's carbon is withheld, or None when it is not.
+
+    Distinguishes the F4 case (one basis, differing grid-factor signatures —
+    energy and money still sum, a labelled what-if restatement is available)
+    from every other non-summable reason (a genuine cross-basis mix, or a
+    structured-partial/N1 row present), which keep the general note.
+    """
+    if _is_summable(bucket):
+        return None
+    if (
+        bucket.get("runs_without_carbon_total", 0) == 0
+        and len(bucket["bases"]) <= 1
+        and len(bucket.get("factor_signatures", ())) > 1
+    ):
+        return _grid_factor_note(bucket)
+    return NOT_SUMMABLE_NOTE
+
 
 # Presentation order for the basis subtotals: location-based first (what most
 # disclosure frameworks expect), then market-based, then the two kinds of
@@ -590,17 +654,33 @@ def _emissions_bucket() -> dict:
         "scope2_g": Decimal(0),
         "scope3_g": Decimal(0),
         "runs_without_scope_split": 0,
+        "runs_without_carbon_total": 0,
         # basis (or None where a run recorded none) -> runs. More than one entry
         # means this bucket's carbon may not be added up.
         "bases": {},
+        "factor_signatures": set(),
+        # F4: the distinct grid_co2e_g_per_kwh values behind those signatures —
+        # tracked separately because a signature tuple is not something a note
+        # can print cheaply, but the price is exactly what a reader wants named.
+        "grid_prices": set(),
     }
 
 
 def _add_to_bucket(bucket: dict, rec: dict) -> None:
     bucket["runs"] += 1
+    bucket["factor_signatures"].add(rec.get("factor_signature", ()))
+    bucket["grid_prices"].add(rec.get("grid_co2e_g_per_kwh"))
     bucket["energy_wh"] += rec["energy_wh"]
     bucket["energy_wh_compute"] += rec["energy_wh_compute"]
-    bucket["co2e_g"] += rec["co2e_g"]
+    # N1: `rec["co2e_g"]` is None for a structured-partial row (no masked
+    # zero) — contribute nothing to the running Decimal sum for it. The
+    # `runs_without_carbon_total` counter just below already keeps the
+    # bucket's *published* carbon withheld; this only keeps the internal
+    # accumulator arithmetic-safe.
+    if rec["co2e_g"] is not None:
+        bucket["co2e_g"] += rec["co2e_g"]
+    if not rec.get("carbon_available", True):
+        bucket["runs_without_carbon_total"] += 1
     basis = rec["grid_co2e_basis"]
     bucket["bases"][basis] = bucket["bases"].get(basis, 0) + 1
     if rec["scope1_g"] is None:
@@ -619,8 +699,12 @@ def _add_to_bucket(bucket: dict, rec: dict) -> None:
         bucket["baseline_usd"] += rec["baseline_usd"]
     # A run with no recorded band contributes its central figure to both ends,
     # so the window total stays comparable with co2e_g instead of collapsing.
-    bucket["co2e_g_low"] += rec["co2e_g_low"] if rec["co2e_g_low"] is not None else rec["co2e_g"]
-    bucket["co2e_g_high"] += rec["co2e_g_high"] if rec["co2e_g_high"] is not None else rec["co2e_g"]
+    # A structured-partial row has neither a band nor a central figure
+    # (`co2e_g` is None too, N1) — it contributes 0 rather than raising.
+    low = rec["co2e_g_low"] if rec["co2e_g_low"] is not None else rec["co2e_g"]
+    high = rec["co2e_g_high"] if rec["co2e_g_high"] is not None else rec["co2e_g"]
+    bucket["co2e_g_low"] += low if low is not None else Decimal(0)
+    bucket["co2e_g_high"] += high if high is not None else Decimal(0)
 
 
 def _bucket_bases(bucket: dict) -> list:
@@ -630,7 +714,11 @@ def _bucket_bases(bucket: dict) -> list:
 
 def _is_summable(bucket: dict) -> bool:
     """May this bucket's carbon be added into one figure? Only within one basis."""
-    return len(bucket["bases"]) <= 1
+    return (
+        bucket.get("runs_without_carbon_total", 0) == 0
+        and len(bucket["bases"]) <= 1
+        and len(bucket.get("factor_signatures", ())) <= 1
+    )
 
 
 def _carbon(value: Decimal, summable: bool) -> float | None:
@@ -670,10 +758,11 @@ def _bucket_json(bucket: dict, **identity) -> dict:
         "scope2_g": _carbon(bucket["scope2_g"], summable),
         "scope3_g": _carbon(bucket["scope3_g"], summable),
         "runs_without_scope_split": bucket["runs_without_scope_split"],
+        "runs_without_carbon_total": bucket["runs_without_carbon_total"],
         # The bases behind this row, and whether its carbon was publishable.
         "grid_bases": _bucket_bases(bucket),
         "carbon_is_summable": summable,
-        "not_summable_note": None if summable else NOT_SUMMABLE_NOTE,
+        "not_summable_note": _not_summable_note(bucket),
     }
 
 
@@ -819,6 +908,11 @@ async def _rollup_emissions(
         model_bucket["energy_class"] = model_bucket["energy_class"] or rec["energy_class"]
         _add_to_bucket(model_bucket, rec)
         _add_to_bucket(by_harness.setdefault(harness_id, _emissions_bucket()), rec)
+        # N1: a structured-partial row (carbon withheld, energy known) is still
+        # counted here — energy is always summable, so `by_basis` energy must
+        # reconcile to the window energy total. `_add_to_bucket` already marks
+        # it `runs_without_carbon_total`, which keeps *this* basis row's own
+        # carbon withheld via `_is_summable`; only the carbon stays hidden.
         _add_to_bucket(by_basis.setdefault(rec["grid_co2e_basis"], _emissions_bucket()), rec)
         if created_at is not None:
             _add_to_bucket(by_day.setdefault(created_at.date().isoformat(), _emissions_bucket()), rec)
@@ -850,6 +944,7 @@ async def _rollup_emissions(
             # nothing, so it is excluded from the sums and counted here.
             "runs_without_estimate": without_estimate,
             "runs_without_scope_split": totals["runs_without_scope_split"],
+            "runs_without_carbon_total": totals["runs_without_carbon_total"],
             "runs_without_baseline": without_baseline,
             "runs_without_money_comparison": without_money,
             "runs_without_uncertainty_band": without_band,
@@ -888,10 +983,13 @@ async def _rollup_emissions(
             # What the nulls above mean, machine-readably.
             "grid_bases": window_bases,
             "carbon_is_summable": summable,
-            "not_summable_note": None if summable else NOT_SUMMABLE_NOTE,
+            "not_summable_note": _not_summable_note(totals),
         },
-        # One row per GHG Protocol basis present. Each row IS summable — that is
-        # the whole point of separating them — so its carbon is always a figure.
+        # One row per GHG Protocol basis present. Separating by basis is what
+        # makes carbon summable *across bases* — a row here is never withheld
+        # for the cross-basis reason. It can still be withheld for a narrower
+        # one: a structured-partial run (N1) or a mixed grid-factor signature
+        # (F4) within that same basis, same as any other rollup row.
         "by_basis": [
             _bucket_json(b, basis=basis)
             for basis, b in sorted(by_basis.items(), key=lambda kv: _basis_rank(kv[0]))
@@ -956,7 +1054,8 @@ async def _rollup_emissions(
             # The stronger of the two flags, and a different claim: mixed_factors
             # means "no single factor sits behind these totals"; mixed_grid_bases
             # means "there is no total". Reported separately because a window can
-            # mix factors within one basis (a corrected grid figure) and still sum.
+            # The historical field name is retained for compatibility; false
+            # also covers incompatible factor identities within one basis.
             "grid_bases": window_bases,
             "mixed_grid_bases": not summable,
             # Added, same reference-only status as the rest of this block.
@@ -1069,6 +1168,7 @@ class EmissionsWhatIfRequest(BaseModel):
     project_id: uuid.UUID | None = None
     days: int = Field(default=30, ge=1, le=3650)
     factors: dict[str, Any] = Field(default_factory=dict)
+    mode: Literal["preserve_measured_energy", "estimate_both_sides"] = "estimate_both_sides"
 
 
 async def _whatif_rows(db: AsyncSession, project_id: uuid.UUID | None, since) -> list:
@@ -1216,6 +1316,248 @@ def _whatif_accounting(
     )
 
 
+def _recorded_boundary(accounting: dict) -> str:
+    boundary = accounting.get("energy_boundary")
+    if boundary in {"gpu", "node_it", "facility", "partial", "unknown"}:
+        return boundary
+    meter = accounting.get("energy_meter") or {}
+    return "gpu" if meter.get("kind") == "nvidia_smi" else "unknown"
+
+
+def _pue_change_applies(factors_doc, provider: str | None) -> bool:
+    pue = factors_doc.pue if isinstance(factors_doc, EmissionsOverrides) else None
+    if pue is None:
+        return False
+    if provider is None:
+        return pue.cloud is not None or pue.local is not None or pue.local_profile is not None
+    if provider == "local":
+        return pue.local is not None or pue.local_profile is not None
+    return pue.cloud is not None
+
+
+def _preserved_measured_accounting(
+    *,
+    recorded: dict,
+    model,
+    tokens: tuple[int, int, int, int],
+    workspace_doc,
+    managed_doc,
+    factors_doc,
+    created_at,
+    catalog,
+) -> dict:
+    """Reprice recorded Wh while retaining every unrequested recorded factor."""
+    at = _aware_utc(created_at)
+    resolved = build_factor_set(
+        provider=model.provider,
+        harness_settings=factors_doc,
+        workspace_settings=workspace_doc,
+        managed_settings=managed_doc,
+        model_id=model.id,
+        at=at,
+    )
+    grid_requested = resolved.grid.layer == "harness"
+    pue_requested = resolved.pue.layer == "harness"
+    if not grid_requested:
+        resolved = dataclasses.replace(
+            resolved,
+            grid=Resolved(
+                Decimal(str(recorded.get("grid_co2e_g_per_kwh", resolved.grid.value))),
+                "run_override", recorded.get("grid_co2e_source") or "recorded",
+                recorded.get("grid_co2e_label"), None, None, "recorded.energy_accounting",
+                region=recorded.get("grid_region"), temporal=recorded.get("grid_temporal"),
+                requested_region=recorded.get("grid_requested_region"),
+                region_resolution_status=recorded.get("grid_region_resolution_status"),
+                factor_boundary=recorded.get("grid_factor_boundary", "unknown"),
+                gas_coverage=recorded.get("grid_gas_coverage", "unknown"),
+                gwp_horizon_years=recorded.get("grid_gwp_horizon_years"),
+                gwp_assessment_basis=recorded.get("grid_gwp_assessment_basis", "unknown"),
+                includes_td_losses=recorded.get("grid_includes_td_losses"),
+                electricity_mix_basis=recorded.get("grid_electricity_mix_basis", "unknown"),
+                dataset_version=recorded.get("grid_dataset_version"),
+                observation_year=recorded.get("grid_observation_year"),
+            ),
+            grid_basis=recorded.get("grid_co2e_basis") or GRID_BASIS_UNSPECIFIED,
+        )
+    if not pue_requested:
+        recorded_pue = recorded.get("configured_pue", recorded.get("pue", resolved.pue.value))
+        resolved = dataclasses.replace(
+            resolved,
+            pue=Resolved(
+                Decimal(str(recorded_pue)), "run_override", "recorded", None, None, None,
+                "recorded.energy_accounting.pue",
+                disclosure=recorded.get("pue_disclosure"),
+            ),
+            pue_profile=recorded.get("pue_profile", resolved.pue_profile),
+        )
+    band = recorded.get("uncertainty") or {}
+    resolved = dataclasses.replace(
+        resolved,
+        embodied_g=Resolved(
+            Decimal(str(recorded.get("embodied_g", 0))), "run_override", "recorded",
+            None, None, None, "recorded.energy_accounting.embodied_g",
+        ),
+        band_low=Resolved(
+            Decimal(str(band.get("band_factor_low", resolved.band_low.value))),
+            "run_override", "recorded", None, None, None,
+            "recorded.energy_accounting.uncertainty.band_factor_low",
+        ),
+        band_high=Resolved(
+            Decimal(str(band.get("band_factor_high", resolved.band_high.value))),
+            "run_override", "recorded", None, None, None,
+            "recorded.energy_accounting.uncertainty.band_factor_high",
+        ),
+    )
+    boundary = _recorded_boundary(recorded)
+    scenario = energy_accounting(
+        model, *tokens, factors=resolved, catalog=catalog,
+        measured_energy_wh=recorded.get("energy_wh"),
+        measured_energy_boundary=boundary,
+    )
+    # A stored baseline cannot be safely reconstructed from the historical
+    # factor context, so retain it as recorded instead of fabricating current
+    # provenance for the comparison.
+    scenario["baseline"] = dict(recorded.get("baseline") or {})
+    baseline_co2e = scenario["baseline"].get("co2e_g")
+    actual_signature = grid_comparison_signature(scenario)
+    baseline_signature = grid_comparison_signature(scenario["baseline"])
+    carbon_compatible = actual_signature == baseline_signature
+    if baseline_co2e is not None and carbon_compatible:
+        avoided = float(baseline_co2e) - float(scenario["co2e_g"])
+        scenario["baseline"]["avoided_co2e_g"] = round(avoided, 6)
+        scenario["baseline"]["avoided_pct"] = (
+            round(100 * avoided / float(baseline_co2e), 3) if baseline_co2e else 0.0
+        )
+    else:
+        scenario["baseline"]["avoided_co2e_g"] = None
+        scenario["baseline"]["avoided_pct"] = None
+    scenario["baseline"]["provenance_status"] = "recorded_counterfactual_unchanged"
+    scenario["cost"] = recorded.get("cost") or scenario.get("cost")
+    for key in ("energy_wh_estimated", "energy_wh_by_bucket", "energy_meter"):
+        if key in recorded:
+            scenario[key] = recorded[key]
+        else:
+            scenario.pop(key, None)
+    if "uncertainty" not in recorded:
+        scenario.pop("uncertainty", None)
+    caveats = [
+        caveat for caveat in scenario.get("caveats", [])
+        if caveat.get("key") != "baseline_crosses_grid_basis"
+    ]
+    actual_basis = scenario.get("grid_co2e_basis")
+    baseline_basis = scenario["baseline"].get("grid_co2e_basis")
+    if not carbon_compatible:
+        caveats.append({
+            "key": "baseline_crosses_grid_basis",
+            "label": "The baseline comparison spans incompatible grid factors",
+            "direction": "either",
+            "applies": True,
+            "note": (
+                f"Scenario actual uses {actual_basis}; the retained recorded "
+                f"counterfactual uses {baseline_basis}."
+            ),
+        })
+    scenario["caveats"] = caveats
+    scenario["energy_source"] = "measured"
+    scenario["scenario_energy_provenance"] = "preserved_recorded_measurement"
+    return scenario
+
+
+def _preserve_whatif_accounting(
+    *, recorded: dict, model_used: str | None, model_timeline: list | None,
+    input_tokens: int | None, output_tokens: int | None,
+    cache_read_tokens: int | None, cache_write_tokens: int | None,
+    catalog, workspace_doc, managed_doc, factors_doc, created_at,
+) -> tuple[dict | None, str | None]:
+    """Return scenario accounting and an exclusion reason, if any."""
+    source = recorded.get("energy_source", "estimated")
+    if source == "mixed" and not model_timeline:
+        return None, "mixed measured/estimated run has no per-segment accounting"
+
+    if model_timeline:
+        blocks = []
+        for seg in model_timeline:
+            seg_recorded = seg.get("energy_accounting")
+            if source in {"measured", "mixed"} and not isinstance(seg_recorded, dict):
+                return None, "measured timeline is missing per-segment accounting"
+            model = catalog.get(seg.get("model"))
+            if model is None:
+                return None, "model is no longer in the catalog"
+            tokens = tuple(seg.get(k) or 0 for k in (
+                "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"
+            ))
+            seg_source = (seg_recorded or {}).get("energy_source", "estimated")
+            if source in {"measured", "mixed"} and "energy_source" not in seg_recorded:
+                return None, "timeline segment lacks recorded energy source"
+            if seg_source == "measured":
+                wh = seg_recorded.get("energy_wh")
+                required = ("energy_wh_total", "grid_co2e_g_per_kwh", "pue", "embodied_g")
+                if (
+                    not isinstance(wh, (int, float, Decimal)) or not math.isfinite(wh) or wh < 0
+                    or any(seg_recorded.get(key) is None for key in required)
+                ):
+                    return None, "measured segment lacks finite energy or required recorded factors"
+                boundary = _recorded_boundary(seg_recorded)
+                if boundary in {"unknown", "partial"} and not (
+                    seg_recorded.get("pue_applied") is False
+                    and seg_recorded.get("energy_wh_total") == wh
+                ):
+                    return None, "ambiguous historical measurement boundary"
+                if (
+                    boundary == "unknown"
+                    and _pue_change_applies(factors_doc, model.provider)
+                ):
+                    return None, "unknown measurement boundary cannot be repriced with PUE"
+                blocks.append(_preserved_measured_accounting(
+                    recorded=seg_recorded, model=model, tokens=tokens,
+                    workspace_doc=workspace_doc, managed_doc=managed_doc,
+                    factors_doc=factors_doc, created_at=created_at, catalog=catalog,
+                ))
+            else:
+                blocks.append(_whatif_accounting(
+                    model_used=model.id, input_tokens=tokens[0], output_tokens=tokens[1],
+                    cache_read_tokens=tokens[2], cache_write_tokens=tokens[3],
+                    model_timeline=None, catalog=catalog, workspace_doc=workspace_doc,
+                    managed_doc=managed_doc, factors_doc=factors_doc, fs_cache={},
+                    created_at=created_at,
+                ))
+        return combine_accountings(blocks), None
+
+    model = catalog.get(model_used) if model_used else None
+    if model is None:
+        return None, "model is no longer in the catalog"
+    tokens = (input_tokens or 0, output_tokens or 0, cache_read_tokens or 0, cache_write_tokens or 0)
+    if source == "measured":
+        wh = recorded.get("energy_wh")
+        required = ("energy_wh_total", "grid_co2e_g_per_kwh", "pue", "embodied_g")
+        if (
+            not isinstance(wh, (int, float, Decimal)) or not math.isfinite(wh) or wh < 0
+            or any(recorded.get(key) is None for key in required)
+        ):
+            return None, "measured run lacks finite energy or required recorded factors"
+        boundary = _recorded_boundary(recorded)
+        if boundary in {"unknown", "partial"} and not (
+            recorded.get("pue_applied") is False and recorded.get("energy_wh_total") == wh
+        ):
+            return None, "ambiguous historical measurement boundary"
+        if (
+            boundary == "unknown"
+            and _pue_change_applies(factors_doc, model.provider)
+        ):
+            return None, "unknown measurement boundary cannot be repriced with PUE"
+        return _preserved_measured_accounting(
+            recorded=recorded, model=model, tokens=tokens, workspace_doc=workspace_doc,
+            managed_doc=managed_doc, factors_doc=factors_doc, created_at=created_at,
+            catalog=catalog,
+        ), None
+    return _whatif_accounting(
+        model_used=model_used, input_tokens=input_tokens, output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+        model_timeline=None, catalog=catalog, workspace_doc=workspace_doc,
+        managed_doc=managed_doc, factors_doc=factors_doc, fs_cache={}, created_at=created_at,
+    ), None
+
+
 LAYER_NOTE = (
     "Scenario factors are layered as the 'harness' precedence rung (run_override "
     "> harness > workspace > managed > env > dataset > global_default) — the most specific "
@@ -1275,6 +1617,16 @@ async def emissions_whatif(
         factors_instance = EmissionsOverrides(**raw_factors) if raw_factors else None
     except ValidationError as exc:
         raise HTTPException(422, detail=_validation_detail(exc)) from exc
+    if body.mode == "preserve_measured_energy":
+        unsupported = sorted(set(raw_factors) - {"version", "grid", "pue"})
+        if unsupported:
+            raise HTTPException(
+                422,
+                detail=(
+                    "preserve_measured_energy currently supports only grid and PUE "
+                    f"scenario factors; unsupported: {', '.join(unsupported)}"
+                ),
+            )
 
     gate = await get_extension_registry().check_workspace_gate(db, ctx.id, "emissions_whatif")
     if not gate.allowed:
@@ -1284,6 +1636,7 @@ async def emissions_whatif(
         project_id=await _scoped_project_id(db, ctx, body.project_id),
         days=body.days,
         factors_doc=factors_instance if factors_instance is not None else {},
+        mode=body.mode,
         ctx=ctx,
         db=db,
     )
@@ -1295,6 +1648,7 @@ async def _emissions_whatif_response(
     factors_doc: dict[str, Any] | EmissionsOverrides,
     ctx: WorkspaceContext,
     db: AsyncSession,
+    mode: Literal["preserve_measured_energy", "estimate_both_sides"] = "estimate_both_sides",
 ) -> dict:
     """`recorded` (the stored rollup) and `scenario` (the same rollup, over a
     recomputed accounting block per run) for the identical set of runs, plus
@@ -1352,6 +1706,57 @@ async def _emissions_whatif_response(
     scenario_rows: list = []
     runs_skipped = 0
     runs_recomputed = 0
+    runs_preserved = 0
+    exclusion_reasons: dict[str, int] = {}
+    # Preserve mode only preserves *measured* energy; a run recorded as
+    # "estimated" falls through to a full re-estimate under today's default
+    # ladder, so its delta mixes a method change in with the factor change the
+    # mode was asked for. Tracked so the response can say so (see the "What-if
+    # preserve mode" audit note).
+    estimated_reestimated_runs = 0
+    estimated_reestimated_pairs: set[tuple[str, str]] = set()
+
+    scenario_is_empty = not bool(
+        factors_doc.model_dump(exclude_none=True, exclude={"version"})
+        if isinstance(factors_doc, EmissionsOverrides)
+        else factors_doc
+    )
+    pue_requested = bool(
+        isinstance(factors_doc, EmissionsOverrides) and factors_doc.pue is not None
+    ) or bool(isinstance(factors_doc, dict) and factors_doc.get("pue"))
+    if mode == "preserve_measured_energy" and pue_requested:
+        pue_doc = factors_doc.pue if isinstance(factors_doc, EmissionsOverrides) else None
+        for row in rows:
+            accounting = row[2] or {}
+            whole_model = catalog.get(row[1]) if row[1] else None
+            candidates = [(accounting, getattr(whole_model, "provider", None))]
+            timeline = row[8] or []
+            candidates.extend(
+                (
+                    seg.get("energy_accounting") or {},
+                    seg.get("provider") or getattr(catalog.get(seg.get("model")), "provider", None),
+                ) for seg in timeline
+                if isinstance(seg, dict)
+            )
+            if any(
+                candidate.get("energy_source") == "measured"
+                and _recorded_boundary(candidate) == "facility"
+                and (
+                    provider is None
+                    or (provider == "local" and bool(pue_doc and (
+                        pue_doc.local is not None or pue_doc.local_profile is not None
+                    )))
+                    or (provider != "local" and bool(pue_doc and pue_doc.cloud is not None))
+                )
+                for candidate, provider in candidates
+            ):
+                raise HTTPException(
+                    422,
+                    detail=(
+                        "PUE cannot be changed for a facility-boundary measurement; "
+                        "facility energy already includes overhead"
+                    ),
+                )
 
     for (
         harness_id,
@@ -1373,23 +1778,57 @@ async def _emissions_whatif_response(
             scenario_rows.append((harness_id, model_used, accounting, created_at))
             continue
 
-        scenario_accounting = _whatif_accounting(
-            model_used=model_used,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cache_read_tokens=cache_read_tokens,
-            cache_write_tokens=cache_write_tokens,
-            model_timeline=model_timeline,
-            catalog=catalog,
-            workspace_doc=workspace_doc,
-            managed_doc=managed_doc,
-            factors_doc=factors_doc,
-            fs_cache=fs_cache,
-            created_at=created_at,
-        )
+        if mode == "preserve_measured_energy" and scenario_is_empty:
+            # Exact object reuse happens before any catalog lookup. This is the
+            # no-op guarantee for historical rows even if today's catalog or
+            # settings have drifted since they were recorded.
+            runs_preserved += 1
+            recorded_rows.append((harness_id, model_used, accounting, created_at))
+            scenario_rows.append((harness_id, model_used, accounting, created_at))
+            continue
+
+        reason = None
+        if mode == "preserve_measured_energy":
+            scenario_accounting, reason = _preserve_whatif_accounting(
+                recorded=accounting, model_used=model_used, model_timeline=model_timeline,
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
+                catalog=catalog, workspace_doc=workspace_doc, managed_doc=managed_doc,
+                factors_doc=factors_doc, created_at=created_at,
+            )
+        else:
+            scenario_accounting = _whatif_accounting(
+                model_used=model_used,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_write_tokens=cache_write_tokens,
+                model_timeline=model_timeline,
+                catalog=catalog,
+                workspace_doc=workspace_doc,
+                managed_doc=managed_doc,
+                factors_doc=factors_doc,
+                fs_cache=fs_cache,
+                created_at=created_at,
+            )
         if scenario_accounting is None:
             runs_skipped += 1
+            reason = reason or "model is no longer in the catalog"
+            exclusion_reasons[reason] = exclusion_reasons.get(reason, 0) + 1
             continue
+        if (
+            mode == "preserve_measured_energy"
+            and accounting.get("energy_source", "estimated") not in ("measured", "mixed")
+        ):
+            recorded_method = accounting.get("method_id")
+            if not recorded_method and accounting.get("energy_source", "estimated") == "estimated":
+                # Pre-batch rows never had a method_id stamped; the only
+                # estimator that existed then was class_ladder_v1.
+                recorded_method = "class_ladder_v1 (legacy, method not stamped)"
+            current_method = scenario_accounting.get("method_id")
+            if recorded_method and current_method and recorded_method != current_method:
+                estimated_reestimated_runs += 1
+                estimated_reestimated_pairs.add((recorded_method, current_method))
         runs_recomputed += 1
         recorded_rows.append((harness_id, model_used, accounting, created_at))
         scenario_rows.append((harness_id, model_used, scenario_accounting, created_at))
@@ -1397,6 +1836,30 @@ async def _emissions_whatif_response(
     recorded = await _rollup_emissions(db, project_id, days, recorded_rows, rows_scanned=len(rows))
     scenario = await _rollup_emissions(db, project_id, days, scenario_rows, rows_scanned=len(rows))
     scenario["layer_note"] = LAYER_NOTE
+
+    method_change_note = None
+    if estimated_reestimated_runs:
+        if len(estimated_reestimated_pairs) == 1:
+            old_method, new_method = next(iter(estimated_reestimated_pairs))
+            method_change_note = (
+                f" {estimated_reestimated_runs} estimated run(s) were recorded under "
+                f"{old_method} and are re-estimated under {new_method}; their delta "
+                "includes the method change, not just the factor change."
+            )
+        else:
+            prior_methods = ", ".join(
+                sorted({old for old, _new in estimated_reestimated_pairs})
+            )
+            current_methods = ", ".join(
+                sorted({new for _old, new in estimated_reestimated_pairs})
+            )
+            method_change_note = (
+                f" {estimated_reestimated_runs} estimated run(s) were recorded under "
+                f"an earlier method ({prior_methods}) and are re-estimated under the "
+                f"current one ({current_methods}); their delta includes the method "
+                "change, not just the factor change."
+            )
+        scenario["layer_note"] += method_change_note
 
     recorded_co2e = recorded["totals"]["co2e_g"]
     scenario_co2e = scenario["totals"]["co2e_g"]
@@ -1429,18 +1892,33 @@ async def _emissions_whatif_response(
     if runs_skipped:
         basis += (
             f" {runs_skipped} run(s) were excluded from both `recorded` and "
-            "`scenario`: their model is no longer in the catalog, so there is "
-            "nothing to recompute them against."
+            "`scenario`; a model may be no longer in the catalog or historical "
+            "segment evidence may be insufficient. See `exclusions` for the "
+            "symmetric exclusion reason."
         )
+    if method_change_note:
+        basis += method_change_note
 
     result = {
         "recorded": recorded,
         "scenario": scenario,
         "delta": delta,
         "runs_recomputed": runs_recomputed,
+        "runs_preserved": runs_preserved,
         "runs_skipped": runs_skipped,
+        "mode": mode,
+        "mode_note": (
+            "Measured energy is preserved; only compatible grid/PUE factors are repriced."
+            if mode == "preserve_measured_energy"
+            else "Recorded accounting is compared with a token-estimated scenario."
+        ),
         "basis": basis,
     }
+    if exclusion_reasons:
+        result["exclusions"] = [
+            {"reason": reason, "runs": count}
+            for reason, count in sorted(exclusion_reasons.items())
+        ]
     if warnings:
         result["warnings"] = warnings
     return result

@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import math
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
 
@@ -50,6 +52,13 @@ if TYPE_CHECKING:
 __all__ = ["Receipt", "Router", "RunResult"]
 
 _T = TypeVar("_T")
+
+
+def _validate_measurement(wh: float | None, boundary: str) -> None:
+    if boundary not in {"gpu", "node_it", "facility", "partial", "unknown"}:
+        raise ValueError(f"unsupported measured_energy_boundary: {boundary!r}")
+    if wh is not None and (isinstance(wh, bool) or not math.isfinite(wh) or wh < 0):
+        raise ValueError("measured_energy_wh must be finite and >= 0")
 
 # A minimal freeform preamble, in the spirit of `engine/context.py`'s
 # FREEFORM_PREAMBLE — reimplemented here, rather than imported, because
@@ -128,6 +137,7 @@ class Receipt:
     # for a confidently metered one. Defaults False so every existing caller
     # (`Router.arun`, which has no partial-turn case to estimate) is unaffected.
     estimated: bool = False
+    call_records: list[dict] = field(default_factory=list)
 
     def __str__(self) -> str:
         short_model = self.model.rsplit("/", 1)[-1]  # display form, not the full tret id
@@ -241,6 +251,7 @@ class Router:
         max_tokens: int = 4096,
         factors: "FactorSet | None" = None,
         measured_energy_wh: float | None = None,
+        measured_energy_boundary: str = "node_it",
     ) -> RunResult:
         """Route `task` to a model, run it once, and return its `Receipt`.
 
@@ -260,11 +271,15 @@ class Router:
         See `energy_accounting`'s own docstring and
         docs/emissions-methodology.md's "Measured energy" section for exactly
         what changes and what does not (PUE, grid intensity and embodied
-        hardware still apply on top, unchanged). Left `None` (the default),
+        hardware depend on the declared boundary). `measured_energy_boundary`
+        defaults to `node_it`; use `facility` for facility-inclusive energy,
+        which receives no additional PUE. GPU-only readings use `gpu` and
+        retain missing-node coverage. Left `None` (the default),
         this call prices from tokens exactly as it always has. Must be `>=
         0`; a negative value raises `ValueError`, same as `energy_accounting`
         itself.
         """
+        _validate_measurement(measured_energy_wh, measured_energy_boundary)
         router = self._ensure_wired()
         assert self._catalog is not None and self._registry is not None  # set by _ensure_wired
         # Best-effort dynamic + local discovery, so a freshly booted process can
@@ -303,6 +318,9 @@ class Router:
         usage = Usage()
         stop_reason = ""
         turn_complete_seen = False
+        served_by: str | None = None
+        inference_geo: str | None = None
+        call_started_at = datetime.now(timezone.utc)
         async for event in provider.stream(
             model=model.wire_id,
             system=system if system is not None else _DEFAULT_SYSTEM,
@@ -327,6 +345,8 @@ class Router:
                 usage = event.usage
                 stop_reason = event.stop_reason
                 turn_complete_seen = True
+                served_by = event.served_by
+                inference_geo = event.inference_geo
             elif isinstance(event, ToolCallComplete):
                 # No tools were offered; a call that arrives anyway is ignored
                 # rather than acted on.
@@ -345,6 +365,23 @@ class Router:
             usage_reported,
             factors=factors,
             measured_energy_wh=measured_energy_wh,
+            measured_energy_boundary=measured_energy_boundary,
+            call_records=[
+                {
+                    "iteration": 1,
+                    "started_at": call_started_at.isoformat(),
+                    "ended_at": datetime.now(timezone.utc).isoformat(),
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_read_tokens": usage.cache_read_tokens,
+                    "cache_write_tokens": usage.cache_write_tokens,
+                    "reasoning_tokens": usage.reasoning_tokens,
+                    "reasoning_accounting": usage.reasoning_accounting,
+                    "served_by": served_by,
+                    "inference_geo": inference_geo,
+                    "usage_status": "reported" if usage_reported else "missing",
+                }
+            ],
         )
         return RunResult(
             text="".join(text_parts),
@@ -364,6 +401,7 @@ class Router:
         max_tokens: int = 4096,
         factors: "FactorSet | None" = None,
         measured_energy_wh: float | None = None,
+        measured_energy_boundary: str = "node_it",
     ) -> RunResult:
         """Synchronous `arun()` — see its docstring for `factors` and
         `measured_energy_wh`."""
@@ -374,6 +412,7 @@ class Router:
                 max_tokens=max_tokens,
                 factors=factors,
                 measured_energy_wh=measured_energy_wh,
+                measured_energy_boundary=measured_energy_boundary,
             )
         )
 
@@ -398,21 +437,50 @@ def _build_receipt(
     estimated: bool = False,
     factors: "FactorSet | None" = None,
     measured_energy_wh: float | None = None,
+    measured_energy_boundary: str = "node_it",
+    call_records: list[dict] | None = None,
 ) -> Receipt:
     # `raw` is computed either way — even on a zero/unreported usage it is a
     # faithful account of exactly the tokens the provider gave us, and stays
     # available for inspection. Only the Receipt's own headline fields, which
     # a caller would otherwise read as a confident measurement, are withheld.
-    accounting = energy_accounting(
-        model,
-        usage.input_tokens,
-        usage.output_tokens,
-        usage.cache_read_tokens,
-        usage.cache_write_tokens,
-        catalog=catalog,
-        factors=factors,
-        measured_energy_wh=measured_energy_wh,
+    needs_per_call = bool(call_records) and (
+        len(call_records or ()) > 1
+        or any(record.get("served_by") for record in call_records or ())
+        or any(record.get("reasoning_accounting") == "additional" for record in call_records or ())
+        or any(record.get("started_at") for record in call_records or ())
     )
+    if needs_per_call and measured_energy_wh is None:
+        from tret.services.emission_calls import account_call_records
+        from tret.services.emission_factors import build_factor_set
+
+        call_factors = factors or build_factor_set(provider=model.provider, model_id=model.id)
+        accounting = account_call_records(
+            model, call_records, billed_usage=usage, factors=call_factors, catalog=catalog,
+        )
+    else:
+        accounting = None
+    if accounting is None:
+        known_additional = sum(
+            record["reasoning_tokens"] for record in call_records or []
+            if record.get("reasoning_accounting") == "additional"
+            and type(record.get("reasoning_tokens")) is int
+            and record["reasoning_tokens"] >= 0
+        )
+        accounting = energy_accounting(
+            model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+            catalog=catalog,
+            factors=factors,
+            measured_energy_wh=measured_energy_wh,
+            measured_energy_boundary=measured_energy_boundary,
+            energy_output_tokens=max(usage.energy_output_tokens, usage.output_tokens + known_additional),
+            reasoning_tokens=usage.reasoning_tokens,
+            reasoning_accounting=usage.reasoning_accounting,
+        )
     if usage_reported:
         # Computed directly from the model's own price table — the exact figure
         # a caller comparing against `ModelInfo.cost_usd(...)` themselves would
@@ -436,9 +504,24 @@ def _build_receipt(
         avoided_co2e_g = baseline.get("avoided_co2e_g")
         avoided_co2e_pct = baseline.get("avoided_pct")
     else:
-        usd = co2e_g = energy_wh = None
+        usd = None
+        co2e_g = accounting["co2e_g"] if measured_energy_wh is not None else None
+        energy_wh = accounting["energy_wh"] if measured_energy_wh is not None else None
         baseline_model = None
         avoided_usd = avoided_usd_pct = avoided_co2e_g = avoided_co2e_pct = None
+        accounting["usage_coverage"] = "unavailable_or_incomplete"
+        accounting["caveats"].append({
+            "key": "usage_coverage_missing", "label": "Provider token usage is incomplete",
+            "direction": "unknown", "applies": True,
+            "note": "Supplied energy remains recorded; billing and same-token comparisons are unavailable.",
+        })
+        # Missing usage does not support a zero-token counterfactual, even if
+        # independently measured energy is available.
+        for key in ("cost_usd", "energy_wh", "energy_wh_total", "co2e_g", "avoided_usd",
+                    "avoided_usd_pct", "avoided_co2e_g", "avoided_pct"):
+            accounting["baseline"][key] = None
+        for key in ("usd", "baseline_usd", "avoided_usd", "avoided_pct"):
+            accounting["cost"][key] = None
     return Receipt(
         model=model.id,
         usd=usd,
@@ -454,6 +537,15 @@ def _build_receipt(
             "output_tokens": usage.output_tokens,
             "cache_read_tokens": usage.cache_read_tokens,
             "cache_write_tokens": usage.cache_write_tokens,
+            **(
+                {
+                    "reasoning_tokens": usage.reasoning_tokens,
+                    "reasoning_accounting": usage.reasoning_accounting,
+                }
+                if usage.reasoning_tokens is not None
+                or usage.reasoning_accounting is not None
+                else {}
+            ),
         },
         routing={
             "chosen_model": decision.chosen_model,
@@ -469,4 +561,5 @@ def _build_receipt(
         overhead=copy.deepcopy(decision.spend),
         raw=copy.deepcopy(accounting),
         estimated=estimated,
+        call_records=copy.deepcopy(call_records or []),
     )

@@ -150,7 +150,23 @@ def test_grid_entry_for_region_key_set(de_table):
     assert resolved is not None
     zone_id, entry = resolved
     assert zone_id == "DE"
-    assert set(entry.keys()) == {"g_per_kwh", "basis", "label", "url", "as_of"}
+    assert set(entry.keys()) == {
+        "g_per_kwh",
+        "basis",
+        "label",
+        "url",
+        "as_of",
+        "factor_boundary",
+        "gas_coverage",
+        "gwp_horizon_years",
+        "gwp_assessment_basis",
+        "includes_td_losses",
+        "electricity_mix_basis",
+        "dataset_version",
+        "observation_year",
+    }
+    assert entry["factor_boundary"] == "lifecycle_electricity_generation"
+    assert entry["gas_coverage"] == "co2e"
 
 
 def test_grid_entry_for_region_values(de_table):

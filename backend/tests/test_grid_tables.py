@@ -33,6 +33,33 @@ def test_diurnal_profile_parses():
     assert table.rows[23] == (23, Decimal("123"))
 
 
+def test_interval_spanning_hour_integrates_both_factors():
+    table = parse_grid_table(DIURNAL_CSV, label="Typical day", basis="location_based")
+    average, coverage = table.average(
+        datetime(2026, 1, 1, 0, 59, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 1, 1, tzinfo=timezone.utc), fallback=Decimal(500),
+    )
+    assert average == Decimal("100.5")
+    assert coverage == 1
+
+
+def test_interval_accounts_for_expired_series_gap_and_new_observation():
+    table = parse_grid_table(SERIES_CSV, label="Observed", basis="location_based")
+    average, coverage = table.average(
+        datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 7, tzinfo=timezone.utc), fallback=Decimal(500),
+    )
+    # 1h at 200, 4h fallback500, 1h at150.
+    assert average == Decimal(2350) / 6
+    assert coverage == pytest.approx(1 / 3)
+
+
+def test_interval_rejects_naive_or_reversed_timestamps():
+    table = parse_grid_table(DIURNAL_CSV, label="Typical day", basis="location_based")
+    with pytest.raises(ValueError, match="timezone-aware"):
+        table.average(datetime(2026, 1, 1), datetime(2026, 1, 2), fallback=Decimal(1))
+
+
 def test_dated_series_parses():
     table = parse_grid_table(SERIES_CSV, label="Jan 1 actuals", basis="market_based")
     assert table.kind == "series"

@@ -7,19 +7,24 @@ used to own so existing imports keep working.
 What is here, and what each part is worth:
 
 * **Energy classes** (`ENERGY_CLASS_WH_PER_MTOK`) — Wh per million
-  *output-equivalent* tokens, calibrated by least-squares against the only
-  granular public per-model dataset (Jegham et al. 2025, arXiv:2505.09598).
+  *output-equivalent* tokens. The shipped (v2) ladder is a single-coefficient
+  nonnegative fit (output + a fixed 0.05x input weight) against
+  source-PUE-normalised Jegham et al. 2025 (arXiv:2505.09598) observations;
+  `class_ladder_v1`, the original two-parameter least-squares fit on the
+  as-published (source-PUE-inclusive) figures, is retained only for rollback.
   Still an estimate; no longer a hand-picked one. `ENERGY_CLASS_CALIBRATION`
   carries the fit each class was anchored on so a reader can reproduce it.
 * **Token weighting** — input and output tokens are *not* equally expensive.
-  Prefill is parallel, generation is sequential, and the fit puts output at
-  roughly 20x input per token. `ENERGY_TOKEN_WEIGHTS` holds the ratios; a cache
-  read is a tenth of an input token, a cache write is a full prefill pass.
+  Prefill is parallel, generation is sequential. `ENERGY_TOKEN_WEIGHTS` holds
+  the ratios; input is weighted 0.05 of output by fixed assumption (v2) — the
+  v1 fit's ~20x ratio is the origin of that number. A cache read is a tenth of
+  an input token, a cache write is a full prefill pass.
 * **PUE** — data-centre overhead, resolved per deployment profile
   (hyperscaler cloud / workstation / on-prem facility). `energy_wh` stays the
   *compute* (IT-load) figure it has always been; `energy_wh_total` is
   compute x PUE.
-* **Grid intensity** — a cited IEA global average by default, optionally
+* **Grid intensity** — Ember's World 2025 lifecycle CO2e intensity by default
+  (458.49 gCO2e/kWh), optionally
   replaced **per provider** by operator configuration (`TRET_GRID_FACTORS`),
   carrying an explicit GHG Protocol **basis** label (location-based /
   market-based / unspecified) because mixing the two is meaningless, and a
@@ -63,8 +68,11 @@ imports this module at import time; keep it that way.
 from __future__ import annotations
 
 import dataclasses
+import json
+import logging
 import math
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tret.config import (
@@ -82,6 +90,8 @@ from tret.services.uncertainty_derivation import (
     band_record,
     derive_band,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from tret.providers.base import Usage
@@ -101,33 +111,34 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # fitted b values, and the input weight is the fitted b/a ratio. The working is
 # reproduced in docs/emissions-methodology.md; `ENERGY_CLASS_CALIBRATION` below
 # is the machine-readable version of the same table.
-JEGHAM_2025 = {
-    "citation": (
-        "Jegham, Abdelatti, Elmoubarki & Hendawi, How Hungry is AI? Benchmarking "
-        "Energy, Water, and Carbon Footprint of LLM Inference (arXiv:2505.09598)"
-    ),
-    "url": "https://arxiv.org/abs/2505.09598",
-    "date": "2025-05-14",
-    # (input tokens, output tokens) of the three published prompt shapes.
-    "shapes": ((100, 300), (1000, 1000), (10000, 1500)),
-    # model -> (Wh short, Wh medium, Wh long)
-    "wh_per_query": {
-        "GPT-4.1 nano": (0.10, 0.27, 0.45),
-        "GPT-4o": (0.42, 1.21, 1.79),
-        "Claude 3.7 Sonnet": (0.84, 2.78, 5.52),
-        "o3": (7.03, 21.41, 39.22),
-        "DeepSeek-R1": (23.82, 29.00, 33.63),
-    },
-    # Least-squares fit, Wh per million tokens: (a input, b output, b/a).
-    # None marks a degenerate fit — see `_DEGENERATE_FIT_NOTE`.
-    "fit_wh_per_mtok": {
-        "GPT-4.1 nano": (4.2, 271.9, 65.1),
-        "GPT-4o": (-6.1, 1233.1, None),
-        "Claude 3.7 Sonnet": (156.7, 2634.7, 16.8),
-        "o3": (792.8, 20850.4, 26.3),
-        "DeepSeek-R1": (-1989.7, 35474.8, None),
-    },
-}
+def _load_jegham_2025() -> dict[str, Any]:
+    path = Path(__file__).resolve().parents[1] / "data" / "calibration" / "jegham_2025_v1.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    observations = manifest["observations"]
+    return {
+        "citation": (
+            "Jegham, Abdelatti, Elmoubarki & Hendawi, How Hungry is AI? Benchmarking "
+            "Energy, Water, and Carbon Footprint of LLM Inference (arXiv:2505.09598)"
+        ),
+        # Preserve the historical public key while exposing the pinned v1 URL
+        # separately for new provenance consumers.
+        "url": "https://arxiv.org/abs/2505.09598",
+        "source_version_url": manifest["source"]["url"],
+        "date": manifest["source"]["published"],
+        "shapes": tuple(tuple(shape) for shape in manifest["shapes"]),
+        "wh_per_query": {
+            model: tuple(row["legacy_rounded_wh"]) for model, row in observations.items()
+        },
+        "fit_wh_per_mtok": {
+            model: tuple(values)
+            for model, values in manifest["legacy_fit_wh_per_mtok"].items()
+        },
+        "manifest": manifest,
+    }
+
+
+JEGHAM_2025 = _load_jegham_2025()
+"""Backward-compatible calibration view, loaded from the pinned v1 manifest."""
 
 _DEGENERATE_FIT_NOTE = (
     "Two of the five fits are degenerate: GPT-4o (a = -6.1) and DeepSeek-R1 "
@@ -150,7 +161,7 @@ _DEGENERATE_FIT_NOTE = (
 # inferred hardware for five models, then generalised to a catalog of models
 # whose active parameter counts nobody publishes. The band in
 # `uncertainty_band` is the honest expression of that.
-ENERGY_CLASS_WH_PER_MTOK: dict[str, Decimal] = {
+ENERGY_CLASS_WH_PER_MTOK_V1: dict[str, Decimal] = {
     # GPT-4.1 nano fit: b = 271.9 Wh/Mtok. Small / distilled / nano-class served
     # models, and tret's default for local weights.
     "S": Decimal("250"),
@@ -168,6 +179,17 @@ ENERGY_CLASS_WH_PER_MTOK: dict[str, Decimal] = {
     # the dataset, which is the unsafe direction and is called out in the docs.
     "R": Decimal("21000"),
 }
+ENERGY_CLASS_WH_PER_MTOK_V2: dict[str, Decimal] = {
+    "S": Decimal("210.3398"),
+    "M": Decimal("855.6651"),
+    "L": Decimal("2399.3371"),
+    # Explicit geometric continuation of the two adjacent fitted classes: L²/M.
+    "XL": Decimal("6727.8875"),
+    "R": Decimal("17713.3258"),
+}
+# The corrected node-IT ladder is the shipped default. V1 remains addressable
+# for rollback and historical replay; stored rows are never recomputed.
+ENERGY_CLASS_WH_PER_MTOK = ENERGY_CLASS_WH_PER_MTOK_V2
 ENERGY_CLASSES = tuple(ENERGY_CLASS_WH_PER_MTOK)
 DEFAULT_ENERGY_CLASS = "M"
 # Models that spend hidden or visible "thinking" tokens before answering. Kept a
@@ -365,12 +387,20 @@ def grid_source_rule(source: str | None) -> str | None:
 
 GRID_REFERENCE = {
     "default": {
-        "value": 470.0,
-        "source": "IEA, Electricity 2025 — 2024 global power-sector average",
-        "url": "https://www.iea.org/reports/electricity-2025",
-        "date": "2025-02",
-        "note": "Reported as roughly 460-480 gCO2e/kWh; 470 is the midpoint.",
+        "value": 458.49,
+        "source": "Ember Yearly Electricity Data — World 2025 CO2 intensity",
+        "url": "https://files.ember-energy.org/public-downloads/yearly_full_release_long_format.csv",
+        "date": "2025",
+        "note": "Lifecycle, all-GHG 100-year intensity per Ember methodology v1.5.",
         "basis": GRID_BASIS_LOCATION,
+        "factor_boundary": "lifecycle_electricity_generation",
+        "gas_coverage": "co2e",
+        "gwp_horizon_years": 100,
+        "gwp_assessment_basis": "unknown",
+        "includes_td_losses": None,
+        "electricity_mix_basis": "production",
+        "dataset_version": "ember-yearly-2026-release",
+        "observation_year": 2025,
     },
     "us_average": {
         "value": 350.0,
@@ -681,6 +711,7 @@ class EnergyConstant:
     note: str
     anchor: str | None  # e.g. "EcoLogits", or the Jegham anchor model, or None
     label: str | None  # an operator's own label for an override, else None
+    interpolated: bool = False  # True only for a class with no measured anchor (XL)
 
 
 def _class_ladder_note(energy_class: str) -> str:
@@ -701,6 +732,13 @@ def _class_ladder_note(energy_class: str) -> str:
             "above the class below it. The weakest constant in the ladder."
         )
     )
+    note += (
+        " class_ladder_v1: this constant was fitted to (or interpolated from) source "
+        "observations that already include the provider's own PUE (Jegham 2025 Eq. 1); "
+        "deployment PUE is applied again on top of it when this constant prices a run, "
+        "so v1 double-counts facility overhead. class_ladder_v2 corrects this by "
+        "normalizing to source PUE before fitting; v1 is kept only for rollback."
+    )
     if is_reasoning_class(energy_class):
         note += (
             " Reasoning tier: several providers omit hidden thinking tokens from the "
@@ -710,7 +748,9 @@ def _class_ladder_note(energy_class: str) -> str:
     return note
 
 
-def _class_ladder_energy_constant(model: ModelInfo) -> EnergyConstant:
+def _class_ladder_energy_constant(
+    model: ModelInfo, version: str = "class_ladder_v2"
+) -> EnergyConstant:
     """Today's behavior, verbatim: an explicit `model.energy_wh_per_mtok` (set
     in `models.yaml`, or already derived from the class ladder at catalog
     construction — the two are indistinguishable by the time a run reads this
@@ -721,18 +761,56 @@ def _class_ladder_energy_constant(model: ModelInfo) -> EnergyConstant:
     """
     energy_class = getattr(model, "energy_class", DEFAULT_ENERGY_CLASS)
     explicit = getattr(model, "energy_wh_per_mtok", None)
-    wh_per_mtok = _d(explicit) if explicit is not None else wh_per_mtok_for_class(energy_class)
+    if getattr(model, "energy_wh_per_mtok_explicit", False):
+        return EnergyConstant(
+            wh_per_mtok=_d(explicit), strategy="catalog_override", confidence="low",
+            source="Explicit model catalog energy constant", url=None, date=None,
+            note="Operator-supplied catalog coefficient; its physical boundary and empirical validation are unknown.",
+            anchor=None, label=None,
+        )
+    ladder = (
+        ENERGY_CLASS_WH_PER_MTOK_V1
+        if version in {"class_ladder", "class_ladder_v1"}
+        else ENERGY_CLASS_WH_PER_MTOK_V2
+    )
+    wh_per_mtok = _d(explicit) if getattr(model, "energy_wh_per_mtok_explicit", False) else ladder.get(
+        energy_class, ladder[DEFAULT_ENERGY_CLASS]
+    )
     calibration = ENERGY_CLASS_CALIBRATION.get(energy_class, {})
     return EnergyConstant(
         wh_per_mtok=wh_per_mtok,
-        strategy="class_ladder",
-        confidence="calibrated" if calibration.get("measured") else "low",
-        source=JEGHAM_2025["citation"] + " — least-squares fit by tret",
+        strategy=version,
+        confidence="calibrated" if version != "class_ladder_v2" and calibration.get("measured") else "low",
+        source=(
+            JEGHAM_2025["citation"] + " — source-PUE-normalized fixed-weight fit by tret"
+            if version == "class_ladder_v2"
+            else JEGHAM_2025["citation"] + " — legacy least-squares fit by tret"
+        ),
         url=JEGHAM_2025["url"],
         date=JEGHAM_2025["date"],
-        note=_class_ladder_note(energy_class),
+        note=(
+            (
+                "class_ladder_v2: no measured anchor: interpolated as L^2/M "
+                "(geometric continuation); weakest constant in the ladder. Exact v1 "
+                "facility observations divided by the source provider PUE, then fitted "
+                "with nonnegative output + 0.05*input weighted tokens where anchored. "
+                "Node-IT boundary; unused-GPU idle, facility overhead and embodied "
+                "hardware excluded. Source energy is modeled from API performance and "
+                "inferred hardware; deployment accuracy has not been measured."
+                if calibration.get("anchor_model") is None
+                else
+                "class_ladder_v2: exact v1 facility observations divided by the source "
+                "provider PUE, then fitted with nonnegative output + 0.05*input weighted "
+                "tokens. Node-IT boundary; unused-GPU idle, facility overhead and embodied "
+                "hardware excluded. Source energy is modeled from API performance and inferred "
+                "hardware; deployment accuracy has not been measured."
+            )
+            if version == "class_ladder_v2"
+            else _class_ladder_note(energy_class)
+        ),
         anchor=calibration.get("anchor_model"),
         label=None,
+        interpolated=version == "class_ladder_v2" and calibration.get("anchor_model") is None,
     )
 
 
@@ -758,7 +836,7 @@ def _active_params_energy_constant(active_params_b: float) -> EnergyConstant:
     no server-energy term — and feeds this single-GPU number straight into the
     same "whole-request Wh per Mtok" slot the class ladder fills. That is a
     systematic UNDERCOUNT: 271.9 Wh/Mtok for a ~405B-active-parameter model
-    sits far below the L-class constant (2,600 Wh/Mtok, fitted from Claude 3.7
+    sits far below the v2 L-class constant (2,399.3371 Wh/Mtok, fitted from Claude 3.7
     Sonnet — a comparably sized served model). Lifting this path to
     `"calibrated"` would need the missing GPU-count term (computable from
     total parameters and per-GPU memory, neither of which tret's catalog
@@ -779,7 +857,7 @@ def _active_params_energy_constant(active_params_b: float) -> EnergyConstant:
         "the GPU count the model needs and adds server/host energy on top before "
         "comparing it to a whole-request figure; tret has neither term, so this "
         "systematically UNDERSTATES the run's real energy (e.g. this model's "
-        f"{_f(wh_per_mtok, 1)} Wh/Mtok against the L-class 2,600 Wh/Mtok fitted "
+        f"{_f(wh_per_mtok, 1)} Wh/Mtok against the L-class 2,399.3371 Wh/Mtok fitted "
         "from a comparably sized served model). Not a measurement — see "
         "docs/emissions-methodology.md's \"The active-parameter formula, and its "
         "stated assumption\"."
@@ -853,11 +931,12 @@ def _energy_constant_and_flags(
         resolved = factors.model_override
         return _model_override_energy_constant(resolved.value, resolved.layer), False
 
-    ladder = _class_ladder_energy_constant(model)
+    strategy = factors.energy_strategy.value if factors is not None else "class_ladder_v2"
+    ladder_version = strategy if strategy in {"class_ladder", "class_ladder_v1", "class_ladder_v2"} else "class_ladder_v2"
+    ladder = _class_ladder_energy_constant(model, ladder_version)
     if getattr(model, "energy_wh_per_mtok_explicit", False):
         return ladder, False
 
-    strategy = factors.energy_strategy.value if factors is not None else "class_ladder"
     active_params_b = getattr(model, "active_params_b", None)
     if strategy == "active_params":
         if active_params_b is not None:
@@ -1341,6 +1420,7 @@ def uncertainty_band(
     band: tuple[Decimal, Decimal] | None = None,
     measured: bool = False,
     evidence: "Evidence | None" = None,
+    pue_applied: bool = True,
 ) -> dict:
     """The judgment band around a run's figures. Never negative, never a CI.
 
@@ -1365,8 +1445,18 @@ def uncertainty_band(
     """
     configured_low, configured_high = band if band is not None else band_factors(settings)
     contributions = uncertainty_contributions(
-        reasoning_tier=reasoning_tier, deployment=deployment, measured=measured
+        reasoning_tier=reasoning_tier, deployment=deployment,
+        measured=measured and evidence is not None and evidence.energy_measured,
     )
+    if not pue_applied:
+        for contribution in contributions:
+            if contribution["key"] == "pue":
+                contribution.update({
+                    "low_multiplier": 1.0,
+                    "high_multiplier": 1.0,
+                    "dominant": False,
+                    "note": "PUE was not applied at this recorded energy boundary.",
+                })
     low, high = configured_low, configured_high
     derivation = None
     if evidence is not None:
@@ -1403,35 +1493,19 @@ def uncertainty_band(
     return result
 
 
-# A labeled operator layer — as opposed to `env`/`global_default`, where
-# nobody actually vouched for the figure with a citation. Used by
-# `_band_evidence` below to decide whether a PUE/grid win is "metered"/
-# "sourced and dated" for `Evidence`'s purposes.
-_OPERATOR_LAYERS = frozenset({"workspace", "managed", "harness"})
+def _band_evidence(
+    factors: "FactorSet", validated: "Evidence | None"
+) -> "Evidence | None":
+    """Use caller-validated evidence only when derived bands are enabled.
 
-
-def _band_evidence(factors: "FactorSet", is_measured: bool) -> "Evidence | None":
-    """The `Evidence` this run's `FactorSet` actually has, or `None` when
-    neither `band_low` nor `band_high` asked for a derived band
-    (`BandBlock.derived`) — in which case `uncertainty_band` applies the
-    plain configured band, exactly as it always has.
-
-    Each flag names a specific, checkable condition (see
-    `tret.services.uncertainty_derivation.Evidence`'s own docstring for what
-    each one narrows): a PUE/grid win only counts as "metered"/"sourced and
-    dated" when it came from a labeled operator layer (`_OPERATOR_LAYERS`),
-    never from `env`/`global_default` — an env var is not a citation.
+    Factor labels, dates and profile names are provenance, not validation.
+    They therefore never create narrowing evidence automatically — which layer
+    resolved a PUE/grid win is not itself a reason to narrow the band, so
+    nothing here inspects `factors.layers_present` or a factor's own layer.
     """
     if not (factors.band_low.derived or factors.band_high.derived):
         return None
-    return Evidence(
-        energy_measured=is_measured,
-        pue_metered=factors.pue.layer in _OPERATOR_LAYERS and bool(factors.pue.label),
-        grid_sourced_dated=(
-            factors.grid.layer in _OPERATOR_LAYERS and bool(factors.grid.as_of)
-        ),
-        embodied_profiled=factors.embodied_g.profile is not None,
-    )
+    return validated or Evidence()
 
 
 # ── provenance ───────────────────────────────────────────────────────────────
@@ -1576,6 +1650,30 @@ def factor_records(
             "have been estimated: " + energy_note
         )
 
+    pue_note = {
+        PUE_PROFILE_CLOUD: (
+            "1.2 for hyperscaler cloud. Above every self-report (Google 1.09, "
+            "AWS 1.15, Microsoft 1.16) and well below the 1.56 industry "
+            "average, i.e. deliberately conservative for a facility tret "
+            "cannot see. Self-reported figures are fleet averages, not the "
+            "building that served this request."
+        ),
+        PUE_PROFILE_WORKSTATION: (
+            "1.05 for a desktop or workstation: fans and a share of room "
+            "cooling, no facility to speak of."
+        ),
+        PUE_PROFILE_ONPREM: (
+            "1.56, the Uptime Institute 2024 industry average across 879 "
+            "operators. An on-prem machine room is a small data centre and "
+            "must not borrow a hyperscaler's number."
+        ),
+    }[pue_profile]
+    if factors.pue.disclosure:
+        pue_note = (
+            f"Provider-asserted {factors.pue.disclosure['statistic'].replace('_', ' ')} "
+            f"for {factors.pue.label}; it is not a measurement of this request."
+        )
+
     factors = [
         _factor(
             "energy_class",
@@ -1594,6 +1692,10 @@ def factor_records(
             strategy="measured" if measured_energy else energy_constant.strategy,
             layer=energy_layer,
             measured=measured_energy,
+            # True only for a class with no measured anchor (XL under v2):
+            # interpolated as L^2/M rather than fitted. False for every
+            # anchored class, and for a measured/overridden constant.
+            interpolated=energy_constant.interpolated,
         ),
         _factor(
             "token_weight_output",
@@ -1657,40 +1759,24 @@ def factor_records(
             "Power Usage Effectiveness",
             _f(pue, 3),
             "total facility energy / IT-load energy",
-            (pue_ref or {}).get("source", "tret default for a workstation profile"),
-            (pue_ref or {}).get("url"),
-            (pue_ref or {}).get("date"),
+            factors.pue.label
+            or (pue_ref or {}).get("source", "tret default for a workstation profile"),
+            factors.pue.url or (pue_ref or {}).get("url"),
+            factors.pue.as_of or (pue_ref or {}).get("date"),
             "low",
-            {
-                PUE_PROFILE_CLOUD: (
-                    "1.2 for hyperscaler cloud. Above every self-report (Google 1.09, "
-                    "AWS 1.15, Microsoft 1.16) and well below the 1.56 industry "
-                    "average, i.e. deliberately conservative for a facility tret "
-                    "cannot see. Self-reported figures are fleet averages, not the "
-                    "building that served this request."
-                ),
-                PUE_PROFILE_WORKSTATION: (
-                    "1.05 for a desktop or workstation: fans and a share of room "
-                    "cooling, no facility to speak of."
-                ),
-                PUE_PROFILE_ONPREM: (
-                    "1.56, the Uptime Institute 2024 industry average across 879 "
-                    "operators. An on-prem machine room is a small data centre and "
-                    "must not borrow a hyperscaler's number."
-                ),
-            }[pue_profile],
+            pue_note,
             factors.pue.setting,
             profile=pue_profile,
             layer=factors.pue.layer,
+            disclosure=factors.pue.disclosure,
         ),
         _factor(
             "grid_intensity",
             "Grid carbon intensity",
             float(grid),
             "gCO2e/kWh",
-            # Only claim the IEA as the source when the shipped IEA value is what
-            # was actually applied. An operator's own figure is theirs to source —
-            # and where they gave it a label, that label IS the source they cited.
+            # Only claim Ember as the source when the shipped default was actually
+            # applied. Equal numeric values supplied by an operator remain custom.
             (
                 grid_ref["source"]
                 if grid_source == GRID_SOURCE_GLOBAL_DEFAULT
@@ -1705,12 +1791,16 @@ def factor_records(
             (
                 factors.grid.url
                 if factors.grid.layer == LAYER_DATASET
-                else grid_ref["url"] if float(grid) == grid_ref["value"] else None
+                else grid_ref["url"]
+                if factors.grid.layer == LAYER_GLOBAL_DEFAULT
+                else None
             ),
             (
                 factors.grid.as_of
                 if factors.grid.layer == LAYER_DATASET
-                else grid_ref["date"] if float(grid) == grid_ref["value"] else None
+                else grid_ref["date"]
+                if factors.grid.layer == LAYER_GLOBAL_DEFAULT
+                else None
             ),
             "low",
             (
@@ -1720,8 +1810,13 @@ def factor_records(
                 )
                 if grid_overridden
                 else (
-                    "Published yearly average for grid zone "
-                    f"{grid_source.rsplit(':', 1)[-1]} (Electricity Maps, ODbL), applied "
+                    "Published yearly average for "
+                    + (
+                        f"country {grid_source.rsplit(':', 1)[-1]} (Ember, CC BY 4.0)"
+                        if grid_source.startswith("dataset:ember:")
+                        else f"grid zone {grid_source.rsplit(':', 1)[-1]} (Electricity Maps, ODbL)"
+                    )
+                    + ", applied "
                     "because this workspace pinned the provider to region "
                     f"{factors.grid.region} — a pin the operator made, not a region tret "
                     "inferred. "
@@ -1731,7 +1826,7 @@ def factor_records(
                     f"Configured at the {factors.grid.layer} layer"
                     + (f" for provider {provider_match}" if provider_match else "")
                     + ", which outranks the environment-level default and the shipped "
-                    "IEA global average for this run. "
+                    "Ember World average for this run. "
                 )
                 if factors.grid.layer not in (LAYER_ENV, LAYER_GLOBAL_DEFAULT)
                 else (
@@ -1752,13 +1847,12 @@ def factor_records(
                 )
                 if grid_source == GRID_SOURCE_LOCAL_SETTING
                 else (
-                    f"The shipped default, {grid_ref['value']} gCO2e/kWh, is the IEA "
-                    "2024 global power-sector average (reported as ~460-480; 470 is "
-                    "the midpoint). "
+                    f"The shipped default is Ember's World 2025 value, "
+                    f"{grid_ref['value']} gCO2e/kWh. "
                 )
-                if float(grid) == grid_ref["value"]
+                if factors.grid.layer == LAYER_GLOBAL_DEFAULT
                 else (
-                    "Configured by the operator, replacing the shipped IEA global "
+                    "Configured by the operator, replacing the shipped Ember World "
                     f"average of {grid_ref['value']} gCO2e/kWh. "
                 )
             )
@@ -1791,10 +1885,20 @@ def factor_records(
             # tret.services.grid_tables). All None/"annual_average"/False
             # when neither feature is in play — exactly today's shape.
             grid_region=factors.grid.region,
+            requested_region=factors.grid.requested_region,
+            region_resolution_status=factors.grid.region_resolution_status,
             temporal=factors.grid.temporal,
             table=factors.grid.table,
             table_summary=factors.grid.table_summary,
             table_miss=factors.grid.table_miss,
+            factor_boundary=factors.grid.factor_boundary,
+            gas_coverage=factors.grid.gas_coverage,
+            gwp_horizon_years=factors.grid.gwp_horizon_years,
+            gwp_assessment_basis=factors.grid.gwp_assessment_basis,
+            includes_td_losses=factors.grid.includes_td_losses,
+            electricity_mix_basis=factors.grid.electricity_mix_basis,
+            dataset_version=factors.grid.dataset_version,
+            observation_year=factors.grid.observation_year,
         ),
         _factor(
             "embodied_hardware",
@@ -1888,16 +1992,25 @@ def caveat_records(
     cost_usd: Decimal | None = None,
     grid_basis: str | None = None,
     baseline_grid_basis: str | None = None,
+    baseline_grid_compatible: bool | None = None,
     active_params_unknown: bool = False,
     active_params_gpu_only: bool = False,
     measured: bool = False,
+    energy_strategy: str | None = None,
+    embodied_double_add_prevented: bool = False,
 ) -> list[dict]:
     """Named biases that travel with the figures instead of living only in a doc.
 
     Every one of these is a known way the number is wrong. They are structured
     rather than prose so a UI can surface the ones that apply to a given run.
 
-    `active_params_unknown=True` adds a caveat naming that the configured
+    `energy_strategy` (the run's `method_id`, e.g. `class_ladder_v1` /
+    `class_ladder_v2`) drives `legacy_source_pue_double_count`: `applies=True`
+    only for a `class_ladder_v1` rollback run, and `applies=False` but still
+    listed for a `class_ladder_v2` run, the same "considered, does not apply
+    here" treatment `measured=True` gives `prompt_shape_residual` below — see
+    the `flipped` handling at the end of this function. `active_params_unknown=True`
+    adds a caveat naming that the configured
     `"active_params"` strategy fell back to the class ladder because this
     model has no `active_params_b`. `active_params_gpu_only=True` (the
     active-parameter formula actually priced this run) adds the companion
@@ -2012,12 +2125,12 @@ def caveat_records(
         },
         {
             "key": "baseline_crosses_grid_basis",
-            "label": "The baseline comparison spans two GHG Protocol bases",
+            "label": "The baseline comparison spans incompatible grid factors",
             "direction": "either",
-            "applies": bool(
-                grid_basis
-                and baseline_grid_basis
-                and grid_basis != baseline_grid_basis
+            "applies": (
+                not baseline_grid_compatible
+                if baseline_grid_compatible is not None
+                else bool(grid_basis and baseline_grid_basis and grid_basis != baseline_grid_basis)
             ),
             "note": (
                 f"This run's electricity is accounted {grid_basis}; the baseline "
@@ -2072,8 +2185,39 @@ def caveat_records(
                 "confidence 'low' rather than 'calibrated'."
             ),
         },
+        {
+            "key": "legacy_source_pue_double_count",
+            "label": "Rollback constants double count facility overhead",
+            "direction": "overstates",
+            "applies": energy_strategy == "class_ladder_v1",
+            "note": (
+                "class_ladder_v1 constants were fitted to source observations that "
+                "already include the provider's PUE (Jegham 2025 Eq. 1); deployment "
+                "PUE is applied again on this run. Retained for rollback fidelity; "
+                "use class_ladder_v2 for the corrected boundary."
+            ),
+        },
+        {
+            "key": "embodied_double_add_prevented",
+            "label": "A duplicate embodied figure was dropped",
+            "direction": "either",
+            "applies": embodied_double_add_prevented,
+            "note": (
+                "This run configured `supplier_includes_inference_hardware` together "
+                "with a separately supplied embodied figure (a flat g_per_run or a "
+                "time-based allocation). Summing both would double-count "
+                "manufacturing carbon that the supplier total already carries, so "
+                "the second figure was dropped rather than added — this run's "
+                "embodied_g reflects the supplier total only."
+            ),
+        },
     ]
     flipped: set[str] = set()
+    if energy_strategy == "class_ladder_v2":
+        # Not true of this run, but named anyway so a reader can see it was
+        # considered — the same "listed, does not apply" treatment `measured`
+        # gives the two caveats below.
+        flipped.add("legacy_source_pue_double_count")
     if measured:
         for c in out:
             if c["key"] == "prompt_shape_residual":
@@ -2153,6 +2297,9 @@ def _baseline_block(
     grid_g_per_kwh: float | None,
     settings: Settings,
     catalog: ModelCatalog | None,
+    actual_factors: "FactorSet",
+    actual_factor_records: list[dict],
+    energy_tokens: tuple[int, int, int, int] | None = None,
 ) -> dict:
     baseline = resolve_baseline_model(settings, catalog)
     if baseline is None:
@@ -2162,9 +2309,48 @@ def _baseline_block(
     # TRET_GRID_FACTORS entry of its own. That is honest per-side, and it means the
     # two sides of the comparison can sit on different GHG Protocol bases; when they
     # do, the run carries the `baseline_crosses_grid_basis` caveat saying so.
+    from tret.services.emission_factors import (
+        LAYER_GLOBAL_DEFAULT,
+        build_factor_set,
+        factor_set_for_model,
+    )
+
     baseline_deployment = deployment_for(baseline.provider)
-    baseline_grid = resolve_grid_factor(
-        baseline.provider, baseline_deployment, settings, override=grid_g_per_kwh
+    baseline_factors = factor_set_for_model(
+        actual_factors, provider=baseline.provider, model_id=baseline.id
+    )
+    if baseline_factors is None:
+        # Legacy/manual FactorSets did not retain their resolution inputs.  Fall
+        # back to Settings rather than reusing provider-specific actual values.
+        baseline_factors = build_factor_set(
+            provider=baseline.provider,
+            settings=settings,
+            run_overrides=(
+                {"grid_g_per_kwh": grid_g_per_kwh}
+                if grid_g_per_kwh is not None
+                else None
+            ),
+            model_id=baseline.id,
+        )
+    baseline_grid = baseline_factors.grid
+    baseline_constant, _ = _energy_constant_and_flags(baseline, baseline_factors)
+    if baseline_factors.model_override is not None:
+        baseline_energy_layer = baseline_factors.model_override.layer
+        baseline_energy_setting = baseline_factors.model_override.setting
+    elif baseline_constant.strategy == "active_params":
+        baseline_energy_layer = baseline_factors.energy_strategy.layer
+        baseline_energy_setting = baseline_factors.energy_strategy.setting
+    else:
+        baseline_energy_layer = LAYER_GLOBAL_DEFAULT
+        baseline_energy_setting = "models.yaml: energy_class / energy_wh_per_mtok"
+    baseline_provenance = factor_records(
+        energy_class=baseline.energy_class,
+        deployment=baseline_deployment,
+        settings=settings,
+        factors=baseline_factors,
+        energy_constant=baseline_constant,
+        energy_layer=baseline_energy_layer,
+        energy_setting=baseline_energy_setting,
     )
     if baseline.id == model.id:
         # The run *is* the baseline. Avoided is 0 by construction, not by
@@ -2180,23 +2366,57 @@ def _baseline_block(
             "cost_usd": _f(actual_cost_usd),
             "avoided_usd": 0.0,
             "avoided_usd_pct": 0.0,
-            "grid_co2e_g_per_kwh": float(baseline_grid["value"]),
-            "grid_co2e_basis": baseline_grid["basis"],
-            "grid_co2e_source": baseline_grid["source"],
+            "grid_co2e_g_per_kwh": float(actual_factors.grid.value),
+            "grid_co2e_basis": actual_factors.grid_basis,
+            "grid_co2e_source": actual_factors.grid.source,
+            "grid_region": actual_factors.grid.region,
+            "grid_temporal": actual_factors.grid.temporal or "annual_average",
+            "grid_factor_boundary": actual_factors.grid.factor_boundary,
+            "grid_gas_coverage": actual_factors.grid.gas_coverage,
+            "grid_gwp_horizon_years": actual_factors.grid.gwp_horizon_years,
+            "grid_gwp_assessment_basis": actual_factors.grid.gwp_assessment_basis,
+            "grid_includes_td_losses": actual_factors.grid.includes_td_losses,
+            "grid_electricity_mix_basis": actual_factors.grid.electricity_mix_basis,
+            "factors": actual_factor_records,
             "basis": (
                 _BASELINE_BASIS + " This run used the baseline model itself, so avoided is 0."
             ),
         }
-    deployment = baseline_deployment
-    pue = pue_for(deployment, settings)
-    grid = baseline_grid["value"]
-    compute_wh = baseline.energy_wh(*tokens)
+    pue = baseline_factors.pue.value
+    grid = baseline_grid.value
+    compute_wh = sum(
+        energy_wh_by_bucket(baseline_constant.wh_per_mtok, *(energy_tokens or tokens)).values(), Decimal(0)
+    )
     total_wh = compute_wh * pue
     electricity_g = round(co2e_grams(total_wh, grid), _PLACES)
-    embodied_g = round(embodied_g_for(deployment, settings), _PLACES)
+    embodied_g = round(baseline_factors.embodied_g.value, _PLACES)
     baseline_co2e = electricity_g + embodied_g
-    avoided = baseline_co2e - round(actual_co2e_g, _PLACES)
-    avoided_pct = _f(Decimal(100) * avoided / baseline_co2e, 3) if baseline_co2e > 0 else 0.0
+    def _signature(grid_factor, grid_basis):
+        return grid_comparison_signature({
+            "grid_co2e_g_per_kwh": float(grid_factor.value),
+            "grid_co2e_basis": grid_basis,
+            "grid_co2e_source": grid_factor.source,
+            "grid_co2e_label": grid_factor.label,
+            "grid_co2e_layer": grid_factor.layer,
+            "grid_factor_boundary": grid_factor.factor_boundary,
+            "grid_gas_coverage": grid_factor.gas_coverage,
+            "grid_gwp_horizon_years": grid_factor.gwp_horizon_years,
+            "grid_gwp_assessment_basis": grid_factor.gwp_assessment_basis,
+            "grid_includes_td_losses": grid_factor.includes_td_losses,
+            "grid_electricity_mix_basis": grid_factor.electricity_mix_basis,
+        })
+
+    actual_signature = _signature(actual_factors.grid, actual_factors.grid_basis)
+    baseline_signature = _signature(baseline_grid, baseline_factors.grid_basis)
+    carbon_compatible = actual_signature == baseline_signature
+    avoided = (
+        baseline_co2e - round(actual_co2e_g, _PLACES) if carbon_compatible else None
+    )
+    avoided_pct = (
+        _f(Decimal(100) * avoided / baseline_co2e, 3)
+        if avoided is not None and baseline_co2e > 0
+        else 0.0 if avoided is not None else None
+    )
     baseline_cost = round(baseline.cost_usd(*tokens), _PLACES)
     avoided_usd = baseline_cost - round(actual_cost_usd, _PLACES)
     # Null, not 0.0, when the baseline itself costs nothing: a percentage needs a
@@ -2213,7 +2433,7 @@ def _baseline_block(
         "co2e_g": _f(baseline_co2e),
         # Signed on purpose: a run that used something heavier than the baseline
         # avoided nothing, and clamping that to zero would be a greenwash.
-        "avoided_co2e_g": _f(avoided),
+        "avoided_co2e_g": _f(avoided) if avoided is not None else None,
         "avoided_pct": avoided_pct,
         # Money, on exactly the same signed same-token basis. Negative means this
         # run cost *more* than the baseline would have — a surcharge, not a saving.
@@ -2224,8 +2444,18 @@ def _baseline_block(
         # because a comparison across two bases is not a GHG Protocol total, and a
         # reader has to be able to see that from the stored run.
         "grid_co2e_g_per_kwh": float(grid),
-        "grid_co2e_basis": baseline_grid["basis"],
-        "grid_co2e_source": baseline_grid["source"],
+        "grid_co2e_basis": baseline_factors.grid_basis,
+        "grid_co2e_source": baseline_grid.source,
+        "grid_region": baseline_grid.region,
+        "grid_temporal": baseline_grid.temporal or "annual_average",
+        "grid_factor_boundary": baseline_grid.factor_boundary,
+        "grid_gas_coverage": baseline_grid.gas_coverage,
+        "grid_gwp_horizon_years": baseline_grid.gwp_horizon_years,
+        "grid_gwp_assessment_basis": baseline_grid.gwp_assessment_basis,
+        "grid_includes_td_losses": baseline_grid.includes_td_losses,
+        "grid_electricity_mix_basis": baseline_grid.electricity_mix_basis,
+        "carbon_compatible_with_actual": carbon_compatible,
+        "factors": baseline_provenance,
         "basis": _BASELINE_BASIS,
     }
 
@@ -2285,6 +2515,13 @@ def energy_accounting(
     catalog: ModelCatalog | None = None,
     factors: "FactorSet | None" = None,
     measured_energy_wh: float | None = None,
+    measured_energy_boundary: str = "node_it",
+    validated_evidence: "Evidence | None" = None,
+    embodied_allocation: dict | None = None,
+    supplier_includes_inference_hardware: bool = False,
+    reasoning_tokens: int | None = None,
+    reasoning_accounting: str = "unknown",
+    energy_output_tokens: int | None = None,
 ) -> dict:
     """The auditable energy/carbon breakdown persisted on a run.
 
@@ -2326,8 +2563,8 @@ def energy_accounting(
     instead; `grid_g_per_kwh`, if *also* passed, still wins as a run override
     on top of it, same as it would on top of `settings` alone.
 
-    `measured_energy_wh` — an operator-supplied **IT-load** figure (Wh) for
-    this exact call, from their own metering. Must be `>= 0`; a negative value
+    `measured_energy_wh` — a measured figure (Wh) at the explicitly supplied
+    `measured_energy_boundary` (default `node_it` for compatibility). Must be `>= 0`; a negative value
     raises `ValueError`. When given, it — not the per-token estimate — becomes
     `energy_wh`; the estimate the model/strategy would otherwise have produced
     is kept as `energy_wh_estimated` (present on every run, measured or not,
@@ -2336,14 +2573,34 @@ def energy_accounting(
     buckets still sum to the measured `energy_wh`. PUE, grid intensity and
     embodied hardware still apply **on top** of the measurement exactly as
     they would on top of an estimate — the measurement is IT-load only, not a
-    substitute for facility overhead or hardware amortization. See
+    substitute for hardware amortization. PUE is not applied to facility,
+    partial, or unknown-boundary readings. See
     docs/emissions-methodology.md's "Energy strategies and measured runs".
     """
     settings = settings or get_settings()
     deployment = deployment_for(model.provider)
 
-    if measured_energy_wh is not None and measured_energy_wh < 0:
-        raise ValueError(f"measured_energy_wh must be >= 0, got {measured_energy_wh!r}")
+    allowed_boundaries = {"gpu", "node_it", "facility", "partial", "unknown"}
+    if measured_energy_boundary not in allowed_boundaries:
+        raise ValueError(f"unsupported measured_energy_boundary: {measured_energy_boundary!r}")
+    if measured_energy_wh is not None and (
+        not math.isfinite(measured_energy_wh) or measured_energy_wh < 0
+    ):
+        raise ValueError(
+            f"measured_energy_wh must be finite and >= 0, got {measured_energy_wh!r}"
+        )
+    if reasoning_tokens is not None and reasoning_tokens < 0:
+        raise ValueError("reasoning_tokens must be nonnegative")
+    if reasoning_accounting == "included_in_output":
+        reasoning_accounting = "counted_in_output"
+    if reasoning_accounting not in {"counted_in_output", "additional", "unknown", None}:
+        raise ValueError("unsupported reasoning_accounting")
+    reasoning_accounting = reasoning_accounting or "unknown"
+    if energy_output_tokens is not None and (
+        isinstance(energy_output_tokens, bool) or not isinstance(energy_output_tokens, int)
+        or energy_output_tokens < output_tokens
+    ):
+        raise ValueError("energy_output_tokens must be an integer at least billed output_tokens")
 
     # Lazy: `emission_factors` imports plain functions from this module at its
     # own top level, so importing it back at *this* module's top level would
@@ -2353,6 +2610,7 @@ def energy_accounting(
         LAYER_RUN_OVERRIDE,
         Resolved,
         build_factor_set,
+        context_with_run_overrides,
     )
 
     if factors is None:
@@ -2363,10 +2621,15 @@ def energy_accounting(
             provider=model.provider, settings=settings, run_overrides=run_overrides,
             model_id=model.id,
         )
-    elif grid_g_per_kwh is not None and factors.grid.layer != LAYER_RUN_OVERRIDE:
+    elif grid_g_per_kwh is not None:
         # `factors` was handed to us already built, but this call *also* got an
         # explicit `grid_g_per_kwh` — that still outranks whatever `factors`
         # resolved, exactly as it would have on top of `settings` alone.
+        context = factors.resolution_context
+        if context is not None:
+            context = context_with_run_overrides(
+                context, {"grid_g_per_kwh": grid_g_per_kwh}
+            )
         factors = dataclasses.replace(
             factors,
             grid=Resolved(
@@ -2377,6 +2640,7 @@ def energy_accounting(
             layers_present=tuple(
                 dict.fromkeys((LAYER_RUN_OVERRIDE, *factors.layers_present))
             ),
+            resolution_context=context,
         )
 
     pue = factors.pue.value
@@ -2385,6 +2649,8 @@ def energy_accounting(
     grid_basis = factors.grid_basis
 
     tokens = (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
+    energy_tokens = (input_tokens, energy_output_tokens if energy_output_tokens is not None else output_tokens,
+                     cache_read_tokens, cache_write_tokens)
     energy_constant, active_params_unknown = _energy_constant_and_flags(model, factors)
     # The only path that ever sets this strategy is `_active_params_energy_constant`
     # — a `model_overrides` win's strategy mirrors its own confidence label, never
@@ -2410,7 +2676,7 @@ def energy_accounting(
         energy_layer = LAYER_GLOBAL_DEFAULT
         energy_setting = "models.yaml: energy_class / energy_wh_per_mtok"
 
-    by_bucket_estimated = energy_wh_by_bucket(wh_per_mtok, *tokens)
+    by_bucket_estimated = energy_wh_by_bucket(wh_per_mtok, *energy_tokens)
     compute_wh_estimated = sum(by_bucket_estimated.values(), Decimal(0))
     is_measured = measured_energy_wh is not None
     if is_measured:
@@ -2429,9 +2695,61 @@ def energy_accounting(
         compute_wh = compute_wh_estimated
         by_bucket = by_bucket_estimated
 
-    total_wh = compute_wh * pue
+    energy_boundary = (
+        measured_energy_boundary
+        if is_measured
+        else (
+            "unknown" if factors.model_override is not None or getattr(model, "energy_wh_per_mtok_explicit", False)
+            else
+            "gpu" if energy_constant.strategy == "active_params"
+            else "node_it" if energy_constant.strategy == "class_ladder_v2"
+            else "unknown"
+        )
+    )
+    # Legacy modeled coefficients keep their as-versioned arithmetic until A3.
+    # Only measured boundaries can safely change the conversion in this version.
+    pue_is_applied = not is_measured or energy_boundary in {"gpu", "node_it"}
+    applied_pue = pue if pue_is_applied else Decimal(1)
+    total_wh = compute_wh * applied_pue
     electricity_g = co2e_grams(total_wh, grid)
     embodied_g = factors.embodied_g.value
+    # Accounting must never fail a run over embodied hardware. A supplier
+    # total that already bundles inference hardware, combined with a second,
+    # separately-configured embodied figure (a flat g_per_run or a time
+    # allocation), would double-count manufacturing carbon if summed — so the
+    # second figure is dropped, not summed, and named with a caveat rather
+    # than raised. Strict validation for an operator *document* (rejecting a
+    # profile that mixes a supplier-inclusive total with its own allocation
+    # at configuration time) still lives in `embodied_profiles.py`; this is
+    # the accounting path, which degrades instead of failing.
+    embodied_double_add_prevented = bool(
+        supplier_includes_inference_hardware and (embodied_g > 0 or embodied_allocation is not None)
+    )
+    embodied_known = True
+    if embodied_double_add_prevented:
+        embodied_g = Decimal(0)
+        embodied_allocation = None
+        logger.warning(
+            "energy_accounting: supplier_includes_inference_hardware is set together "
+            "with a separately configured embodied figure for %s; dropping the "
+            "embodied figure instead of double-counting.",
+            getattr(model, "id", "<unknown model>"),
+        )
+    elif embodied_allocation is not None:
+        allocation_total = embodied_allocation.get("complete_total_g")
+        if allocation_total is None:
+            # Partial coverage: at least one hardware component in the
+            # allocation has no known figure (see `allocate_by_time`).
+            # Unknown, never zero, and never a reason to fail the run — the
+            # allocation's own per-component detail (still attached below as
+            # `result["embodied_allocation"]`) and the embodied factor record
+            # carry what *is* known.
+            embodied_known = False
+            embodied_g = Decimal(0)  # arithmetic only; the output field is null below
+        elif not math.isfinite(float(allocation_total)) or float(allocation_total) < 0:
+            raise ValueError("embodied_allocation.complete_total_g must be finite and nonnegative")
+        else:
+            embodied_g = Decimal(str(allocation_total))
     cost_usd = model.cost_usd(*tokens)
 
     scopes = scope_split(deployment, electricity_g, embodied_g)
@@ -2450,6 +2768,70 @@ def energy_accounting(
     baseline_settings = settings.model_copy(
         update={"emissions_baseline_model": factors.baseline_model.value}
     )
+    actual_factor_records = factor_records(
+        energy_class=energy_class,
+        deployment=deployment,
+        settings=settings,
+        factors=factors,
+        energy_constant=energy_constant,
+        energy_layer=energy_layer,
+        energy_setting=energy_setting,
+        measured_energy=is_measured,
+    )
+    if is_measured:
+        energy_factor = next(f for f in actual_factor_records if f["key"] == "energy_class")
+        energy_factor["label"] = f"Measured energy ({measured_energy_boundary} boundary Wh)"
+        energy_factor["source"] = f"Measured energy ({measured_energy_boundary} boundary Wh)"
+        energy_factor["note"] = energy_factor["note"].replace(
+            "IT-load Wh", f"{measured_energy_boundary}-boundary Wh"
+        )
+    if not pue_is_applied:
+        pue_factor = next(f for f in actual_factor_records if f["key"] == "pue")
+        pue_factor.update({
+            "value": 1.0,
+            "source": "Not applied at this measured energy boundary",
+            "confidence": "exact",
+            "note": (
+                f"Configured PUE {float(pue)} was not multiplied into this {energy_boundary}-boundary "
+                "measurement."
+            ),
+        })
+    if embodied_allocation is not None and not embodied_known:
+        embodied_factor = next(f for f in actual_factor_records if f["key"] == "embodied_hardware")
+        covered = embodied_allocation.get("covered_subtotal_g")
+        unknown_ids = [
+            c.get("component_id")
+            for c in embodied_allocation.get("components", [])
+            if c.get("status") == "unknown"
+        ]
+        embodied_factor.update({
+            "value": None,
+            "confidence": "low",
+            "note": (
+                embodied_factor["note"]
+                + f" This run's time allocation has a known covered subtotal of "
+                f"{covered} gCO2e but is missing a figure for "
+                + (", ".join(unknown_ids) if unknown_ids else "at least one component")
+                + ", so the complete allocation is unknown rather than zero; "
+                "embodied_g reports null and only the known electricity component "
+                "is summed into co2e_g."
+            ),
+        })
+        embodied_factor["embodied_allocation_covered_subtotal_g"] = covered
+        embodied_factor["embodied_allocation_unknown_components"] = unknown_ids
+    if embodied_double_add_prevented:
+        embodied_factor = next(f for f in actual_factor_records if f["key"] == "embodied_hardware")
+        embodied_factor.update({
+            "value": 0.0,
+            "confidence": "excluded",
+            "note": (
+                embodied_factor["note"]
+                + " supplier_includes_inference_hardware was set together with a "
+                "separately configured embodied figure on this run; the second "
+                "figure was dropped rather than summed — see the "
+                "embodied_double_add_prevented caveat."
+            ),
+        })
     baseline = _baseline_block(
         model,
         tokens,
@@ -2460,15 +2842,123 @@ def energy_accounting(
         grid_g_per_kwh,
         baseline_settings,
         catalog,
+        factors,
+        actual_factor_records,
+        energy_tokens,
     )
 
-    return {
+    if is_measured:
+        method_id = "measured_energy_v1"
+        energy_source_by_component = {"reported_energy": "measured"}
+    elif factors.model_override is not None:
+        method_id = "model_override_v1"
+        energy_source_by_component = {"unresolved_energy_boundary": "supplied"}
+    elif getattr(model, "energy_wh_per_mtok_explicit", False):
+        method_id = "catalog_override_v1"
+        energy_source_by_component = {"unresolved_energy_boundary": "supplied"}
+    elif energy_constant.strategy == "active_params":
+        method_id = "active_params_v1"
+        energy_source_by_component = {"gpu": "modeled"}
+    else:
+        method_id = (
+            "class_ladder_v2"
+            if energy_constant.strategy == "class_ladder_v2"
+            else "class_ladder_v1"
+        )
+        energy_source_by_component = (
+            {"gpu": "modeled", "non_gpu_it": "modeled"}
+            if method_id == "class_ladder_v2"
+            else {"unresolved_energy_boundary": "modeled"}
+        )
+    incomplete_boundary = energy_boundary in {"gpu", "partial", "unknown"}
+    energy_method_shadow = None
+    if not is_measured and method_id == "class_ladder_v2":
+        legacy_constant = _class_ladder_energy_constant(model, "class_ladder_v1")
+        legacy_compute = sum(
+            energy_wh_by_bucket(legacy_constant.wh_per_mtok, *energy_tokens).values(), Decimal(0)
+        )
+        legacy_total = legacy_compute * pue
+        legacy_co2e = co2e_grams(legacy_total, grid) + embodied_g
+        energy_method_shadow = {
+            "method_id": "class_ladder_v1",
+            "calibration_id": "jegham_2025_legacy_unresolved_boundary",
+            "energy_boundary": "unknown",
+            "energy_wh": _f(legacy_compute),
+            "energy_wh_total": _f(legacy_total),
+            "co2e_g": _f(legacy_co2e),
+            "difference_kind": "methodology_correction_not_emissions_savings",
+        }
+
+    # `included_components`/`excluded_components` describe the carbon *result*
+    # (what is actually summed into co2e_g), not the calibration boundary —
+    # see `energy_boundary_of_coefficients` below for that. Facility overhead
+    # is either multiplied in via PUE (`pue_is_applied`) or, for a measurement
+    # already taken at the facility boundary, already inside the measured
+    # figure; either way it belongs in `included_components`, never in
+    # `excluded_components`, or a consumer summing the two lists would double
+    # it. A facility-inclusive but unnormalized constant (class_ladder_v1)
+    # still gets PUE applied on top — see the `legacy_source_pue_double_count`
+    # caveat, which names that specific double count rather than this list.
+    facility_overhead_via_pue = pue_is_applied
+    facility_overhead_measured = (not pue_is_applied) and energy_boundary == "facility"
+    included_components = (
+        (["gpu"] if energy_boundary == "gpu" else
+         ["facility_energy"] if energy_boundary == "facility" else
+         ["node_it_energy"] if energy_boundary == "node_it" else
+         ["reported_partial_energy"] if energy_boundary == "partial" else [])
+        + (["embodied_hardware"] if embodied_g > 0 else [])
+        + (["facility_overhead_via_pue"] if facility_overhead_via_pue else [])
+        + (["facility_overhead_measured"] if facility_overhead_measured else [])
+    )
+    excluded_components = (
+        (["non_gpu_it"] if energy_boundary == "gpu" else [])
+        + (
+            [
+                "unused_gpu_idle",
+                # An unknown embodied allocation (embodied_known False) belongs
+                # to the coverage record as unknown, not here — this list is
+                # only for a component genuinely excluded (zero, not unknown).
+                *(["embodied_hardware"] if embodied_g <= 0 and embodied_known else []),
+            ]
+            if method_id == "class_ladder_v2" else
+            ["unmeasured_components"] if incomplete_boundary and energy_boundary != "gpu" else []
+        )
+    )
+
+    result = {
         # ── original keys, original meanings ──
         "estimated": True,
+        "method_id": method_id,
+        "method_version": 2 if method_id == "class_ladder_v2" else 1,
+        "calibration_id": (
+            "jegham_2025_v2_node_it_fixed_weight"
+            if method_id == "class_ladder_v2"
+            else "jegham_2025_legacy_unresolved_boundary"
+            if method_id == "class_ladder_v1"
+            else None
+        ),
+        "energy_boundary": energy_boundary,
+        # The calibration boundary the coefficients themselves were fit/
+        # measured at — `node_it` for v2, `unknown` for v1 (facility-inclusive
+        # but unnormalized), `gpu` for active_params, or the measured
+        # boundary. Currently identical to `energy_boundary` above (which has
+        # always meant the coefficient boundary, never the result boundary);
+        # named separately so a consumer never has to guess which one a bare
+        # `energy_boundary` key means.
+        "energy_boundary_of_coefficients": energy_boundary,
+        # `included_components`/`excluded_components` below describe the
+        # result, not the coefficient boundary — see comment above.
+        "component_lists_describe": "result",
+        "included_components": included_components,
+        "excluded_components": excluded_components,
+        "energy_source_by_component": energy_source_by_component,
+        "energy_boundary_complete": not incomplete_boundary,
+        "energy_method_shadow": energy_method_shadow,
         "model": model.id,
         "energy_class": energy_class,
         "energy_wh_per_mtok": float(wh_per_mtok),
-        "weighted_tokens": float(weighted_tokens(*tokens)),
+        "weighted_tokens": float(weighted_tokens(*energy_tokens)),
+        "energy_output_tokens": energy_tokens[1],
         "cache_read_weight": float(ENERGY_CACHE_READ_MULTIPLIER),
         "cache_write_weight": float(ENERGY_CACHE_WRITE_MULTIPLIER),
         "energy_wh": _f(compute_wh),  # compute / IT load only — the measurement, if given
@@ -2480,10 +2970,15 @@ def energy_accounting(
         "grid_co2e_g_per_kwh": float(grid),
         "co2e_g": _f(total_g),  # == scope1 + scope2 + scope3
         "basis": _ACCOUNTING_BASIS,
-        "pue": float(pue),
+        "pue": float(applied_pue),
+        "configured_pue": float(pue),
+        "pue_applied": pue_is_applied,
         "energy_wh_total": _f(total_wh),  # compute x PUE
         "deployment": deployment,
-        "embodied_g": _f(embodied_g),
+        # Null, never 0, when an embodied_allocation had at least one
+        # component with no known figure — a 0 here would claim the hardware
+        # was priced at zero rather than never priced at all.
+        "embodied_g": _f(embodied_g) if embodied_known else None,
         "scopes": scopes,
         "baseline": baseline,
         # ── added: the input/output split ──
@@ -2505,6 +3000,7 @@ def energy_accounting(
         "reasoning_tier": reasoning_tier,
         # ── added: factor resolution ──
         "pue_profile": profile,
+        "pue_disclosure": factors.pue.disclosure,
         "grid_co2e_basis": grid_basis,
         # Which precedence rule chose the grid factor, as a stable key
         # (`provider:anthropic` | `local_setting` | `global_default` |
@@ -2525,11 +3021,21 @@ def energy_accounting(
         # (tret.services.grid_regions), or None when none applied to this
         # win — see FactorSet.grid.region / `_resolve_grid`.
         "grid_region": factors.grid.region,
+        "grid_requested_region": factors.grid.requested_region,
+        "grid_region_resolution_status": factors.grid.region_resolution_status,
         # "annual_average" (the plain per-provider/default figure, or a
         # table referenced but not evaluated/missed) or "hourly" (an hourly
         # grid.tables entry had a value for this run's actual start time) —
         # see tret.services.grid_tables and `_apply_grid_table`.
         "grid_temporal": factors.grid.temporal or "annual_average",
+        "grid_factor_boundary": factors.grid.factor_boundary,
+        "grid_gas_coverage": factors.grid.gas_coverage,
+        "grid_gwp_horizon_years": factors.grid.gwp_horizon_years,
+        "grid_gwp_assessment_basis": factors.grid.gwp_assessment_basis,
+        "grid_includes_td_losses": factors.grid.includes_td_losses,
+        "grid_electricity_mix_basis": factors.grid.electricity_mix_basis,
+        "grid_dataset_version": factors.grid.dataset_version,
+        "grid_observation_year": factors.grid.observation_year,
         # ── added: money and uncertainty ──
         "cost": _cost_block(cost_usd, baseline),
         "uncertainty": uncertainty_band(
@@ -2541,19 +3047,11 @@ def energy_accounting(
             settings=settings,
             band=(factors.band_low.value, factors.band_high.value),
             measured=is_measured,
-            evidence=_band_evidence(factors, is_measured),
+            evidence=_band_evidence(factors, validated_evidence) if pue_is_applied else None,
+            pue_applied=pue_is_applied,
         ),
         # ── added: provenance ──
-        "factors": factor_records(
-            energy_class=energy_class,
-            deployment=deployment,
-            settings=settings,
-            factors=factors,
-            energy_constant=energy_constant,
-            energy_layer=energy_layer,
-            energy_setting=energy_setting,
-            measured_energy=is_measured,
-        ),
+        "factors": actual_factor_records,
         # Which layers contributed anything to this run at all, most specific
         # first — e.g. `["workspace", "env"]` when a workspace overrode the
         # grid factor but every other constant fell through to the
@@ -2565,11 +3063,40 @@ def energy_accounting(
             cost_usd=cost_usd,
             grid_basis=grid_basis,
             baseline_grid_basis=baseline.get("grid_co2e_basis"),
+            baseline_grid_compatible=baseline.get("carbon_compatible_with_actual"),
             active_params_unknown=active_params_unknown,
             active_params_gpu_only=active_params_gpu_only,
             measured=is_measured,
+            energy_strategy=method_id,
+            embodied_double_add_prevented=embodied_double_add_prevented,
         ),
     }
+    if embodied_allocation is not None:
+        result["embodied_allocation"] = embodied_allocation
+    for caveat in result["caveats"]:
+        if caveat.get("key") == "reasoning_token_accounting":
+            caveat.update({
+                "key": "reasoning_counted_in_output" if reasoning_accounting == "counted_in_output" else "reasoning_hidden",
+                "direction": "either",
+                "label": "Reasoning count is included in output" if reasoning_accounting == "counted_in_output" else "Reasoning denominator uncertainty",
+                "note": (
+                    "Provider-reported reasoning included in output is counted once. "
+                    if reasoning_accounting == "counted_in_output" else
+                    "Confirmed additional reasoning is counted once in the energy denominator. "
+                    if reasoning_accounting == "additional" else
+                    "The provider did not establish a separate reasoning count; missing does not mean zero. "
+                ) + "The calibration's reasoning denominator remains unresolved, so the direction of model error is unknown.",
+            })
+    if reasoning_tokens is not None or reasoning_accounting != "unknown":
+        result["reasoning_tokens"] = {
+            "known_subset": int(reasoning_tokens) if reasoning_tokens is not None else None,
+            "accounting": reasoning_accounting,
+            "caveat": "Billed output is unchanged; only confirmed additional reasoning enters the separate energy denominator.",
+        }
+    from tret.services.emissions_coverage import operational_coverage
+
+    result["coverage"] = operational_coverage(result)
+    return result
 
 
 # ── reading a stored block back ──────────────────────────────────────────────
@@ -2719,12 +3246,12 @@ def _bases_of(blocks: list[dict]) -> list:
 
 CROSS_BASIS_CAVEAT = {
     "key": "carbon_crosses_grid_basis",
-    "label": "Carbon could not be summed: this run spans more than one GHG Protocol basis",
+    "label": "Carbon could not be summed: this run uses incompatible grid factors",
     "direction": "unknown",
     "note": (
-        "Parts of this run were accounted location-based and parts market-based. "
-        "Those answer different questions and may not be added, so every carbon "
-        "figure here is null and the per-basis subtotals are in `by_basis`. "
+        "Parts of this run use different GHG Protocol bases or grid-factor "
+        "methodologies. Those figures may not be added, so every combined carbon "
+        "figure here is null and compatible subtotals are in `by_basis`. "
         "Energy, tokens and cost are unaffected and are summed as normal."
     ),
 }
@@ -2778,6 +3305,46 @@ def _agreed(values: list):
         return None
 
 
+def grid_comparison_signature(accounting: dict) -> tuple:
+    """Comparable grid method, or exact factor identity when metadata is unknown."""
+    metadata = (
+        accounting.get("grid_co2e_basis"),
+        accounting.get("grid_factor_boundary"),
+        accounting.get("grid_gas_coverage"),
+        accounting.get("grid_gwp_horizon_years"),
+        accounting.get("grid_gwp_assessment_basis"),
+        accounting.get("grid_includes_td_losses"),
+        accounting.get("grid_electricity_mix_basis"),
+        accounting.get("grid_dataset_version"),
+        accounting.get("grid_observation_year"),
+    )
+    unknown = (None, "", "unknown", "unspecified")
+    if all(value not in unknown for value in metadata):
+        return ("method", *metadata)
+    # Every "we don't know" spelling (None, "", "unknown", "unspecified")
+    # collapses to one canonical sentinel before joining the identity tuple.
+    # Without this, two runs that are each unknown in the same field —
+    # overwhelmingly `grid_includes_td_losses` on the shipped default, which
+    # has never been surveyed — could still compare "different" purely
+    # because one recorded `None` and the other `"unspecified"`, which would
+    # make even two runs priced under the identical default un-summable.
+    # Fields that carry a real value are untouched: identity still requires
+    # an exact match on grid_co2e_g_per_kwh/basis/source/label/layer and on
+    # any metadata field that is actually known.
+    normalized_metadata = tuple(
+        "unknown" if value in unknown else value for value in metadata
+    )
+    return (
+        "identity",
+        accounting.get("grid_co2e_g_per_kwh"),
+        accounting.get("grid_co2e_basis"),
+        accounting.get("grid_co2e_source"),
+        accounting.get("grid_co2e_label"),
+        accounting.get("grid_co2e_layer"),
+        *normalized_metadata,
+    )
+
+
 def combine_accountings(blocks: list[dict]) -> dict | None:
     """One run-level accounting block from several per-model ones.
 
@@ -2792,9 +3359,10 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
         return blocks[0]
 
     bases = _bases_of(blocks)
+    factor_signatures = {grid_comparison_signature(block) for block in blocks}
     # One basis (or one that simply never varied) — carbon adds. More than one,
     # and it does not, at any scale.
-    carbon_summable = len(bases) <= 1
+    carbon_summable = len(bases) <= 1 and len(factor_signatures) <= 1
 
     combined = dict(blocks[0])
     for key in _SUMMABLE_TOP:
@@ -2871,6 +3439,37 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
     else:
         combined["energy_source"] = "estimated"
 
+    boundaries = {b.get("energy_boundary", "unknown") for b in (worked or blocks)}
+    combined["energy_boundary"] = next(iter(boundaries)) if len(boundaries) == 1 else "mixed"
+    combined["energy_boundary_complete"] = all(
+        b.get("energy_boundary_complete", False) for b in (worked or blocks)
+    )
+    methods = {b.get("method_id", "legacy_unknown") for b in (worked or blocks)}
+    combined["method_id"] = next(iter(methods)) if len(methods) == 1 else "mixed"
+    combined["included_components"] = list(dict.fromkeys(
+        component
+        for b in (worked or blocks)
+        for component in b.get("included_components", [])
+    ))
+    combined["excluded_components"] = list(dict.fromkeys(
+        component
+        for b in (worked or blocks)
+        for component in b.get("excluded_components", [])
+        # A segment that excluded a component and another that included it
+        # is not a contradiction to surface: the record declares
+        # `component_lists_describe: "result"`, and the union result did
+        # include it (some segment carried it), so included wins.
+        if component not in combined["included_components"]
+    ))
+    component_sources: dict[str, set[str]] = {}
+    for block in (worked or blocks):
+        for component, source in block.get("energy_source_by_component", {}).items():
+            component_sources.setdefault(component, set()).add(source)
+    combined["energy_source_by_component"] = {
+        component: next(iter(sources)) if len(sources) == 1 else "mixed"
+        for component, sources in component_sources.items()
+    }
+
     # `energy_meter` (engine/harness.py, tret/services/energy_meter.py): only
     # present on a segment whose model actually got metered. Additive, and
     # combined the same spirit as everything above — sum what is genuinely
@@ -2897,36 +3496,49 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
             "interval_s": _agreed([m.get("interval_s") for m in metered]),
             "shared_device": any(m.get("shared_device") for m in metered),
             "note": "; ".join(notes) if notes else None,
+            "energy_boundary": _agreed([m.get("energy_boundary", "unknown") for m in metered])
+            or "mixed",
         }
 
     combined["models"] = [b.get("model") for b in blocks]
+    distinct_models = set(combined["models"])
     combined["grid_bases"] = bases
     combined["carbon_summable"] = carbon_summable
     if not carbon_summable:
-        # Per-basis subtotals, so the carbon is still *available* — it just is not
-        # offered as one number that would be a category error. Same shape and
-        # same reasoning as `by_basis` in api/analytics.py.
+        # Each subtotal is internally compatible. Basis alone is insufficient:
+        # two custom factors can both have an unknown basis while representing
+        # different conversion methods. Keep those in separate rows rather than
+        # leaking the invalid sum through this fallback view.
+        groups: dict[tuple, list[dict]] = {}
+        for block in blocks:
+            group_key = (
+                block.get("grid_co2e_basis"),
+                grid_comparison_signature(block),
+            )
+            groups.setdefault(group_key, []).append(block)
         combined["by_basis"] = [
             {
                 "grid_co2e_basis": basis,
+                "grid_factor_signature": list(signature),
                 **{
-                    key: _sum_or_none(
-                        [b.get(key) for b in blocks if b.get("grid_co2e_basis") == basis]
-                    )
+                    key: _sum_or_none([b.get(key) for b in grouped_blocks])
                     for key in ("co2e_g", "energy_wh")
                 },
-                "models": [
-                    b.get("model") for b in blocks if b.get("grid_co2e_basis") == basis
-                ],
+                "models": [b.get("model") for b in grouped_blocks],
             }
-            for basis in bases
+            for (basis, signature), grouped_blocks in groups.items()
         ]
     combined["basis"] = (
-        "summed across the models this run used; per-model factors are reported "
-        "only where every segment agreed"
+        (
+            "summed across the models this run used; per-model factors are reported "
+            if len(distinct_models) > 1
+            else "summed across calls to one model; call factors are reported "
+        )
+        + "only where every segment agreed"
         + (
-            "; carbon is null because the segments span more than one GHG "
-            "Protocol basis and is broken out in `by_basis`. "
+            "; carbon is null because the segments use incompatible grid bases "
+            "or factor methodologies and is broken out into compatible subtotals "
+            "in `by_basis`. "
             if not carbon_summable
             else ". "
         )
@@ -2936,7 +3548,9 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
     # how a figure was reached, and every segment's reasoning still applies to
     # its own share.
     combined["factors"] = _union_by_key(blocks, "factors")
-    caveats = [*_union_by_key(blocks, "caveats"), MULTI_MODEL_CAVEAT, LIST_PRICE_CAVEAT]
+    caveats = [*_union_by_key(blocks, "caveats"), LIST_PRICE_CAVEAT]
+    if len(distinct_models) > 1:
+        caveats.append(MULTI_MODEL_CAVEAT)
     if not carbon_summable:
         caveats.append(CROSS_BASIS_CAVEAT)
     combined["caveats"] = caveats
@@ -2958,6 +3572,9 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
             LAYER_PRECEDENCE.index(layer) if layer in LAYER_PRECEDENCE else len(LAYER_PRECEDENCE)
         ),
     )
+    from tret.services.emissions_coverage import operational_coverage
+
+    combined["coverage"] = operational_coverage(combined)
     return combined
 
 
@@ -2966,7 +3583,23 @@ def _union_by_key(blocks: list[dict], field_name: str) -> list:
     for block in blocks:
         for entry in block.get(field_name) or []:
             key = entry.get("key") if isinstance(entry, dict) else str(entry)
-            seen.setdefault(key, entry)
+            previous = seen.get(key)
+            if previous is None or previous == entry:
+                seen.setdefault(key, entry)
+            elif field_name == "factors" and isinstance(entry, dict):
+                variants = previous.get("variants") if isinstance(previous, dict) else None
+                if variants is None:
+                    variants = [previous]
+                if entry not in variants:
+                    variants = [*variants, entry]
+                seen[key] = {
+                    "key": key,
+                    "label": previous.get("label") if isinstance(previous, dict) else None,
+                    "value": None,
+                    "source": "mixed",
+                    "note": "Component calls used different factor records; see variants.",
+                    "variants": variants,
+                }
     return list(seen.values())
 
 
@@ -3020,6 +3653,9 @@ def overhead_call(
         usage.cache_read_tokens,
         usage.cache_write_tokens,
         factors=factors,
+        energy_output_tokens=usage.energy_output_tokens,
+        reasoning_tokens=usage.reasoning_tokens,
+        reasoning_accounting=usage.reasoning_accounting,
     )
     return {
         "kind": kind,  # routing | compaction_summary

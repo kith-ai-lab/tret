@@ -43,20 +43,20 @@
 # counts 1.0, an input token 0.05, a cache write 0.05, a cache read 0.005 —
 # generation costs ~20x reading per token). The constants live in
 # tret/services/emissions.py (ENERGY_CLASS_WH_PER_MTOK) and are least-squares
-# fits against Jegham et al., arXiv:2505.09598 (14 May 2025), the only granular
-# public per-model dataset:
+# source-PUE-normalized fixed-weight fits against Jegham et al.,
+# arXiv:2505.09598v1 (14 May 2025):
 #
-#   S  ≈    250 Wh/Mtok  fitted from GPT-4.1 nano (b = 271.9). Small / distilled
+#   S  = 210.3398 Wh/Mtok fitted from GPT-4.1 nano. Small / distilled
 #                        / nano-class served models, and the default for local
 #                        weights.
-#   M  ≈  1,200 Wh/Mtok  fitted from GPT-4o (b = 1233.1). Mid-size served models.
-#   L  ≈  2,600 Wh/Mtok  fitted from Claude 3.7 Sonnet (b = 2634.7). Large
+#   M  = 855.6651 Wh/Mtok fitted from GPT-4o. Mid-size served models.
+#   L  = 2399.3371 Wh/Mtok fitted from Claude 3.7 Sonnet. Large
 #                        frontier models.
-#   XL ≈  6,000 Wh/Mtok  NO measured anchor — one geometric step above L. The
+#   XL = 6727.8875 Wh/Mtok NO measured anchor — reproducible L²/M interpolation. The
 #                        largest non-reasoning flagships.
-#   R  ≈ 21,000 Wh/Mtok  fitted from o3 (b = 20850.4). The reasoning tier.
-#                        DeepSeek-R1's fit implies 35,475, so this sits at the
-#                        LOW end of the two reasoning models measured.
+#   R  = 17713.3258 Wh/Mtok fitted from source-PUE-normalized o3 observations.
+#                         The reasoning tier; its reasoning-token denominator
+#                         remains an explicit calibration uncertainty.
 #
 # HOW TO READ AN ASSIGNMENT BELOW. Active parameter counts are unpublished for
 # every closed model here, so **tier and price remain a proxy for size** and that

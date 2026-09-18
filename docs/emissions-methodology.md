@@ -9,8 +9,89 @@ Implementation: `backend/tret/services/emissions.py`. Settings:
 The routing side of the energy model is in [eco-accounting.md](eco-accounting.md);
 this page is authoritative wherever the two overlap.
 
-**One-line summary: these are calibrated estimates for comparing model choices.
-They are not measurements, not an inventory, and not reportable.**
+**One-line summary: carbon figures are estimates for comparing model choices.
+Energy may be modeled or measured, with its coverage recorded explicitly.
+These figures are not a verified emissions inventory and are not reportable
+as one on their own.**
+
+## September 2026 accuracy corrections
+
+Implementation is tracked in [the emissions accuracy plan](research/emissions-plan-2026-09-17.md).
+The corrected default is `class_ladder_v2`. Exact Jegham v1 means are divided
+by their source PUE before fitting one nonnegative coefficient to the fixed
+predictor `output + 0.05 × input`. Deployment PUE is then applied once. The
+legacy `class_ladder_v1` (and legacy `class_ladder` alias) remains available
+through `energy_strategy` for rollback. Stored history is not rewritten.
+
+| Class | Corrected node-IT Wh/M output-equivalent tokens |
+|---|---:|
+| S | 210.3398 |
+| M | 855.6651 |
+| L | 2399.3371 |
+| XL | 6727.8875 |
+| R | 17713.3258 |
+
+The move from v1's shipped constants to v2 has three components, not one:
+v1's hand-rounding is dropped, the fitted mean is divided by its source PUE
+(−10.7% (S, M, R; PUE 1.12) to −12.3% (L; PUE 1.14) per class on its own),
+and the fit itself switches from
+a two-parameter OLS to a single nonnegative coefficient against the fixed
+predictor `output + 0.05 × input`. The three do not move every class the same
+way — for class L the fit-method change pushes the constant back up by more
+than the PUE division removes, so L ends up closer to its v1 figure than PUE
+alone would predict. Per class, in Wh per million output-equivalent tokens:
+
+| Class | v1 shipped | v1 fitted mean | ÷ source PUE | v2 shipped |
+|---|---:|---:|---:|---:|
+| S | 250 | 271.9 | 242.7 | 210.3398 |
+| M | 1,200 | 1,233.1 | 1,101.0 | 855.6651 |
+| L | 2,600 | 2,634.7 | 2,311.1 | 2,399.3371 |
+| R | 21,000 | 20,850.4 | 18,616.5 | 17,713.3258 |
+
+XL is explicitly interpolated as `L²/M`; it has no direct observation. The R
+anchor remains o3, with its unresolved reasoning denominator recorded. This
+is a reproducible source-boundary correction, not demonstrated deployment
+accuracy. The [v2 manifest](../backend/tret/data/calibration/class_ladder_v2.json)
+contains residuals and alternative-fit diagnostics. Runtime shadow output
+labels differences as methodology corrections, never operational savings.
+Explicit operator/catalog constants retain their precedence and an unknown
+boundary unless independently specified.
+
+The global electricity default is now **458.49 gCO2e/kWh**, from the pinned
+Ember 2025 observation. The previous IEA attribution was incorrect. Explicit
+`country-ISO3` pins select bundled 2025 country records; no provider geography
+is inferred. See the grid section for its lifecycle electricity boundary.
+
+The baseline resolves its own model and provider through the same factor
+layers and observation time as the actual run, including model overrides,
+energy strategy, regional/hourly grid factors, PUE and embodied settings.
+Provider-specific factors may legitimately differ. Changes in estimated
+savings caused by this fix are methodology corrections, not observed
+reductions in energy use.
+
+New per-call records retain start/end time, upstream, inference geography and
+reasoning semantics. An hourly grid table is integrated across its transitions
+over each modeled call, assuming constant power within that call. Dated-table
+gaps use the configured fallback and record temporal coverage; incompatible
+table/fallback accounting bases use the fallback for the whole interval.
+This is time-weighted modeling, not a measured power trace. Older records and
+aggregate meter readings without interval energy retain their recorded or
+point-in-time factor; their temporal distribution is unknown.
+
+The SDK accepts `measured_energy_boundary` alongside `measured_energy_wh`.
+The CLI equivalent is `--measured-boundary` with `--measured-wh`. The compatible
+default is `node_it`; `facility` already includes facility overhead and receives
+no further PUE. A PDU's installation point determines its boundary: a server
+outlet measures IT load, whereas a facility-inclusive source may include cooling.
+
+Local GPU metering can use `TRET_LOCAL_ENERGY_METER=nvml` with the optional
+`nvidia-ml-py` package. It reads the cumulative counter on the selected GPU
+(index 0 by default). Unsupported initial counters fall back to sampled power
+with a recorded reason; resets, gaps and incomplete timing retain the token
+estimate. These are GPU-board observations, excluding other devices and host
+components. Meter initialization/teardown is bounded and concurrency with
+unknown resource shares remains unallocated. Instrument validation is still
+required before using these observations to establish accuracy.
 
 ## Read this first
 
@@ -21,15 +102,16 @@ must not make one about itself.
 
 Two things changed from tret's first version of this model, and both matter:
 
-- The constants used to be **hand-picked**. They are now **fitted** to the only
-  granular public per-model dataset that exists. That is a real improvement in
-  provenance and a small one in accuracy.
+- The constants used to be **hand-picked**. They are now **fitted** to a pinned
+  public per-model study. This improves reproducibility; empirical accuracy
+  still needs deployment validation.
 - Every figure now travels with an explicit **uncertainty band** and a
   **per-factor provenance record**, so "where did this number come from" is
   answerable from a stored run alone.
 
-What did not change: nothing here is metered, and the honest use of the output is
-comparison between two model choices — never disclosure.
+Optional meters supply energy observations; the carbon conversion still uses
+estimated or configured factors. Comparing models also requires compatible
+boundaries and task quality; a meter alone does not establish either.
 
 ## The chain, end to end
 
@@ -39,7 +121,7 @@ weighted_tokens = 0.05*input + 1.0*output
 energy_wh       = energy_wh_per_mtok * weighted_tokens / 1e6   # compute / IT load
 energy_wh_total = energy_wh * PUE                              # + facility overhead
 electricity_g   = energy_wh_total * grid_g_per_kwh / 1000
-embodied_g      = embodied_g_per_run                           # local runs only, 0 by default
+embodied_g      = embodied_g_per_run                           # supplied separately; unknown if unsupported
 co2e_g          = electricity_g + embodied_g   # == scope1 + scope2 + scope3
 co2e_g_low      = co2e_g / 2.5
 co2e_g_high     = co2e_g * 2.5
@@ -47,10 +129,14 @@ avoided_co2e_g  = baseline_co2e_g - co2e_g     # signed
 avoided_usd     = baseline_usd    - actual_usd # signed
 ```
 
-`energy_wh` keeps the meaning it has always had — **compute (IT-load) energy
-only**. `energy_wh_total` is the PUE-inclusive figure, and it is the one carbon
-is derived from. Both are persisted, so the overhead is never hidden inside a
-single number.
+The chain above describes the corrected node-IT token estimator. For measured results,
+`energy_wh` is the raw reading within `energy_boundary`: `gpu`, `node_it`,
+`facility`, `partial` or `unknown`. A facility reading already contains
+overhead, so `energy_wh_total == energy_wh`; it receives no further PUE
+multiplication. PUE applied to a GPU-only observation cannot supply missing
+CPU, memory or other host energy. Read the boundary and component coverage
+alongside either energy value. Historical rows without this metadata have
+unknown boundaries, not verified IT coverage.
 
 ## Why input and output tokens are weighted apart
 
@@ -72,9 +158,17 @@ A cache read re-uses stored KV state instead of running a fresh forward pass, so
 it gets the same 0.1x discount providers charge for it. It is not zero: the state
 still has to be fetched and attended over.
 
-## The regression, reproducibly
+## Legacy regression, retained for reproducibility
 
 ### The source data
+
+The pinned [Jegham v1 manifest](../backend/tret/data/calibration/jegham_2025_v1.json)
+now preserves Table 4 means and standard deviations at their original precision,
+Table 1 source PUE, and separate node-IT-normalized observations. The table and
+fit below describe the legacy rounded inputs retained by `class_ladder_v1`.
+The default v2 fit uses exact normalized inputs as described above. These source
+figures are modeled estimates from API performance and inferred hardware, not
+direct energy measurements. The reasoning-token denominator remains unverified.
 
 Jegham, Abdelatti, Elmoubarki & Hendawi, *How Hungry is AI? Benchmarking Energy,
 Water, and Carbon Footprint of LLM Inference*, [arXiv:2505.09598](https://arxiv.org/abs/2505.09598),
@@ -161,7 +255,7 @@ short-prompt figure is anomalously high — the same anomaly that makes its fit
 degenerate. Tret records this as the `prompt_shape_residual` caveat on every
 run rather than claiming the split solved it.
 
-## The energy classes
+## Legacy v1 energy classes
 
 Wh per million **output-equivalent** tokens. Each is a fitted `b` from the table
 above, except XL.
@@ -225,7 +319,7 @@ are stronger evidence than this ladder for the models they cover.
 
 ## Energy strategies and measured runs
 
-Every run picks its per-token energy constant one of three ways —
+Every run picks its per-token energy constant through a named strategy —
 `energy_strategy`, layered exactly like every other factor in
 [Configuration layers](#configuration-layers) (`run_override > harness >
 workspace > managed > global_default`; there is no `env` rung for this one
@@ -233,8 +327,9 @@ factor — no `TRET_*` setting sets it):
 
 | strategy | what it does |
 |---|---|
-| `class_ladder` (default) | The table above: an explicit `models.yaml` constant, or the calibrated class. Unchanged. |
-| `active_params` | EcoLogits' formula, below — only when the model also carries `active_params_b`. Falls back to `class_ladder` (with a caveat) when it does not. |
+| `class_ladder_v2` (default) | The corrected node-IT class table in the September 2026 section. Explicit model constants still take precedence. |
+| `class_ladder_v1` / `class_ladder` | Legacy coefficients and unresolved source boundary, retained for rollback and historical reproduction. |
+| `active_params` | EcoLogits' formula, below — only when the model also carries `active_params_b`. Falls back to the corrected ladder (with a caveat) when it does not. |
 | `measured` | A config-time signal that this workspace's `model_overrides` are expected to be kept current. Does not by itself change the arithmetic beyond what a `model_overrides` entry already would. |
 
 **Resolution order for one model, regardless of `energy_strategy`:**
@@ -304,8 +399,9 @@ is comparable to a whole-request figure. tret has neither of those inputs — no
 GPU count, no server-energy term — and feeds this single-GPU number straight
 into the same "whole-request Wh per Mtok" slot the class ladder fills. That is
 a systematic **UNDERCOUNT**, not a rounding error: 271.9 Wh/Mtok for a
-~405B-active-parameter model sits far below the L-class constant (2,600
-Wh/Mtok, fitted from Claude 3.7 Sonnet — a comparably sized served model). Every
+~405B-active-parameter model sits far below the corrected L-class constant
+(2,399.3371 Wh/Mtok, derived from Claude 3.7 Sonnet observations). This
+comparison does not establish Claude's undisclosed active parameter count. Every
 run this strategy prices carries an `active_params_gpu_only` caveat
 (`direction: "understates"`) naming exactly this gap. Lifting this path to
 `"calibrated"` would need the missing GPU-count term (computable from total
@@ -316,23 +412,25 @@ under this strategy gets the class ladder instead, plus an
 
 ### Measured energy: an operator's own meter, on top of everything else
 
-`energy_accounting(..., measured_energy_wh=<Wh>)` replaces the *estimate*
-with a real IT-load figure for one run, on any deployment (self-hosted most
-often, but nothing here requires it). What changes, and — as important —
-what does not:
+`energy_accounting(..., measured_energy_wh=<Wh>,
+measured_energy_boundary="node_it")` replaces the token estimate with an
+observation for one run. The boundary defaults to `node_it` for compatibility
+with the existing caller-supplied IT-load contract. Callers can explicitly
+identify `gpu`, `facility`, `partial` or `unknown` observations.
 
 - `energy_wh` becomes the measurement. `energy_wh_estimated` keeps what the
   configured strategy would have produced (present on every run, measured or
   not — it just equals `energy_wh` when there is no measurement), and
   `energy_wh_by_bucket` is scaled proportionally from that estimate so the
   buckets still sum to the measured total.
-- **PUE, grid intensity and embodied hardware still apply on top,
-  unchanged.** A measurement is IT-load only — the same scope `energy_wh` has
-  always had — never a substitute for facility overhead or hardware
-  amortization. `co2e_g` is still `scope1_g + scope2_g + scope3_g`, computed
-  from the measured (not estimated) electricity figure.
+- **Facility observations receive no additional PUE.** Node IT observations
+  use the configured PUE. GPU readings retain incomplete coverage even when
+  multiplied by PUE. Partial/unknown measured boundaries receive no extra
+  PUE because they may already include some facility energy.
+  Grid intensity and separately configured embodied hardware still enter the
+  carbon estimate.
 - The `energy_class` factor record's confidence becomes `"measured"`, its
-  source `"Operator-supplied measurement (IT-load Wh)"`, and it carries
+  source naming the measurement boundary, and it carries
   `measured: true` — whatever strategy would otherwise have priced the
   (now-superseded) estimate is still named in the note.
 - Two caveats flip to `applies: false`, and stay in the list rather than
@@ -350,8 +448,8 @@ what does not:
   spanning several models (`combine_accountings`) reports `"mixed"` unless
   every segment was measured.
 
-`measured_energy_wh` must be `>= 0`; a negative value raises `ValueError`
-rather than silently producing a negative energy figure.
+`measured_energy_wh` must be finite and `>= 0`; negative, NaN or infinite
+values raise `ValueError` rather than producing an invalid energy figure.
 
 #### How a measurement reaches a run
 
@@ -387,12 +485,14 @@ takes (`tret/services/energy_meter.py`):
   `energy_accounting(measured_energy_wh=…)` call described above — there is
   no meter object in the loop, just the number.
 
-Both paths measure **IT-load only**. PUE, grid intensity and embodied
-hardware still apply on top exactly as they do to an estimate — a
-measurement replaces the per-token guess for compute energy; it is not a
-substitute for facility overhead or hardware amortization, and it does not
-change which deployment (and therefore which PUE profile and GHG Protocol
-scope) a run is accounted under.
+The NVIDIA path measures GPUs only and records `energy_boundary: gpu` on
+both the accounting result and meter provenance. CPU, RAM and other host
+components remain outside that observation. SDK/CLI readings retain their
+existing caller-supplied node-IT contract; explicit alternative boundaries
+are available through the accounting API and `ExternalReadingMeter`.
+`estimated: true` describes the carbon estimate, while `energy_source` and
+component provenance describe the energy evidence. These fields can therefore
+correctly say that energy was measured and carbon was estimated.
 
 ## Regions, hourly tables, hardware profiles, and a band that responds to evidence
 
@@ -558,72 +658,34 @@ narrowed by whatever this specific run can actually prove:
 {"band": {"derived": true}}
 ```
 
-Four conditions, each independently checkable off the run's own resolved
-`FactorSet` — no new configuration beyond what a document already sets
-elsewhere in this same layer ladder:
+Labels, dates and named profiles are provenance, not validation. They no
+longer qualify a factor as metered or narrow the band automatically. Explicit
+validated evidence must match the component, boundary and validation domain;
+energy evidence must also declare complete temporal and device coverage.
+A GPU-only reading does not establish complete node coverage. Unvalidated
+readings remain useful observations without acquiring an instrument-accuracy
+claim.
 
-| Evidence | True when |
-|---|---|
-| `energy_measured` | this run's energy came from `measured_energy_wh`, not the per-token estimate |
-| `pue_metered` | the winning PUE came from a labeled `workspace`/`managed`/`harness` layer |
-| `grid_sourced_dated` | the winning grid factor came from a labeled `workspace`/`managed`/`harness` layer **and** carries an `as_of` date |
-| `embodied_profiled` | the winning embodied figure came from a named hardware profile — recorded on the run today, but narrows no row: `uncertainty_contributions` ships no per-factor sensitivity row for embodied carbon to narrow |
+Missing components are reported separately from uncertainty on the included
+subtotal. No judgment band converts excluded hardware, network, storage or
+material tool activity into a complete lifecycle result. A standards mapping
+may be eligible for review; it is never automatically labelled conformant.
 
-Each true condition narrows the matching row(s) in `uncertainty.contributions`
-to instrument-level tolerance (see [Per-factor
-sensitivity](#per-factor-sensitivity) for what each row otherwise claims) —
-`energy_measured` narrows `energy_class`, `batching`, `measurement_bias` and
-(on a local run) `unbatched_local_inference`; `pue_metered` narrows `pue`;
-`grid_sourced_dated` narrows `grid_intensity`. The (possibly narrowed) rows
-are then folded into a band bounded **above** by the configured `low`/`high`
-— never wider than configured, only ever at or inside it, and never *below*
-it on an axis nothing actually evidenced: for each axis, the widest
-remaining row's implied bound is compared against the configured value —
-but only counts if that row was itself narrowed by evidence a moment ago;
-an axis whose widest row is an ordinary, untouched baseline sensitivity
-(nobody's evidence, just the row's own always-present uncertainty) stays at
-the configured value rather than narrowing off it. This is deliberate, not
-an oversight: `derived: true` with none of the four conditions true must
-reproduce the plain configured band exactly (a deliberately conservative
-4.0x/4.0x stays 4.0x/4.0x, never quietly tightens to whichever row's
-baseline multiplier happens to be smallest), and one kind of evidence alone
-(energy measured, say, with grid and PUE still unsourced) must not borrow
-narrowing credit from `grid_intensity`'s own wide, undated default just
-because that default happens to be the largest number left on the table.
-`uncertainty` gains a `derivation` key naming the configured band, the one
-actually applied, which rule chose it (`"configured"` when neither axis
-narrowed, `"dominant_contribution"` when one did), and which row (if any)
-governed the result. `band.derived` false or absent is exactly today's
-behaviour: the configured band applies untouched and there is no
-`derivation` key.
-
-A worked example, for a **non-reasoning** model: a run whose energy was
-measured, whose PUE came from a labeled workspace layer, and whose grid
-factor came from a labeled, dated workspace layer (no hardware profile) —
-against the shipped default 2.5x/2.5x band. `grid_intensity` narrows to
-0.7/1.3, `pue` to 0.95/1.05, `energy_class`/`batching`/`measurement_bias` to
-0.9/1.1 each, `token_energy_ratio`/`reasoning_tokens` untouched (1.15 and
-1.2 respectively — smaller than grid's 1.3 either way). Every touched row is
-evidence-stamped, and `grid_intensity` is the widest of them on both axes:
-on the low axis its `1/0.7 ≈ 1.4286` is the largest divisor among the
-touched rows and beats the configured 2.5, so it wins; on the high axis its
-own `1.3` is likewise the largest touched multiplier and again beats 2.5.
-The run reports `band_factor_low ≈ 1.4286`, `band_factor_high == 1.3`,
-`derivation.rule == "dominant_contribution"`, `derivation.dominant_key ==
-"grid_intensity"` — the grid factor's own sourcing was the single most
-convincing piece of evidence this run had, and the band says so.
-
-A **reasoning-tier** run under the identical evidence keeps the *high* axis
-at the configured value instead: `reasoning_tokens`' own high_multiplier
-jumps to `3.0` for a reasoning model (one-sided — hidden thinking tokens can
-only make real generation work higher than what was counted, never lower),
-which is wider than `grid_intensity`'s evidenced `1.3` and yet `evidence`
-was never stamped on it (none of the four conditions touches
-`reasoning_tokens`) — so per the rule above, the high axis stays at
-whatever was configured rather than narrowing off `grid_intensity` in its
-place. The low axis is unaffected (`reasoning_tokens`' `low_multiplier` is
-`1.0` either way, never the widest divisor) and still narrows to
-`grid_intensity`'s `≈1.4286` exactly as in the non-reasoning example.
+**The component-list contract.** `included_components`/`excluded_components`
+on an accounting record describe the carbon *result* — what is actually
+summed into `co2e_g` — not the calibration boundary the coefficients were fit
+at; `component_lists_describe: "result"` on the record says so explicitly.
+`facility_overhead_via_pue` means PUE was applied on this run;
+`facility_overhead_measured` means the measurement boundary already included
+it, so PUE was not multiplied in on top. `energy_boundary_of_coefficients`
+names the calibration boundary itself (`node_it` for v2, `unknown` for v1),
+kept separate from `energy_boundary` above so a consumer never has to guess
+which one a bare `energy_boundary` key means. A component whose figure is
+unknown — a partial embodied-hardware allocation, for instance — appears in
+the coverage record (`coverage`, see above) with status `"unknown"`, never in
+`excluded_components`: that list is only for a component genuinely excluded
+(known to be zero or out of scope), and conflating the two would read an
+unknown as a deliberate, quantified exclusion.
 
 ## Data-centre overhead (PUE)
 
@@ -659,16 +721,25 @@ clamped to 1 rather than allowed to shrink the number.
 
 ## Grid intensity, and its basis
 
-Default **470 gCO2e/kWh** — the IEA's 2024 global power-sector average
-([Electricity 2025](https://www.iea.org/reports/electricity-2025), reported as
-~460-480; 470 is the midpoint). Tret's previous 400 was stale-low and uncited.
+Default **458.49 gCO2e/kWh**, the World 2025 row of the pinned
+[Ember yearly dataset](https://files.ember-energy.org/public-downloads/yearly_full_release_long_format.csv).
+Its [methodology](https://files.ember-energy.org/public-downloads/ember_electricity_data_methodology.pdf)
+uses lifecycle electricity-generation greenhouse-gas factors with a 100-year
+horizon. This includes power-generation infrastructure and upstream fuel;
+it does **not** include Tret's inference server manufacturing. The source CSV
+calls the unit `gCO2/kWh`; metadata preserves that spelling and separately
+records the methodology's CO2e coverage. The GWP assessment basis and inclusion
+of transmission/distribution losses remain unknown. Electricity mix is
+production-based. The asset carries a source SHA256, observation year, and the
+`creator`, `attribution` and `license_url` fields CC BY 4.0 requires alongside
+the `license` field itself — separate from Electricity Maps' ODbL data. See
+[THIRD_PARTY_DATA.md](../THIRD_PARTY_DATA.md) for both datasets' full terms.
 
-| reference | g/kWh | note |
-|---|---|---|
-| IEA global, 2024 | 470 | tret default |
-| EPA eGRID2023 US average | 350 | subregions span >10x |
-| low-carbon grid | ~30 | e.g. Sweden |
-| coal-heavy grid | ~750 | |
+The old 470/IEA statement was unsupported. The 2024 Ember row has also been
+revised to 471.46; reproducing this release uses the pinned input, not a fresh
+download presumed identical. Unsupported `country-ISO3` pins retain explicit
+fallback provenance. An operator-supplied numeric factor—even 458.49—does not
+inherit Ember's boundary or source metadata.
 
 ### Location-based vs market-based
 
@@ -1261,7 +1332,7 @@ run_override  >  harness  >  workspace  >  managed  >  env  >  dataset  >  globa
 * **`env`** — a `TRET_*` setting the operator actually set, in a real
   environment variable or a loaded `.env` file. Detected through Pydantic's
   `model_fields_set`, not by comparing against the shipped default: an
-  operator who deliberately sets `TRET_GRID_CO2E_G_PER_KWH` back to `470` is
+  operator who deliberately sets `TRET_GRID_CO2E_G_PER_KWH` to `458.49` is
   still recorded as `env`, not `global_default`.
 * **`dataset`** — the grid factor only. When a workspace has pinned the run's
   provider to a region and *nothing an operator set* priced that provider —
@@ -1433,7 +1504,9 @@ looked like under these settings instead?" Never writes anything: no run row,
 no workspace document, is touched by this endpoint.
 
 **Request**: `{"project_id": <uuid or null>, "days": <1-3650, default 30>,
-"factors": <a partial EmissionsOverrides document>}`. `factors` is validated
+"factors": <a partial EmissionsOverrides document>,
+"mode": "estimate_both_sides" | "preserve_measured_energy"}`.
+The default mode is `estimate_both_sides` for existing clients. `factors` is validated
 the same way a `PUT` to the settings API is — a violation 422s with the same
 plain, dotted-field message (`_validation_detail`, shared by both routers so
 they can never disagree about how a validation error reads) — and the
@@ -1455,7 +1528,7 @@ workspace layer for this recompute, same as a run's own fail-open contract
 above, with a warning naming why rather than a silent difference from what the
 workspace normally configures).
 
-**Layering semantics — the `layer_note`.** The scenario's `factors` document is
+**Layering semantics — the `layer_note`.** For token re-estimation, the scenario's `factors` document is
 passed as `build_factor_set`'s `harness_settings` — the reserved,
 more-specific-than-workspace rung nothing else populates today — layered on
 top of whatever the workspace and any managed layer already configure. That
@@ -1486,27 +1559,38 @@ in the database and the request's own `factors`. Verified by
 which snapshots a run before and after a scenario call and asserts they are
 byte-for-byte identical.
 
-**This endpoint recomputes estimates, never a measurement.** A self-hosted run
-can now genuinely carry `energy_source: "measured"` — see [How a measurement
-reaches a run](#how-a-measurement-reaches-a-run) above for the two paths
-(`TRET_LOCAL_ENERGY_METER=nvidia_smi`, or an external reading through the SDK
-or `tret run --measured-wh`) — but this what-if endpoint still only ever
-recomputes the *estimate* a run's tokens would produce under different
-factors. A run whose stored `energy_accounting["energy_source"]` is
-`"measured"` or `"mixed"` is recomputed the same as any other: `scenario`
-reprices its token counts through the requested factors exactly as `recorded`
-reflects what was actually persisted, so the two blocks answer different
-questions for such a run (what was actually measured, vs. what the estimate
-alone would have said) rather than the same question under two configurations.
-Nothing here recomputes a meter reading, because there is nothing to
-recompute it from — the Wh figure a meter or an external reading produced is
-not a function of this endpoint's `factors` input at all.
+**Two explicit energy modes.** `estimate_both_sides` retains the original
+endpoint behavior: the recorded side stays as recorded, while the scenario
+reprices tokens. Despite the API name, it does not replace recorded meter
+observations with estimates. The UI calls this “Re-estimate scenario energy
+from tokens.”
+
+`preserve_measured_energy` keeps measured Wh and overlays only requested
+compatible grid/PUE changes. Unspecified measured-side factors come from the
+stored result, not today's workspace defaults. Facility measurements cannot
+receive a PUE change. Partial or unknown historical boundaries that cannot
+be safely replayed are excluded with a reason. Unsupported factor changes
+return 422; use token re-estimation for changes to energy models or other
+factors. Estimated segments still use the token estimator.
+
+An empty preserve scenario copies stored accounting exactly, even if the
+catalog or settings changed, and reports `runs_preserved`. Nonempty scenarios
+use each segment's stored measurement evidence. An ambiguous mixed run is
+excluded from both sides; no token-based allocation of measured energy is
+invented. `exclusions` supplies reason/count pairs, and the UI shows them.
+Missing historical measurement or uncertainty metadata stays missing.
+
+For preserved measurements, the baseline remains the recorded counterfactual,
+explicitly labeled as unchanged; its signed carbon difference is recalculated
+against the scenario actual result. Reconstructing all historical baseline
+factor layers is outside this mode's current scope. The response's `mode` and
+`mode_note` identify the interpretation. No mode changes stored run data.
 
 ## Where the numbers live in the API
 
 Each run's `energy_accounting` block carries, additively:
 
-- the original keys, unchanged in name and meaning: `energy_wh` (compute only),
+- the original keys, with measured energy coverage now explicit: `energy_wh` (within `energy_boundary`),
   `energy_wh_per_mtok`, `weighted_tokens`, `grid_co2e_g_per_kwh`, `co2e_g` (the
   run total, always `scope1 + scope2 + scope3`), `pue`, `energy_wh_total`,
   `deployment`, `embodied_g`, `scopes`, `baseline`;
@@ -1626,8 +1710,9 @@ lower.
 
 ## Limitations — read before quoting any number
 
-- **Not audit-grade.** Nothing here is metered, verified, or assured. It is a
-  model of a model, calibrated against five models' inferred hardware.
+- **Not audit-grade.** Some energy may be observed by an optional meter, but
+  the overall carbon result is not verified or assured. The default energy
+  model uses inferred hardware; meter and workload validation remain separate.
 - **Not an offset and not a reduction claim.** `avoided_co2e_g` and `avoided_usd`
   are same-token counterfactuals. Nothing tret reports removes carbon from the
   atmosphere or may be netted against anything.
@@ -1652,3 +1737,30 @@ If you need defensible numbers: meter your own deployment, put the result in
 with its basis, set `embodied_g_per_run` from your own hardware, switch the PUE
 profile to match where you actually run, and treat everything tret produces as a
 starting sanity check rather than a result.
+
+
+## Coverage matrix and validation tools
+
+| Result | Included today | Missing or conditional | Claim status |
+|---|---|---|---|
+| Operational inference | Measured or modeled boundary, applied PUE and electricity factor | Remaining node components for GPU measurements; deployment-specific validation | Covered subtotal |
+| Lifecycle inference | Operational subtotal plus explicitly supplied hardware allocation | Idle reserve, network/storage, material tools and other components without evidence | Complete total withheld |
+| Provider development | No training allocation silently charged to inference | Development/training footprint, functional unit and allocation evidence | Not calculated |
+| SCI for AI consumer candidate | Explicit unit and component records | Complete operation/monitoring and hardware coverage, comparable quality gates, review | Incomplete |
+
+The SCI mapping pins [repository revision e8d3534](https://github.com/Green-Software-Foundation/sci-ai/blob/e8d3534f72b26e7b114c9054050db60f4543bb60/SPEC.md).
+This is a review input, not a claim of ratification or conformity.
+
+The [validation runbook](research/emissions-validation-runbook.md) provides local
+commands for an allowlisted workload inventory, a measured benchmark protocol,
+held-out evaluation, cache experiments, explicit accepted-task cohorts and
+methodology shadow reports. Actual exports, reference-meter validation and a
+representative shadow window are still required. Production history remains
+as recorded.
+
+Legacy hardware profiles preserve their arithmetic and now name their divisor:
+`runs_over_lifetime` means lifetime **batch executions**, followed by the batch
+size divisor to allocate per request. New supplied footprints can instead use
+`total_embodied_g × duration_s / service_life_s × resource_share`. No grid factor
+enters that allocation and no second batch divisor is applied. Supplied cloud
+hardware is permitted; absent cloud hardware is unknown, not verified zero.

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "calibration_id": "jegham_2025_v1",
+  "source": {
+    "title": "How Hungry is AI? Benchmarking Energy, Water, and Carbon Footprint of LLM Inference",
+    "authors": ["Jegham", "Abdelatti", "Elmoubarki", "Hendawi"],
+    "version": "v1",
+    "published": "2025-05-14",
+    "url": "https://arxiv.org/html/2505.09598v1",
+    "license": "CC BY 4.0",
+    "underlying_api_data_license": "unknown"
+  },
+  "boundary": {
+    "energy_boundary": "facility",
+    "included_components": ["gpu", "non_gpu_it", "facility_overhead"],
+    "excluded_components": ["idle_unused_gpu", "embodied_hardware"],
+    "batch_size": 8,
+    "node_gpu_count": 8,
+    "gpu_configuration_evidence": "inferred",
+    "non_gpu_utilization": 0.5,
+    "output_reasoning_denominator": "unverified"
+  },
+  "shapes": [[100, 300], [1000, 1000], [10000, 1500]],
+  "providers": {
+    "openai": {"pue": 1.12, "classification_basis": "table_1_provider_row"},
+    "anthropic": {"pue": 1.14, "classification_basis": "table_1_provider_row"},
+    "deepseek": {"pue": 1.27, "classification_basis": "table_1_provider_row"}
+  },
+  "observations": {
+    "GPT-4.1 nano": {"provider": "openai", "facility_wh_mean": [0.103, 0.271, 0.454], "facility_wh_stddev": [0.037, 0.087, 0.208], "legacy_rounded_wh": [0.10, 0.27, 0.45], "node_it_wh_mean": [0.0919642857, 0.2419642857, 0.4053571429]},
+    "GPT-4o": {"provider": "openai", "facility_wh_mean": [0.421, 1.214, 1.788], "facility_wh_stddev": [0.127, 0.391, 0.363], "legacy_rounded_wh": [0.42, 1.21, 1.79], "node_it_wh_mean": [0.3758928571, 1.0839285714, 1.5964285714]},
+    "Claude 3.7 Sonnet": {"provider": "anthropic", "facility_wh_mean": [0.836, 2.781, 5.518], "facility_wh_stddev": [0.102, 0.277, 0.751], "legacy_rounded_wh": [0.84, 2.78, 5.52], "node_it_wh_mean": [0.7333333333, 2.4394736842, 4.8403508772]},
+    "o3": {"provider": "openai", "facility_wh_mean": [7.026, 21.414, 39.223], "facility_wh_stddev": [3.663, 14.273, 20.317], "legacy_rounded_wh": [7.03, 21.41, 39.22], "node_it_wh_mean": [6.2732142857, 19.1196428571, 35.0205357143], "pue_classification_basis": "inherited_group_row"},
+    "DeepSeek-R1": {"provider": "deepseek", "facility_wh_mean": [23.815, 29.0, 33.634], "facility_wh_stddev": [2.160, 3.069, 3.798], "legacy_rounded_wh": [23.82, 29.00, 33.63], "node_it_wh_mean": [18.7519685039, 22.8346456693, 26.4834645669]}
+  },
+  "legacy_fit_wh_per_mtok": {
+    "GPT-4.1 nano": [4.2, 271.9, 65.1],
+    "GPT-4o": [-6.1, 1233.1, null],
+    "Claude 3.7 Sonnet": [156.7, 2634.7, 16.8],
+    "o3": [792.8, 20850.4, 26.3],
+    "DeepSeek-R1": [-1989.7, 35474.8, null]
+  }
+}

@@ -106,8 +106,9 @@ services:
       TRET_LOCAL_ENERGY_METER_INTERVAL_S: ${TRET_LOCAL_ENERGY_METER_INTERVAL_S:-1.0}
       TRET_LOCAL_ENERGY_METER_GPU_INDEX: ${TRET_LOCAL_ENERGY_METER_GPU_INDEX:-}
       # Eco accounting — docs/eco-accounting.md, docs/emissions-methodology.md.
-      # 470 gCO2e/kWh is the IEA 2024 global power-sector average.
-      TRET_GRID_CO2E_G_PER_KWH: ${TRET_GRID_CO2E_G_PER_KWH:-470.0}
+      # Omitted when unset so the application retains its cited Ember default
+      # provenance. Set TRET_GRID_CO2E_G_PER_KWH to supply an operator factor.
+      TRET_GRID_CO2E_G_PER_KWH:
       # GHG Protocol Scope 2 basis of that factor: location_based | market_based
       # | unspecified. The default factor is a physical-grid average.
       TRET_GRID_CO2E_BASIS: ${TRET_GRID_CO2E_BASIS:-location_based}

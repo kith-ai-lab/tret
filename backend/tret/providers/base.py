@@ -86,6 +86,18 @@ class Usage:
     # is unaffected by this: the two numbers answer different questions and are
     # never substituted for one another.
     reported_cost_usd: Decimal | None = None
+    # Provider-reported hidden/reasoning output. New fields stay after the
+    # original five constructor arguments so older positional callers keep
+    # binding their fifth argument to ``reported_cost_usd``.
+    reasoning_tokens: int | None = None
+    reasoning_accounting: Literal["counted_in_output", "additional", "unknown"] | None = None
+
+    @property
+    def energy_output_tokens(self) -> int:
+        """Output denominator with only confirmed additional reasoning added."""
+        if self.reasoning_accounting == "additional" and self.reasoning_tokens is not None:
+            return self.output_tokens + self.reasoning_tokens
+        return self.output_tokens
 
 
 @dataclass
@@ -121,6 +133,32 @@ class JsonCompletion:
     # other OpenAI-compatible server — and for AnthropicProvider it is the
     # constant "anthropic", so the field reads uniformly across providers.
     served_by: str | None = None
+    # Provider-reported execution geography. This is evidence, not a region
+    # inferred from provider/model configuration; absent remains None.
+    inference_geo: str | None = None
+
+
+_CALL_SLUG_RE = re.compile(r"^[a-z0-9._:/-]+$")
+_CALL_SLUG_MAX_LEN = 64
+
+
+def normalize_call_slug(value: str | None) -> str | None:
+    """Normalize a per-call `served_by`/`inference_geo` reading before it is
+    persisted into a JSON column and the SDK ledger on every turn.
+
+    Stripped, lower-cased, capped at 64 characters, and restricted to
+    `[a-z0-9._:/-]` — anything oversized or outside that charset (whatever
+    an upstream happens to send, never validated before) becomes `None`
+    rather than persisting it verbatim.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().lower()
+    if not candidate or len(candidate) > _CALL_SLUG_MAX_LEN:
+        return None
+    if not _CALL_SLUG_RE.fullmatch(candidate):
+        return None
+    return candidate
 
 
 # ── prompt-cache breakpoints ──────────────────────────────────────────────────
@@ -171,6 +209,7 @@ class TurnComplete:
     # See `JsonCompletion.served_by` — the same field, carried on the streaming
     # path instead of the structured-completion one.
     served_by: str | None = None
+    inference_geo: str | None = None
 
 
 ProviderEvent = TextDelta | ToolCallComplete | TurnComplete

@@ -30,6 +30,40 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## 2026-09 emissions method and default changes
+
+No migration. Several shipped emissions defaults and behaviours change with
+this pull; none rewrite stored history.
+
+- **Grid default corrected: 470 → 458.49 gCO2e/kWh.** The old figure was
+  mis-cited as an "IEA global power-sector average"; it is actually the
+  pinned [Ember Yearly Electricity Data](emissions-methodology.md) World
+  2025 lifecycle CO2e intensity. This is a source correction, not a new
+  measurement — every new run now uses 458.49 unless the workspace has its
+  own grid factor configured.
+- **Default energy strategy is now `class_ladder_v2`** (source-PUE-normalised,
+  single-coefficient fit), with `class_ladder_v1` still available as a named
+  rollback through the `energy_strategy` factor. New runs' energy figures
+  move by roughly −8% to −29% by class versus v1 — see
+  [emissions-methodology.md](emissions-methodology.md) for the per-class
+  breakdown. This is a methodology correction, **not an emissions
+  reduction**: nothing about actual energy use changed.
+- **Carbon totals are now withheld across a grid-factor change, even within
+  one GHG Protocol basis.** The analytics rollup nulls `co2e_g` (and sets
+  `carbon_is_summable: false`) for any window whose runs were priced under
+  different grid factors — including a window that spans this upgrade, or a
+  workspace that corrects its own configured factor later. Energy and money
+  still sum normally; only carbon is withheld, and only until the window
+  rolls past the change. Use `POST /api/analytics/emissions/whatif` for an
+  explicitly labelled restatement under one factor.
+- **Embodied emissions now apply to cloud runs too, if configured.** A
+  workspace that already had `embodied.g_per_run` (or an embodied profile)
+  set previously saw it applied to local runs only; it now applies to cloud
+  runs as well, so cloud scope 3 rises for those workspaces. Nothing changes
+  for a workspace that never configured embodied emissions.
+- Stored historical figures are never rewritten by any of the above; only
+  new runs and new rollup queries see the corrected defaults.
+
 ## 2026-09-11 · chat and runs fixes
 
 Three fixes, no migration:

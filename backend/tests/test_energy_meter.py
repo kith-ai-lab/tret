@@ -93,6 +93,11 @@ def test_parse_power_draw_returns_none_when_every_reading_is_negative():
     assert energy_meter._parse_power_draw("0, -5.0\n1, -1.0\n", gpu_index=None) is None
 
 
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf"])
+def test_parse_power_draw_rejects_non_finite_readings(value):
+    assert energy_meter._parse_power_draw(f"0, {value}\n", gpu_index=None) is None
+
+
 # ── NvidiaSmiMeter: integration of a known power series ─────────────────────
 
 
@@ -140,13 +145,8 @@ async def test_integration_extends_flat_before_the_first_sample_too(monkeypatch)
     assert reading.wh == pytest.approx(Decimal("150") / Decimal("3600"))
 
 
-async def test_stop_clamps_a_negative_integration_to_zero(monkeypatch):
-    """`_parse_power_draw` already keeps a negative *reading* out of
-    `_samples` in the ordinary path — this is the belt-and-suspenders half:
-    even if a negative wattage somehow reached the trapezoid (samples set
-    directly here, the way every white-box test in this file does), the run
-    must report zero energy, never negative, rather than fail or subtract
-    from anything upstream."""
+async def test_stop_rejects_negative_internal_samples(monkeypatch):
+    """Injected or corrupted samples are rejected at integration too."""
     meter = NvidiaSmiMeter(interval_s=1.0)
     meter._samples = [(0.0, -100.0), (1.0, -100.0)]
     meter._start_ts = 0.0
@@ -154,8 +154,7 @@ async def test_stop_clamps_a_negative_integration_to_zero(monkeypatch):
 
     reading = await meter.stop()
 
-    assert reading is not None
-    assert reading.wh == Decimal("0")
+    assert reading is None
 
 
 async def test_short_run_falls_back_to_one_more_sample_over_elapsed_time(monkeypatch):
@@ -292,6 +291,9 @@ def test_describe_reports_kind_and_interval():
     d = meter.describe()
     assert d["kind"] == "nvidia_smi"
     assert d["interval_s"] == 2.5
+    assert d["energy_boundary"] == "gpu"
+    assert "gpu-board" in d["notes"].lower()
+    assert "host-level" not in d["notes"].lower()
     assert "shared" in d["notes"].lower() or "overstate" in d["notes"].lower()
 
 
@@ -312,6 +314,7 @@ async def test_external_reading_meter_wraps_the_given_figure():
         note="whole-rack PDU",
         shared_device=True,
     )
+    assert reading.energy_boundary == "node_it"
 
 
 async def test_external_reading_meter_defaults_to_not_shared():
@@ -319,6 +322,15 @@ async def test_external_reading_meter_defaults_to_not_shared():
     reading = await meter.stop()
     assert reading.shared_device is False
     assert reading.wh == Decimal("3.0")
+
+
+@pytest.mark.parametrize(
+    "wh",
+    [Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity"), Decimal("-0.1")],
+)
+def test_external_reading_meter_rejects_invalid_energy(wh):
+    with pytest.raises(ValueError, match="finite non-negative"):
+        ExternalReadingMeter(wh=wh)
 
 
 def test_external_reading_meter_describe():

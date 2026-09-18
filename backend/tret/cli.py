@@ -243,6 +243,7 @@ def _run_command(args: argparse.Namespace) -> None:
                 model=args.model,
                 max_iterations=args.max_iterations,
                 measured_energy_wh=args.measured_wh,
+                measured_energy_boundary=args.measured_boundary,
                 on_route=on_route,
                 on_tool_call=on_tool_call,
             )
@@ -393,9 +394,14 @@ def main() -> None:
         type=_non_negative_float,
         default=None,
         help=(
-            "IT-load watt-hours you metered for this run; recorded as a "
+            "Watt-hours you metered for this run; declare scope with --measured-boundary; "
             "measurement, replaces the estimate"
         ),
+    )
+    run_cmd.add_argument(
+        "--measured-boundary", default="node_it",
+        choices=("gpu", "node_it", "facility", "partial", "unknown"),
+        help="Boundary of --measured-wh (default: node_it); facility includes facility overhead",
     )
     run_cmd.add_argument(
         "--json", action="store_true", help="Emit machine-readable JSON to stdout"

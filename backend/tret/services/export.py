@@ -15,10 +15,9 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tret.config import get_settings
-
 from tret.db.models import Finding, Run
 from tret.services.emissions import energy_wh_field
+from tret.services.emissions_validation import number
 from tret.services.html_sanitize import render_markdown
 
 
@@ -120,15 +119,41 @@ async def assemble_deliverable(
             }
         )
     footprint = _deliverable_footprint(runs.values())
-    if footprint["energy_wh"] is not None:
+    if footprint["runs"]:
         # Reported in the deliverable itself, not just the audit view: a climate
         # document that hides its own compute footprint is making an argument it
         # would not accept from anyone else. Estimated, and labelled as such.
+        #
+        # `energy_wh` is None only when the runs behind it genuinely disagree on
+        # energy boundary (F5) — never just because a boundary is missing. A
+        # missing boundary means the run predates boundary labelling, which is
+        # itself a known, nameable state (`energy_boundary_legacy_qualifier`),
+        # not an unknown one; the paragraph must never be dropped for it.
+        carbon = (f", ≈{footprint['co2e_g']:.3g} gCO2e" if footprint["co2e_g"] is not None
+                  else "; combined carbon withheld because coverage or factor bases differ")
+        description = ("Observed energy with estimated carbon factors." if footprint["energy_source"] == "measured"
+                       else "Heuristic estimate or mixed measurement coverage; not a measurement of the whole task.")
+        if footprint["energy_wh"] is not None:
+            energy_clause = f"{footprint['energy_wh']:.3g} Wh{carbon}"
+        else:
+            subtotals = "; ".join(
+                f"{s['boundary']}: {s['energy_wh']:.3g} Wh across {s['runs']} run(s)"
+                for s in footprint["energy_boundary_subtotals"]
+            )
+            energy_clause = (
+                "combined energy figure withheld because these drafting runs record "
+                f"different energy boundaries ({subtotals})"
+            )
+        boundary_note = (
+            " Energy boundary: legacy, unresolved (runs recorded before boundary "
+            "labelling); figures summed as recorded."
+            if footprint.get("energy_boundary_legacy_qualifier") else ""
+        )
         parts.append(
-            f"\n---\n\n_Estimated compute footprint of the {footprint['runs']} run(s) behind "
-            f"this document: {footprint['energy_wh']:.3g} Wh, ≈{footprint['co2e_g']:.3g} gCO2e "
-            f"at {footprint['grid_co2e_g_per_kwh']:.0f} gCO2e/kWh. Heuristic estimate from token "
-            "counts and model energy class — not a measurement._"
+            f"\n---\n\n_Estimated compute footprint of the {footprint['runs']} drafting run(s), as recorded: "
+            f"{energy_clause}. {description} "
+            "Covers selected drafting runs; other attempts, tools and supporting activity may be excluded."
+            f"{boundary_note}_"
         )
     markdown_text = "\n".join(parts)
     # Section bodies are model-authored and derived from third-party uploads, so
@@ -153,28 +178,93 @@ def _deliverable_footprint(runs) -> dict:
     Summed over *distinct runs*, so two sections drafted by one run are not
     counted twice. Runs with no estimate contribute nothing and are counted as
     missing rather than as zero.
+
+    Energy is withheld (`energy_wh: None`) only when two or more runs genuinely
+    disagree on energy boundary — never merely because a boundary predates
+    labelling (F5). A legacy-only window still sums, with
+    `energy_boundary_legacy_qualifier: True` flagging the caveat the caller
+    must print; a real mix withholds the sum and reports
+    `energy_boundary_subtotals` instead.
     """
-    total_wh = 0.0
-    total_co2e = 0.0
-    grid = float(get_settings().grid_co2e_g_per_kwh)
-    counted = 0
-    for run in runs:
-        if run.energy_wh is None:
-            continue
-        counted += 1
-        total_wh += float(run.energy_wh)
-        accounting = run.energy_accounting or {}
-        total_co2e += float(accounting.get("co2e_g") or 0.0)
-        if accounting.get("grid_co2e_g_per_kwh"):
-            # The intensity actually used at run time wins over today's setting.
-            grid = float(accounting["grid_co2e_g_per_kwh"])
+    runs = list({str(r.id): r for r in runs}.values())
+    energy = [float(number(r.energy_wh, "energy_wh")) for r in runs if r.energy_wh is not None]
+    accounts = [r.energy_accounting or {} for r in runs if r.energy_wh is not None]
+    carbon = [float(number(a["co2e_g"], "co2e_g")) for a in accounts
+              if a.get("co2e_g") is not None]
+
+    def known(value):
+        return "unknown" if value is None or value == "" else value
+
+    bases = {(known(a.get("grid_co2e_basis")),
+              known(a.get("grid_factor_boundary", a.get("factor_boundary"))),
+              known(a.get("grid_gas_coverage", a.get("gas_coverage"))),
+              known(a.get("grid_gwp_horizon_years")),
+              known(a.get("grid_gwp_assessment_basis", a.get("gwp_basis"))),
+              known(a.get("grid_includes_td_losses")),
+              known(a.get("grid_electricity_mix_basis"))) for a in accounts}
+    single_run = len(energy) == 1
+    known_compatible = len(bases) == 1 and (
+        single_run or "unknown" not in next(iter(bases), ())
+    )
+    grids = {
+        float(number(a["grid_co2e_g_per_kwh"], "grid_co2e_g_per_kwh"))
+        if a.get("grid_co2e_g_per_kwh") is not None else None
+        for a in accounts
+    }
+    sources = {a.get("energy_source", "unknown") for a in accounts}
+    boundaries = {a.get("energy_boundary", "unknown") for a in accounts}
+
+    # ── F5: a missing `energy_boundary` is a *legacy* row, not an unknown one ──
+    # A pre-batch run has no `energy_boundary` key at all (it predates boundary
+    # labelling entirely); a v2 run that genuinely couldn't resolve one records
+    # `"unknown"` alongside a `method_id`. Only the former group's energy may be
+    # summed with a caveat rather than withheld outright — the whole point of
+    # this classification is that "legacy" and "genuinely unresolved" mean
+    # different things and must not be folded into the same withholding rule
+    # that a real cross-boundary mix triggers below.
+    def boundary_class(a: dict) -> str:
+        if "energy_boundary" not in a:
+            return "legacy_unresolved"
+        boundary = a.get("energy_boundary")
+        if boundary in (None, "unknown") and not a.get("method_id"):
+            return "legacy_unresolved"
+        return boundary or "unknown"
+
+    boundary_classes = [boundary_class(a) for a in accounts]
+    per_boundary_energy: dict[str, float] = {}
+    per_boundary_runs: dict[str, int] = {}
+    for wh, cls in zip(energy, boundary_classes):
+        per_boundary_energy[cls] = per_boundary_energy.get(cls, 0.0) + wh
+        per_boundary_runs[cls] = per_boundary_runs.get(cls, 0) + 1
+    boundary_subtotals = [
+        {"boundary": cls, "energy_wh": round(total, 6), "runs": per_boundary_runs[cls]}
+        for cls, total in sorted(per_boundary_energy.items())
+    ]
+    distinct_classes = set(boundary_classes)
+    # A single run is summed regardless of its own boundary (nothing to mix
+    # with); two-or-more legacy rows sum with the qualifier sentence; two or
+    # more rows spanning distinct boundary classes withhold the combined
+    # figure and publish per-boundary subtotals instead.
+    energy_summable = bool(energy) and (single_run or len(distinct_classes) == 1)
+    legacy_qualifier = (
+        bool(energy) and not single_run and distinct_classes == {"legacy_unresolved"}
+    )
+
     return {
         "estimated": True,
-        "runs": counted,
+        "runs": len(energy),
         "runs_without_estimate": sum(1 for r in runs if r.energy_wh is None),
-        "energy_wh": round(total_wh, 6) if counted else None,
-        "co2e_g": round(total_co2e, 6) if counted else None,
-        "grid_co2e_g_per_kwh": grid,
+        "runs_without_carbon": len(runs) - len(carbon),
+        "energy_wh": round(sum(energy), 6) if energy_summable else None,
+        "co2e_g": round(sum(carbon), 6) if carbon and len(carbon) == len(runs) and known_compatible else None,
+        "grid_co2e_g_per_kwh": next(iter(grids)) if len(grids) == 1 else None,
+        "energy_source": next(iter(sources)) if len(sources) == 1 else "mixed",
+        "energy_boundary": next(iter(boundaries)) if len(boundaries) == 1 else "mixed",
+        "coverage": "selected_drafting_runs_only",
+        "carbon_compatible": known_compatible,
+        # F5 additions — additive only, the shape above is unchanged.
+        "energy_boundary_legacy_qualifier": legacy_qualifier,
+        "energy_boundary_subtotals": boundary_subtotals if (energy and not single_run) else [],
     }
 
 

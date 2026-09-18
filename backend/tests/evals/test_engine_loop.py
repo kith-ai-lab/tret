@@ -14,6 +14,7 @@ Each drives the real engine through the real world fixture; only the model and
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
@@ -150,7 +151,15 @@ async def test_a_midstream_failure_with_nothing_streamed_books_nothing_extra(wor
     assert result.run.status == "failed"
     assert result.run.cost_usd == 0
     assert result.run.reported_cost_usd is None
-    assert not result.run.model_timeline
+    # The failed request has no usage to estimate, but retaining the attempt is
+    # still important: it must remain explicitly unavailable and must not
+    # inherit routing metadata from an earlier call.
+    assert len(result.run.model_timeline) == 1
+    record = result.run.model_timeline[0]["call_records"][-1]
+    assert record["usage_status"] == "unavailable"
+    assert record["served_by"] is None
+    assert record["inference_geo"] is None
+    assert record["reasoning_tokens"] is None
     # Only the user's own opening message is on the record — no assistant turn
     # to even consider partial, since nothing ever streamed back.
     assert len(result.run.messages) == 1
@@ -707,6 +716,48 @@ async def test_cancelling_a_run_that_fails_before_start_still_clears_cancelled(w
     assert run.status == "failed"
     assert "unknown_task_type" in run.error
     assert provider.calls == []  # refused before the first token, as ever
+
+    assert engine._cancelled == set()
+
+
+async def test_cancellederror_during_guarded_finalize_still_clears_cancelled(world):
+    """`execute()`'s own `finally` guards its energy-accounting finalize
+    (`_stop_meter` / `_combine_segments` / `db.commit`) with a bare `except
+    Exception`, which never sees a `CancelledError` (a `BaseException`) raised
+    while awaiting inside that guard. Before the nested-`finally` fix, such a
+    `CancelledError` would skip straight past `self._cancelled.discard(run_id)`
+    and leak `run_id` into `_cancelled` forever, the same leak (g)'s sibling
+    test covers for a pre-flight failure. This drives the same leak through
+    the *finalize* guard instead, by making `_stop_meter` — the guard's first
+    awaited call once a segment is live on `emissions.current_segment` — raise
+    `CancelledError` directly.
+    """
+    from types import SimpleNamespace
+
+    provider = ReplayProvider([ScriptedTurn(text="Should never be asked anything.")])
+    engine = HarnessEngine(catalog=ModelCatalog(), priors=NoPriors())
+    harness_id = await world.create_harness()
+    run_id = await world.create_run(
+        harness_id=harness_id,
+        task_type="divergence_assesment",  # one letter short of the real slug
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+
+    async def fake_execute_inner(db, run, emissions):
+        emissions.current_segment = SimpleNamespace()  # a segment "still live"
+
+    async def fake_stop_meter(segment, emissions):
+        raise asyncio.CancelledError()
+
+    engine._execute_inner = fake_execute_inner
+    engine._stop_meter = fake_stop_meter
+
+    engine.cancel(run_id)
+    assert engine._cancelled == {run_id}
+
+    with patch("tret.engine.harness.ProviderRegistry", _replay_registry(provider)):
+        with pytest.raises(asyncio.CancelledError):
+            await engine.execute(run_id)
 
     assert engine._cancelled == set()
 

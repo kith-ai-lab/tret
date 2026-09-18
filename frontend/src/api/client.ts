@@ -538,7 +538,9 @@ export interface EmissionsFactor {
   // hourly table or the plain annual figure (tret.services.grid_tables).
   // All undefined/null on a run recorded before either feature existed.
   grid_region?: string | null
-  temporal?: 'annual_average' | 'hourly' | null
+  temporal?: 'annual_average' | 'hourly' | 'interval_weighted' | null
+  requested_region?: string | null
+  region_resolution_status?: string | null
   table?: string | null
   table_summary?: EmissionsGridTableSummary | null
   table_miss?: boolean | null
@@ -645,6 +647,34 @@ export type TokenCounts = Record<TokenBucket, number>
  *  for that reason. */
 export interface EnergyAccounting {
   estimated: boolean
+  /** Missing on historical rows: unknown coverage, not verified node IT. */
+  energy_boundary?: 'gpu' | 'node_it' | 'facility' | 'partial' | 'unknown' | 'mixed'
+  energy_boundary_complete?: boolean
+  energy_source?: 'estimated' | 'measured' | 'mixed'
+  method_id?: string | null
+  method_version?: number | null
+  grid_factor_boundary?: string | null
+  grid_gas_coverage?: string | null
+  grid_gwp_horizon_years?: number | null
+  grid_gwp_assessment_basis?: string | null
+  grid_dataset_version?: string | null
+  grid_observation_year?: number | null
+  energy_method_shadow?: {
+    method_id: string
+    energy_wh?: number
+    co2e_g?: number
+    difference_kind?: string
+  } | null
+  coverage?: {
+    functional_unit: string
+    missing: string[]
+    covered_subtotal: Record<string, number>
+    complete_total: Record<string, number> | null
+    components: {component_id: string; status: string; value: number | null; unit: string; reason?: string}[]
+    alignment?: {status: string; conformity_claim?: string | null}
+  }
+  configured_pue?: number | null
+  pue_applied?: boolean | null
   model: string | null
   /** Present only on a multi-model roll-up: every model the run used, in order. */
   models?: string[]
@@ -657,6 +687,7 @@ export interface EnergyAccounting {
   carbon_summable?: boolean
   by_basis?: {
     grid_co2e_basis: string | null
+    grid_factor_signature?: unknown[]
     co2e_g: number | null
     energy_wh: number | null
     models: (string | null)[]
@@ -666,14 +697,14 @@ export interface EnergyAccounting {
   weighted_tokens: number
   cache_read_weight: number | null
   cache_write_weight: number | null
-  energy_wh: number // compute / IT load only — excludes facility overhead
+  energy_wh: number // raw energy within energy_boundary; legacy coverage may be unknown
   grid_co2e_g_per_kwh: number | null
   /** Run total; equals scope1_g + scope2_g + scope3_g. Null on a roll-up whose
    *  segments span more than one GHG Protocol basis — see `carbon_summable`. */
   co2e_g: number | null
   basis: string
   pue?: number
-  energy_wh_total?: number // compute x PUE
+  energy_wh_total?: number // energy used for carbon conversion; facility readings already include PUE
   deployment?: string // cloud | local
   embodied_g?: number
   scopes?: EmissionScopes
@@ -685,7 +716,7 @@ export interface EnergyAccounting {
   energy_wh_per_mtok_output?: number
   output_to_input_energy_ratio?: number
   tokens?: TokenCounts
-  energy_wh_by_bucket?: TokenCounts // compute Wh per bucket; sums to energy_wh
+  energy_wh_by_bucket?: TokenCounts // modeled allocation of energy_wh; sums to energy_wh
   reasoning_tier?: boolean
   // ── factor resolution ──
   pue_profile?: string // hyperscaler_cloud | workstation | onprem_datacenter
@@ -704,7 +735,9 @@ export interface EnergyAccounting {
    *  table referenced but not evaluated/missed) or "hourly" (an hourly
    *  grid.tables entry had a value for this run's actual start time).
    *  Undefined on a run recorded before hourly tables existed. */
-  grid_temporal?: 'annual_average' | 'hourly'
+  grid_temporal?: 'annual_average' | 'hourly' | 'interval_weighted'
+  grid_requested_region?: string | null
+  grid_region_resolution_status?: string | null
   // ── money, uncertainty, provenance ──
   cost?: EmissionsCost
   uncertainty?: EmissionsUncertainty
@@ -1663,6 +1696,7 @@ export interface EmissionsBucket {
   scope2_g: number | null
   scope3_g: number | null
   runs_without_scope_split: number
+  runs_without_carbon_total?: number
   /** The bases behind this bucket, in presentation order. More than one entry
    *  means its carbon was withheld. */
   grid_bases: GridBasis[]
@@ -1683,8 +1717,10 @@ export interface EmissionsTotals extends EmissionsBucket {
   avoided_pct: number | null // signed; null across a basis-mixed window
 }
 
-/** One GHG Protocol basis present in the window. Each row IS summable — that is
- *  the whole point of separating them — so its carbon is always a figure. */
+/** One GHG Protocol basis present in the window. Separating by basis is what
+ *  makes summing carbon meaningful at all, but a row's carbon can still be
+ *  withheld (`carbon_is_summable: false`) when its runs were priced under
+ *  different grid factors within that one basis — see `not_summable_note`. */
 export interface EmissionsByBasis extends EmissionsBucket {
   basis: GridBasis
 }
@@ -1936,7 +1972,7 @@ export interface EmissionsResolvedValue {
   /** Grid only: "annual_average" (no table, or the GET/PUT/DELETE settings
    *  endpoint computes without a run time, so a table reference always
    *  reads as annual here — see `table` below) or "hourly". */
-  temporal?: 'annual_average' | 'hourly' | null
+  temporal?: 'annual_average' | 'hourly' | 'interval_weighted' | null
   /** Grid only: the name of the `grid.tables` entry the winning grid entry
    *  referenced, or null if it referenced none. Set even when `temporal`
    *  reads "annual_average" here — meaning "hourly table `<table>` will
@@ -1972,7 +2008,7 @@ export interface EmissionsEffectiveFactors {
 }
 
 /** One shipped-default figure with the citation text the form shows beside its
- *  input ("default 470 gCO2e/kWh, IEA 2024"). */
+ *  input ("default 458.49 gCO2e/kWh, Ember World 2025"). */
 export interface EmissionsShippedDefault {
   value: number
   label: string
@@ -2023,6 +2059,7 @@ export interface EmissionsWhatifBody {
   project_id?: string | null
   days: number
   factors: Partial<EmissionsOverrides>
+  mode?: 'estimate_both_sides' | 'preserve_measured_energy'
 }
 
 /** The difference the scenario would have made. `co2e_g`/`co2e_pct` are null
@@ -2042,6 +2079,10 @@ export interface EmissionsWhatifResult {
   delta: EmissionsWhatifDelta
   runs_recomputed: number
   runs_skipped: number
+  runs_preserved?: number
+  mode?: 'estimate_both_sides' | 'preserve_measured_energy'
+  mode_note?: string
+  exclusions?: { reason: string; runs: number }[]
   basis: string
   /** Present when the workspace's own stored override document could not be
    *  applied to this scenario (e.g. it no longer validates) — the recompute

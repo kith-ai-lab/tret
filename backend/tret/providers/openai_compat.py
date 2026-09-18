@@ -12,6 +12,7 @@ import json
 import time
 from collections.abc import AsyncIterator
 from decimal import Decimal, InvalidOperation
+from typing import Literal
 
 import httpx
 
@@ -33,6 +34,7 @@ from tret.providers.base import (
     is_retryable_status,
     looks_like_html,
     mark_cache_breakpoint,
+    normalize_call_slug,
     summarize_html_error,
 )
 
@@ -178,7 +180,11 @@ def _served_by_from_openai(data: dict) -> str | None:
     return None
 
 
-def _usage_from_openai(usage: dict) -> Usage:
+def _usage_from_openai(
+    usage: dict,
+    *,
+    reasoning_accounting: Literal["counted_in_output", "additional", "unknown"] = "unknown",
+) -> Usage:
     """Translate an OpenAI-style usage object into canonical Usage.
 
     `prompt_tokens` counts the cache buckets too, so both of them are subtracted
@@ -189,13 +195,39 @@ def _usage_from_openai(usage: dict) -> Usage:
     prompt_tokens = int(usage.get("prompt_tokens") or 0)
     cache_read = min(_cached_prompt_tokens(usage), prompt_tokens)
     cache_write = min(_cache_write_tokens(usage), prompt_tokens - cache_read)
+    reasoning_tokens: int | None = None
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, dict):
+        raw_reasoning = details.get("reasoning_tokens")
+        if (
+            isinstance(raw_reasoning, int)
+            and not isinstance(raw_reasoning, bool)
+            and raw_reasoning >= 0
+        ):
+            reasoning_tokens = raw_reasoning
     return Usage(
         input_tokens=prompt_tokens - cache_read - cache_write,
         output_tokens=int(usage.get("completion_tokens") or 0),
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
+        reasoning_tokens=reasoning_tokens,
+        reasoning_accounting=(reasoning_accounting if reasoning_tokens is not None else None),
         reported_cost_usd=_reported_cost_usd(usage),
     )
+
+
+def _inference_geo_from_openai(data: dict) -> str | None:
+    """Return explicit response geography; never infer it from configuration.
+
+    Checked under `usage` first (`usage.get("inference_geo")`, the plan's own
+    cited shape) before the body's top level, so a live response that nests
+    it under `usage` is not silently read as absent.
+    """
+    usage = data.get("usage")
+    value = usage.get("inference_geo") if isinstance(usage, dict) else None
+    if not (isinstance(value, str) and value.strip()):
+        value = data.get("inference_geo")
+    return normalize_call_slug(value) if isinstance(value, str) else None
 
 
 def _index_of(entry: dict) -> int:
@@ -227,6 +259,10 @@ class OpenAICompatProvider(Provider):
     # LocalProvider overrides this to `local`, which is the class an air-gapped
     # deployment keeps (tret/net/policy.py).
     egress_class = CLASS_PROVIDER
+    # Compatibility alone does not prove whether a vendor includes hidden
+    # reasoning in completion_tokens. A provider with a pinned contract may
+    # narrow this (OpenRouter below); otherwise explicit values remain unknown.
+    reasoning_accounting: Literal["counted_in_output", "additional", "unknown"] = "unknown"
 
     def __init__(
         self,
@@ -385,6 +421,7 @@ class OpenAICompatProvider(Provider):
         # `openrouter_metadata` — taking the last keeps this correct even if
         # an earlier chunk arrives before the decision is final.
         served_by: str | None = None
+        inference_geo: str | None = None
 
         async with open_client(
             self.egress_class, timeout=httpx.Timeout(300.0, connect=15.0)
@@ -413,7 +450,15 @@ class OpenAICompatProvider(Provider):
                         except json.JSONDecodeError:
                             continue
                         if chunk.get("usage"):
-                            usage = _usage_from_openai(chunk["usage"])
+                            # Streaming usage objects are cumulative snapshots;
+                            # replace with the newest one rather than summing.
+                            usage = _usage_from_openai(
+                                chunk["usage"],
+                                reasoning_accounting=self.reasoning_accounting,
+                            )
+                        chunk_geo = _inference_geo_from_openai(chunk)
+                        if chunk_geo:
+                            inference_geo = chunk_geo
                         chunk_served_by = _served_by_from_openai(chunk)
                         if chunk_served_by:
                             served_by = chunk_served_by
@@ -468,8 +513,13 @@ class OpenAICompatProvider(Provider):
         # name can change chunk to chunk until routing settles (see the
         # `served_by` local above), and resolving each intermediate value
         # would spend the endpoints-lookup cache churn on names never kept.
-        served_by = await self._resolve_served_by(model, served_by)
-        yield TurnComplete(usage=usage, stop_reason=stop, served_by=served_by)
+        served_by = normalize_call_slug(await self._resolve_served_by(model, served_by))
+        yield TurnComplete(
+            usage=usage,
+            stop_reason=stop,
+            served_by=served_by,
+            inference_geo=inference_geo,
+        )
 
     async def complete_json(
         self,
@@ -530,8 +580,11 @@ class OpenAICompatProvider(Provider):
                 raise ProviderError(self.name, message, resp.status_code)
             break
         data = resp.json()
-        usage = _usage_from_openai(data.get("usage") or {})
-        served_by = await self._resolve_served_by(model, _served_by_from_openai(data))
+        usage = _usage_from_openai(
+            data.get("usage") or {}, reasoning_accounting=self.reasoning_accounting
+        )
+        served_by = normalize_call_slug(await self._resolve_served_by(model, _served_by_from_openai(data)))
+        inference_geo = _inference_geo_from_openai(data)
         try:
             calls = data["choices"][0]["message"].get("tool_calls") or []
             for call in calls:
@@ -541,6 +594,7 @@ class OpenAICompatProvider(Provider):
                         usage=usage,
                         model=model,
                         served_by=served_by,
+                        inference_geo=inference_geo,
                     )
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             raise ProviderError(self.name, f"Malformed structured completion: {e}") from e
@@ -595,6 +649,7 @@ class OpenRouterProvider(OpenAICompatProvider):
     """
 
     name = "openrouter"
+    reasoning_accounting = "counted_in_output"
     max_cache_breakpoints = 4  # Anthropic's per-request limit, which OpenRouter inherits
 
     def __init__(

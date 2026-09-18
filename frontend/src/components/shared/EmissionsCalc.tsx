@@ -171,12 +171,15 @@ function buildSteps(energy: EnergyAccounting): Step[] {
     },
     {
       n: 3,
-      step: 'Compute energy',
-      derivation: `${formatTokens(weighted)} / 1,000,000 x ${formatFactor(energy.energy_wh_per_mtok, 1)} Wh`,
+      step: 'Energy within recorded boundary',
+      derivation: energy.energy_source === 'measured'
+        ? `Recorded ${(energy.energy_boundary ?? 'unknown').replace(/_/g, ' ')} observation`
+        : energy.energy_source === 'mixed' ? 'Sum of measured and estimated segment energy'
+        : `${formatTokens(weighted)} / 1,000,000 x ${formatFactor(energy.energy_wh_per_mtok, 1)} Wh`,
       result: orDash(formatWh(compute)),
       band: formatWhBand(band?.energy_wh_low, band?.energy_wh_high),
-      source: 'derived',
-      sourceHint: 'IT load only — this figure excludes data-centre overhead.',
+      source: energy.energy_source === 'measured' ? 'meter observation' : energy.energy_source === 'mixed' ? 'mixed evidence' : 'derived',
+      sourceHint: `Coverage: ${(energy.energy_boundary ?? 'unknown').replace(/_/g, ' ')}. GPU-only readings do not include the rest of the host.`,
     },
   ]
 
@@ -194,7 +197,9 @@ function buildSteps(energy: EnergyAccounting): Step[] {
     steps.push({
       n: 4,
       step: 'Facility overhead (PUE)',
-      derivation: `${formatWh(compute)} x PUE ${formatFactor(pue)}`,
+      derivation: energy.pue_applied === false || energy.energy_boundary === 'facility'
+        ? `${formatWh(compute)} — ${energy.energy_boundary === 'facility' ? 'facility overhead already included' : 'no PUE conversion for incomplete boundary'}`
+        : `${formatWh(compute)} x PUE ${formatFactor(pue)}`,
       result: orDash(formatWh(total)),
       band: formatWhBand(band?.energy_wh_total_low, band?.energy_wh_total_high),
       source: `instance setting · ${energy.deployment ?? 'deployment not recorded'}${
@@ -219,6 +224,9 @@ function buildSteps(energy: EnergyAccounting): Step[] {
       energy.grid_co2e_label ? `“${energy.grid_co2e_label}”` : null,
       energy.grid_region ? `region: ${energy.grid_region}` : null,
       energy.grid_temporal === 'hourly' ? 'hourly table' : null,
+      energy.grid_temporal === 'interval_weighted' ? 'time-weighted table; constant power within calls' : null,
+      energy.grid_region_resolution_status === 'fallback_unknown_region'
+        ? `unsupported pin ${energy.grid_requested_region}; fallback applied` : null,
     ]
       .filter((part): part is string => Boolean(part))
       .join(' · '),
@@ -269,7 +277,7 @@ export function CrossBasisNotice({ energy }: { energy: EnergyAccounting }) {
   return (
     <div>
       <div className="mono-label" style={{ marginBottom: 6 }}>
-        Carbon not summed — this run spans two accounting bases
+        Carbon total withheld: incompatible grid bases or factor methods
       </div>
       <div
         style={{
@@ -279,13 +287,12 @@ export function CrossBasisNotice({ energy }: { energy: EnergyAccounting }) {
           color: 'var(--text-muted)',
         }}
       >
-        Parts of this run were accounted {(energy.grid_bases ?? []).filter(Boolean).join(' and ')}.
-        Those answer different questions and may not be added, so there is no run total. Energy,
-        tokens and cost are unaffected. Per-basis subtotals:
+        These parts use different accounting bases or lack evidence that their grid factors are
+        comparable. Energy, tokens and cost remain recorded. Compatible carbon subtotals:
       </div>
       <div className="kv">
-        {(energy.by_basis ?? []).map((row) => (
-          <Fragment key={row.grid_co2e_basis ?? 'unspecified'}>
+        {(energy.by_basis ?? []).map((row, index) => (
+          <Fragment key={`${row.grid_co2e_basis}-${JSON.stringify(row.grid_factor_signature)}-${index}`}>
             <span className="k">{row.grid_co2e_basis ?? 'unspecified'}</span>
             <span>
               {row.co2e_g === null ? NO_ESTIMATE : `${formatFactor(row.co2e_g, 3)} gCO₂e`} ·{' '}
@@ -432,7 +439,7 @@ function TokenBuckets({ energy }: { energy: EnergyAccounting }) {
               <th className="num">Tokens</th>
               <th className="num">Weight</th>
               <th className="num">Output-equiv.</th>
-              <th className="num">Compute Wh (est.)</th>
+              <th className="num">Allocated Wh (est.)</th>
             </tr>
           </thead>
           <tbody>

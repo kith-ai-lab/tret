@@ -28,15 +28,82 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Iterable
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    """A validated, domain-scoped observation that may narrow one component."""
+
+    id: str
+    component: str
+    evidence_class: str
+    validation_id: str
+    source: str
+    as_of: str
+    boundary: str
+    temporal: str
+    device_coverage: str
+    domain: str
+    temporal_coverage: float = 0.0
+
+    def __post_init__(self) -> None:
+        required = (self.id, self.component, self.evidence_class, self.validation_id,
+                    self.source, self.as_of, self.boundary, self.temporal,
+                    self.device_coverage, self.domain)
+        if not all(isinstance(value, str) and value.strip() for value in required):
+            raise ValueError("evidence records require every identity and validation field")
+        if not 0 <= self.temporal_coverage <= 1:
+            raise ValueError("temporal coverage must be finite and between zero and one")
 
 
 @dataclass(frozen=True)
 class Evidence:
     energy_measured: bool = False  # operator-supplied Wh, not modeled from tokens
-    pue_metered: bool = False  # PUE from a labeled operator layer, not the shipped default
-    grid_sourced_dated: bool = False  # grid factor from a labeled operator layer with an as_of
+    pue_metered: bool = False  # PUE evidence_class == "measurement", complete device + temporal coverage
+    grid_sourced_dated: bool = False  # grid evidence_class in {"published", "measurement"} with a known temporal reference
     embodied_profiled: bool = False  # embodied figure from a named hardware profile
+    record_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def from_records(
+        cls,
+        records: Iterable[EvidenceRecord],
+        *,
+        domain: str,
+        energy_boundary: str = "unknown",
+    ) -> "Evidence":
+        """Derive flags only from validated records matching this exact domain.
+
+        A GPU-only energy observation is intentionally insufficient for complete
+        node IT energy. Labels and dates alone never create evidence.
+        """
+        matched = [r for r in records if r.domain == domain and r.validation_id]
+        energy = any(
+            r.component == "energy"
+            and r.evidence_class == "measurement"
+            and r.device_coverage == "complete"
+            and r.temporal_coverage == 1
+            and r.boundary == energy_boundary
+            and energy_boundary in {"node_it", "facility"}
+            for r in matched
+        )
+        return cls(
+            energy_measured=energy,
+            pue_metered=any(
+                r.component == "pue" and r.evidence_class == "measurement"
+                and r.device_coverage == "complete" and r.temporal_coverage == 1 for r in matched
+            ),
+            grid_sourced_dated=any(
+                r.component == "grid" and r.evidence_class in {"published", "measurement"}
+                and r.temporal != "unknown" for r in matched
+            ),
+            embodied_profiled=any(
+                r.component == "embodied" and r.evidence_class in {"profile", "published"}
+                and r.device_coverage == "complete" for r in matched
+            ),
+            record_ids=tuple(r.id for r in matched),
+        )
 
 
 # Rows narrowed once the run's IT-load energy was measured rather than

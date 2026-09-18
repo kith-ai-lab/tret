@@ -676,6 +676,24 @@ async def test_served_by_none_from_a_non_streaming_response_without_it(monkeypat
     assert completion.served_by is None
 
 
+async def test_non_streaming_completion_preserves_reasoning_and_geo(monkeypatch):
+    response = _completion_json()
+    response["inference_geo"] = "us"
+    response["usage"] = {
+        "prompt_tokens": 10,
+        "completion_tokens": 7,
+        "completion_tokens_details": {"reasoning_tokens": 4},
+    }
+
+    completion, _ = await _run_complete_json(
+        monkeypatch, OpenRouterProvider("k"), response
+    )
+
+    assert completion.usage.reasoning_tokens == 4
+    assert completion.usage.reasoning_accounting == "counted_in_output"
+    assert completion.inference_geo == "us"
+
+
 async def test_served_by_dropped_when_display_name_has_no_matching_endpoint(monkeypatch):
     """An unmapped display name is dropped, not lowercased and passed through
     as if it were already a slug — OpenRouter renaming or retiring an
@@ -699,7 +717,9 @@ async def test_kimi_complete_json_never_reports_served_by(monkeypatch):
     # base class's identity `_resolve_served_by` hook (Kimi never overrides
     # it), so this only pins that the parser itself is correct — the absence
     # in practice comes from Kimi's wire format, not special-casing here.
-    assert completion.served_by == "Anthropic"
+    # `normalize_call_slug` lower-cases every served_by before persistence, so
+    # the parsed display name comes back as its slug form.
+    assert completion.served_by == "anthropic"
 
 
 async def test_served_by_parsed_from_a_streaming_chunk_sequence(monkeypatch):
@@ -750,6 +770,50 @@ async def test_served_by_none_when_absent_from_every_chunk(monkeypatch):
     lines = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
     events, _ = await _run_stream(monkeypatch, KimiProvider("k"), lines)
     assert events[-1].served_by is None
+
+
+async def test_stream_keeps_final_cumulative_reasoning_usage_and_geo(monkeypatch):
+    lines = _sse(
+        {
+            "choices": [{"delta": {"content": "ok"}, "finish_reason": None}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "completion_tokens_details": {"reasoning_tokens": 1},
+            },
+            "inference_geo": "us",
+        },
+        {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 7,
+                "completion_tokens_details": {"reasoning_tokens": 4},
+            },
+        },
+    )
+
+    events, _ = await _run_stream(monkeypatch, OpenRouterProvider("k"), lines)
+    completed = events[-1]
+
+    assert completed.usage.output_tokens == 7
+    assert completed.usage.reasoning_tokens == 4
+    assert completed.usage.reasoning_accounting == "counted_in_output"
+    assert completed.inference_geo == "us"
+
+
+async def test_compat_provider_marks_reasoning_semantics_unknown(monkeypatch):
+    lines = _sse(
+        {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {
+                "completion_tokens": 7,
+                "completion_tokens_details": {"reasoning_tokens": 4},
+            },
+        }
+    )
+    events, _ = await _run_stream(monkeypatch, KimiProvider("k"), lines)
+    assert events[-1].usage.reasoning_accounting == "unknown"
 
 
 # ── 4b. served_by -> provider.ignore: the resolved value is a slug on the wire ──

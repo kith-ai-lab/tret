@@ -137,7 +137,9 @@ async def test_get_default_shape_has_four_providers_and_global_default_layers(cl
         assert factors["band_high"]["layer"] == "global_default"
         assert factors["baseline_model"]["layer"] == "global_default"
     shipped = body["shipped_defaults"]
-    assert shipped["grid_default"]["value"] == 470.0
+    assert shipped["grid_default"]["value"] == 458.49
+    assert "IEA" not in shipped["grid_default"]["label"]
+    assert "Ember" in shipped["grid_default"]["label"]
     assert shipped["pue_cloud"]["value"] == 1.2
     assert shipped["pue_local"]["value"] == 1.05
     assert shipped["pue_onprem"]["value"] == 1.56
@@ -170,7 +172,9 @@ async def test_get_with_a_broken_stored_document_fails_open(client, seed):
     assert body["effective"] is None
     assert "grid.default.label" in body["error"]
     # shipped_defaults is unaffected by the broken document.
-    assert body["shipped_defaults"]["grid_default"]["value"] == 470.0
+    assert body["shipped_defaults"]["grid_default"]["value"] == 458.49
+    assert "IEA" not in body["shipped_defaults"]["grid_default"]["label"]
+    assert "Ember" in body["shipped_defaults"]["grid_default"]["label"]
 
 
 async def test_get_is_open_to_any_member(client, seed):

@@ -181,7 +181,7 @@ async def test_the_transcript_stays_replayable_across_the_switch(world):
     assert called == answered
 
 
-async def test_a_run_that_never_switches_records_no_timeline(world):
+async def test_a_run_that_never_switches_records_one_accounting_segment(world):
     # The cold path. An ordinary single-model run must not acquire a different
     # accounting record just because this feature exists. The replay script
     # never scripts a cache write or a cache hit (see `ScriptedTurn`'s own
@@ -190,9 +190,12 @@ async def test_a_run_that_never_switches_records_no_timeline(world):
     # cold path as the switch machinery, for a different reason.
     result, _first, _target = await _run_with_switch(world, switch_at=999)
 
-    assert result.run.model_timeline is None
+    assert len(result.run.model_timeline) == 1
+    assert result.run.model_timeline[0]["model"] == result.run.model_used
+    assert result.run.model_timeline[0]["from_iteration"] == 1
+    assert result.run.model_timeline[0]["to_iteration"] == result.run.iterations
     assert "switches" not in (result.run.routing or {})
-    assert "models" not in (result.run.energy_accounting or {})
+    assert set(result.run.energy_accounting["models"]) == {result.run.model_used}
     assert result.run.energy_accounting["model"] == result.run.model_used
 
 
@@ -296,7 +299,8 @@ async def test_a_pinned_harness_is_never_switched_away_from(world):
 
     # The supervisor is not even consulted: there is no decision to make.
     assert seen == []
-    assert result.run.model_timeline is None
+    assert len(result.run.model_timeline) == 1
+    assert result.run.model_timeline[0]["model"] == result.run.model_used
     assert result.run.status == "completed"
 
 

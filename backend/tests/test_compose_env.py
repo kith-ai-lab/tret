@@ -41,12 +41,12 @@ CONTAINER_OVERRIDES = {
 }
 
 
-def _backend_environment() -> dict[str, str]:
+def _backend_environment() -> dict[str, str | None]:
     compose = yaml.safe_load(COMPOSE.read_text())
     env = compose["services"]["backend"]["environment"]
     if isinstance(env, list):  # compose also allows a "KEY=value" list
         return dict(item.split("=", 1) for item in env)
-    return {k: "" if v is None else str(v) for k, v in env.items()}
+    return {k: None if v is None else str(v) for k, v in env.items()}
 
 
 def _documented_names() -> set[str]:
@@ -91,6 +91,10 @@ def test_compose_defaults_match_the_code_defaults(name):
     if name in CONTAINER_OVERRIDES:
         pytest.skip("deliberately fixed to a container path or service name")
     value = _backend_environment()[name]
+    if value in (None, "") and name == "TRET_GRID_CO2E_G_PER_KWH":
+        # YAML null is Compose's host pass-through form: an unset host variable
+        # stays absent, so the application owns the default and its provenance.
+        return
     match = re.fullmatch(r"\$\{%s(?::-(.*))?\}" % name, value)
     assert match, f"{name} should be written as ${{{name}:-<default>}}, found {value!r}"
 
@@ -164,6 +168,8 @@ def test_every_numeric_or_bool_default_in_compose_parses():
     env = _backend_environment()
     overrides = {}
     for name, value in env.items():
+        if value is None:
+            continue
         match = re.fullmatch(r"\$\{%s(?::-(.*))?\}" % name, value)
         overrides[name[len("TRET_") :].lower()] = match.group(1) or "" if match else value
     Settings(**overrides)  # must not raise

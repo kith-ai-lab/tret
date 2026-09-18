@@ -13,20 +13,114 @@ layering, and `energy_accounting(factors=None)` is exactly what it was before
 from __future__ import annotations
 
 from decimal import Decimal
+from dataclasses import asdict
 
 import pytest
 from pydantic import ValidationError
 
-from tret.config import Settings
+from tret.config import GridFactor, Settings
 from tret.providers.catalog import ModelCatalog, ModelInfo
 from tret.services.emission_factors import (
     EmissionsOverrides,
     Resolved,
     build_factor_set,
+    factor_set_for_model,
 )
 from tret.services.emissions import combine_accountings, energy_accounting
 
 CATALOG = ModelCatalog()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("factor_boundary", "banana"),
+        ("gas_coverage", "gasnope"),
+        ("gwp_assessment_basis", "ar99"),
+        ("electricity_mix_basis", "regional"),
+        ("gwp_horizon_years", -1),
+    ],
+)
+def test_grid_factor_rejects_unknown_method_metadata(field, value):
+    with pytest.raises(ValidationError):
+        GridFactor(g_per_kwh=100, **{field: value})
+
+
+def test_cloud_explicit_embodied_override_is_counted_but_default_remains_unknown_zero():
+    default = build_factor_set(provider="anthropic")
+    assert default.embodied_g.value == 0
+    supplied = build_factor_set(
+        provider="anthropic",
+        workspace_settings={"embodied": {"g_per_run": 2.5, "label": "supplier allocation"}},
+    )
+    assert supplied.embodied_g.value == Decimal("2.5")
+    report = energy_accounting(_model(), 10, 10, factors=supplied)
+    assert report["embodied_g"] == 2.5
+    assert "embodied_hardware" in report["included_components"]
+    assert "embodied_hardware" not in report["excluded_components"]
+    assert report["coverage"]["functional_unit"] == "one_run"
+    assert report["coverage"]["complete_total"] is None
+
+
+def test_pue_upstream_requires_exact_served_by_and_baseline_context_does_not_reuse_it():
+    managed = {
+        "pue": {"upstreams": {"aws": {
+            "value": 1.14, "label": "AWS fleet average",
+            "url": "https://aws.amazon.com/sustainability/", "as_of": "2025-12-31",
+        }}}
+    }
+    fallback = build_factor_set(provider="anthropic", managed_settings=managed)
+    selected = build_factor_set(provider="anthropic", managed_settings=managed, served_by="aws")
+    assert selected.pue.value == Decimal("1.14")
+    assert selected.pue.disclosure["statistic"] == "operating_fleet_average"
+    assert fallback.pue.value != selected.pue.value
+    baseline = factor_set_for_model(selected, provider="anthropic", model_id="anthropic/test")
+    assert baseline is not None
+    assert baseline.pue.disclosure is None
+
+
+def test_amazon_bedrock_served_by_selects_the_aws_disclosure():
+    """F11: OpenRouter's Bedrock slug must reach the AWS upstream PUE — the
+    only mapping that previously existed was `google-vertex` -> `google`."""
+    managed = {
+        "pue": {"upstreams": {"aws": {
+            "value": 1.14, "label": "AWS fleet average",
+            "url": "https://aws.amazon.com/sustainability/", "as_of": "2025-12-31",
+        }}}
+    }
+    selected = build_factor_set(
+        provider="openrouter", managed_settings=managed, served_by="amazon-bedrock"
+    )
+    assert selected.pue.value == Decimal("1.14")
+    assert selected.pue.disclosure["statistic"] == "operating_fleet_average"
+    # The direct (non-OpenRouter) Anthropic provider must never be aliased.
+    unmapped = build_factor_set(
+        provider="anthropic", managed_settings=managed, served_by="anthropic"
+    )
+    assert unmapped.pue.value != Decimal("1.14")
+
+
+def test_time_allocation_is_added_once_and_supplier_double_count_is_rejected():
+    allocation = {
+        "method_id": "time_resource_share_v1", "complete_total_g": 1.25,
+        "covered_subtotal_g": 1.25, "components": [],
+    }
+    report = energy_accounting(_model(), 10, 10, embodied_allocation=allocation)
+    assert report["embodied_g"] == 1.25
+    assert report["embodied_allocation"] == allocation
+    # Accounting must never fail a run (see the project contract): a supplier
+    # figure that would double-count embodied hardware is dropped rather than
+    # raised, with a caveat recording that it happened.
+    guarded = energy_accounting(
+        _model(), 10, 10, embodied_allocation=allocation,
+        supplier_includes_inference_hardware=True,
+    )
+    assert guarded["embodied_g"] == 0.0
+    assert guarded.get("embodied_allocation") is None
+    caveat = next(
+        c for c in guarded["caveats"] if c["key"] == "embodied_double_add_prevented"
+    )
+    assert caveat["applies"] is True
 
 
 def _settings(**over) -> Settings:
@@ -470,6 +564,36 @@ def test_combine_accountings_unions_factor_layers_across_segments():
     )
 
 
+def test_combine_accountings_withholds_carbon_for_incompatible_factor_metadata():
+    first = energy_accounting(_model(), 100, 20)
+    second = dict(energy_accounting(_model(), 100, 20))
+    second["grid_gas_coverage"] = "co2"
+    combined = combine_accountings([first, second])
+    assert combined["carbon_summable"] is False
+    assert combined["co2e_g"] is None
+    assert combined["coverage"]["complete_total"] is None
+
+
+def test_unknown_custom_grid_factors_require_identical_factor_identity():
+    first = energy_accounting(_model(), 100, 20, grid_g_per_kwh=100)
+    same = energy_accounting(_model(), 100, 20, grid_g_per_kwh=100)
+    different = energy_accounting(_model(), 100, 20, grid_g_per_kwh=200)
+    assert combine_accountings([first, same])["carbon_summable"] is True
+    mixed = combine_accountings([first, different])
+    assert mixed["carbon_summable"] is False
+    assert mixed["co2e_g"] is None
+    assert len(mixed["by_basis"]) == 2
+    assert sorted(row["co2e_g"] for row in mixed["by_basis"]) == sorted(
+        [first["co2e_g"], different["co2e_g"]]
+    )
+    assert all(
+        row["co2e_g"] != pytest.approx(first["co2e_g"] + different["co2e_g"])
+        for row in mixed["by_basis"]
+    )
+    caveat = next(c for c in mixed["caveats"] if c["key"] == "carbon_crosses_grid_basis")
+    assert "incompatible grid factors" in caveat["label"]
+
+
 # ── a layered baseline_model actually changes the counterfactual model ───────
 def test_a_layered_baseline_model_changes_which_model_the_run_is_compared_against():
     settings = _settings()
@@ -487,3 +611,27 @@ def test_a_layered_baseline_model_changes_which_model_the_run_is_compared_agains
     )
     overridden_report = _account(model, settings, factors=fs)
     assert overridden_report["baseline"]["model"] == alternative.id
+
+
+def test_resolution_context_is_immutable_minimal_and_contains_no_settings_secrets():
+    sentinel = "secret-sentinel-must-not-be-retained"
+    raw = {
+        "grid": {"default": {
+            "g_per_kwh": 77, "basis": "location_based", "label": "original",
+        }}
+    }
+    factors = build_factor_set(
+        provider="anthropic", settings=Settings(anthropic_api_key=sentinel),
+        workspace_settings=raw, model_id="anthropic/test",
+    )
+    raw["grid"]["default"]["g_per_kwh"] = 999
+    context_dump = repr(asdict(factors.resolution_context))
+    assert sentinel not in context_dump
+
+    baseline = factor_set_for_model(
+        factors, provider="anthropic", model_id="anthropic/other"
+    )
+    assert baseline.grid.value == Decimal("77")
+    # The public context consists only of tuples/scalars: callers cannot mutate
+    # nested documents and change a later counterfactual resolution.
+    assert isinstance(factors.resolution_context.workspace_settings, tuple)

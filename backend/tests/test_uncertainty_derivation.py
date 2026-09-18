@@ -18,6 +18,7 @@ from tret.services.emissions import uncertainty_contributions
 from tret.services.uncertainty_derivation import (
     DerivedBand,
     Evidence,
+    EvidenceRecord,
     adjust_contributions,
     band_record,
     derive_band,
@@ -25,6 +26,20 @@ from tret.services.uncertainty_derivation import (
 
 CONFIGURED_LOW = Decimal("2.5")
 CONFIGURED_HIGH = Decimal("2.5")
+
+
+def test_records_require_matching_domain_and_complete_boundary():
+    gpu = EvidenceRecord(
+        "e1", "energy", "measurement", "validated-meter-v1", "meter", "2026-01-01",
+        "gpu", "run", "complete", "run-1",
+    )
+    assert not Evidence.from_records([gpu], domain="run-1", energy_boundary="node_it").energy_measured
+    node = EvidenceRecord(
+        "e2", "energy", "measurement", "validated-meter-v1", "meter", "2026-01-01",
+        "node_it", "run", "complete", "run-1", temporal_coverage=1,
+    )
+    assert Evidence.from_records([node], domain="run-1", energy_boundary="node_it").energy_measured
+    assert not Evidence.from_records([node], domain="run-2", energy_boundary="node_it").energy_measured
 
 
 def cloud_rows() -> list[dict]:

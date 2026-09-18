@@ -106,6 +106,8 @@ class StubProvider(Provider):
     text_chunks: tuple[str, ...] = ("Hello, ", "world.")
     run_usage: Usage = field(default_factory=lambda: Usage(input_tokens=123, output_tokens=45))
     stop_reason: str = "end_turn"
+    served_by: str | None = None
+    inference_geo: str | None = None
     fail_complete_json: bool = False
     # A local OpenAI-compat server that ignores stream_options.include_usage
     # never sends a usage-bearing turn-complete event at all.
@@ -169,7 +171,12 @@ class StubProvider(Provider):
         if self.emit_unexpected_tool_call:
             yield ToolCallComplete(ToolCall(id="call-1", name="not_offered", arguments={}))
         if self.emit_turn_complete:
-            yield TurnComplete(usage=self.run_usage, stop_reason=self.stop_reason)
+            yield TurnComplete(
+                usage=self.run_usage,
+                stop_reason=self.stop_reason,
+                served_by=self.served_by,
+                inference_geo=self.inference_geo,
+            )
 
 
 @pytest.fixture
@@ -210,7 +217,8 @@ async def test_arun_returns_scripted_text_and_matching_receipt(wired):
     expected_accounting = energy_accounting(TARGET_MODEL, 123, 45, 0, 0, catalog=catalog)
     assert receipt.co2e_g == expected_accounting["co2e_g"]
     assert receipt.energy_wh == expected_accounting["energy_wh"]
-    assert receipt.raw == expected_accounting
+    assert {key: receipt.raw[key] for key in expected_accounting} == expected_accounting
+    assert receipt.raw["call_accounting_method"] == "reconciled_per_call_v1"
     assert receipt.raw["baseline"] == expected_accounting["baseline"]
     assert receipt.baseline_model == expected_accounting["baseline"]["model"]
     assert receipt.avoided_co2e_g == expected_accounting["baseline"]["avoided_co2e_g"]
@@ -224,6 +232,45 @@ async def test_arun_returns_scripted_text_and_matching_receipt(wired):
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
     }
+    assert receipt.call_records[0]["usage_status"] == "reported"
+
+
+async def test_sdk_receipt_preserves_reasoning_upstream_and_geo(wired):
+    _catalog, _registry, provider = wired
+    provider.run_usage = Usage(
+        input_tokens=10,
+        output_tokens=8,
+        reasoning_tokens=3,
+        reasoning_accounting="counted_in_output",
+    )
+    provider.served_by = "supplier-a"
+    provider.inference_geo = "us"
+
+    receipt = (await Router().arun("reason about this")).receipt
+
+    assert receipt.usage["reasoning_tokens"] == 3
+    assert receipt.usage["reasoning_accounting"] == "counted_in_output"
+    from datetime import datetime
+
+    call = receipt.call_records[0]
+    assert datetime.fromisoformat(call["ended_at"]) > datetime.fromisoformat(call["started_at"])
+    assert [{key: value for key, value in call.items() if key not in {"started_at", "ended_at"}}] == [
+        {
+            "iteration": 1,
+            "input_tokens": 10,
+            "output_tokens": 8,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 3,
+            "reasoning_accounting": "counted_in_output",
+            "served_by": "supplier-a",
+            "inference_geo": "us",
+            "usage_status": "reported",
+        }
+    ]
+    assert receipt.raw["call_accounting_method"] == "reconciled_per_call_v1"
+    assert receipt.raw["call_accountings"][0]["served_by"] == "supplier-a"
+    assert receipt.raw["call_accountings"][0]["inference_geo"] == "us"
     assert receipt.routing["chosen_model"] == TARGET_MODEL.id
     assert receipt.routing["reasoning"] == "picked for the test"
     assert receipt.routing["fallback_used"] is False
@@ -310,7 +357,7 @@ async def test_none_carbon_propagates_and_str_omits_it(wired, monkeypatch):
     def _null_carbon_accounting(model, input_tokens, output_tokens,
                                  cache_read_tokens=0, cache_write_tokens=0,
                                  grid_g_per_kwh=None, *, settings=None, catalog=None,
-                                 factors=None, measured_energy_wh=None):
+                                 factors=None, measured_energy_wh=None, **kwargs):
         return {
             "model": model.id,
             "co2e_g": None,
@@ -320,6 +367,8 @@ async def test_none_carbon_propagates_and_str_omits_it(wired, monkeypatch):
         }
 
     monkeypatch.setattr(sdk_module, "energy_accounting", _null_carbon_accounting)
+    from tret.services import emission_calls
+    monkeypatch.setattr(emission_calls, "account_call_records", lambda *args, **kwargs: None)
 
     router = Router()
     result = await router.arun("summarize x")
@@ -430,6 +479,49 @@ async def test_all_zero_usage_also_yields_an_unpriced_receipt(wired):
     assert result.receipt.co2e_g is None
 
 
+@pytest.mark.parametrize("measured", [0.0, 42.5])
+@pytest.mark.parametrize("emit_usage", [False, True])
+async def test_independent_measurement_survives_missing_usage(wired, measured, emit_usage):
+    _, _, provider = wired
+    provider.run_usage = Usage()
+    provider.emit_turn_complete = emit_usage
+
+    receipt = (await Router().arun("summarize x", measured_energy_wh=measured)).receipt
+
+    assert receipt.energy_wh == measured
+    assert receipt.co2e_g is not None
+    assert receipt.usd is None
+    assert receipt.baseline_model is None
+    assert receipt.avoided_co2e_g is None
+    assert receipt.raw["baseline"]["co2e_g"] is None
+    assert receipt.raw["cost"]["usd"] is None
+    assert receipt.raw["usage_coverage"] == "unavailable_or_incomplete"
+
+
+async def test_aggregate_fallback_keeps_confirmed_additional_reasoning(wired):
+    catalog, _, _ = wired
+    usage = Usage(input_tokens=100, output_tokens=30)
+    records = [
+        {"iteration": 0, "input_tokens": 80, "output_tokens": 20,
+         "cache_read_tokens": 0, "cache_write_tokens": 0, "usage_status": "reported",
+         "reasoning_tokens": 50, "reasoning_accounting": "additional"},
+        {"iteration": 1, "input_tokens": 20, "output_tokens": 10,
+         "cache_read_tokens": 0, "cache_write_tokens": 0, "usage_status": "estimated",
+         "reasoning_tokens": None, "reasoning_accounting": "unknown"},
+    ]
+    decision = await Router().aroute("summarize x")
+    receipt = sdk_module._build_receipt(
+        TARGET_MODEL, usage, decision, catalog, True, estimated=True, call_records=records,
+    )
+    expected = energy_accounting(
+        TARGET_MODEL, 100, 30, catalog=catalog, energy_output_tokens=80,
+    )
+    assert receipt.energy_wh == expected["energy_wh"]
+    assert receipt.usd == float(TARGET_MODEL.cost_usd(100, 30))
+    assert receipt.usage["output_tokens"] == 30
+    assert receipt.call_records == records
+
+
 # ── 10. a stray tool call, despite offering none, is safely ignored ────────
 
 
@@ -498,6 +590,22 @@ async def test_measured_energy_wh_defaults_to_unmeasured(wired):
     router = Router()
     result = await router.arun("summarize x")
     assert result.receipt.raw["energy_source"] == "estimated"
+
+
+async def test_sdk_facility_measurement_receives_no_second_pue(wired):
+    result = await Router().arun(
+        "summarize x", measured_energy_wh=42.5, measured_energy_boundary="facility",
+    )
+    assert result.receipt.raw["energy_boundary"] == "facility"
+    assert result.receipt.raw["energy_wh_total"] == 42.5
+    assert result.receipt.raw["pue"] == 1
+
+
+def test_sdk_sync_facility_boundary_passes_through(wired):
+    result = Router().run(
+        "summarize x", measured_energy_wh=42.5, measured_energy_boundary="facility",
+    )
+    assert result.receipt.raw["energy_wh_total"] == 42.5
 
 
 async def test_build_receipt_rejects_a_negative_measured_energy_wh(wired):

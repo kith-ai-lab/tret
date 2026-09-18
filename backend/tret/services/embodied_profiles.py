@@ -46,6 +46,15 @@ class EmbodiedProfile:
     label: str | None = None
 
     def __post_init__(self) -> None:
+        for name in ("gpus", "runs_over_lifetime", "batch_size"):
+            if type(getattr(self, name)) is not int:
+                raise ProfileError(f"'{name}' must be an integer, not a boolean or fraction")
+        if type(self.include_server) is not bool:
+            raise ProfileError("'include_server' must be a boolean")
+        if not isinstance(self.gpu_model, str) or not self.gpu_model.strip():
+            raise ProfileError("'gpu_model' must be a nonempty string")
+        if self.label is not None and (not isinstance(self.label, str) or not self.label.strip()):
+            raise ProfileError("'label' must be a nonempty string when supplied")
         if self.gpus < 0:
             raise ProfileError(f"'gpus' must be >= 0, got {self.gpus!r}")
         if self.runs_over_lifetime <= 0:
@@ -101,6 +110,9 @@ def profile_summary(profile: EmbodiedProfile) -> dict:
         "include_server": profile.include_server,
         "gpu_model": profile.gpu_model,
         "label": profile.label,
+        "method_id": "legacy_batch_divisor_v1",
+        "denominator_unit": "lifetime_batch_executions",
+        "functional_unit": "request",
         "grams_per_run": float(grams_per_run(profile)),
         "gpu_h100_kg": EMBODIED_REFERENCE["gpu_h100_kg"],
         "server_excluding_gpus_kg": EMBODIED_REFERENCE["server_excluding_gpus_kg"],
@@ -109,3 +121,71 @@ def profile_summary(profile: EmbodiedProfile) -> dict:
         "url": EMBODIED_REFERENCE["url"],
         "caveat": EMBODIED_REFERENCE["caveat"],
     }
+
+
+@dataclass(frozen=True)
+class HardwareFootprint:
+    """One equipment component; a missing footprint is unknown, never zero."""
+
+    component_id: str
+    total_embodied_g: Decimal | None
+    service_life_s: Decimal
+    source: str
+    evidence_id: str
+
+    def __post_init__(self) -> None:
+        from tret.services.emissions_validation import number
+
+        if any(not isinstance(value, str) or not value.strip()
+               for value in (self.component_id, self.source, self.evidence_id)):
+            raise ProfileError("component identity, source and evidence_id are required")
+        if number(self.service_life_s, "service_life_s") <= 0:
+            raise ProfileError("service life must be positive")
+        if self.total_embodied_g is not None:
+            number(self.total_embodied_g, "total_embodied_g")
+
+
+def allocate_by_time(components: list[HardwareFootprint], *, duration_s: Decimal,
+                     share_by_component: Mapping[str, Decimal],
+                     supplier_includes_hardware: bool = False) -> dict:
+    """Allocate by elapsed time and reserved resource share, independent of grid.
+
+    Legacy batch-divisor profiles are unchanged. Time-based allocations must
+    use disjoint intervals and resource shares; a second batch divisor is not
+    accepted. This is an accounting allocation, not a corporate inventory.
+    """
+    from tret.services.emissions_validation import number
+
+    if supplier_includes_hardware:
+        raise ProfileError("supplier total already includes hardware; a second allocation is invalid")
+    duration = number(duration_s, "duration_s")
+    if duration <= 0:
+        raise ProfileError("duration_s must be positive")
+    ids = [c.component_id for c in components]
+    if len(set(ids)) != len(ids) or set(share_by_component) - set(ids):
+        raise ProfileError("duplicate or unknown hardware component")
+    rows, subtotal = [], Decimal(0)
+    for component in components:
+        service_life = number(component.service_life_s, "service_life_s")
+        if duration > service_life:
+            raise ProfileError(
+                f"duration_s exceeds service life for component {component.component_id!r}"
+            )
+        share = share_by_component.get(component.component_id)
+        if share is not None:
+            share = number(share, "resource_share")
+            if share > 1:
+                raise ProfileError("resource_share must be <= 1")
+        grams = None
+        if share is not None and component.total_embodied_g is not None:
+            grams = (number(component.total_embodied_g, "total_embodied_g") * duration
+                     / service_life * share)
+            subtotal += grams
+        rows.append({"component_id": component.component_id,
+                     "allocated_g": float(grams) if grams is not None else None,
+                     "status": "supplied" if grams is not None else "unknown",
+                     "resource_share": float(share) if share is not None else None,
+                     "source": component.source, "evidence_id": component.evidence_id})
+    return {"method_id": "time_resource_share_v1", "duration_s": float(duration),
+            "components": rows, "covered_subtotal_g": float(subtotal),
+            "complete_total_g": float(subtotal) if rows and all(r["allocated_g"] is not None for r in rows) else None}

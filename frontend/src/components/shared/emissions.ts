@@ -468,7 +468,7 @@ export const GRID_SOURCE_META: Record<string, { label: string; what: string }> =
   },
   global_default: {
     label: 'global default',
-    what: 'TRET_GRID_CO2E_G_PER_KWH — the single factor applied wherever nothing more specific is configured. Ships as the IEA global power-sector average.',
+    what: 'TRET_GRID_CO2E_G_PER_KWH — the single factor applied wherever nothing more specific is configured. Ships as Ember’s World 2025 lifecycle CO2e intensity (458.49 gCO2e/kWh, CC BY 4.0).',
   },
   run_override: {
     label: 'supplied for this run',
@@ -501,7 +501,7 @@ export function gridSourceWhat(source: string | null | undefined): string {
 /** Why tret asks the operator instead of looking the region up. The question a
  *  reviewer always asks, answered where the numbers are. */
 export const GRID_NO_INFERENCE_NOTE =
-  'Operator configuration, never inference. tret does not derive a grid region from an IP address and makes no network call to look one up: for a cloud API call the caller’s location says nothing about which data centre served the request, providers do not disclose the serving region, and a router such as OpenRouter sends the call to whichever upstream has capacity. Location is knowable when the operator knows it — they self-host somewhere, or they pin a provider to a region — so it comes from them.'
+  'Grid regions come from explicit configuration. Caller location and provider brand do not establish where inference ran. Response geography is retained as evidence, but broad labels such as “us” or “global” do not select a regional grid factor.'
 
 // ── basis separation ─────────────────────────────────────────────────────
 // The GHG Protocol rule with teeth: energy and dollars sum across bases, carbon
@@ -511,18 +511,18 @@ export const GRID_NO_INFERENCE_NOTE =
 export const NOT_SUMMABLE_TITLE = 'These runs have no single carbon total'
 
 export const NOT_SUMMABLE_WHY =
-  'The runs in this window were accounted under more than one GHG Protocol basis. A location-based figure (the physical grid that served the load) and a market-based one (contractual renewable claims) answer different questions, so adding them produces a meaningless number rather than a smaller one — and under the GHG Protocol they may not be summed at all. Carbon is therefore reported once per basis, and never as a single figure.'
+  'These records have incompatible grid accounting bases or factor methods, or lack a combined carbon figure. Location-based and market-based results answer different questions. Factors also need compatible boundaries and gas coverage. Carbon totals are withheld where compatibility is not established.'
 
 export const SUMMABLE_ACROSS_BASES_NOTE =
   'Energy in Wh and dollars are still totalled across the whole window: a kWh is a kWh however its carbon is accounted, and a price has no Scope 2 accounting method. Only carbon — including the scope split, the baseline comparison and the judgment band — is held back.'
 
 export const BASIS_SUBTOTAL_HINT =
-  'One row per GHG Protocol basis. Each row is internally consistent and may be read as a total; the rows may not be added to each other. Which rows exist is a consequence of how the operator configured their factors, not of anything tret inferred.'
+  'Subtotals retain their recorded accounting basis. A row with incompatible factor methods has no combined carbon figure. Rows with different bases or methods must not be added.'
 
 /** The em-dash placeholder wording for a carbon figure withheld because it would
  *  cross a basis boundary. Distinct from "no estimate recorded". */
 export const NOT_SUMMABLE_CELL_HINT =
-  'No single figure: the runs behind this row span more than one GHG Protocol basis, which may not be summed. See the per-basis subtotals.'
+  'No single figure: carbon coverage or compatibility is incomplete. Inspect the recorded subtotals and factor methods.'
 
 // ── which precedence layer set a factor ──────────────────────────────────
 // Per-workspace emissions overrides (Settings → Emissions factors) added a

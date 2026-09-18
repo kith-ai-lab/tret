@@ -398,14 +398,14 @@ export function TotalsStrip({ totals }: { totals: EmissionsTotals }) {
         }
       />
       <Stat
-        label="Total energy (est.)"
+        label="Energy used for carbon"
         value={orDash(formatEnergyScaled(totals.energy_wh))}
-        title={`Includes facility overhead. Compute only: ${orDash(formatEnergyScaled(totals.energy_wh_compute))}.`}
+        title="Sum of recorded energy after each run's applicable overhead treatment. Coverage may be incomplete; inspect individual runs."
       />
       <Stat
-        label="Compute energy (est.)"
+        label="Recorded energy"
         value={orDash(formatEnergyScaled(totals.energy_wh_compute))}
-        title="IT load, before data-centre overhead."
+        title="Sum of energy within each run's recorded boundary, before any additional PUE. GPU, node and facility coverage may differ."
       />
       <Stat
         label="Runs with an estimate"
@@ -418,6 +418,14 @@ export function TotalsStrip({ totals }: { totals: EmissionsTotals }) {
         color={totals.runs_without_estimate > 0 ? 'var(--amber)' : undefined}
         title={`Excluded from every total above. ${NO_ESTIMATE_HINT}`}
       />
+      {(totals.runs_without_carbon_total ?? 0) > 0 && (
+        <Stat
+          label="Runs without a combined carbon figure"
+          value={formatTokens(totals.runs_without_carbon_total ?? 0)}
+          color="var(--amber)"
+          title="Recorded energy and cost are retained; incompatible carbon components are not combined."
+        />
+      )}
       <Stat
         label={framing.label}
         value={orDash(formatCo2eScaled(avoided))}

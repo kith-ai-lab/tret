@@ -162,11 +162,12 @@ export function EmissionsScenarioButton({ projectId, days }: { projectId: string
 
 function ScenarioContent({ projectId, days }: { projectId: string | null; days: number }) {
   const [draft, setDraft] = useState<ScenarioDraft>(emptyDraft())
+  const [mode, setMode] = useState<'estimate_both_sides' | 'preserve_measured_energy'>('estimate_both_sides')
   const [clientErrors, setClientErrors] = useState<string[]>([])
 
   const whatifMutation = useMutation({
     mutationFn: () =>
-      api.emissionsWhatif({ project_id: projectId, days, factors: draftToFactors(draft) }),
+      api.emissionsWhatif({ project_id: projectId, days, factors: draftToFactors(draft), mode }),
   })
   const apiError = whatifMutation.error as ApiError | null
 
@@ -179,6 +180,17 @@ function ScenarioContent({ projectId, days }: { projectId: string | null; days: 
 
   return (
     <div className="stack" style={{ gap: 16 }}>
+      <div className="field">
+        <label htmlFor="emissions-scenario-mode" className="mono-label">Energy calculation</label>
+        <select id="emissions-scenario-mode" value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
+          <option value="estimate_both_sides">Re-estimate scenario energy from tokens</option>
+          <option value="preserve_measured_energy">Keep recorded measurements</option>
+        </select>
+        <div className="fine-print">
+          The recorded side stays unchanged. Keeping measurements supports grid and PUE changes;
+          facility readings already include overhead. Other changes require token re-estimation.
+        </div>
+      </div>
       <div className="panel stack" style={{ gap: 14 }}>
         <div>
           <div className="mono-label" style={{ marginBottom: 6 }}>
@@ -440,7 +452,7 @@ function ScenarioResult({ result }: { result: EmissionsWhatifResult }) {
             hint="A whole number on purpose: carbon percentages are deliberately coarse in this methodology, so a decimal place here would be false precision."
           />
           <DeltaStat
-            label="Δ energy (est.)"
+            label="Δ energy"
             value={orDash(formatEnergyScaled(delta.energy_wh))}
           />
           <DeltaStat
@@ -449,17 +461,23 @@ function ScenarioResult({ result }: { result: EmissionsWhatifResult }) {
             hint="Exact arithmetic on published list prices — the one figure here that is not an estimate."
           />
           <DeltaStat label="Runs recomputed" value={formatTokens(result.runs_recomputed)} />
+          {result.runs_preserved !== undefined && <DeltaStat label="Runs kept unchanged" value={formatTokens(result.runs_preserved)} />}
           <DeltaStat
             label="Runs skipped"
             value={formatTokens(result.runs_skipped)}
-            hint="Runs skipped only because their model is no longer in the catalog — there is nothing to recompute them against, so they are excluded from both totals above rather than left one-sided."
+            hint="Runs lacking a catalog model or sufficient measurement evidence are excluded from both totals."
           />
         </div>
 
         <div className="fine-print">
+          {result.mode_note ?? 'The server did not report its energy calculation mode.'}{' '}
           {result.basis} Nothing here is written anywhere — this is a comparison, not a save. Change
           the workspace's actual settings above to make it apply to the next real run.
         </div>
+
+        {result.exclusions?.map((entry) => (
+          <div className="fine-print" key={entry.reason}>{entry.runs} excluded: {entry.reason}</div>
+        ))}
 
         {result.warnings && result.warnings.length > 0 && (
           <div className="callout callout-warn">

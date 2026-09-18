@@ -59,7 +59,7 @@ export function LiveFootprint({
         </span>
       </span>
 
-      <span className="t-item" title="Cumulative estimated compute energy (IT load).">
+      <span className="t-item" title="Cumulative energy within the reported coverage. See the completed run for measurement and boundary details.">
         <span className="t-key">energy</span>
         <span className="t-val" style={{ minWidth: '9ch' }}>
           {orDash(formatWh(usage?.energy_wh))}

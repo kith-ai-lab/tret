@@ -1,0 +1,481 @@
+{
+  "attribution": "Ember (2026). Yearly Electricity Data. Licensed under CC BY 4.0. https://ember-energy.org/data/yearly-electricity-data/",
+  "countries": {
+    "ARG": {
+      "g_per_kwh": 342.91,
+      "name": "Argentina",
+      "year": 2025
+    },
+    "ARM": {
+      "g_per_kwh": 235.5,
+      "name": "Armenia",
+      "year": 2025
+    },
+    "AUS": {
+      "g_per_kwh": 524.59,
+      "name": "Australia",
+      "year": 2025
+    },
+    "AUT": {
+      "g_per_kwh": 117.22,
+      "name": "Austria",
+      "year": 2025
+    },
+    "AZE": {
+      "g_per_kwh": 647.12,
+      "name": "Azerbaijan",
+      "year": 2025
+    },
+    "BEL": {
+      "g_per_kwh": 109.3,
+      "name": "Belgium",
+      "year": 2025
+    },
+    "BGD": {
+      "g_per_kwh": 696.13,
+      "name": "Bangladesh",
+      "year": 2025
+    },
+    "BGR": {
+      "g_per_kwh": 275.41,
+      "name": "Bulgaria",
+      "year": 2025
+    },
+    "BIH": {
+      "g_per_kwh": 573.0,
+      "name": "Bosnia Herzegovina",
+      "year": 2025
+    },
+    "BLR": {
+      "g_per_kwh": 312.53,
+      "name": "Belarus",
+      "year": 2025
+    },
+    "BOL": {
+      "g_per_kwh": 481.29,
+      "name": "Bolivia",
+      "year": 2025
+    },
+    "BRA": {
+      "g_per_kwh": 109.95,
+      "name": "Brazil",
+      "year": 2025
+    },
+    "CAN": {
+      "g_per_kwh": 190.73,
+      "name": "Canada",
+      "year": 2025
+    },
+    "CHE": {
+      "g_per_kwh": 39.22,
+      "name": "Switzerland",
+      "year": 2025
+    },
+    "CHL": {
+      "g_per_kwh": 290.51,
+      "name": "Chile",
+      "year": 2025
+    },
+    "CHN": {
+      "g_per_kwh": 526.19,
+      "name": "China",
+      "year": 2025
+    },
+    "COL": {
+      "g_per_kwh": 186.81,
+      "name": "Colombia",
+      "year": 2025
+    },
+    "CRI": {
+      "g_per_kwh": 24.2,
+      "name": "Costa Rica",
+      "year": 2025
+    },
+    "CYP": {
+      "g_per_kwh": 489.0,
+      "name": "Cyprus",
+      "year": 2025
+    },
+    "CZE": {
+      "g_per_kwh": 401.46,
+      "name": "Czechia",
+      "year": 2025
+    },
+    "DEU": {
+      "g_per_kwh": 329.65,
+      "name": "Germany",
+      "year": 2025
+    },
+    "DNK": {
+      "g_per_kwh": 99.62,
+      "name": "Denmark",
+      "year": 2025
+    },
+    "DOM": {
+      "g_per_kwh": 537.48,
+      "name": "Dominican Republic (the)",
+      "year": 2025
+    },
+    "ECU": {
+      "g_per_kwh": 159.02,
+      "name": "Ecuador",
+      "year": 2025
+    },
+    "EGY": {
+      "g_per_kwh": 563.23,
+      "name": "Egypt",
+      "year": 2025
+    },
+    "ESP": {
+      "g_per_kwh": 153.56,
+      "name": "Spain",
+      "year": 2025
+    },
+    "EST": {
+      "g_per_kwh": 316.64,
+      "name": "Estonia",
+      "year": 2025
+    },
+    "ETH": {
+      "g_per_kwh": 23.08,
+      "name": "Ethiopia",
+      "year": 2025
+    },
+    "FIN": {
+      "g_per_kwh": 57.47,
+      "name": "Finland",
+      "year": 2025
+    },
+    "FRA": {
+      "g_per_kwh": 41.45,
+      "name": "France",
+      "year": 2025
+    },
+    "GBR": {
+      "g_per_kwh": 217.41,
+      "name": "United Kingdom",
+      "year": 2025
+    },
+    "GEO": {
+      "g_per_kwh": 145.93,
+      "name": "Georgia",
+      "year": 2025
+    },
+    "GRC": {
+      "g_per_kwh": 324.41,
+      "name": "Greece",
+      "year": 2025
+    },
+    "HRV": {
+      "g_per_kwh": 158.5,
+      "name": "Croatia",
+      "year": 2025
+    },
+    "HUN": {
+      "g_per_kwh": 163.02,
+      "name": "Hungary",
+      "year": 2025
+    },
+    "IND": {
+      "g_per_kwh": 670.55,
+      "name": "India",
+      "year": 2025
+    },
+    "IRL": {
+      "g_per_kwh": 255.9,
+      "name": "Ireland",
+      "year": 2025
+    },
+    "IRN": {
+      "g_per_kwh": 659.53,
+      "name": "Iran (Islamic Republic of)",
+      "year": 2025
+    },
+    "ISR": {
+      "g_per_kwh": 492.69,
+      "name": "Israel",
+      "year": 2025
+    },
+    "ITA": {
+      "g_per_kwh": 284.63,
+      "name": "Italy",
+      "year": 2025
+    },
+    "JPN": {
+      "g_per_kwh": 477.37,
+      "name": "Japan",
+      "year": 2025
+    },
+    "KAZ": {
+      "g_per_kwh": 805.32,
+      "name": "Kazakhstan",
+      "year": 2025
+    },
+    "KEN": {
+      "g_per_kwh": 95.44,
+      "name": "Kenya",
+      "year": 2025
+    },
+    "KGZ": {
+      "g_per_kwh": 150.32,
+      "name": "Kyrgyzstan",
+      "year": 2025
+    },
+    "KHM": {
+      "g_per_kwh": 498.87,
+      "name": "Cambodia",
+      "year": 2025
+    },
+    "KOR": {
+      "g_per_kwh": 417.14,
+      "name": "South Korea",
+      "year": 2025
+    },
+    "KWT": {
+      "g_per_kwh": 634.72,
+      "name": "Kuwait",
+      "year": 2025
+    },
+    "LKA": {
+      "g_per_kwh": 321.16,
+      "name": "Sri Lanka",
+      "year": 2025
+    },
+    "LTU": {
+      "g_per_kwh": 138.51,
+      "name": "Lithuania",
+      "year": 2025
+    },
+    "LUX": {
+      "g_per_kwh": 123.38,
+      "name": "Luxembourg",
+      "year": 2025
+    },
+    "LVA": {
+      "g_per_kwh": 134.28,
+      "name": "Latvia",
+      "year": 2025
+    },
+    "MAR": {
+      "g_per_kwh": 602.27,
+      "name": "Morocco",
+      "year": 2025
+    },
+    "MDA": {
+      "g_per_kwh": 510.35,
+      "name": "Moldova",
+      "year": 2025
+    },
+    "MEX": {
+      "g_per_kwh": 474.02,
+      "name": "Mexico",
+      "year": 2025
+    },
+    "MKD": {
+      "g_per_kwh": 405.63,
+      "name": "North Macedonia",
+      "year": 2025
+    },
+    "MLT": {
+      "g_per_kwh": 484.02,
+      "name": "Malta",
+      "year": 2025
+    },
+    "MNE": {
+      "g_per_kwh": 264.23,
+      "name": "Montenegro",
+      "year": 2025
+    },
+    "MNG": {
+      "g_per_kwh": 823.53,
+      "name": "Mongolia",
+      "year": 2025
+    },
+    "MYS": {
+      "g_per_kwh": 603.21,
+      "name": "Malaysia",
+      "year": 2025
+    },
+    "NGA": {
+      "g_per_kwh": 455.71,
+      "name": "Nigeria",
+      "year": 2025
+    },
+    "NLD": {
+      "g_per_kwh": 253.56,
+      "name": "Netherlands",
+      "year": 2025
+    },
+    "NOR": {
+      "g_per_kwh": 28.1,
+      "name": "Norway",
+      "year": 2025
+    },
+    "NZL": {
+      "g_per_kwh": 92.76,
+      "name": "New Zealand",
+      "year": 2025
+    },
+    "OMN": {
+      "g_per_kwh": 544.47,
+      "name": "Oman",
+      "year": 2025
+    },
+    "PAK": {
+      "g_per_kwh": 310.19,
+      "name": "Pakistan",
+      "year": 2025
+    },
+    "PER": {
+      "g_per_kwh": 238.25,
+      "name": "Peru",
+      "year": 2025
+    },
+    "PHL": {
+      "g_per_kwh": 595.44,
+      "name": "Philippines (the)",
+      "year": 2025
+    },
+    "POL": {
+      "g_per_kwh": 590.8,
+      "name": "Poland",
+      "year": 2025
+    },
+    "PRI": {
+      "g_per_kwh": 654.75,
+      "name": "Puerto Rico",
+      "year": 2025
+    },
+    "PRT": {
+      "g_per_kwh": 128.08,
+      "name": "Portugal",
+      "year": 2025
+    },
+    "PRY": {
+      "g_per_kwh": 24.7,
+      "name": "Paraguay",
+      "year": 2025
+    },
+    "QAT": {
+      "g_per_kwh": 581.52,
+      "name": "Qatar",
+      "year": 2025
+    },
+    "ROU": {
+      "g_per_kwh": 259.74,
+      "name": "Romania",
+      "year": 2025
+    },
+    "RUS": {
+      "g_per_kwh": 449.86,
+      "name": "Russian Federation (the)",
+      "year": 2025
+    },
+    "SGP": {
+      "g_per_kwh": 497.09,
+      "name": "Singapore",
+      "year": 2025
+    },
+    "SLV": {
+      "g_per_kwh": 137.77,
+      "name": "El Salvador",
+      "year": 2025
+    },
+    "SRB": {
+      "g_per_kwh": 695.66,
+      "name": "Serbia",
+      "year": 2025
+    },
+    "SVK": {
+      "g_per_kwh": 94.88,
+      "name": "Slovakia",
+      "year": 2025
+    },
+    "SVN": {
+      "g_per_kwh": 183.47,
+      "name": "Slovenia",
+      "year": 2025
+    },
+    "SWE": {
+      "g_per_kwh": 35.35,
+      "name": "Sweden",
+      "year": 2025
+    },
+    "THA": {
+      "g_per_kwh": 546.32,
+      "name": "Thailand",
+      "year": 2025
+    },
+    "TJK": {
+      "g_per_kwh": 73.94,
+      "name": "Tajikistan",
+      "year": 2025
+    },
+    "TUN": {
+      "g_per_kwh": 560.29,
+      "name": "Tunisia",
+      "year": 2025
+    },
+    "TUR": {
+      "g_per_kwh": 475.73,
+      "name": "Turkey",
+      "year": 2025
+    },
+    "TWN": {
+      "g_per_kwh": 634.07,
+      "name": "Taiwan",
+      "year": 2025
+    },
+    "URY": {
+      "g_per_kwh": 80.4,
+      "name": "Uruguay",
+      "year": 2025
+    },
+    "USA": {
+      "g_per_kwh": 384.4,
+      "name": "United States of America",
+      "year": 2025
+    },
+    "UZB": {
+      "g_per_kwh": 1000.0,
+      "name": "Uzbekistan",
+      "year": 2025
+    },
+    "VNM": {
+      "g_per_kwh": 462.58,
+      "name": "Viet Nam",
+      "year": 2025
+    },
+    "XKX": {
+      "g_per_kwh": 902.9,
+      "name": "Kosovo",
+      "year": 2025
+    },
+    "ZAF": {
+      "g_per_kwh": 698.96,
+      "name": "South Africa",
+      "year": 2025
+    }
+  },
+  "creator": "Ember",
+  "dataset": "Ember Yearly Electricity Data 2026 release, 2025 observations",
+  "electricity_mix_basis": "production",
+  "factor_boundary": "lifecycle_electricity_generation",
+  "gas_coverage": "co2e",
+  "gwp_assessment_basis": "unknown",
+  "gwp_horizon_years": 100,
+  "includes_td_losses": null,
+  "license": "CC BY 4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "methodology_url": "https://files.ember-energy.org/public-downloads/ember_electricity_data_methodology.pdf",
+  "schema_version": 1,
+  "source_sha256": "259e1095ee8ffeaf0aff37ad557916ae1823a2da13312da50ba4cec6b4574c3b",
+  "source_url": "https://files.ember-energy.org/public-downloads/yearly_full_release_long_format.csv",
+  "unit_source": "gCO2/kWh",
+  "world": {
+    "g_per_kwh": 458.49,
+    "name": "World",
+    "year": 2025
+  },
+  "year": 2025
+}
