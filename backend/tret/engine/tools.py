@@ -43,6 +43,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
@@ -118,6 +119,13 @@ class RunContext:
     # it off the run's own task_input and `run_harness_task` refuses to go past
     # MAX_DELEGATION_DEPTH.
     delegation_depth: int = 0
+    # This run's own effective cost cap (harness cap narrowed by `_cost_cap_usd`
+    # in task_input, if any — see harness.py where this is set), used by
+    # `run_harness_task` to carve a child's budget out of what is left of it.
+    # None only for a RunContext a test builds directly rather than one the
+    # engine assembles at run start; delegation then skips the carve-up
+    # entirely rather than guessing a cap that was never computed.
+    max_cost_usd: Decimal | None = None
     # Research budget, spent by fetch_url. A page is re-sent as conversation input
     # on every later iteration, so an unbounded number of them is the same failure
     # mode the result caps below exist for — with an outbound request attached.
@@ -166,18 +174,17 @@ class ToolError(Exception):
     """Returned to the model as a tool error message (not fatal to the run)."""
 
 
-# ── delegation depth ──────────────────────────────────────────────────────────
-# `run_harness_task` starts a whole new run, so delegation is the one tool whose
-# cost is another entire agent loop. Refusing chat/freeform task types does NOT
-# make it non-recursive: any pack task type may list `run_harness_task` in its
-# tools (or a harness may enable it), and then A can delegate to B, B to A, or a
-# task to itself — an unbounded chain of runs, each burning its own budget, with
-# only the cost cap of the *individual* runs standing in the way. The depth is
-# carried in the child run's task_input under `_delegation_depth` and enforced
-# here: a chat turn may delegate (depth 0 -> 1) and a specialist may delegate one
-# further hop (1 -> 2), and that is the end of it.
-MAX_DELEGATION_DEPTH = 2
-DELEGATION_DEPTH_KEY = "_delegation_depth"
+# ── delegation ────────────────────────────────────────────────────────────────
+# Defined in `engine/delegation.py` (dependency-free, so SDK-path modules such
+# as compaction.py can import them) and re-exported here, where delegation
+# itself lives.
+from tret.engine.delegation import (  # noqa: E402,F401
+    COST_CAP_KEY,
+    DELEGATION_DEPTH_KEY,
+    DELEGATION_TOOLS,
+    MAX_DELEGATION_DEPTH,
+    MIN_CHILD_BUDGET_USD,
+)
 
 
 # ── result caps ───────────────────────────────────────────────────────────────
@@ -1670,29 +1677,48 @@ async def run_method(ctx: RunContext, method: str, params: dict | None = None) -
     )
 
 
-@builtin(
-    "run_harness_task",
-    "Delegate a structured task to a specialist harness (the capability catalog in your context "
-    "lists available task types and their input fields). The task runs with its own doctrine, "
-    "model routing, and validation; any verdict or finding it records is a DRAFT awaiting human "
-    "approval. Use this whenever the user asks for work a specialist task type covers — do not "
-    "attempt structured assessments yourself in chat.",
-    {
-        "type": "object",
-        "required": ["task_type", "task_input"],
-        "properties": {
-            "task_type": {"type": "string", "description": "Task type slug from the capability catalog"},
-            "task_input": {"type": "object", "description": "Inputs matching the task's input fields"},
-            "harness_name": {"type": "string", "description": "Optional specific harness to use"},
-        },
-    },
-)
-async def run_harness_task(
-    ctx: RunContext, task_type: str, task_input: dict, harness_name: str | None = None
-) -> str:
+@dataclass
+class PreparedChild:
+    """What `_await_child` / `_summarize_child` need, without `ctx.db`.
+
+    A future batch/subagent caller will `_prepare_child` several of these one
+    at a time (each touches `ctx.db`) and then await them concurrently — see
+    the one-shared-session invariant documented at harness.py ~2303-2318.
+    """
+
+    child_id: uuid.UUID
+    harness_name: str
+    task_type: str
+
+
+async def _prepare_child(
+    ctx: RunContext,
+    task_type: str,
+    task_input: dict,
+    harness_name: str | None = None,
+    *,
+    kind: str = "task",
+    batch_id: uuid.UUID | None = None,
+    budget_share: int = 1,
+    commit: bool = True,
+) -> PreparedChild:
+    """Resolve a delegation target and insert the child `Run` row.
+
+    Everything here touches `ctx.db`, so a caller preparing several children
+    for a concurrent batch must run this phase sequentially for each one
+    before awaiting any of them. `commit=True` (the single-tool path today)
+    commits at the point `run_harness_task` always has; `commit=False` only
+    flushes, so a future batch caller can prepare N children and commit once.
+
+    `kind` / `batch_id` are stamped straight onto `Run.delegation_kind` /
+    `Run.delegation_batch_id` — see those columns' own comments (db/models.py).
+    `budget_share` is this child's share of what's left of the parent's cost
+    cap (1 for a single delegation; a future parallel-batch caller passes the
+    fan-out width so N siblings split one budget instead of each claiming all
+    of it) — see the carve-up below.
+    """
     # Lazy imports avoid a circular dependency with the engine module.
     from tret.db.models import Harness, Run
-    from tret.engine.harness import get_harness_engine
     from tret.packs.links import pack_map_for_harnesses
 
     if task_type in ("chat", "freeform"):
@@ -1715,6 +1741,28 @@ async def run_harness_task(
     if parent_harness is None:
         raise ToolError("Delegation requires a parent run bound to a harness")
     workspace_id = parent_harness.workspace_id
+
+    # Carve this child's cap out of what's left of the ROOT's cost cap, before
+    # inserting any row: the root's cap is meant to bound its whole delegation
+    # tree (`ctx.max_cost_usd` is this run's own effective cap, propagated hop
+    # by hop — see RunContext), so a child is entitled to a *share* of what
+    # this run has left, never a fresh budget of its own. `ctx.max_cost_usd is
+    # None` only for a RunContext a test built directly (the engine always
+    # sets it), and skips the carve-up entirely rather than guessing a cap.
+    child_budget_share: Decimal | None = None
+    if ctx.max_cost_usd is not None:
+        remaining = ctx.max_cost_usd - (
+            (parent.cost_usd or Decimal(0)) + (parent.delegated_cost_usd or Decimal(0))
+        )
+        child_budget_share = remaining / budget_share
+        if child_budget_share < MIN_CHILD_BUDGET_USD:
+            raise ToolError(
+                f"This run has ${remaining} of its ${ctx.max_cost_usd} budget left"
+                + (f" ({budget_share}-way split leaves ${child_budget_share} per child)"
+                   if budget_share != 1 else "")
+                + " — that is not enough to delegate. Finish the work here with the tools you "
+                "have, or report what is missing."
+            )
 
     harnesses = (
         (
@@ -1775,33 +1823,75 @@ async def run_harness_task(
     harness = candidates[0]
     declaring = declaring_pack(harness)
 
+    child_task_input = {**task_input, DELEGATION_DEPTH_KEY: ctx.delegation_depth + 1}
+    if child_budget_share is not None:
+        # Lazy import: harness.py imports this module, so importing it back at
+        # module load time would be circular (same reason `get_harness_engine`
+        # is imported lazily in `_await_child` below).
+        from tret.engine.harness import DEFAULT_MAX_COST_USD
+
+        child_harness_cap = Decimal(
+            str((harness.loop_config or {}).get("max_cost_usd", DEFAULT_MAX_COST_USD))
+        )
+        # The child never gets MORE than its own harness would already grant it
+        # — the carve-up can only shrink a cap, never raise one above what the
+        # harness's own config allows.
+        cap = min(child_harness_cap, child_budget_share).quantize(Decimal("0.000001"))
+        # JSON column: task_input round-trips through JSONB, which has no
+        # Decimal type, so this is stored (and later parsed back) as a string.
+        child_task_input[COST_CAP_KEY] = str(cap)
+
     child = Run(
         project_id=ctx.project_id,
         harness_id=harness.id,
         pack_id=declaring.id if declaring else None,
         conversation_id=ctx.conversation_id,
+        parent_run_id=ctx.run_id,
+        root_run_id=(parent.root_run_id or parent.id) if parent else None,
+        delegation_kind=kind,
+        delegation_batch_id=batch_id,
         task_type=task_type,
         # The hop counter travels with the child, so the chain is bounded however
         # it was reached; the engine reads it back off task_input.
-        task_input={**task_input, DELEGATION_DEPTH_KEY: ctx.delegation_depth + 1},
+        task_input=child_task_input,
         created_by=parent.created_by if parent else None,
     )
     ctx.db.add(child)
-    await ctx.db.commit()
+    if commit:
+        await ctx.db.commit()
+    else:
+        await ctx.db.flush()
+
+    return PreparedChild(child_id=child.id, harness_name=harness.name, task_type=task_type)
+
+
+async def _await_child(ctx: RunContext, prepared: PreparedChild) -> tuple[Run | None, list[Finding]]:
+    """Run the prepared child to completion and read back its result.
+
+    Must never touch `ctx.db`: a future batch caller runs several of these
+    concurrently via `asyncio.gather`, and `ctx.db` is the one AsyncSession
+    every tool in this run shares, which cannot be used concurrently.
+    """
+    from tret.engine.harness import get_harness_engine
 
     engine = get_harness_engine()
     # Registered before `execute()` and cleared in `finally` regardless of how
     # the child finishes, so the window in which the engine knows this run is a
     # child of `ctx.run_id` covers exactly the child's own lifetime — no wider.
-    # This is what lets `engine.cancel(ctx.run_id)` (or an ancestor's own
-    # cancellation) reach a run that has no `parent_run_id` column of its own
-    # (see `HarnessEngine._is_cancelled` / `.cancel`).
-    engine.register_delegation(child_id=child.id, parent_id=ctx.run_id)
+    # The child's `parent_run_id` column is already set by `_prepare_child`,
+    # but cancellation needs an in-process fast path rather than a DB round
+    # trip per hop, and this in-memory graph is that fast path (see
+    # `HarnessEngine._is_cancelled` / `.cancel`).
+    engine.register_delegation(child_id=prepared.child_id, parent_id=ctx.run_id)
     await get_event_bus().publish(
         ctx.run_id,
         RunEvent(
             "delegation_started",
-            {"child_run_id": str(child.id), "harness": harness.name, "task_type": task_type},
+            {
+                "child_run_id": str(prepared.child_id),
+                "harness": prepared.harness_name,
+                "task_type": prepared.task_type,
+            },
         ),
     )
     # Read results through a fresh session — the engine ran in its own.
@@ -1810,16 +1900,20 @@ async def run_harness_task(
     done: Run | None = None
     findings: list = []
     try:
-        await engine.execute(child.id)
+        await engine.execute(prepared.child_id)
         async with get_session_factory()() as read_db:
-            done = await read_db.get(Run, child.id)
+            done = await read_db.get(Run, prepared.child_id)
             findings = (
-                (await read_db.execute(select(Finding).where(Finding.run_id == child.id)))
+                (
+                    await read_db.execute(
+                        select(Finding).where(Finding.run_id == prepared.child_id)
+                    )
+                )
                 .scalars()
                 .all()
             )
     finally:
-        engine.unregister_delegation(child.id)
+        engine.unregister_delegation(prepared.child_id)
         # Published from the same `finally` as unregistration — not after the
         # result dict below is built — so a `delegation_started` always gets a
         # matching finish, even on a path `engine.execute()` does not normally
@@ -1832,18 +1926,67 @@ async def run_harness_task(
             RunEvent(
                 "delegation_finished",
                 {
-                    "child_run_id": str(child.id),
-                    "harness": harness.name,
+                    "child_run_id": str(prepared.child_id),
+                    "harness": prepared.harness_name,
                     "status": done.status if done is not None else "unknown",
                 },
             ),
         )
+    return done, findings
 
+
+async def _record_delegated_cost(ctx: RunContext, child_id: uuid.UUID) -> None:
+    """Add what the child cost — its own spend plus whatever it in turn
+    delegated — onto the parent's `delegated_cost_usd`, so the parent's
+    budget check (harness.py) sees this child's full cost on its very next
+    iteration.
+
+    Reads the child back by id rather than taking `_await_child`'s result, and
+    commits, because callers run this from a `finally`: the child's dollars are
+    spent whether or not the tool call that spawned it goes on to succeed, and
+    the engine rolls the session back when a tool errors (harness.py, right
+    after `execute_tool`). Spend recorded only on the success path would leave
+    `_prepare_child`'s `remaining` too generous after exactly the runs that
+    went wrong.
+
+    Touches `ctx.db`, so — like `_prepare_child` — this belongs to the
+    sequential phase around a concurrent batch, not inside the
+    `asyncio.gather` that will run several `_await_child`s at once.
+    """
+    from tret.db.models import Run
+
+    parent = await ctx.db.get(Run, ctx.run_id)
+    child = await ctx.db.get(Run, child_id)
+    if parent is None or child is None:
+        return
+    # `child` is the instance `_prepare_child` added to this session, still
+    # carrying the zeros it was inserted with; the engine ran it in a session
+    # of its own.
+    await ctx.db.refresh(child)
+    parent.delegated_cost_usd = (parent.delegated_cost_usd or Decimal(0)) + (
+        (child.cost_usd or Decimal(0)) + (child.delegated_cost_usd or Decimal(0))
+    )
+    await ctx.db.commit()
+
+
+def _summarize_child(prepared: PreparedChild, done: "Run | None", findings: list) -> dict:
+    """Build the result dict a delegation tool returns, `note` included.
+
+    `done` is `None` only if `_await_child` finished without raising yet the
+    fresh-session read-back found no row for the child — not a path today's
+    code takes in practice. Preserved as-is: this indexes into `done.status`
+    unconditionally, exactly like the pre-split code did, so that edge case
+    still surfaces as an `AttributeError` out of the tool call rather than a
+    silently different result.
+    """
     result = {
-        "child_run_id": str(child.id),
+        "child_run_id": str(prepared.child_id),
         "status": done.status,
         "model_used": done.model_used,
         "cost_usd": float(done.cost_usd or 0),
+        # What the child itself spent through further delegation — the two
+        # together are what this one `run_harness_task` call cost in total.
+        "delegated_cost_usd": float(done.delegated_cost_usd or 0),
         # The delegated run's own ecological line, so a chat turn that
         # delegates can report the full cost of the work it caused rather
         # than only the dollars. Estimated — docs/eco-accounting.md.
@@ -1877,7 +2020,35 @@ async def run_harness_task(
         result["note"] = (
             "Findings are DRAFTS awaiting human approval — say so when you report them."
         )
-    return json.dumps(result, default=str)
+    return result
+
+
+@builtin(
+    "run_harness_task",
+    "Delegate a structured task to a specialist harness (the capability catalog in your context "
+    "lists available task types and their input fields). The task runs with its own doctrine, "
+    "model routing, and validation; any verdict or finding it records is a DRAFT awaiting human "
+    "approval. Use this whenever the user asks for work a specialist task type covers — do not "
+    "attempt structured assessments yourself in chat.",
+    {
+        "type": "object",
+        "required": ["task_type", "task_input"],
+        "properties": {
+            "task_type": {"type": "string", "description": "Task type slug from the capability catalog"},
+            "task_input": {"type": "object", "description": "Inputs matching the task's input fields"},
+            "harness_name": {"type": "string", "description": "Optional specific harness to use"},
+        },
+    },
+)
+async def run_harness_task(
+    ctx: RunContext, task_type: str, task_input: dict, harness_name: str | None = None
+) -> str:
+    prepared = await _prepare_child(ctx, task_type, task_input, harness_name)
+    try:
+        done, findings = await _await_child(ctx, prepared)
+    finally:
+        await _record_delegated_cost(ctx, prepared.child_id)
+    return json.dumps(_summarize_child(prepared, done, findings), default=str)
 
 
 @builtin(

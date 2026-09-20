@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
+from tests.evals.golden_world import install_sqlite_type_shims
 from tret.db.models import Base, Harness, Pack, Project, Run, Workspace
 from tret.engine.tools import RunContext, ToolError, run_harness_task
 from tret.packs.links import set_harness_packs
@@ -56,6 +57,11 @@ class _FakeEngine:
 
 @pytest.fixture()
 async def db(tmp_path, monkeypatch):
+    # The DDL shims above make `create_all` work, but binding a Python list
+    # into an ARRAY column (`Harness.tool_names`) needs the column-type swap
+    # too. Without this the file only passed when some other test module had
+    # already installed the shims in the same process.
+    install_sqlite_type_shims()
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'delegation.db'}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

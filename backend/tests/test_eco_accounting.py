@@ -19,6 +19,7 @@ rather than absorbed by a loosened assertion.
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 from decimal import Decimal
 
 import httpx
@@ -433,6 +434,15 @@ class _StubDb:
 
     async def get(self, model, _id):
         return self._project if model is Project else self._run
+
+    async def execute(self, _query):
+        # get_run's delegation-tree aggregate (api/runs.py::_run_tree): this
+        # run delegated nothing, so the tree is just itself and `tree` is None.
+        class _LoneRun:
+            def one(self):
+                return SimpleNamespace(run_count=1)
+
+        return _LoneRun()
 
 
 def _ctx_for(db: _StubDb) -> WorkspaceContext:

@@ -5,17 +5,19 @@ import base64
 import binascii
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
 from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.db.engine import get_db
 from tret.db.models import Document, Harness, Project, Run, User
+from tret.engine.delegation import COST_CAP_KEY, DELEGATION_DEPTH_KEY
 from tret.engine.events import get_event_bus
 from tret.engine.harness import get_harness_engine
 from tret.packs.links import packs_for_harness, resolve_pack_for_task
@@ -45,6 +47,12 @@ def _run_summary(run: Run) -> dict:
         # for a run that never began as a chat turn (workbench, a scheduled
         # task) — permanently, not a gap to be backfilled later.
         "conversation_id": str(run.conversation_id) if run.conversation_id else None,
+        # Delegation lineage (`run_harness_task`, engine/tools.py). All four
+        # null for a run nothing delegated to and that delegated nothing.
+        "parent_run_id": str(run.parent_run_id) if run.parent_run_id else None,
+        "root_run_id": str(run.root_run_id) if run.root_run_id else None,
+        "delegation_kind": run.delegation_kind,
+        "delegation_batch_id": str(run.delegation_batch_id) if run.delegation_batch_id else None,
         "task_type": run.task_type,
         "status": run.status,
         "model_used": run.model_used,
@@ -62,6 +70,10 @@ def _run_summary(run: Run) -> dict:
         "reported_cost_usd": (
             float(run.reported_cost_usd) if run.reported_cost_usd is not None else None
         ),
+        # What this run has caused OTHER runs to spend through delegation —
+        # never rolled into cost_usd/reported_cost_usd above. See
+        # Run.delegated_cost_usd's own comment (db/models.py).
+        "delegated_cost_usd": float(run.delegated_cost_usd or 0),
         # Estimated ecological cost alongside the dollar cost. None (not 0) for
         # runs that predate eco accounting: no estimate is not the same as none
         # drawn. Full derivation is in the detail view's "energy" block.
@@ -117,7 +129,14 @@ async def create_run(
         if set(found_ids) != set(body.document_ids):
             raise HTTPException(404, "Document not found")
 
-    task_input = dict(body.task_input)
+    # Delegation plumbing is the engine's to stamp (engine/tools.py::
+    # `_prepare_child`), never a caller's: a hand-set `_delegation_depth`
+    # would make a root run look like a delegated child — which tret-cloud's
+    # pre-run gate reads as "the parent already holds credit for this" — and
+    # a negative one would buy extra hops.
+    task_input = {
+        k: v for k, v in body.task_input.items() if k not in (DELEGATION_DEPTH_KEY, COST_CAP_KEY)
+    }
     if body.model_override:
         task_input["_model_override"] = body.model_override
 
@@ -170,6 +189,7 @@ def _decode_run_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
 async def list_runs(
     limit: int | None = Query(default=None, ge=1, le=200),
     cursor: str | None = None,
+    top_level_only: bool = False,
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
@@ -184,6 +204,9 @@ async def list_runs(
     rather than an OFFSET, so a run created mid-page can never shift
     already-seen rows into the next page or duplicate one across pages.
     `next_cursor` is omitted (null) once the last page is reached.
+    `top_level_only=true` hides delegated runs (`parent_run_id IS NOT NULL`),
+    leaving only runs a person, a schedule, or the API started directly;
+    it defaults to false, which keeps today's behaviour unchanged.
     """
     paged = limit is not None or cursor is not None
     effective_limit = limit if limit is not None else 50
@@ -193,6 +216,8 @@ async def list_runs(
         return {"items": [], "next_cursor": None} if paged else []
 
     query = select(Run).where(Run.project_id == project.id)
+    if top_level_only:
+        query = query.where(Run.parent_run_id.is_(None))
     if cursor is not None:
         last_created_at, last_id = _decode_run_cursor(cursor)
         query = query.where(
@@ -215,6 +240,67 @@ async def list_runs(
     return {"items": [_run_summary(r) for r in page], "next_cursor": next_cursor}
 
 
+async def _run_tree(db: AsyncSession, run: Run) -> dict | None:
+    """Aggregate totals over `run`'s whole delegation tree — root plus every
+    descendant — in one indexed query. None when `run` is a root with no
+    descendants (`run_count == 1`): a lone run has no tree worth reporting
+    beyond its own summary.
+
+    Per-run `cost_usd`/`reported_cost_usd`/`energy_wh` are deliberately never
+    rolled up into a parent row's own columns — `api/analytics.py` sums
+    `Run.cost_usd` (and friends) straight across every row in a window, so a
+    parent that already carried its children's totals would double-count
+    them the moment analytics scanned both the parent and the children.
+    Tree totals are computed here, on read, instead.
+
+    `reported_cost_usd`: sums `coalesce(reported_cost_usd, cost_usd)` per
+    row — the simpler of the two acceptable roll-ups (falling back to the
+    catalog price for any row that has accrued cost but no provider-reported
+    actual yet), rather than only summing rows that already have a reported
+    figure. It reports None only when the whole tree has neither a reported
+    figure anywhere nor any catalog cost at all — i.e. nothing has spent
+    anything yet — matching `reported_cost_usd`'s own "null means no cost
+    accrued" meaning at the per-run level.
+    """
+    root = run.root_run_id or run.id
+    reported_expr = func.coalesce(Run.reported_cost_usd, Run.cost_usd)
+    has_reported = case((Run.reported_cost_usd.is_not(None), 1), else_=0)
+    row = (
+        await db.execute(
+            select(
+                func.count().label("run_count"),
+                func.sum(Run.cost_usd).label("cost_usd"),
+                func.sum(reported_expr).label("reported_cost_usd"),
+                func.sum(has_reported).label("reported_count"),
+                func.sum(Run.energy_wh).label("energy_wh"),
+            ).where(
+                # A child always inherits its parent's project (`_prepare_child`),
+                # so this predicate changes no result today; it is here so tenant
+                # scoping is a property of the query, not of how rows get written.
+                Run.project_id == run.project_id,
+                or_(Run.id == root, Run.root_run_id == root),
+            )
+        )
+    ).one()
+
+    if row.run_count == 1:
+        return None
+
+    cost_usd = row.cost_usd or Decimal(0)
+    reported_cost_usd = (
+        None
+        if not row.reported_count and cost_usd == 0
+        else float(row.reported_cost_usd or 0)
+    )
+    return {
+        "root_run_id": str(root),
+        "run_count": row.run_count,
+        "cost_usd": float(cost_usd),
+        "reported_cost_usd": reported_cost_usd,
+        "energy_wh": energy_wh_field(row.energy_wh),
+    }
+
+
 @router.get("/{run_id}")
 async def get_run(
     run_id: uuid.UUID,
@@ -226,6 +312,11 @@ async def get_run(
     if run is None or await project_in_workspace(db, run.project_id, ctx.id) is None:
         raise HTTPException(404, "Run not found")
     return {**_run_summary(run), "task_input": run.task_input, "messages": run.messages,
+            # Aggregate totals over this run's whole delegation tree (root plus
+            # every descendant), or None when this run is a root with none.
+            # See `_run_tree` for why these are computed on read rather than
+            # rolled up into any row's own cost/energy columns.
+            "tree": await _run_tree(db, run),
             "document_ids": [str(d) for d in (run.document_ids or [])],
             "doctrine_sha": run.doctrine_sha,
             # What the context was made of, per component, in estimated tokens.
@@ -258,6 +349,29 @@ async def get_run(
             # {checked, status, attempts, unsupported, first_unsupported}.
             # Null for any run the check does not apply to.
             "grounding": run.grounding}
+
+
+@router.get("/{run_id}/children")
+async def list_run_children(
+    run_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """Direct children only — a run this one's `run_harness_task` call spawned
+    (`parent_run_id == run_id`), not grandchildren. Oldest first, matching how
+    a delegation batch's children were created."""
+    run = await db.get(Run, run_id)
+    if run is None or await project_in_workspace(db, run.project_id, ctx.id) is None:
+        raise HTTPException(404, "Run not found")
+    children = (
+        await db.execute(
+            select(Run)
+            .where(Run.parent_run_id == run_id, Run.project_id == run.project_id)
+            .order_by(Run.created_at.asc(), Run.id.asc())
+        )
+    ).scalars().all()
+    return [_run_summary(c) for c in children]
 
 
 @router.get("/method-runs/{method_run_id}")

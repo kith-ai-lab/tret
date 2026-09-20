@@ -37,6 +37,7 @@ import math
 from dataclasses import dataclass, field
 
 from tret.engine.context import estimate_tokens
+from tret.engine.delegation import DELEGATION_TOOLS
 from tret.providers.base import Msg, ToolSpec
 from tret.services.emissions import overhead_call
 
@@ -49,7 +50,6 @@ ELIDABLE_TOOLS = frozenset(
         "read_document",
         "search_documents",
         "list_prior_findings",
-        "run_harness_task",
         # The web tools are elidable by construction rather than by judgment.
         # `web_search` returns titles, URLs and vendor snippets that its own
         # description forbids quoting or citing — navigation, not evidence.
@@ -74,6 +74,10 @@ ELIDABLE_TOOLS = frozenset(
         # costs nothing a re-call couldn't recover cheaply.
         "list_pack_lessons",
     }
+    # `run_harness_task`, and any future sibling delegation tool, by name —
+    # see `DELEGATION_TOOLS`'s own comment in engine/delegation.py for why they're kept
+    # in one place instead of repeated here.
+    | DELEGATION_TOOLS
 )
 # Never elided, for two distinct reasons:
 #

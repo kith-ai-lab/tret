@@ -22,6 +22,7 @@ from tret.api.workspace import WorkspaceContext, current_project, current_worksp
 from tret.db.engine import get_db, get_session_factory
 from tret.db.models import Conversation, Dataset, Harness, Pack, Run, User
 from tret.engine.harness import get_harness_engine
+from tret.engine.tools import DELEGATION_TOOLS
 from tret.packs.links import pack_map_for_harnesses, packs_for_harness, resolve_pack_for_task
 from tret.router_llm.objectives import OBJECTIVES
 from tret.services import lifecycle
@@ -400,7 +401,7 @@ def _assistant_message(run: Run) -> dict:
                 assistant_text = m["content"]  # last assistant text wins
             for tc in m.get("tool_calls") or []:
                 entry = {"tool": tc.get("name"), "summary": ""}
-                if tc.get("name") == "run_harness_task":
+                if tc.get("name") in DELEGATION_TOOLS:
                     args = tc.get("arguments") or {}
                     entry["summary"] = f"delegated {args.get('task_type', '?')}"
                 else:

@@ -406,6 +406,27 @@ task types would not have bounded anything on its own — each hop is a whole
 extra agent loop spending its own budget, with only the per-run cost cap in the
 way.
 
+Lineage is persisted on the `Run` row itself, not just carried in `task_input`:
+`parent_run_id` (the run whose `run_harness_task` call created this one),
+`root_run_id` (the top-level ancestor, denormalized off the parent chain),
+and `delegation_kind`/`delegation_batch_id` (which shape of call, and which
+parallel batch, if any). This is what the runs API's `/{run_id}/children` and
+per-run `tree` aggregate read; the in-process parent map the engine also keeps
+is only the fast path cancellation needs, not the record of who delegated to
+whom. Each run's own `cost_usd` is never rolled up into an ancestor's —
+`api/analytics.py` sums it straight across every row, so a parent carrying its
+children's spend would double it — but a run does track `delegated_cost_usd`,
+what it has caused other runs to spend, one hop deep and recursive by
+construction (a child adds its own `cost_usd` *and* its own
+`delegated_cost_usd` onto its parent's total when it finishes). A run's
+budget check is against `cost_usd + delegated_cost_usd`, so the root's own
+cost cap bounds its whole delegation tree rather than each hop getting a
+fresh budget of its own: `run_harness_task` carves a child's cap out of what
+the parent has left (stamped onto the child's `task_input` as `_cost_cap_usd`,
+which can only lower a harness's own cap, never raise it), and refuses to
+delegate at all once that remaining share drops below a $0.05 floor — a
+budget too small to buy a delegated run anything.
+
 ## SDK and CLI
 
 `tret.sdk.Router` and the `tret run` CLI (`tret/local_run.py`) are a second,

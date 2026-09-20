@@ -50,6 +50,7 @@ from tret.engine.events import RunEvent, get_event_bus
 from tret.engine.extensions import get_extension_registry
 from tret.engine.tools import (
     CONNECTOR_TOOL_NAMES,
+    COST_CAP_KEY,
     DELEGATION_DEPTH_KEY,
     LESSON_TOOL_NAMES,
     WEB_TOOL_NAMES,
@@ -204,6 +205,39 @@ def _near_context_limit(est_tokens: int, context_limit: int) -> bool:
     to be near, and `over_budget` never fires against it either.
     """
     return bool(context_limit) and est_tokens >= EXACT_COUNT_THRESHOLD * context_limit
+
+
+def _effective_max_cost(harness_cap: Decimal, task_input: dict) -> Decimal:
+    """`harness_cap` narrowed by `_cost_cap_usd` (COST_CAP_KEY) if a
+    delegating parent stamped one onto `task_input` (`_prepare_child`,
+    engine/tools.py) — via `min`, never assignment, so a caller who sets the
+    key by hand through the runs API can only ever lower their own run's cap,
+    never raise it. Anything that doesn't parse to a positive Decimal is
+    ignored rather than raised: a malformed or stale value should not be able
+    to fail the run before it starts.
+    """
+    raw_cap = task_input.get(COST_CAP_KEY)
+    if raw_cap is None:
+        return harness_cap
+    try:
+        stamped_cap = Decimal(str(raw_cap))
+    except (ArithmeticError, ValueError, TypeError):
+        return harness_cap
+    # `Decimal("nan")` constructs without complaint and only raises once it is
+    # compared, so finiteness is checked before the sign.
+    if not stamped_cap.is_finite() or stamped_cap <= 0:
+        return harness_cap
+    return min(harness_cap, stamped_cap)
+
+
+def _spent(run: Run) -> Decimal:
+    """What `run`'s cost cap is checked against: its own model spend plus
+    whatever it has caused through delegation so far. The two are separate
+    columns (`cost_usd` must stay pure per-run spend for `api/analytics.py`'s
+    rollup — see `Run.delegated_cost_usd`'s own comment) but the cap doesn't
+    care about that split; it cares about total exposure.
+    """
+    return (run.cost_usd or Decimal(0)) + (run.delegated_cost_usd or Decimal(0))
 
 
 def _format_token_budget(n: int) -> str:
@@ -801,14 +835,15 @@ class HarnessEngine:
         self.router = ModelRouter(self.catalog, self.registry, self.priors)
         self.bus = get_event_bus()
         self._cancelled: set[uuid.UUID] = set()
-        # In-process delegation lineage: child run id -> parent run id.
-        # `run_harness_task` (engine/tools.py) registers a child here before
-        # awaiting its `execute()` and unregisters it after, so a run created by
-        # delegation is never a mystery to the engine that has to cancel it —
-        # even though a child has no `parent_run_id` column (see the module this
-        # dict is read from: `_is_cancelled` and `cancel` below). Bounded by
-        # construction: a run appears here for exactly the lifetime of the
-        # `run_harness_task` call that created it.
+        # In-process delegation lineage: child run id -> parent run id. A child
+        # run's `parent_run_id` column (db/models.py) is the persisted record of
+        # this, but cancellation needs to walk the chain in-process without a
+        # DB round trip per hop, so `run_harness_task` (engine/tools.py)
+        # registers a child here before awaiting its `execute()` and
+        # unregisters it after (see the module this dict is read from:
+        # `_is_cancelled` and `cancel` below). Bounded by construction: a run
+        # appears here for exactly the lifetime of the `run_harness_task` call
+        # that created it.
         self._parent_of: dict[uuid.UUID, uuid.UUID] = {}
 
     def register_delegation(self, *, child_id: uuid.UUID, parent_id: uuid.UUID) -> None:
@@ -1327,7 +1362,9 @@ class HarnessEngine:
         max_iterations = max(1, min(requested_iterations, MAX_ITERATIONS_CEILING))
         max_output_tokens = int(loop_cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))
         temperature = float(loop_cfg.get("temperature", DEFAULT_TEMPERATURE))
-        max_cost = Decimal(str(loop_cfg.get("max_cost_usd", DEFAULT_MAX_COST_USD)))
+        max_cost = _effective_max_cost(
+            Decimal(str(loop_cfg.get("max_cost_usd", DEFAULT_MAX_COST_USD))), run.task_input
+        )
         model_policy = effective_model_policy(harness.model_policy, run.task_input)
         budget_raw = model_policy.get("max_run_output_tokens")
         output_budget = int(budget_raw) if budget_raw else 0
@@ -1548,7 +1585,11 @@ class HarnessEngine:
             pack_manifest=pack.manifest if pack else None,
             pack_dir=pack.source_path if pack else None,
             terminal_tool=task.get("terminal_tool"),
-            delegation_depth=int(run.task_input.get(DELEGATION_DEPTH_KEY) or 0),
+            # Clamped at zero: a negative depth would buy extra hops under
+            # `MAX_DELEGATION_DEPTH`. The runs API strips this key from what a
+            # caller sends (api/runs.py), but the engine does not rely on that.
+            delegation_depth=max(0, int(run.task_input.get(DELEGATION_DEPTH_KEY) or 0)),
+            max_cost_usd=max_cost,
         )
         # The grounding check (engine/grounding.py) only makes sense where a
         # reply's prose *is* the output: a verdict task's numbers are already
@@ -1742,7 +1783,7 @@ class HarnessEngine:
                 _budget_line(
                     iteration=iteration,
                     max_iterations=max_iterations,
-                    cost_so_far=run.cost_usd or Decimal(0),
+                    cost_so_far=_spent(run),
                     max_cost=max_cost,
                     est_tokens=estimate_wire_tokens(system, view, tool_specs),
                     context_limit=context_limit,
@@ -2284,9 +2325,20 @@ class HarnessEngine:
                 run.status = self._final_status(ctx, final_text)
                 break
 
-            if run.cost_usd >= max_cost:
+            spent = _spent(run)
+            if spent >= max_cost:
                 run.status = "failed"
-                run.error = f"cost_cap_exceeded: run cost ${run.cost_usd} >= cap ${max_cost}"
+                # Byte-identical to the pre-delegation message when nothing has
+                # been delegated (delegated_cost_usd == 0) — router_llm/outcomes.py
+                # only matches the "cost_cap_exceeded" prefix, but the exact
+                # historical tail is kept anyway rather than changed for free.
+                if run.delegated_cost_usd:
+                    run.error = (
+                        f"cost_cap_exceeded: run cost ${run.cost_usd} + delegated "
+                        f"${run.delegated_cost_usd} >= cap ${max_cost}"
+                    )
+                else:
+                    run.error = f"cost_cap_exceeded: run cost ${run.cost_usd} >= cap ${max_cost}"
                 break
 
             # Hard stop only once the model has had the finalize-now instruction
@@ -2480,7 +2532,7 @@ class HarnessEngine:
                     repeated_call_trips=repeated_call_trips,
                     terminal_recorded=ctx.terminal_recorded,
                     findings_created=findings_total,
-                    cost_so_far=run.cost_usd or Decimal(0),
+                    cost_so_far=_spent(run),
                     max_cost_usd=max_cost,
                     switches_used=switches_used,
                     max_switches=adaptive.max_switches,

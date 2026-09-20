@@ -458,6 +458,36 @@ class Run(Base):
     conversation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="SET NULL")
     )
+    # Lineage for a run spawned by `run_harness_task` (engine/tools.py). Both
+    # FKs point back into this same table, so both `ondelete="SET NULL"`: a
+    # deleted ancestor must not cascade into deleting (or blocking deletion
+    # of) the runs it delegated to — the same "outliving its cause" posture
+    # `conversation_id` above takes toward a deleted Conversation. Indexed:
+    # both are the join key for "this run's whole delegation tree" (see
+    # api/runs.py's `/{run_id}/children` and the `tree` block on run detail).
+    #
+    # The run whose delegation tool call created this run. Null for a run a
+    # person, a schedule, or the plain `POST /api/runs` API started directly.
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
+    # The top-level ancestor of a delegated run, denormalized off the parent
+    # chain so a whole tree's totals are one indexed query instead of a
+    # recursive walk. Null on the root itself — a root's tree is therefore
+    # `id == X OR root_run_id == X`, never `root_run_id == X` alone.
+    root_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
+    # "task" (a specialist pack task) or "subagent" (an ad-hoc brief) — which
+    # shape of `run_harness_task` call created this run. Null for a
+    # non-delegated run.
+    delegation_kind: Mapped[str | None] = mapped_column(Text)
+    # Shared by every child spawned from one parallel-delegation call, so
+    # those siblings can be grouped without relying on `created_at` proximity.
+    # No FK: this identifies a batch, not a row — there is no single `runs`
+    # row it points at. Null for a non-delegated run, or a delegation made
+    # one at a time rather than in parallel.
+    delegation_batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     doctrine_sha: Mapped[str | None] = mapped_column(Text)  # snapshot at run time
     task_type: Mapped[str] = mapped_column(Text, nullable=False)
     task_input: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
@@ -493,6 +523,21 @@ class Run(Base):
     # catalog-priced figure used for routing and cost caps; this column is
     # the one billing should charge against.
     reported_cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    # What this run has caused OTHER runs to spend through delegation
+    # (`run_harness_task`, engine/tools.py): for each finished child,
+    # `child.cost_usd + child.delegated_cost_usd`, added on as that child
+    # finishes. Recursive by construction, so it is correct at any delegation
+    # depth without walking the tree. Kept as its own column rather than
+    # folded into `cost_usd` above because `cost_usd` must stay this run's
+    # own model spend and nothing else — `api/analytics.py` sums `cost_usd`
+    # straight across every row in a window, and a parent that already
+    # carried its children's spend in that column would double-count it the
+    # moment analytics scanned both rows. A run's actual budget consumption
+    # is `cost_usd + delegated_cost_usd`, checked against `loop_config.
+    # max_cost_usd` in the engine.
+    delegated_cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, default=0, server_default="0"
+    )
     # Estimated energy drawn by this run, in watt-hours, with the full derivation
     # in energy_accounting ({"energy_wh","co2e_g","energy_class",
     # "energy_wh_per_mtok","grid_co2e_g_per_kwh","weighted_tokens",...}).
