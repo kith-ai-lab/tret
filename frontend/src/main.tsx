@@ -9,6 +9,7 @@ import App from './App'
 import '@fontsource-variable/instrument-sans/wght.css'
 import '@fontsource-variable/jetbrains-mono/wght.css'
 import './theme/global.css'
+import './components/chat/delegated-work.css'
 
 const queryClient = new QueryClient({
   defaultOptions: {

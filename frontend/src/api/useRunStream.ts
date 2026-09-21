@@ -49,6 +49,28 @@ export interface FindingRecordedItem {
 
 export type StreamItem = ToolCallItem | ToolResultItem | FindingRecordedItem
 
+/** A child run this run started via `run_harness_task` / `delegate_parallel` /
+ *  `spawn_subagent`. Kept as its own array rather than folded into `StreamItem`:
+ *  `RunDetail.tsx`'s `ToolItemRow` switches over `StreamItem.kind` assuming only
+ *  the three existing members, so adding a fourth there would need edits to a
+ *  file this task does not own. */
+export interface DelegationItem {
+  kind: 'delegation'
+  childRunId: string
+  harness: string
+  taskType: string | null
+  delegationKind: 'task' | 'subagent'
+  /** Shared by every child of one `delegate_parallel` call; null otherwise. */
+  batchId: string | null
+  /** Position within a `delegate_parallel` batch; null outside one. */
+  index: number | null
+  label: string | null
+  /** A run status once `delegation_finished` lands, 'unknown' if the engine
+   *  could not report one, or 'running' while still in flight. */
+  status: 'running' | string
+  costUsd: number | null
+}
+
 /** The engine crossed a run's soft output budget and told the model to finalize
  *  (harness.py). Not a failure — the run continues — but the user is entitled to
  *  know their answer is being wrapped up early. A run that then keeps going is
@@ -112,6 +134,9 @@ export interface RunStreamState {
    *  from the front of `items` to hold it at MAX_ITEMS. Zero for the common
    *  case of a run that never grows past the cap. */
   truncatedItems: number
+  /** Child runs delegated to via `run_harness_task`/`delegate_parallel`/
+   *  `spawn_subagent`, in arrival order (see `DelegationItem`). */
+  delegations: DelegationItem[]
   routing: RoutingDecision | null
   /** Where the prompt tokens went, as published right after routing — so the
    *  breakdown is available at second one of the run rather than only after it
@@ -136,6 +161,7 @@ const initialState: RunStreamState = {
   text: '',
   items: [],
   truncatedItems: 0,
+  delegations: [],
   routing: null,
   composition: null,
   budget: null,
@@ -293,6 +319,57 @@ export function useRunStream(runId: string | null): RunStreamState {
           finding_id: String(d.finding_id ?? ''),
         }),
       })),
+    )
+    on('delegation_started', (d) =>
+      setState((s) => {
+        const childRunId = String(d.child_run_id ?? '')
+        // A duplicate (e.g. a reconnect replaying the backlog) is ignored rather
+        // than appended twice.
+        if (!childRunId || s.delegations.some((x) => x.childRunId === childRunId)) return s
+        const item: DelegationItem = {
+          kind: 'delegation',
+          childRunId,
+          harness: String(d.harness ?? '?'),
+          taskType: typeof d.task_type === 'string' ? d.task_type : null,
+          delegationKind: d.kind === 'subagent' ? 'subagent' : 'task',
+          batchId: typeof d.batch_id === 'string' ? d.batch_id : null,
+          index: typeof d.index === 'number' ? d.index : null,
+          label: typeof d.label === 'string' ? d.label : null,
+          status: 'running',
+          costUsd: null,
+        }
+        return { ...s, delegations: [...s.delegations, item] }
+      }),
+    )
+    on('delegation_finished', (d) =>
+      setState((s) => {
+        const childRunId = String(d.child_run_id ?? '')
+        if (!childRunId) return s
+        const status = typeof d.status === 'string' ? d.status : 'unknown'
+        const costUsd = numberOrNull(d.cost_usd)
+        const idx = s.delegations.findIndex((x) => x.childRunId === childRunId)
+        if (idx === -1) {
+          // The stream was opened mid-run (or after a reconnect dropped the
+          // `delegation_started` frame): the child never appeared as running, so
+          // it arrives already finished.
+          const item: DelegationItem = {
+            kind: 'delegation',
+            childRunId,
+            harness: String(d.harness ?? '?'),
+            taskType: typeof d.task_type === 'string' ? d.task_type : null,
+            delegationKind: d.kind === 'subagent' ? 'subagent' : 'task',
+            batchId: typeof d.batch_id === 'string' ? d.batch_id : null,
+            index: typeof d.index === 'number' ? d.index : null,
+            label: typeof d.label === 'string' ? d.label : null,
+            status,
+            costUsd,
+          }
+          return { ...s, delegations: [...s.delegations, item] }
+        }
+        const next = [...s.delegations]
+        next[idx] = { ...next[idx], status, costUsd }
+        return { ...s, delegations: next }
+      }),
     )
     on('usage', (d) =>
       setState((s) => ({

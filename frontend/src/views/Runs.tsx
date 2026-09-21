@@ -37,11 +37,33 @@ const STATUSES = [
   'cancelled',
 ]
 
+const SHOW_DELEGATED_KEY = 'tret.runs.showDelegated'
+
+/** Read the persisted "show delegated runs" choice. Wrapped in try/catch: a
+ *  private window, cleared site data or a blocked storage API must never break
+ *  the page — it just falls back to the default (off). */
+function readShowDelegated(): boolean {
+  try {
+    return localStorage.getItem(SHOW_DELEGATED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeShowDelegated(value: boolean): void {
+  try {
+    localStorage.setItem(SHOW_DELEGATED_KEY, value ? '1' : '0')
+  } catch {
+    // Best effort — the toggle still works for the rest of this session.
+  }
+}
+
 export function Runs() {
   const navigate = useNavigate()
+  const [showDelegated, setShowDelegated] = useState(readShowDelegated)
   const runsQuery = useInfiniteQuery({
-    queryKey: ['runs'],
-    queryFn: ({ pageParam }) => api.listRuns(50, pageParam),
+    queryKey: ['runs', { showDelegated }],
+    queryFn: ({ pageParam }) => api.listRuns(50, pageParam, !showDelegated),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     refetchInterval: (query) =>
@@ -88,7 +110,20 @@ export function Runs() {
       header: 'Harness',
       render: (r) => harnessName.get(r.harness_id) ?? r.harness_id.slice(0, 8),
     },
-    { key: 'task', header: 'Task', render: (r) => r.task_type },
+    {
+      key: 'task',
+      header: 'Task',
+      render: (r) =>
+        r.parent_run_id ? (
+          <span>
+            <span style={{ color: 'var(--text-muted)' }}>↳ </span>
+            {r.task_type}{' '}
+            <span className="chip">{r.delegation_kind === 'subagent' ? 'subagent' : 'delegated'}</span>
+          </span>
+        ) : (
+          r.task_type
+        ),
+    },
     {
       key: 'routing',
       header: 'Model',
@@ -107,7 +142,24 @@ export function Runs() {
         </span>
       ),
     },
-    { key: 'cost', header: 'Cost', align: 'right', render: (r) => formatCost(r.cost_usd) },
+    {
+      key: 'cost',
+      header: 'Cost',
+      align: 'right',
+      render: (r) => (
+        <span>
+          {formatCost(r.cost_usd)}
+          {(r.delegated_cost_usd ?? 0) > 0 && (
+            <>
+              <br />
+              <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+                +{formatCost(r.delegated_cost_usd ?? 0)} delegated
+              </span>
+            </>
+          )}
+        </span>
+      ),
+    },
     {
       key: 'footprint',
       header: 'Footprint',
@@ -145,6 +197,17 @@ export function Runs() {
           onChange={(e) => setModelFilter(e.target.value)}
           style={{ width: 240 }}
         />
+        <label className="mono-label runs-delegated-toggle">
+          <input
+            type="checkbox"
+            checked={showDelegated}
+            onChange={(e) => {
+              setShowDelegated(e.target.checked)
+              writeShowDelegated(e.target.checked)
+            }}
+          />
+          show delegated runs
+        </label>
         <span className="mono-label">{rows.length} runs</span>
       </div>
 

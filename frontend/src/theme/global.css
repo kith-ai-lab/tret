@@ -1964,3 +1964,25 @@ summary:focus-visible {
   font-variant-numeric: tabular-nums;
   margin-top: 2px;
 }
+
+/* ── delegation (run detail + runs list) ── */
+
+/* Runs list: the "show delegated runs" checkbox reads as one of the filter
+   controls beside it rather than a stray label. */
+.runs-delegated-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+/* Run detail: the delegation section's parent/root links sit inline with
+   their mono-label captions and chips, wrapping on narrow viewports rather
+   than overflowing the panel. */
+.delegation-panel .row a {
+  color: var(--accent);
+}
+
+.delegation-panel .row a:hover {
+  text-decoration: underline;
+}

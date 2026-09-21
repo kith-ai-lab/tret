@@ -12,6 +12,7 @@ import {
   ROUTING_OBJECTIVES,
 } from '../api/client'
 import { useRunStream } from '../api/useRunStream'
+import { DelegatedWork, DelegatedWorkDisclosure } from '../components/chat/DelegatedWork'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
 import {
   BAND_SHORT,
@@ -42,6 +43,12 @@ const MODEL_OVERRIDE_STORAGE_KEY = 'tret.chat.modelOverride'
 // Fixed per conversation once one exists (see `harness_id` on the
 // conversation itself), so this key only ever governs the next new chat.
 const HARNESS_STORAGE_KEY = 'tret.chat.harness'
+
+// Tools whose activity pill is evidence of delegated child runs — a completed
+// turn with one of these gets the "Delegated work" disclosure alongside its
+// pills, since the pill summary alone ("delegated 3 tasks in parallel: a, b")
+// is not the only record of what ran.
+const DELEGATION_TOOLS = new Set(['run_harness_task', 'delegate_parallel', 'spawn_subagent'])
 
 const EXAMPLE_PROMPTS = [
   {
@@ -544,6 +551,7 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
   // The compact chip only makes sense once the turn actually has a cost/carbon
   // record — a message from before this accounting existed carries neither.
   const hasFootprint = message.cost_usd !== undefined
+  const hasDelegation = !!message.run_id && activity.some((a) => DELEGATION_TOOLS.has(a.tool))
   return (
     <div className="chat-turn assistant">
       <AssistantAvatar />
@@ -563,6 +571,7 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
             ))}
           </div>
         )}
+        {hasDelegation && <DelegatedWorkDisclosure runId={message.run_id!} />}
         {/* MarkdownDoc renders its own wrapper, so it *is* the prose element —
             nesting it inside another `.chat-prose.md` would leave the
             first-child/last-child margin rules pointing at the wrapper instead of
@@ -749,6 +758,7 @@ function LiveTurn({ runId, stream }: { runId: string; stream: ReturnType<typeof 
             ))}
           </div>
         )}
+        <DelegatedWork items={stream.delegations} />
         {stream.text ? (
           <div className="chat-prose">
             <span style={{ whiteSpace: 'pre-wrap' }}>{stream.text}</span>

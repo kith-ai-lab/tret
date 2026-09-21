@@ -17,6 +17,7 @@ import { LiveFootprint } from '../components/shared/LiveFootprint'
 import { ProvenanceCard } from '../components/shared/ProvenanceCard'
 import { RoutingBadge } from '../components/shared/RoutingBadge'
 import { StatusBadge } from '../components/shared/StatusBadge'
+import { DelegationPanel } from '../components/runs/DelegationPanel'
 
 const LIVE_STATUSES = ['queued', 'running']
 
@@ -268,6 +269,10 @@ export function RunDetailView() {
       {run.overhead && run.overhead.calls.length > 0 && (
         <OverheadPanel overhead={run.overhead} />
       )}
+
+      {/* Delegation lineage — renders nothing for a run with no parent, no
+          children and no tree. */}
+      <DelegationPanel run={run} />
 
       {/* Provenance + footer */}
       <ProvenanceCard

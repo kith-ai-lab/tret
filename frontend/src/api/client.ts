@@ -308,6 +308,19 @@ export interface RunSummary {
   id: string
   project_id: string
   harness_id: string
+  /** Delegation lineage. All null for a run nothing delegated to. `root_run_id`
+   *  is null on the root itself: a root's tree is `id == X || root_run_id == X`. */
+  parent_run_id: string | null
+  root_run_id: string | null
+  /** "task" (a specialist pack task) or "subagent" (a brief another run's model
+   *  wrote); null for a run a person, a schedule or the API started. */
+  delegation_kind: 'task' | 'subagent' | null
+  /** Shared by the children of one `delegate_parallel` call. */
+  delegation_batch_id: string | null
+  /** What this run caused other runs to spend, all the way down. Never part of
+   *  `cost_usd`, which stays this run's own model spend. Optional: a backend
+   *  older than this frontend does not send it. */
+  delegated_cost_usd?: number
   task_type: string
   status: string // queued | running | completed | failed | cancelled
   model_used: string | null
@@ -854,7 +867,19 @@ export interface RunOverhead {
   accounting: EnergyAccounting | null
 }
 
+/** Totals over a run's whole delegation tree (root plus every descendant),
+ *  computed on read. The same figures whichever run of the tree is asked. */
+export interface RunTree {
+  root_run_id: string
+  run_count: number
+  cost_usd: number
+  reported_cost_usd: number | null
+  energy_wh: number | null
+}
+
 export interface RunDetail extends RunSummary {
+  /** Null for a run that was never delegated to and delegated nothing. */
+  tree: RunTree | null
   task_input: Record<string, unknown>
   messages: Msg[]
   document_ids: string[]
@@ -2794,11 +2819,16 @@ export const api = {
   // runs
   createRun: (body: CreateRunBody) =>
     request<{ run_id: string }>('/runs', { method: 'POST', body }),
-  listRuns: (limit = 50, cursor?: string) =>
+  /** `topLevelOnly` hides delegated runs (those with a `parent_run_id`). */
+  listRuns: (limit = 50, cursor?: string, topLevelOnly = false) =>
     request<RunsPage>(
-      `/runs?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
+      `/runs?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}${
+        topLevelOnly ? '&top_level_only=true' : ''
+      }`,
     ),
   getRun: (id: string) => request<RunDetail>(`/runs/${id}`),
+  /** Direct children only (runs this one delegated to), oldest first. */
+  listRunChildren: (id: string) => request<RunSummary[]>(`/runs/${id}/children`),
   cancelRun: (id: string) => request<{ ok: boolean }>(`/runs/${id}/cancel`, { method: 'POST' }),
 
   // harnesses
