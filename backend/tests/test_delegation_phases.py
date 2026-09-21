@@ -486,6 +486,70 @@ async def test_prepare_child_truncates_label_to_80_chars(db):  # noqa: F811
     assert prepared.label == "x" * 80
 
 
+async def test_prepare_child_persists_label_on_child_task_input(db):  # noqa: F811
+    """The label must survive past the turn that started it (completed-turn
+    activity and the run-detail children table only have the child row to
+    read it back from — see api/runs.py::_run_summary)."""
+    from tret.engine.tools import LABEL_KEY
+
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    prepared = await _prepare_child(ctx, "assess_risk", {}, label="Cedar Landing Flood Assessment")
+
+    child = await db.get(Run, prepared.child_id)
+    assert child.task_input[LABEL_KEY] == "Cedar Landing Flood Assessment"
+
+
+async def test_prepare_child_persisted_label_is_truncated_to_80_chars(db):  # noqa: F811
+    from tret.engine.tools import LABEL_KEY
+
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    prepared = await _prepare_child(ctx, "assess_risk", {}, label="x" * 200)
+
+    child = await db.get(Run, prepared.child_id)
+    assert child.task_input[LABEL_KEY] == "x" * 80
+
+
+async def test_prepare_child_model_supplied_label_in_task_input_does_not_survive_without_arg(
+    db,  # noqa: F811
+):
+    """A model-written `_label` inside a TASK child's free-form task_input
+    must never masquerade as the engine-stamped label — with no `label`
+    argument given, it is dropped."""
+    from tret.engine.tools import LABEL_KEY
+
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    prepared = await _prepare_child(ctx, "assess_risk", {LABEL_KEY: "sneaky"})
+
+    assert prepared.label is None
+    child = await db.get(Run, prepared.child_id)
+    assert LABEL_KEY not in child.task_input
+
+
+async def test_prepare_child_engine_label_overrides_model_supplied_task_input_label(
+    db,  # noqa: F811
+):
+    """When a label argument IS given, it wins over whatever the model put at
+    `_label` in its own task_input dict."""
+    from tret.engine.tools import LABEL_KEY
+
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    prepared = await _prepare_child(
+        ctx, "assess_risk", {LABEL_KEY: "sneaky"}, label="Real Label"
+    )
+
+    assert prepared.label == "Real Label"
+    child = await db.get(Run, prepared.child_id)
+    assert child.task_input[LABEL_KEY] == "Real Label"
+
+
 # ── delegation event payloads ────────────────────────────────────────────────
 
 

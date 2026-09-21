@@ -213,6 +213,7 @@ from tret.engine.delegation import (  # noqa: E402,F401
     COST_CAP_KEY,
     DELEGATION_DEPTH_KEY,
     DELEGATION_TOOLS,
+    LABEL_KEY,
     MAX_DELEGATION_DEPTH,
     MIN_CHILD_BUDGET_USD,
     PROJECT_DOCS_KEY,
@@ -1972,6 +1973,15 @@ async def _prepare_child(
         child_pack_id = declaring.id if declaring else None
 
     child_task_input = {**task_input, DELEGATION_DEPTH_KEY: ctx.delegation_depth + 1}
+    if label:
+        # Engine-stamped from the tool's own `label` argument only — this must
+        # win over anything the model put at `_label` in a TASK child's
+        # free-form task_input dict (spread in above), so it always overwrites.
+        child_task_input[LABEL_KEY] = label[:80]
+    else:
+        # No label given: drop any model-supplied `_label` rather than let it
+        # masquerade as an engine-stamped one downstream.
+        child_task_input.pop(LABEL_KEY, None)
     if child_budget_share is not None:
         # Lazy import: harness.py imports this module, so importing it back at
         # module load time would be circular (same reason `get_harness_engine`

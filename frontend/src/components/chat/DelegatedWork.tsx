@@ -120,7 +120,14 @@ export function DelegatedWork({ items }: { items: DelegationItem[] }) {
 function childToRow(child: RunSummary): Row {
   return {
     childRunId: child.id,
-    label: child.delegation_kind === 'subagent' ? 'subagent' : child.task_type || 'task',
+    // Prefer the model-written label persisted on the child (survives past
+    // the turn that started it) over the generic task-type/"subagent"
+    // fallback — otherwise a completed batch's rows are indistinguishable
+    // (the live bug: three "divergence_assessment" rows where streaming had
+    // shown three different names).
+    label:
+      child.delegation_label ||
+      (child.delegation_kind === 'subagent' ? 'subagent' : child.task_type || 'task'),
     // The persisted run summary has no friendly harness name (only
     // `harness_id`), so it is omitted rather than shown as a raw id.
     harness: null,

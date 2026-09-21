@@ -17,7 +17,7 @@ from tret.api.auth import current_user
 from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.db.engine import get_db
 from tret.db.models import Document, Harness, Project, Run, User
-from tret.engine.delegation import COST_CAP_KEY, DELEGATION_DEPTH_KEY
+from tret.engine.delegation import COST_CAP_KEY, DELEGATION_DEPTH_KEY, LABEL_KEY
 from tret.engine.events import get_event_bus
 from tret.engine.harness import get_harness_engine
 from tret.packs.links import packs_for_harness, resolve_pack_for_task
@@ -53,6 +53,11 @@ def _run_summary(run: Run) -> dict:
         "root_run_id": str(run.root_run_id) if run.root_run_id else None,
         "delegation_kind": run.delegation_kind,
         "delegation_batch_id": str(run.delegation_batch_id) if run.delegation_batch_id else None,
+        # The model-written name the caller gave this child via the
+        # delegation tool's `label` argument (`_prepare_child`, engine/
+        # tools.py), stamped onto task_input under LABEL_KEY. None for a run
+        # nothing delegated to, or one delegated without a label.
+        "delegation_label": (run.task_input or {}).get(LABEL_KEY),
         "task_type": run.task_type,
         "status": run.status,
         "model_used": run.model_used,
@@ -132,10 +137,13 @@ async def create_run(
     # Delegation plumbing is the engine's to stamp (engine/tools.py::
     # `_prepare_child`), never a caller's: a hand-set `_delegation_depth`
     # would make a root run look like a delegated child — which tret-cloud's
-    # pre-run gate reads as "the parent already holds credit for this" — and
-    # a negative one would buy extra hops.
+    # pre-run gate reads as "the parent already holds credit for this" — a
+    # negative one would buy extra hops, and a hand-set `_label` would let a
+    # caller forge a delegation label onto a run nothing actually delegated to.
     task_input = {
-        k: v for k, v in body.task_input.items() if k not in (DELEGATION_DEPTH_KEY, COST_CAP_KEY)
+        k: v
+        for k, v in body.task_input.items()
+        if k not in (DELEGATION_DEPTH_KEY, COST_CAP_KEY, LABEL_KEY)
     }
     if body.model_override:
         task_input["_model_override"] = body.model_override

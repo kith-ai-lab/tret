@@ -118,7 +118,8 @@ async def _setup_workspace(seed, *, workspace_name: str, email: str):
 
 def make_run(project, harness, **kwargs) -> Run:
     kwargs.setdefault("id", uuid.uuid4())
-    return Run(project_id=project.id, harness_id=harness.id, task_type="freeform", task_input={}, **kwargs)
+    kwargs.setdefault("task_input", {})
+    return Run(project_id=project.id, harness_id=harness.id, task_type="freeform", **kwargs)
 
 
 # ── _run_summary fields ──────────────────────────────────────────────────────
@@ -139,6 +140,7 @@ async def test_run_summary_lineage_fields_are_null_for_an_ordinary_run(client, s
     assert body["root_run_id"] is None
     assert body["delegation_kind"] is None
     assert body["delegation_batch_id"] is None
+    assert body["delegation_label"] is None
     # A lone run's tree is not worth reporting beyond its own summary.
     assert body["tree"] is None
 
@@ -156,6 +158,7 @@ async def test_run_summary_lineage_fields_are_populated_for_a_delegated_run(
         project, harness,
         parent_run_id=root.id, root_run_id=root.id,
         delegation_kind="task", delegation_batch_id=batch_id,
+        task_input={"_label": "Cedar Landing Flood Assessment"},
     )
     async with session_factory() as db:
         db.add(child)
@@ -169,6 +172,7 @@ async def test_run_summary_lineage_fields_are_populated_for_a_delegated_run(
     assert body["root_run_id"] == str(root.id)
     assert body["delegation_kind"] == "task"
     assert body["delegation_batch_id"] == str(batch_id)
+    assert body["delegation_label"] == "Cedar Landing Flood Assessment"
 
 
 # ── GET /api/runs/{run_id}/children ─────────────────────────────────────────
@@ -329,3 +333,24 @@ async def test_create_run_strips_caller_supplied_delegation_keys(client, seed, s
         run = await db.get(Run, uuid.UUID(response.json()["run_id"]))
     assert run.task_input == {"message": "hi"}
     assert run.parent_run_id is None
+
+
+async def test_create_run_strips_caller_supplied_label(client, seed, session_factory):
+    """A hand-set `_label` would let a caller forge a delegation label onto a
+    run nothing actually delegated to — only the engine (`_prepare_child`)
+    may stamp it."""
+    team, project, user, harness = await _setup_workspace(seed, workspace_name="Co", email="a@example.com")
+
+    await login(client, user.email)
+    response = await client.post(
+        "/api/runs",
+        json={
+            "harness_id": str(harness.id),
+            "task_input": {"message": "hi", "_label": "forged label"},
+        },
+    )
+    assert response.status_code in (200, 201), response.text
+
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(response.json()["run_id"]))
+    assert run.task_input == {"message": "hi"}

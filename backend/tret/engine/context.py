@@ -128,7 +128,10 @@ those forbid, say so in your report instead of doing it.
 
 Use the tools you have been given. You cannot record findings, propose \
 writes, or delegate to another run — you do not hold those tools — so do not \
-claim to have done any of that.
+claim to have done any of that. You also do not hold file_data_request: where \
+the platform rules above say to file a data request for something missing, \
+state in your report exactly what is missing and why it matters instead, so \
+the run that briefed you can file that request itself.
 
 Finish with ONE self-contained report as your final message: what you found, \
 each figure with where it came from (which document, dataset row, or URL), \

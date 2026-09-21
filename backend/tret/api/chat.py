@@ -401,7 +401,19 @@ def _assistant_message(run: Run) -> dict:
                 assistant_text = m["content"]  # last assistant text wins
             for tc in m.get("tool_calls") or []:
                 entry = {"tool": tc.get("name"), "summary": ""}
-                if tc.get("name") in DELEGATION_TOOLS:
+                result = tool_results.get(tc.get("id"))
+                if tc.get("name") in DELEGATION_TOOLS and _tool_result_summary(result) == "error":
+                    # The call was refused (e.g. `delegate_parallel`'s "at most
+                    # 3 tasks" cap) before any child run started — summarizing
+                    # from the call's own arguments, as below, would read like
+                    # the delegation happened. Same error detection
+                    # `_tool_result_summary` uses, so this never drifts from
+                    # what an ordinary tool's activity pill calls an error.
+                    content = (result or {}).get("content") or ""
+                    if content.startswith("Tool error: "):
+                        content = content[len("Tool error: ") :]
+                    entry["summary"] = f"refused: {content[:100]}"
+                elif tc.get("name") in DELEGATION_TOOLS:
                     args = tc.get("arguments") or {}
                     if tc.get("name") == "delegate_parallel":
                         batch = args.get("tasks") or []
@@ -423,7 +435,7 @@ def _assistant_message(run: Run) -> dict:
                     else:
                         entry["summary"] = f"delegated {args.get('task_type', '?')}"
                 else:
-                    entry["summary"] = _tool_result_summary(tool_results.get(tc.get("id")))
+                    entry["summary"] = _tool_result_summary(result)
                 activity.append(entry)
     if run.status == "completed_without_output" and not assistant_text:
         # The engine's empty-reply guard: the model finished its tool calls and

@@ -317,6 +317,11 @@ export interface RunSummary {
   delegation_kind: 'task' | 'subagent' | null
   /** Shared by the children of one `delegate_parallel` call. */
   delegation_batch_id: string | null
+  /** The short, model-written name the caller gave this child via the
+   *  delegation tool's `label` argument. Null for a run nothing delegated to,
+   *  or one delegated without a label. Optional: a backend older than this
+   *  frontend does not send it. */
+  delegation_label?: string | null
   /** What this run caused other runs to spend, all the way down. Never part of
    *  `cost_usd`, which stays this run's own model spend. Optional: a backend
    *  older than this frontend does not send it. */

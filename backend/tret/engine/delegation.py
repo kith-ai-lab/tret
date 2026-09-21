@@ -47,6 +47,17 @@ COST_CAP_KEY = "_cost_cap_usd"
 # than started with a cap it has no real chance of finishing inside.
 MIN_CHILD_BUDGET_USD = Decimal("0.05")
 
+# Engine-plumbing key carrying the short, model-written name a caller gave a
+# child via the delegation tool's `label` argument (`_prepare_child`'s
+# `label` parameter). Persisted on the child's own task_input so it survives
+# past the turn that started it — the `delegation_started`/`delegation_finished`
+# events carry the label live, but a completed turn and the run-detail
+# children table only have the child run's row to read it back from. Stamped
+# by the engine from the tool argument alone: a model-supplied `_label`
+# already sitting in a TASK child's free-form task_input must never win over
+# it (see `_prepare_child`), so it is dropped whenever no label was given.
+LABEL_KEY = "_label"
+
 # ── ad-hoc subagents ──────────────────────────────────────────────────────────
 # A subagent is a child run whose brief is written by the parent MODEL (via a
 # future `spawn_subagent` tool), not declared by a pack — the third member of

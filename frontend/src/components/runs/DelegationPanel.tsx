@@ -90,9 +90,21 @@ export function DelegationPanel({ run }: { run: RunDetail }) {
               parallel batch
             </div>
           )}
-          <span className="mono-body">
-            {c.delegation_kind === 'subagent' ? 'subagent' : c.task_type}
-          </span>
+          {/* The model's own name for this piece of work, when it gave one:
+              without it, three children of one batch read as three identical
+              task types. The task type stays, muted, underneath. */}
+          {c.delegation_label ? (
+            <>
+              <span className="mono-body">{c.delegation_label}</span>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+                {c.delegation_kind === 'subagent' ? 'subagent' : c.task_type}
+              </div>
+            </>
+          ) : (
+            <span className="mono-body">
+              {c.delegation_kind === 'subagent' ? 'subagent' : c.task_type}
+            </span>
+          )}
         </>
       ),
     },
@@ -173,7 +185,7 @@ export function DelegationPanel({ run }: { run: RunDetail }) {
             rows={children}
             rowKey={(c) => c.id}
             rowLabel={(c) =>
-              `Open run: ${c.delegation_kind === 'subagent' ? 'subagent' : c.task_type || 'task'} · ${c.status}`
+              `Open run: ${c.delegation_label || (c.delegation_kind === 'subagent' ? 'subagent' : c.task_type || 'task')} · ${c.status}`
             }
             onRowClick={(c) => navigate(`/runs/${c.id}`)}
             empty="No delegated runs."

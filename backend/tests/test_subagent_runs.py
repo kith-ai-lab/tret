@@ -56,6 +56,16 @@ def test_assemble_context_subagent_no_pack_includes_preamble():
     assert "task_instructions" in kinds
 
 
+def test_subagent_preamble_says_it_lacks_file_data_request():
+    """PLATFORM_PREAMBLE tells every run to call file_data_request when data
+    is missing, but a subagent is never granted that tool (SUBAGENT_ALLOWED_
+    TOOLS) — the live bug: a subagent's report listed file_data_request among
+    its "available tools" though it was never offered one. The preamble must
+    redirect it to state the gap in its report instead."""
+    assert "file_data_request" not in SUBAGENT_ALLOWED_TOOLS
+    assert "file_data_request" in SUBAGENT_PREAMBLE
+
+
 def test_assemble_context_subagent_with_pack_still_includes_doctrine():
     """Adding "subagent" to GENERIC_TASK_TYPES must not stop a pack-bound
     harness's doctrine from loading — a subagent working under a specialist

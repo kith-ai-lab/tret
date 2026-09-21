@@ -431,6 +431,88 @@ def test_assistant_message_keeps_delegation_summary_over_an_empty_result():
     ]
 
 
+def test_assistant_message_summarizes_a_refused_delegate_parallel_as_refused():
+    """A refused batch call (e.g. over the task-count cap) must not read as
+    though the delegation happened — the live bug: 3 activity pills, the
+    first reading "delegated 5 tasks..." although nothing was delegated."""
+    run = _run(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "name": "delegate_parallel",
+                        "arguments": {
+                            "tasks": [{"task_type": "divergence_assessment"}] * 5
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "Tool error: delegate_parallel allows at most 3 tasks at a time.",
+                "tool_call_id": "call_1",
+                "meta": {"error": True},
+            },
+        ]
+    )
+    message = _assistant_message(run)
+    assert message["activity"] == [
+        {
+            "tool": "delegate_parallel",
+            "summary": "refused: delegate_parallel allows at most 3 tasks at a time.",
+        }
+    ]
+
+
+def test_assistant_message_summarizes_a_refused_spawn_subagent_as_refused():
+    run = _run(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_1", "name": "spawn_subagent", "arguments": {"label": "check data"}}
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "Tool error: instructions must be at least 20 characters.",
+                "tool_call_id": "call_1",
+                "meta": {"error": True},
+            },
+        ]
+    )
+    message = _assistant_message(run)
+    assert message["activity"] == [
+        {"tool": "spawn_subagent", "summary": "refused: instructions must be at least 20 characters."}
+    ]
+
+
+def test_assistant_message_truncates_a_long_refusal_to_about_100_chars():
+    run = _run(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "call_1", "name": "run_harness_task", "arguments": {"task_type": "x"}}
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "Tool error: " + "z" * 200,
+                "tool_call_id": "call_1",
+                "meta": {"error": True},
+            },
+        ]
+    )
+    message = _assistant_message(run)
+    assert message["activity"][0]["summary"] == "refused: " + "z" * 100
+
+
 def test_assistant_message_leaves_a_successful_lookup_summary_blank():
     run = _run(
         messages=[
