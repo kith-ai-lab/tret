@@ -103,7 +103,12 @@ default — change in `.env`), and you're in a seeded demo:
   Point still trustworthy?*") and the assistant recognizes the request,
   triggers the right specialist harness task via its `run_harness_task` tool,
   and reports the draft verdict back — with the delegated run fully audited
-  and its finding waiting in the approval queue
+  and its finding waiting in the approval queue. It can also fan several
+  independent specialist tasks out at once (`delegate_parallel`) and brief
+  short-lived, read-only subagents for a quick lookup (`spawn_subagent`).
+  Every delegated run, however it was started, is a real Run with its own
+  audit trail — none of this is a hidden side channel — and the turn's own
+  cost cap covers the whole tree, not just the top-level run.
 
 - the **climate-risk** pack installed, with sample sites, forward-looking
   regional signals, and vendor-style hazard scores

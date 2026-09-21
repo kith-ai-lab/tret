@@ -66,6 +66,17 @@ grounded, schema-valid, fully audited result?*
 
 - **`test_live_eval_example.py`** — the live-eval skeleton (see below).
 
+- **`test_subagent_tools_offered.py`** — what `spawn_subagent` actually offers
+  an ad-hoc subagent, through the real engine rather than a unit-level stub:
+  the read-only allowlist intersected with what the parent run itself was
+  granted, narrowed further by an explicit request, and never widened by a
+  later step in the loop. The delegation tools themselves have unit-level
+  coverage instead of a golden scenario each — `test_delegate_parallel.py`,
+  `test_spawn_subagent.py`, and `test_delegation_phases.py` (`backend/tests/`)
+  — since what they exercise (fan-out width, budget carving, the
+  prepare/run/record phase split) is about the tool call's own mechanics, not
+  a task's doctrine or output shape.
+
 ### Guardrails on the evals themselves
 
 `HarnessEngine.execute()` catches every exception and records it as

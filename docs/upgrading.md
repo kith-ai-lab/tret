@@ -30,6 +30,109 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## 2026-09-20 · parallel delegation, subagents, and shared budgets
+
+Two migrations, both additive:
+
+- `b8b354463da7` adds four nullable columns to `runs`
+  (`parent_run_id`/`root_run_id`, both self-referential FKs with `ON DELETE
+  SET NULL`, plus `delegation_kind`/`delegation_batch_id`) and their indexes.
+  No backfill — lineage was only ever kept in the engine's own in-memory
+  parent map before this, so there is nothing in an existing row to recover;
+  every run that predates this migration stays null there.
+- `9d3b1f6c7a2e` adds `runs.delegated_cost_usd` `NOT NULL DEFAULT 0`. Zero is
+  the correct historical value (no run rolled a child's cost into its parent
+  before this), not a placeholder, and on Postgres 11+ adding a column with a
+  constant default is a metadata-only change — no table rewrite, regardless
+  of table size.
+
+Both apply the way every other migration does (see above): automatically, on
+boot, inside the advisory-locked transaction.
+
+**Every workspace gets a seeded "Subagent" harness** on next boot
+(`services.workspace.seed_subagent_harness`), found by `task_profile`, not by
+name, so a renamed one is still recognized and an unrelated harness an
+operator happened to call "Subagent" is left alone. It's the target every
+ad-hoc `spawn_subagent` call runs against; archiving it turns ad-hoc
+subagents off for that workspace. **Any existing chat harness that already
+carries `run_harness_task`** gets `delegate_parallel` and `spawn_subagent`
+appended to its `tool_names` on next boot, the same way `run_method` and the
+connector tools were backfilled onto older harnesses before it. This is
+conditional, checked at every boot, not a one-time migration: a chat harness
+with no `run_harness_task` never gets `delegate_parallel` or `spawn_subagent`
+added on its own, and `run_harness_task` itself is never added to an
+*existing* harness that lacks it (only a freshly-created chat harness gets
+all three from the start) — so removing `run_harness_task` from a chat
+harness is what turns off delegation there, and it stays off: neither it nor
+the two tools that ride with it come back on a later boot
+(`services/workspace.py`'s `seed_chat_harness`).
+
+**New settings** (`.env.example`, `backend/tret/config.py`), all with
+defaults that need no action:
+
+| Setting | Default | What it bounds |
+| --- | --- | --- |
+| `TRET_MAX_FANOUT` | 4 (2 under the `token_conservation`/`eco` objectives) | children one `delegate_parallel` call may start at once |
+| `TRET_MAX_CHILDREN_PER_RUN` | 8 | children one run may start over its whole lifetime, across every delegation tool |
+| `TRET_MAX_CONCURRENT_CHILD_RUNS` | 6 | delegated child runs executing at once, per delegation depth, process-wide |
+| `TRET_DELEGATION_TIMEOUT_SECONDS` | 900 | wall-clock limit for one `delegate_parallel` call |
+
+Every executing run — delegated or not — holds a database session for its
+lifetime, so `TRET_MAX_CONCURRENT_CHILD_RUNS` should stay well under the pool
+size below, and it's worth checking the Postgres server's own
+`max_connections` before raising either.
+
+**Database pool size is now explicit and larger**: `TRET_DB_POOL_SIZE=10` and
+`TRET_DB_MAX_OVERFLOW=10`, where previously nothing was set and SQLAlchemy's
+own default of 5 + 10 applied silently. To pin the old behaviour, set
+`TRET_DB_POOL_SIZE=5` explicitly (overflow is unchanged).
+
+**A delegated child's cost cap is now carved from its parent's remaining
+budget, not a fresh cap of its own.** Previously each delegated run got its
+harness's full cost ceiling independent of what the parent had already
+spent; now every delegation tool stamps a child's cap onto its own
+`task_input`: an equal share of what the parent has left of its budget, and
+never more than the child harness's own ceiling. A run's own budget check is against
+`cost_usd + delegated_cost_usd` — so the root's cost cap bounds its whole
+delegation tree, not each hop separately. One consequence worth knowing about
+before it shows up as a support question: **delegation can now be refused
+outright** when the remaining share would fall below a $0.05 floor, where
+before it always succeeded (into its own fresh budget) regardless of what the
+rest of the tree had already spent.
+
+**429 retries can now outlast a fast shutdown drain.** Providers retry a 429
+up to three times, honouring `Retry-After` when the provider sends one, each
+wait capped at 30s and jittered — worst case around 90s of waiting alone,
+inside what looks to the engine like a single model call, before the request
+attempts themselves are even counted. That can exceed the default
+`TRET_SHUTDOWN_DRAIN_SECONDS=45`. If you're seeing runs orphaned or cut off
+mid-retry on deploy, raise `TRET_SHUTDOWN_DRAIN_SECONDS` — and check it
+against your orchestrator's own kill timeout (Fly's `kill_timeout`, Kubernetes'
+`terminationGracePeriodSeconds`, etc.), since a longer drain is only useful if
+the platform actually waits for it.
+
+**`subagent` is now a reserved task-type slug.** A pack that declares a task
+type named `subagent`, or names it as a harness preset's `task_types` entry,
+fails `tret packs validate` and is not installed. If you have a pack using
+that slug for something else, rename it before upgrading.
+
+**UI**: the runs list now hides delegated runs by default, behind a "Show
+delegated runs" toggle — a workspace that delegates heavily will otherwise
+see its top-level view swamped with children. Chat shows a live "Delegated
+work" block while a turn's delegated runs are in flight, collapsed once the
+turn completes; run detail gained a Delegation section.
+
+**API**: `_delegation_depth` and `_cost_cap_usd` in a posted run's
+`task_input` are now silently dropped (`POST /api/runs`) — that pair is the
+engine's own delegation plumbing, stamped by `run_harness_task`/
+`delegate_parallel` on the child runs they create, and accepting them from a
+caller would let a hand-built request masquerade as a bounded child or hand
+itself extra delegation depth. `GET /api/runs` accepts `top_level_only=true`
+to filter to `parent_run_id IS NULL`; a run summary now carries the lineage
+fields and `delegated_cost_usd`; run detail carries a `tree` block aggregating
+totals over the run's whole delegation tree; and `GET /api/runs/{id}/children`
+lists a run's direct children, oldest first.
+
 ## 2026-09 emissions method and default changes
 
 No migration. Several shipped emissions defaults and behaviours change with

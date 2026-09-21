@@ -51,6 +51,13 @@ datasets:
   - { name: reference_scores, file: sample-data/reference_scores.csv }
 ```
 
+`subagent` is a reserved task-type slug: it belongs to the engine's own
+ad-hoc subagent runs (`spawn_subagent`), and `tret packs validate` fails a
+pack that declares a task type named `subagent`, or names it as a harness
+preset's `task_types` entry — there is no harmless reason for a pack to own
+it, since either would put pack-authored instructions or policy in front of
+every ad-hoc subagent in the workspace.
+
 ## The pieces that make it trustworthy
 
 - **shape** drives the router's deterministic fallback and tells the LLM
@@ -305,6 +312,19 @@ packs remain future work.
 | `record_verdict` / `record_finding` | schema-validated structured outputs |
 | `draft_section` | store a markdown deliverable section |
 | `file_data_request` | declare a gap instead of guessing |
+| `run_harness_task` / `delegate_parallel` / `spawn_subagent` | delegate structured work to another harness, several such tasks at once, or a short-lived read-only worker briefed at runtime — see [architecture.md](architecture.md#chat-orchestration) |
+
+A task type may list any of the three delegation tools, not just the chat
+harness — but a delegated run is a whole extra agent loop against the same
+run tree: depth tops out at two hops overall (however they were reached), a
+delegated child's cost cap is carved out of the root run's own remaining
+budget rather than getting one of its own, and a `spawn_subagent` child is
+read-only, sees no wider a document scope than its parent, and reports back
+text rather than a finding. `delegate_parallel` is for genuinely *independent*
+work only (the same assessment over several sites, say) — don't reach for it
+when one item needs another item's result first; that's still sequential
+work, and belongs in one task or a plain `run_harness_task` hop, not a
+parallel batch.
 
 **Lessons memory** is on by default for every pack — no manifest field to
 set, and no `tools` entry to declare either. Unlike `list_prior_findings`
