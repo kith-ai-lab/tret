@@ -8,15 +8,16 @@
   "compatibility_date": "2024-11-01",
 
   // D1 database that stores reports/instances/totals (see migrations/).
-  // `database_id` is a placeholder: the maintainer replaces it after
-  // running `wrangler d1 create tret-telemetry` (README DEPLOY section).
+  // `database_id` is Kith's production database (an identifier, not a
+  // secret). A fork running its own collector replaces it after
+  // `wrangler d1 create tret-telemetry` (README DEPLOY section).
   // `wrangler dev` and the vitest-pool-workers tests use a local/ephemeral
-  // D1 instance and never touch the placeholder.
+  // D1 instance and never touch it.
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "tret-telemetry",
-      "database_id": "REPLACE_WITH_D1_ID",
+      "database_id": "21c94c19-13d0-4533-ae92-4d2762ecd180",
       "migrations_dir": "migrations"
     }
   ],
