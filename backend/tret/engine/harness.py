@@ -49,10 +49,13 @@ from tret.engine.context import (
 from tret.engine.events import RunEvent, get_event_bus
 from tret.engine.extensions import get_extension_registry
 from tret.engine.tools import (
+    ALLOWED_TOOLS_KEY,
     CONNECTOR_TOOL_NAMES,
     COST_CAP_KEY,
     DELEGATION_DEPTH_KEY,
     LESSON_TOOL_NAMES,
+    SUBAGENT_ALLOWED_TOOLS,
+    SUBAGENT_TASK_TYPE,
     WEB_TOOL_NAMES,
     WRITE_CONNECTOR_TOOL_NAMES,
     RunContext,
@@ -230,6 +233,40 @@ def _effective_max_cost(harness_cap: Decimal, task_input: dict) -> Decimal:
     return min(harness_cap, stamped_cap)
 
 
+def _subagent_tool_names(
+    enabled_names: list[str], task_input: dict, *, delegated: bool
+) -> list[str]:
+    """`enabled_names` narrowed to what a `subagent`-task run may actually be
+    offered — pure over its inputs so the security-load-bearing rule (see
+    `engine/delegation.SUBAGENT_ALLOWED_TOOLS`) is one small function to read
+    and test, not a branch buried in the middle of `_execute_inner`'s tools
+    block.
+
+    Always intersected with `SUBAGENT_ALLOWED_TOOLS`, defence in depth even if
+    someone edits the seeded Subagent harness to list a write tool, or POSTs a
+    subagent run directly through the runs API — the allowlist wins no matter
+    what the harness or the run row claims to enable.
+
+    `task_input[ALLOWED_TOOLS_KEY]` is the parent's own grant (stamped by the
+    future `spawn_subagent` tool), narrowing further when it is a list. A
+    missing or malformed grant means "no narrowing beyond the allowlist" only
+    for a run with no parent (`delegated=False` — someone started a subagent
+    run directly, e.g. through the runs API, so there is no grant to enforce);
+    for an actually delegated subagent (`delegated=True`) a missing or
+    malformed grant means NO tools at all — fail closed, since a real
+    `spawn_subagent` call always stamps a grant and its absence means either a
+    bug or a run row someone hand-crafted to dodge one.
+    """
+    granted = task_input.get(ALLOWED_TOOLS_KEY)
+    if isinstance(granted, list):
+        allowed = SUBAGENT_ALLOWED_TOOLS & set(granted)
+    elif delegated:
+        allowed = frozenset()
+    else:
+        allowed = SUBAGENT_ALLOWED_TOOLS
+    return [n for n in enabled_names if n in allowed]
+
+
 def _spent(run: Run) -> Decimal:
     """What `run`'s cost cap is checked against: its own model spend plus
     whatever it has caused through delegation so far. The two are separate
@@ -344,10 +381,13 @@ STATUS_COMPLETED = "completed"
 STATUS_COMPLETED_WITHOUT_OUTPUT = "completed_without_output"
 SUCCESS_STATUSES = (STATUS_COMPLETED, STATUS_COMPLETED_WITHOUT_OUTPUT)
 
-# The two task types the engine implements itself: a conversational turn and an
-# open-ended one. Every other task type must be declared by the run's pack —
-# there is no third source of a task's meaning (see `engine/context.task_config`).
-GENERIC_TASK_TYPES = ("chat", "freeform")
+# The three task types the engine implements itself: a conversational turn, an
+# open-ended one, and a subagent — a child run whose brief was written by its
+# PARENT RUN's model rather than declared by a pack (see `_subagent_tool_names`
+# below and `engine/delegation.py`). Every other task type must be declared by
+# the run's pack — there is no other source of a task's meaning (see
+# `engine/context.task_config`).
+GENERIC_TASK_TYPES = ("chat", "freeform", "subagent")
 
 
 def _utcnow() -> datetime:
@@ -845,12 +885,39 @@ class HarnessEngine:
         # appears here for exactly the lifetime of the `run_harness_task` call
         # that created it.
         self._parent_of: dict[uuid.UUID, uuid.UUID] = {}
+        # Hand-back channel for a subagent's looked-up values (see the "──
+        # finish ──" section of `_execute_inner`, where a delegated run's
+        # `ctx.retrieved_values` is stashed here as it finishes) — populated
+        # by the engine, never by a tool, and popped by the future
+        # `spawn_subagent`/`_await_child` machinery once the parent has read
+        # it. In-process only, like `_parent_of` above: a process restart
+        # loses whatever nobody collected yet, which is acceptable for a
+        # value a parent could always re-derive with its own `lookup_dataset`
+        # call.
+        self._retrieved_handoff: dict[uuid.UUID, list[dict]] = {}
 
     def register_delegation(self, *, child_id: uuid.UUID, parent_id: uuid.UUID) -> None:
         self._parent_of[child_id] = parent_id
 
     def unregister_delegation(self, child_id: uuid.UUID) -> None:
         self._parent_of.pop(child_id, None)
+
+    def take_retrieved_values(self, run_id: uuid.UUID) -> list[dict]:
+        """Pop and return `run_id`'s handed-back retrieved values, or `[]` if
+        none were stashed (no parent, nothing retrieved, or already taken —
+        this is a one-shot pop, not a peek)."""
+        return self._retrieved_handoff.pop(run_id, [])
+
+    def _stash_retrieved_values(self, run_id: uuid.UUID, values: list[dict]) -> None:
+        """Bounded insert into `_retrieved_handoff` — a small helper (rather
+        than the check inlined at the one call site) so the cap behaviour is
+        directly testable. At most 2000 entries kept for `run_id`; at most 64
+        runs' worth held at once, oldest evicted first (dict insertion order,
+        since Python 3.7+ dicts preserve it) to make room for a new one.
+        """
+        if run_id not in self._retrieved_handoff and len(self._retrieved_handoff) >= 64:
+            self._retrieved_handoff.pop(next(iter(self._retrieved_handoff)))
+        self._retrieved_handoff[run_id] = list(values)[:2000]
 
     def _factors_for(
         self, provider: str, model_id: str | None, emissions: "_EmissionsContext"
@@ -1391,6 +1458,15 @@ class HarnessEngine:
                 "lookup_dataset",
                 "list_prior_findings",
             ]
+        if run.task_type == SUBAGENT_TASK_TYPE:
+            # Security posture, not a convenience filter — see
+            # `_subagent_tool_names`'s own docstring and
+            # `engine/delegation.SUBAGENT_ALLOWED_TOOLS`. Applied before the
+            # unknown-tool check and the web/connector withholding below so
+            # those still run on top of an already-narrowed list.
+            enabled_names = _subagent_tool_names(
+                enabled_names, run.task_input, delegated=run.parent_run_id is not None
+            )
         # A name with no builtin behind it is refused before the first token,
         # never quietly dropped. `api/harnesses.py` and `packs/loader.py` both
         # reject unknown names on write, so reaching this means a row predating
@@ -1481,6 +1557,16 @@ class HarnessEngine:
             # Opting out withholds the tools even when a pack task names them,
             # the same way the web and connector filters above subtract theirs.
             enabled_names = [n for n in enabled_names if n not in LESSON_TOOL_NAMES]
+        if run.task_type == SUBAGENT_TASK_TYPE:
+            # Applied a second time, last: the lessons block just above ADDS
+            # tools (`propose_pack_lesson` among them, a write into workspace
+            # pack memory), and a subagent inherits its parent's pack, so without
+            # this every subagent of a pack-bound chat turn held a write tool its
+            # allowlist names as excluded. Nothing may add to a subagent's tools
+            # after this line.
+            enabled_names = _subagent_tool_names(
+                enabled_names, run.task_input, delegated=run.parent_run_id is not None
+            )
         tool_specs = [builtins[n] for n in enabled_names]
 
         # ── context, accounted ───────────────────────────────────────────────
@@ -1603,6 +1689,11 @@ class HarnessEngine:
             delegation_depth=max(0, int(run.task_input.get(DELEGATION_DEPTH_KEY) or 0)),
             objective=objective,
             max_cost_usd=max_cost,
+            # `tool_specs` (above) is built from `enabled_names` after every
+            # withholding step (unknown-tool refusal, web/connector
+            # withholding, the lessons opt-in/out) — its names are exactly
+            # what this run's model was actually offered.
+            enabled_tools=frozenset(s.name for s in tool_specs),
         )
         # The grounding check (engine/grounding.py) only makes sense where a
         # reply's prose *is* the output: a verdict task's numbers are already
@@ -2747,6 +2838,18 @@ class HarnessEngine:
         # reporting only what the run started with, silently dropping every
         # document a tool pulled in along the way.
         run.document_ids = list(ctx.document_ids)
+        # `ctx.retrieved_values` (the registry `lookup_dataset` fills and the
+        # cited-values check trusts) dies with the child's RunContext once
+        # this call returns. A parent that later wants to cite a value its
+        # subagent looked up needs it, and it must only ever contain values a
+        # real row returned — so it is handed over by the engine itself,
+        # never parsed out of the child's prose (which the model wrote and
+        # could misquote or fabricate). Stashed only for a delegated run
+        # (`parent_run_id` set): a top-level subagent, or a chat/freeform run,
+        # has no parent to collect it. See `_stash_retrieved_values` for the
+        # bound that keeps an uncollected handoff from growing without limit.
+        if run.parent_run_id is not None and ctx.retrieved_values:
+            self._stash_retrieved_values(run.id, ctx.retrieved_values)
         run.messages = [m.to_json() for m in messages]
         run.overhead = overhead_block(overhead_calls)
         run.finished_at = _utcnow()

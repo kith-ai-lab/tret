@@ -29,7 +29,11 @@ DELEGATION_DEPTH_KEY = "_delegation_depth"
 # `delegate_parallel` (engine/tools.py) is the parallel-batch tool this
 # comment used to describe as a future addition — it fans several children out
 # from one call instead of `run_harness_task`'s one-at-a-time delegation.
-DELEGATION_TOOLS = frozenset({"run_harness_task", "delegate_parallel"})
+# `spawn_subagent` is the ad-hoc-brief tool (also engine/tools.py) — it starts
+# a child run too, just one whose task_type/task_input is written by the
+# parent's own model rather than resolved against a pack's declared task
+# types.
+DELEGATION_TOOLS = frozenset({"run_harness_task", "delegate_parallel", "spawn_subagent"})
 
 # Engine-plumbing key (hidden from the model — see `build_user_message`,
 # engine/context.py) carrying the ceiling the engine carved for a delegated
@@ -42,3 +46,45 @@ COST_CAP_KEY = "_cost_cap_usd"
 # the parent could do itself, so the delegation is refused up front rather
 # than started with a cap it has no real chance of finishing inside.
 MIN_CHILD_BUDGET_USD = Decimal("0.05")
+
+# ── ad-hoc subagents ──────────────────────────────────────────────────────────
+# A subagent is a child run whose brief is written by the parent MODEL (via a
+# future `spawn_subagent` tool), not declared by a pack — the third member of
+# `engine/harness.GENERIC_TASK_TYPES`. Its constants live here, next to the
+# other delegation ones, for the same reason: `tools.py` owns the run but
+# `compaction.py` needs to reason about what a subagent tool call looked like
+# without importing the ORM.
+SUBAGENT_TASK_TYPE = "subagent"
+# `Harness.task_profile` of the one harness every workspace seeds for this
+# (`services.workspace.seed_subagent_harness`) — never a `run_harness_task`
+# target (see `_prepare_child`'s harness query in tools.py).
+SUBAGENT_TASK_PROFILE = "subagent"
+# task_input keys the engine reads when starting a subagent run.
+ALLOWED_TOOLS_KEY = "_allowed_tools"  # list[str]: the parent's own grant, narrowing further
+PROJECT_DOCS_KEY = "_project_docs"  # bool: the parent itself had project-wide document scope
+
+# An ALLOWlist, not a denylist, so a write tool added to the engine later is
+# denied to a subagent by default rather than needing to be remembered here.
+# A subagent's brief is model-written and may be poisoned by something the
+# parent read while doing its own work, so it must never hold a tool its
+# parent lacks, never hold any write/record/delegation tool, never see more
+# documents than its parent, and only ever REPORT text back — everything that
+# records, proposes, files or delegates (`record_verdict`, `record_finding`,
+# `propose_connected_write`, `propose_pack_lesson`, `file_data_request`,
+# `draft_section`, and every `DELEGATION_TOOLS` member) is deliberately absent
+# from this set.
+SUBAGENT_ALLOWED_TOOLS = frozenset(
+    {
+        "read_document",
+        "search_documents",
+        "lookup_dataset",
+        "list_prior_findings",
+        "list_pack_lessons",
+        "run_method",
+        "web_search",
+        "fetch_url",
+        "list_connected_sources",
+        "search_connected_files",
+        "read_connected_file",
+    }
+)

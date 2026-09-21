@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.config import get_settings
 from tret.db.models import Harness, Project, User, Workspace, WorkspaceMember
+from tret.engine.delegation import SUBAGENT_ALLOWED_TOOLS, SUBAGENT_TASK_PROFILE
 from tret.engine.extensions import GateResult, get_extension_registry
 from tret.packs.links import link_all_workspace_packs
 from tret.packs.loader import PackValidationError, install_pack
@@ -175,6 +176,7 @@ async def seed_workspace_content(db: AsyncSession, workspace_id, project_id) -> 
         await _install_configured_packs(db, workspace_id, project_id)
     await seed_chat_harness(db, workspace_id)
     await _seed_default_harnesses(db, workspace_id)
+    await seed_subagent_harness(db, workspace_id)
 
 
 async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) -> None:
@@ -273,6 +275,13 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
             chat_harness.tool_names or []
         ):
             chat_harness.tool_names = [*chat_harness.tool_names, "delegate_parallel"]
+        # `spawn_subagent` rides along with `run_harness_task` on the same
+        # terms as `delegate_parallel` above — never added on its own to a
+        # harness that never had delegation at all.
+        if "run_harness_task" in (chat_harness.tool_names or []) and "spawn_subagent" not in (
+            chat_harness.tool_names or []
+        ):
+            chat_harness.tool_names = [*chat_harness.tool_names, "spawn_subagent"]
         missing_connector_tools = [
             n
             for n in ("list_connected_sources", "search_connected_files", "read_connected_file")
@@ -301,6 +310,7 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
         tool_names=[
             "run_harness_task",
             "delegate_parallel",
+            "spawn_subagent",
             "run_method",
             "read_document",
             "search_documents",
@@ -351,6 +361,51 @@ async def _seed_default_harnesses(db: AsyncSession, workspace_id) -> None:
             task_profile="freeform",
             model_policy={"mode": "auto", "max_cost_tier": "standard"},
             tool_names=["read_document", "search_documents", "lookup_dataset", "list_prior_findings"],
+        )
+    )
+
+
+async def seed_subagent_harness(db: AsyncSession, workspace_id) -> None:
+    """The seeded target for ad-hoc subagent runs (a child run whose brief is
+    written by another run's model — `spawn_subagent`, not yet added — rather
+    than declared by a pack). Modelled exactly on `_seed_default_harnesses`
+    above: checked by name, idempotent, one per workspace.
+
+    `tool_names` is the FULL allowlist, sorted — the actual per-run grant is
+    narrowed further by the spawning tool and enforced again by the engine
+    (`engine.harness._subagent_tool_names`) no matter what this harness lists,
+    so there is no reason to under-provision it here.
+    """
+    existing = (
+        await db.execute(
+            select(Harness).where(
+                Harness.workspace_id == workspace_id,
+                # By profile, not by name: an unrelated harness an operator
+                # happened to call "Subagent" must not suppress seeding, and a
+                # renamed or archived seeded one must not be seeded again
+                # (archiving it is how an operator turns subagents off).
+                Harness.task_profile == SUBAGENT_TASK_PROFILE,
+            )
+        )
+    ).scalars().first()
+    if existing is not None:
+        return
+    db.add(
+        Harness(
+            workspace_id=workspace_id,
+            name="Subagent",
+            description="Short-lived worker another run briefs for a bounded piece of "
+            "reading or lookup. Reports text only: it cannot record findings, propose "
+            "writes or delegate.",
+            task_profile=SUBAGENT_TASK_PROFILE,
+            model_policy={"mode": "auto", "max_cost_tier": "standard"},
+            loop_config={
+                "max_iterations": 12,
+                "max_output_tokens": 4096,
+                "temperature": 0.2,
+                "max_cost_usd": 1.0,
+            },
+            tool_names=sorted(SUBAGENT_ALLOWED_TOOLS),
         )
     )
 

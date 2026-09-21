@@ -277,6 +277,36 @@ def test_harness_preset_naming_chat_task_type_is_rejected_as_a_front_door_hijack
     assert "not one of this pack's own task_types" not in joined
 
 
+def test_pack_may_not_declare_the_reserved_subagent_task_type(tmp_path):
+    """Unlike 'chat', the slug itself is the vector: a pack-declared 'subagent'
+    task type would replace the engine's subagent preamble with pack
+    instructions and, by naming a terminal tool, switch off the grounding check
+    a parent relies on — for every ad-hoc subagent of a run bound to the pack."""
+    (tmp_path / "pack.yaml").write_text(
+        "pack: preset-test\nversion: 0.1.0\ndisplay_name: Preset Test\n"
+        "task_types:\n"
+        "  - slug: subagent\n    display_name: Sub\n    shape: freeform\n"
+    )
+    _, _, errors = validate_pack(tmp_path)
+    assert any("task 'subagent'" in e and "reserved" in e for e in errors)
+
+
+def test_harness_preset_naming_the_subagent_profile_is_rejected(tmp_path):
+    """A preset whose first task_type is 'subagent' would install a harness
+    with `task_profile='subagent'` — created before the workspace's own seeded
+    one, so every ad-hoc subagent would run on the pack's prompt and policy."""
+    (tmp_path / "pack.yaml").write_text(
+        "pack: preset-test\nversion: 0.1.0\ndisplay_name: Preset Test\n"
+        "task_types:\n"
+        "  - slug: subagent\n    display_name: Sub\n    shape: freeform\n"
+        "harnesses:\n"
+        "  - name: My Harness\n    task_types: [subagent]\n    tools: [lookup_dataset]\n"
+    )
+    _, _, errors = validate_pack(tmp_path)
+    joined = " ".join(errors)
+    assert "harness preset 'My Harness'" in joined and "Subagent harness" in joined
+
+
 def test_pack_may_declare_a_chat_task_type_as_long_as_no_preset_references_it(tmp_path):
     """Task types named 'chat' may exist for other purposes — the hijack
     vector is a *preset* routing a harness's task_profile to 'chat', not the

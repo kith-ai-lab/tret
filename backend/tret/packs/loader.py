@@ -29,6 +29,7 @@ import yaml
 # would fix both; it is an engine-side edit, so it is recorded here rather than
 # done piecemeal.
 from tret.engine.context import doctrine_sha, parse_doctrine_selector, select_doctrine_text
+from tret.engine.delegation import SUBAGENT_TASK_TYPE
 from tret.packs.archive import PackArchiveError, extract_pack_archive
 from tret.packs.integrity import pack_content_hash
 from tret.packs.safety import scan_method_file
@@ -115,6 +116,17 @@ def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[s
     schemas: dict[str, dict] = {}
     builtins = set(get_builtin_tools())
     for task in manifest.task_types:
+        # "subagent" is the engine's own task type for a run briefed by another
+        # run's model (engine/delegation.py). A pack declaring that slug would
+        # replace the subagent preamble with its own instructions and, by naming
+        # a terminal tool, switch off the grounding check the parent relies on —
+        # for every ad-hoc subagent of a run bound to this pack. Unlike "chat"
+        # below, there is no harmless reason for a pack to own this slug.
+        if task.slug == SUBAGENT_TASK_TYPE:
+            errors.append(
+                f"task '{task.slug}': this slug is reserved for the engine's own ad-hoc "
+                "subagent runs and may not be declared by a pack"
+            )
         if task.output_schema:
             path = pack_dir / task.output_schema
             slug = Path(task.output_schema).stem.removesuffix(".schema")
@@ -177,6 +189,12 @@ def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[s
         # named "chat" for other purposes (e.g. a findings schema keyed to
         # it); it is a preset routing a harness's task_profile to "chat" that
         # is the actual vector, not the slug's existence.
+        if preset.task_types and preset.task_types[0] == SUBAGENT_TASK_TYPE:
+            errors.append(
+                f"harness preset '{preset.name}': task_types names '{SUBAGENT_TASK_TYPE}' — "
+                "that task_profile is reserved for the workspace's own Subagent harness, "
+                "which every ad-hoc subagent run is started on"
+            )
         if preset.task_types and preset.task_types[0] == "chat":
             errors.append(
                 f"harness preset '{preset.name}': task_types names 'chat' — a preset's first "

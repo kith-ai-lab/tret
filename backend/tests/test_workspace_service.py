@@ -146,6 +146,7 @@ async def test_multi_tenant_team_workspace_gets_the_default_pack(db, monkeypatch
     assert await _harness_names(db, workspace.id) == {
         "Chat Assistant",
         "General Assistant",
+        "Subagent",
         "Climate Analyst",
     }
 
@@ -196,7 +197,7 @@ async def test_seed_default_packs_false_skips_it_in_multi_tenant_mode(db, monkey
 
     assert await _pack(db, workspace.id) is None
     # The rest of seeding still happens — packs are the only thing gated off.
-    assert await _harness_names(db, workspace.id) == {"Chat Assistant", "General Assistant"}
+    assert await _harness_names(db, workspace.id) == {"Chat Assistant", "General Assistant", "Subagent"}
 
 
 async def test_seed_default_packs_false_skips_it_in_self_host_mode(db, monkeypatch):
@@ -267,7 +268,7 @@ async def test_pack_install_failure_does_not_fail_workspace_creation(db, monkeyp
     ).scalars().first()
     assert membership is not None
     assert membership.role == "owner"
-    assert await _harness_names(db, workspace_id) == {"Chat Assistant", "General Assistant"}
+    assert await _harness_names(db, workspace_id) == {"Chat Assistant", "General Assistant", "Subagent"}
 
 
 async def test_pack_install_failure_workspace_persists_in_a_fresh_session(
@@ -314,7 +315,7 @@ async def test_pack_install_failure_workspace_persists_in_a_fresh_session(
             .scalars()
             .all()
         }
-        assert harness_names == {"Chat Assistant", "General Assistant"}
+        assert harness_names == {"Chat Assistant", "General Assistant", "Subagent"}
 
 
 # ── the moved commit: harness-seeding failures roll back the whole creation ──

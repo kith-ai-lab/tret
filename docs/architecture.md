@@ -465,6 +465,41 @@ where nearly all delegation happens, to guard against a total the other limits
 already bound: a tree's spend is capped by its root's cost cap, and its size by
 the depth ceiling and `TRET_MAX_CHILDREN_PER_RUN`.
 
+Both delegation tools above resolve a target the way a *pack* declared it.
+`spawn_subagent` (and a `delegate_parallel` item carrying `"kind":
+"subagent"`) is the third shape: a child run whose brief — instructions,
+context, expected output — is written by the parent's own MODEL, resolved
+against the one Subagent harness every workspace seeds
+(`services.workspace.seed_subagent_harness`; an operator tunes its model
+policy and loop limits there like any other harness). Because the brief is
+model-written and may be poisoned by something the parent read, its authority
+is structural rather than trusted: its tool grant is `SUBAGENT_ALLOWED_TOOLS`
+(read-only; no record/write/delegation tool is ever in it) intersected with
+whatever tools the PARENT run itself was actually offered, narrowed further
+only if the parent's own request asks for a smaller subset; its document
+scope is never wider than the parent's own (an explicit list is checked
+against it, an omitted one inherits it exactly, project-wide included); and
+it is a leaf — it holds no delegation tool, so it cannot spawn a further
+child. It returns one text report, not a finding: `run_harness_task`'s draft
+findings are absent, and the result instead carries the child's own prose
+grounding verdict (`grounding.status`/`unsupported`) so the parent knows
+whether to trust figures in that report. Any value the subagent actually
+looked up via `lookup_dataset` is handed back too — the engine's own
+retrieved-values registry for that child, tagged with `via_run_id`, never
+anything parsed out of its prose — so a parent citing one in its own
+`record_verdict` still traces to a real dataset row. `effort: "light"` routes
+the subagent to the `token_conservation` objective for a simple lookup that
+should not spend a full-size model.
+
+A subagent's tool list is narrowed twice in the engine, the second time after
+every step that can *add* tools (the pack-lesson tools are appended late, and a
+subagent inherits its parent's pack), so nothing can put a write tool back. The
+`subagent` slug is reserved: a pack may neither declare it as a task type nor
+name it in a harness preset, since either would put pack-authored instructions
+or policy under every ad-hoc subagent in the workspace. The seeded Subagent
+harness is found by its `task_profile`, not its name; archiving it turns ad-hoc
+subagents off for that workspace.
+
 ## SDK and CLI
 
 `tret.sdk.Router` and the `tret run` CLI (`tret/local_run.py`) are a second,

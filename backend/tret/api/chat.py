@@ -407,14 +407,19 @@ def _assistant_message(run: Run) -> dict:
                         batch = args.get("tasks") or []
                         # De-duplicated, in call order — a batch that repeats
                         # a task_type over several inputs should read as one
-                        # kind of work, not a wall of the same word.
+                        # kind of work, not a wall of the same word. A
+                        # subagent item has no task_type of its own, so it
+                        # reads as the literal word "subagent" instead.
                         types: list[str] = []
                         for t in batch:
-                            slug = t.get("task_type", "?")
+                            slug = "subagent" if t.get("kind") == "subagent" else t.get("task_type", "?")
                             if slug not in types:
                                 types.append(slug)
                         shown = ", ".join(types[:4]) + ("…" if len(types) > 4 else "")
                         entry["summary"] = f"delegated {len(batch)} tasks in parallel: {shown}"
+                    elif tc.get("name") == "spawn_subagent":
+                        brief = args.get("label") or (args.get("instructions") or "")[:60]
+                        entry["summary"] = f"briefed a subagent: {brief}"
                     else:
                         entry["summary"] = f"delegated {args.get('task_type', '?')}"
                 else:

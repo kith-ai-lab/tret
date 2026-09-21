@@ -24,7 +24,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.api.auth import bootstrap_admin
 from tret.config import get_settings
 from tret.db.models import Project, User, Workspace, WorkspaceMember
-from tret.services.workspace import create_workspace, seed_chat_harness, seed_workspace_content
+from tret.services.workspace import (
+    create_workspace,
+    seed_chat_harness,
+    seed_subagent_harness,
+    seed_workspace_content,
+)
 
 log = logging.getLogger("tret.bootstrap")
 
@@ -91,9 +96,16 @@ async def bootstrap(db: AsyncSession) -> None:
         try:
             async with db.begin_nested():
                 await seed_chat_harness(db, other.id)
+                # Same reasoning as the chat-harness backfill above: a tenant
+                # workspace created before the Subagent harness existed still
+                # needs one, since it is the seeded target `spawn_subagent`
+                # (once added) resolves against, not something a workspace
+                # can be usably retrofitted without.
+                await seed_subagent_harness(db, other.id)
         except Exception:  # noqa: BLE001 - one workspace's failure must not abort boot
             log.exception(
-                "chat-harness backfill failed for workspace %s and was skipped", other.id
+                "chat/subagent-harness backfill failed for workspace %s and was skipped",
+                other.id,
             )
     await db.commit()
 
