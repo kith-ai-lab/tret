@@ -2,7 +2,7 @@
 
 Egress is not one boolean. tret must reach an LLM provider to do anything at
 all, so "no internet" and "no *research* internet" are different deployments and
-each needs its own switch. Five classes:
+each needs its own switch. Six classes:
 
     provider   cloud model calls (anthropic, kimi, openrouter)
     catalog    the OpenRouter model list and provider key validation
@@ -15,6 +15,13 @@ each needs its own switch. Five classes:
                destination, not a model-chosen one, so it carries `local`'s
                trust rather than `research`'s SSRF checks, while still being
                severed by the same switch as research (see CLASS_SEARCH below)
+    telemetry  the opt-in anonymous usage report (tret/services/telemetry.py)
+               — a fixed, single-host destination like `search`, but with a
+               switch of its own (`TRET_TELEMETRY`) rather than riding
+               another class's. Whether a report is ever actually sent is a
+               taller stack than this one switch (`tret/services/
+               telemetry.py`'s state resolution, §1 of the shared contract):
+               this class only says whether the *network path* is open.
 
 `research` ships **off**. Turning it on is a deliberate act by an operator, and
 turning it back off severs the agent's internet without touching the rest of the
@@ -56,7 +63,10 @@ CLASS_CATALOG = "catalog"
 CLASS_LOCAL = "local"
 CLASS_RESEARCH = "research"
 CLASS_SEARCH = "search"
-EGRESS_CLASSES = (CLASS_PROVIDER, CLASS_CATALOG, CLASS_LOCAL, CLASS_RESEARCH, CLASS_SEARCH)
+CLASS_TELEMETRY = "telemetry"
+EGRESS_CLASSES = (
+    CLASS_PROVIDER, CLASS_CATALOG, CLASS_LOCAL, CLASS_RESEARCH, CLASS_SEARCH, CLASS_TELEMETRY
+)
 
 MODE_OFF = "off"
 MODE_REPLAY = "replay"
@@ -77,6 +87,10 @@ _RANK = {MODE_OFF: 0, MODE_REPLAY: 1, MODE_ON: 2}
 # would otherwise put at risk.
 PROVIDER_HOSTS = frozenset({"api.anthropic.com", "api.moonshot.ai", "openrouter.ai"})
 CATALOG_HOSTS = frozenset({"openrouter.ai"})
+# The telemetry collector. A fork that repoints TRET_TELEMETRY_URL at its own
+# collector widens this by exactly the one host it configured (policy_for
+# below adds it), never by more.
+TELEMETRY_HOSTS = frozenset({"telemetry.kithailab.com"})
 
 
 class EgressDenied(RuntimeError):
@@ -166,6 +180,13 @@ def _configured_mode(egress_class: str, settings) -> str:
         return _normalize(settings.egress_catalog)
     if egress_class == CLASS_LOCAL:
         return _normalize(settings.egress_local)
+    if egress_class == CLASS_TELEMETRY:
+        # No TRET_EGRESS_TELEMETRY of its own: the class simply tracks
+        # whether telemetry *could* be enabled at all (TRET_TELEMETRY != off).
+        # Whether a report is actually sent is decided by a taller stack
+        # (tret/services/telemetry.py's state resolution) that this class
+        # feeds into as one more gate, the "egress class must be on" step.
+        return MODE_OFF if settings.telemetry == "off" else MODE_ON
     # `research` and `search` share TRET_EGRESS_RESEARCH — see CLASS_SEARCH's
     # note in effective_mode() for why `search` has no env var of its own.
     return _normalize(settings.egress_research)
@@ -352,6 +373,25 @@ def policy_for(egress_class: str, settings=None) -> ClassPolicy:
             max_bytes=0,
             timeout_seconds=20.0,
         )
+    if egress_class == CLASS_TELEMETRY:
+        hosts = set(TELEMETRY_HOSTS)
+        url_host = urlsplit((s.telemetry_url or "").strip()).hostname
+        if url_host:
+            hosts.add(url_host.lower().rstrip("."))
+        return ClassPolicy(
+            name=egress_class,
+            mode=mode,
+            allow_hosts=frozenset(hosts),
+            # Operator-configured destination (like `local`/`search`), never
+            # model-chosen, but there is no reason to relax past https/443:
+            # the collector is a public HTTPS endpoint by construction, not a
+            # LAN model server or an internal search instance.
+            allow_http=False,
+            standard_ports_only=True,
+            verify_addresses=VERIFY_NONE,
+            max_bytes=0,
+            timeout_seconds=5.0,  # contract §4: 5s, no retries
+        )
     return ClassPolicy(
         name=egress_class,
         mode=mode,
@@ -380,12 +420,20 @@ def egress_status(settings=None) -> dict:
 
     def _class_status(name: str) -> dict:
         pol = policy_for(name, s)
-        return {
+        status = {
             "mode": pol.mode,
             "configured": _configured_mode(name, s),
             "runtime_override": _runtime_overrides.get(name),
             "allow_hosts": sorted(pol.allow_hosts),
         }
+        if name == CLASS_TELEMETRY:
+            # S7: an extra key on the telemetry class only — tests/test_egress_api.py
+            # has no strict shape assertion over this dict, so this is additive.
+            status["note"] = (
+                "this class only says whether the network path is open — a report is "
+                "sent only after an instance admin opts in (see docs/telemetry.md)"
+            )
+        return status
 
     return {
         "master": _normalize(s.egress),
@@ -417,5 +465,19 @@ def log_egress_at_boot(settings=None, logger=None) -> None:
                 CLASS_LOCAL: "the configured local model server is unreachable",
                 CLASS_RESEARCH: "web_search and fetch_url are withheld from every run",
                 CLASS_SEARCH: "the web search backend is unreachable (research is off)",
+                CLASS_TELEMETRY: "no anonymous usage report will ever be sent",
             }[name],
         )
+    # S7: unlike every other class, `telemetry` gets a line regardless of its
+    # own mode. A stock install's boot log otherwise implies, by omission,
+    # that an "on" telemetry egress path means telemetry itself is live — it
+    # only ever means the network path is open; whether a report is ever
+    # actually sent is the taller stack in tret/services/telemetry.py's own
+    # state resolution (contract §1), gated on an instance admin's opt-in.
+    out.info(
+        "egress class %r is %s: the network path being open does NOT mean telemetry is "
+        "on — telemetry reports are sent only after an instance admin opts in; see "
+        "docs/telemetry.md",
+        CLASS_TELEMETRY,
+        effective_mode(CLASS_TELEMETRY, s),
+    )

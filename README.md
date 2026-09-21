@@ -366,6 +366,7 @@ See [docs/architecture.md](docs/architecture.md) and
 | [local-models.md](docs/local-models.md) | zero-cloud operation |
 | [evals.md](docs/evals.md) | the golden-run suite |
 | [hardening.md](docs/hardening.md) | production checklist |
+| [telemetry.md](docs/telemetry.md) | the opt-in anonymous usage report: every field, on or off |
 | [upgrading.md](docs/upgrading.md) | schema migrations, legacy databases, recovery |
 | [deploy-fly.md](docs/deploy-fly.md) | reference deployment |
 | [deploy-render.md](docs/deploy-render.md) | one-click hosted deployment |
@@ -378,8 +379,13 @@ Configuration is env-only. tret makes no network calls except to the LLM
 providers you configure (plus an optional OpenRouter model-catalog fetch you can
 disable, and web research if you switch it on — off by default). With
 `TRET_EGRESS=off` and a local model server it makes none at all. Every one of
-those goes through a single module you can read in an afternoon. No telemetry,
-ever.
+those goes through a single module you can read in an afternoon. No telemetry
+unless an admin turns it on.
+
+tret can optionally report anonymous, aggregate usage statistics to Kith —
+off by default, and an admin has to opt in before anything is sent.
+[docs/telemetry.md](docs/telemetry.md) lists every field the report can ever
+carry; nothing in it is a name, an id tied to you, or any piece of your data.
 
 ## Contributing
 

@@ -1,0 +1,261 @@
+{
+  "$defs": {
+    "TelemetryFeatures": {
+      "additionalProperties": false,
+      "description": "Exactly the four booleans contract \u00a73 names \u2014 nothing else.",
+      "properties": {
+        "connections": {
+          "title": "Connections",
+          "type": "boolean"
+        },
+        "delegation": {
+          "title": "Delegation",
+          "type": "boolean"
+        },
+        "local_models": {
+          "title": "Local Models",
+          "type": "boolean"
+        },
+        "packs": {
+          "title": "Packs",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "packs",
+        "connections",
+        "delegation",
+        "local_models"
+      ],
+      "title": "TelemetryFeatures",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "The ONLY body ever POSTed to `telemetry_url` (contract \u00a73).\n\n`extra=\"forbid\"` is the allowlist: a field that is not explicitly listed\nhere cannot be sent even by accident. Closed enums/buckets are `Literal`\ntypes on purpose, so the JSON schema this model produces (see\n`tests/test_telemetry.py`'s schema snapshot) documents the exact set of\nvalues a receiver ever has to handle.",
+  "properties": {
+    "co2e_g": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Co2E G"
+    },
+    "db": {
+      "title": "Db",
+      "type": "string"
+    },
+    "deploy": {
+      "enum": [
+        "docker",
+        "fly",
+        "render",
+        "bare"
+      ],
+      "title": "Deploy",
+      "type": "string"
+    },
+    "energy_wh": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Energy Wh"
+    },
+    "factor_rungs": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "propertyNames": {
+        "enum": [
+          "run_override",
+          "harness",
+          "workspace",
+          "managed",
+          "env",
+          "dataset",
+          "provider",
+          "local_setting",
+          "global_default",
+          "legacy",
+          "other"
+        ]
+      },
+      "title": "Factor Rungs",
+      "type": "object"
+    },
+    "features": {
+      "$ref": "#/$defs/TelemetryFeatures"
+    },
+    "instance_id": {
+      "title": "Instance Id",
+      "type": "string"
+    },
+    "model_families": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "propertyNames": {
+        "enum": [
+          "claude",
+          "gpt",
+          "gemini",
+          "gemma",
+          "llama",
+          "mistral",
+          "qwen",
+          "deepseek",
+          "kimi",
+          "grok",
+          "phi",
+          "command",
+          "local/other",
+          "other"
+        ]
+      },
+      "title": "Model Families",
+      "type": "object"
+    },
+    "providers": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "propertyNames": {
+        "enum": [
+          "anthropic",
+          "kimi",
+          "openrouter",
+          "local",
+          "other"
+        ]
+      },
+      "title": "Providers",
+      "type": "object"
+    },
+    "run_status": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "propertyNames": {
+        "enum": [
+          "queued",
+          "running",
+          "completed",
+          "completed_without_output",
+          "failed",
+          "cancelled",
+          "other"
+        ]
+      },
+      "title": "Run Status",
+      "type": "object"
+    },
+    "runs_bucket": {
+      "enum": [
+        "0",
+        "1-10",
+        "11-100",
+        "101-1000",
+        "1001-10000",
+        "10000+"
+      ],
+      "title": "Runs Bucket",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "task_types": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "propertyNames": {
+        "enum": [
+          "chat",
+          "freeform",
+          "pack"
+        ]
+      },
+      "title": "Task Types",
+      "type": "object"
+    },
+    "tokens_in": {
+      "title": "Tokens In",
+      "type": "integer"
+    },
+    "tokens_out": {
+      "title": "Tokens Out",
+      "type": "integer"
+    },
+    "tret_version": {
+      "title": "Tret Version",
+      "type": "string"
+    },
+    "users_bucket": {
+      "enum": [
+        "0",
+        "1",
+        "2-5",
+        "6-20",
+        "21-100",
+        "100+"
+      ],
+      "title": "Users Bucket",
+      "type": "string"
+    },
+    "window_end": {
+      "title": "Window End",
+      "type": "string"
+    },
+    "window_start": {
+      "title": "Window Start",
+      "type": "string"
+    },
+    "workspaces_bucket": {
+      "enum": [
+        "0",
+        "1",
+        "2-5",
+        "6-20",
+        "21-100",
+        "100+"
+      ],
+      "title": "Workspaces Bucket",
+      "type": "string"
+    }
+  },
+  "required": [
+    "instance_id",
+    "window_start",
+    "window_end",
+    "tret_version",
+    "deploy",
+    "db",
+    "users_bucket",
+    "workspaces_bucket",
+    "runs_bucket",
+    "tokens_in",
+    "tokens_out",
+    "providers",
+    "model_families",
+    "task_types",
+    "run_status",
+    "energy_wh",
+    "co2e_g",
+    "factor_rungs",
+    "features"
+  ],
+  "title": "TelemetryPayload",
+  "type": "object"
+}

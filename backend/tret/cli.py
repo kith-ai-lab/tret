@@ -1,4 +1,5 @@
-"""`tret` CLI — pack authoring utilities, outcome bookkeeping, egress, and `run`."""
+"""`tret` CLI — pack authoring utilities, outcome bookkeeping, egress,
+telemetry, and `run`."""
 from __future__ import annotations
 
 import argparse
@@ -200,6 +201,73 @@ def _egress_restore(egress_class: str) -> None:
     print(f"\nNOTE: {_PROCESS_LOCAL_WARNING}", file=sys.stderr)
 
 
+def _telemetry_status() -> None:
+    """`tret telemetry status` — the same shape `GET /api/admin/telemetry`
+    returns, as JSON on stdout so it's scriptable."""
+    import asyncio
+    import json as json_module
+
+    from tret.db.engine import get_session_factory
+    from tret.services.telemetry import status
+
+    async def run() -> dict:
+        async with get_session_factory()() as db:
+            return await status(db)
+
+    result = asyncio.run(run())
+    print(json_module.dumps(result, indent=2))
+
+
+def _telemetry_preview() -> None:
+    """`tret telemetry preview` — `{"payload": {...}, "would_send": bool}` for
+    the next report. `services.telemetry.preview` never mints an instance id
+    on its own, so this command never does either."""
+    import asyncio
+    import json as json_module
+
+    from tret.db.engine import get_session_factory
+    from tret.services.telemetry import preview
+
+    async def run() -> dict:
+        async with get_session_factory()() as db:
+            return await preview(db)
+
+    result = asyncio.run(run())
+    print(json_module.dumps(result, indent=2))
+
+
+def _telemetry_toggle(enabled: bool) -> None:
+    """`tret telemetry enable`/`disable` — flips the admin DB toggle via
+    `tret.services.telemetry.set_enabled`, the same call the settings UI's
+    PUT makes. When the effective state is locked (an operator `TRET_TELEMETRY`
+    of `on`/`off`, or `DO_NOT_TRACK`), the DB toggle cannot move it:
+    `set_enabled` raises `TelemetryLocked`, reported here as a one-line
+    reason on stderr and exit code 2, rather than a stack trace.
+    """
+    import asyncio
+
+    from tret.db.engine import get_session_factory
+    from tret.services.telemetry import TelemetryLocked, set_enabled
+
+    action = "enable" if enabled else "disable"
+
+    async def run():
+        async with get_session_factory()() as db:
+            return await set_enabled(db, enabled)
+
+    try:
+        state = asyncio.run(run())
+    except TelemetryLocked as exc:
+        print(f"cannot {action} telemetry: locked ({exc.reason})", file=sys.stderr)
+        sys.exit(2)
+
+    print(f"telemetry {action}d")
+    print(
+        f"  enabled={state.enabled} env_mode={state.env_mode} "
+        f"db_enabled={state.db_enabled} locked={state.locked}"
+    )
+
+
 def _run_command(args: argparse.Namespace) -> None:
     """`tret run TASK [--path DIR] [--out FILE] ...` — see backend/tret/local_run.py.
 
@@ -359,6 +427,18 @@ def main() -> None:
         help=f"one of: {', '.join(EGRESS_CLASSES)}",
     )
 
+    telemetry = sub.add_parser(
+        "telemetry", help="Inspect and control anonymous usage telemetry (see docs/telemetry.md)"
+    )
+    telemetry_sub = telemetry.add_subparsers(dest="telemetry_command", required=True)
+    telemetry_sub.add_parser("status", help="Show telemetry state as JSON")
+    telemetry_sub.add_parser(
+        "preview",
+        help="Preview the next telemetry payload as JSON — never mints an instance id",
+    )
+    telemetry_sub.add_parser("enable", help="Turn telemetry on (the admin DB toggle)")
+    telemetry_sub.add_parser("disable", help="Turn telemetry off (the admin DB toggle)")
+
     run_cmd = sub.add_parser(
         "run", help="Route a task, run it (optionally over local files), print a receipt"
     )
@@ -428,6 +508,16 @@ def main() -> None:
             _egress_cut(args.egress_class)
         elif args.egress_command == "restore":
             _egress_restore(args.egress_class)
+        return
+    if args.command == "telemetry":
+        if args.telemetry_command == "status":
+            _telemetry_status()
+        elif args.telemetry_command == "preview":
+            _telemetry_preview()
+        elif args.telemetry_command == "enable":
+            _telemetry_toggle(True)
+        elif args.telemetry_command == "disable":
+            _telemetry_toggle(False)
         return
     if args.command == "run":
         _run_command(args)

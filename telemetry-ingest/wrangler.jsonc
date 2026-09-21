@@ -1,0 +1,64 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tret-telemetry-ingest",
+  "main": "src/index.js",
+  // Bump this when the Worker should opt into newer default runtime
+  // behavior. It does not need to track "today" -- it pins a runtime
+  // behavior snapshot, not a deploy date.
+  "compatibility_date": "2024-11-01",
+
+  // D1 database that stores reports/instances/totals (see migrations/).
+  // `database_id` is a placeholder: the maintainer replaces it after
+  // running `wrangler d1 create tret-telemetry` (README DEPLOY section).
+  // `wrangler dev` and the vitest-pool-workers tests use a local/ephemeral
+  // D1 instance and never touch the placeholder.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tret-telemetry",
+      "database_id": "REPLACE_WITH_D1_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // Public HTTP surface. The `kithailab.com` zone must already be on the
+  // Cloudflare account this Worker is deployed from -- see README DEPLOY.
+  "routes": [
+    { "pattern": "telemetry.kithailab.com", "custom_domain": true }
+  ],
+
+  // Daily cron (contract §7 amendments): runs the retention purge
+  // (deletes `reports`/`instances` rows older than 13 months, and
+  // `daily_accepts` rows older than 40 days) and, only when the rebuild
+  // rule in src/aggregates.js is met, rebuilds the public `/v1/aggregates`
+  // snapshot -- see src/index.js's `scheduled()`. 04:00 UTC is arbitrary,
+  // chosen only as a quiet hour, not tied to anything privacy-relevant.
+  "triggers": {
+    "crons": ["0 4 * * *"]
+  },
+
+  // DAILY_ACCEPT_CAP (contract §7 amendments B2): the global daily accept
+  // cap on POST /v1/report, across all instances -- admission control
+  // against a flood of fresh-UUID fake reports. A plain var, not a secret:
+  // it's an operational knob, not sensitive.
+  "vars": {
+    "DAILY_ACCEPT_CAP": "2000"
+  },
+
+  // Observability is left OFF on purpose. Cloudflare's built-in request
+  // logging persists per-request metadata (including the requesting IP) for
+  // every invocation of a Worker -- exactly the kind of record this Worker
+  // exists to avoid creating. `received_day` in the `reports` table is a
+  // UTC *date*, not a timestamp, specifically so a report can never be
+  // correlated against server-side request logs; enabling observability
+  // here would quietly reintroduce that correlation risk out from under the
+  // application code. Keep this disabled even if Cloudflare changes the
+  // platform default for new Workers.
+  "observability": {
+    "enabled": false
+  }
+
+  // ADMIN_TOKEN (bearer token for GET /v1/admin/instances) is a secret, not
+  // a var: set it out of band with `wrangler secret put ADMIN_TOKEN`. It
+  // must never be written into this file or committed to source control.
+}

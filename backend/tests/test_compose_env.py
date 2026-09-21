@@ -32,6 +32,12 @@ NOT_BACKEND_SETTINGS = {
     "TRET_LOCAL_PULL_MODEL",
 }
 
+# The one deliberate non-`TRET_*`, non-`Settings`-field entry: DO_NOT_TRACK is
+# the ambient convention every tool checks the same way (docs/telemetry.md),
+# read straight from `os.environ` by `tret/services/telemetry.py`'s
+# `resolve_state` rather than through a `Settings` field.
+NON_SETTINGS_BACKEND_ENV = {"DO_NOT_TRACK"}
+
 # Values compose deliberately fixes to container paths / service names, so they
 # must NOT match the code default (which is tuned for a bare local checkout).
 CONTAINER_OVERRIDES = {
@@ -59,6 +65,16 @@ def _settings_env_names() -> set[str]:
     return {f"TRET_{name.upper()}" for name in Settings.model_fields}
 
 
+def test_do_not_track_reaches_the_backend_container():
+    """DO_NOT_TRACK carries no `TRET_` prefix (docs/telemetry.md — the
+    ambient convention every tool checks the same way), so it is invisible to
+    `_documented_names()`'s and `_settings_env_names()`'s `TRET_*` regex scans
+    above and needs its own, explicit check: without this line in compose's
+    `environment:` block, an operator's DO_NOT_TRACK in `.env` never reaches
+    the container at all."""
+    assert "DO_NOT_TRACK" in _backend_environment()
+
+
 def test_every_documented_env_var_reaches_the_backend_container():
     missing = sorted(
         name
@@ -73,7 +89,9 @@ def test_every_documented_env_var_reaches_the_backend_container():
 
 def test_every_backend_env_var_is_a_real_setting():
     """The other direction: no compose entry the code does not read."""
-    unknown = sorted(set(_backend_environment()) - _settings_env_names())
+    unknown = sorted(
+        set(_backend_environment()) - _settings_env_names() - NON_SETTINGS_BACKEND_ENV
+    )
     assert not unknown, f"passed to the backend but not a Settings field: {unknown}"
 
 

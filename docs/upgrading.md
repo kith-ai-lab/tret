@@ -30,6 +30,19 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## 2026-09-21 · opt-in anonymous telemetry
+
+One migration, additive: a new table `instance_state` (`key TEXT PRIMARY
+KEY`, `value JSONB NOT NULL`, `updated_at TIMESTAMPTZ`) — the first
+instance-level key/value store. It holds telemetry's own on/off state,
+instance id, and last-10-sends log; every row in it is empty until telemetry
+is actually turned on.
+
+Upgrading changes nothing on its own: telemetry stays off until an admin
+opts in, in Settings or with `tret telemetry enable`. See
+[telemetry.md](telemetry.md) for what it reports and how to verify that for
+yourself.
+
 ## 2026-09-20 · parallel delegation, subagents, and shared budgets
 
 Two migrations, both additive:

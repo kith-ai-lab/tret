@@ -832,8 +832,9 @@ explicit because a reader will ask:
   identical requests.
 - **An IP lookup is also a network call and a privacy leak**, and tret's promise
   is that it makes no network calls except to the LLM providers you configure
-  (plus an optional model-catalog fetch), with no telemetry ever. A geolocation
-  dependency would break that for a number that would still be wrong.
+  (plus an optional model-catalog fetch), with telemetry off unless an admin
+  turns it on (see [telemetry.md](telemetry.md)). A geolocation dependency
+  would break that for a number that would still be wrong.
 
 Where location *is* knowable, the operator is the one who knows it: they
 self-host somewhere specific, or they have pinned a provider to a region, or they

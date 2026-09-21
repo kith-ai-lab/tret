@@ -80,6 +80,25 @@ def test_endpoint_returns_200_and_the_real_doc(client: TestClient):
     assert response.json()["title"] == "Emissions methodology"
 
 
+# ── the telemetry doc is registered and served the same way ──────────────────
+TELEMETRY = REPO_ROOT / "docs" / "telemetry.md"
+TELEMETRY_SLUG = "telemetry"
+
+
+def test_telemetry_doc_is_registered_and_served(client: TestClient):
+    """Minimal parallel to the methodology tests above: same mechanism, new slug."""
+    assert TELEMETRY.is_file(), f"{TELEMETRY} is gone — GET /api/docs/telemetry has nothing to show"
+    assert docs.resolve_doc(TELEMETRY_SLUG) is not None
+    assert docs.resolve_doc(TELEMETRY_SLUG).resolve() == TELEMETRY.resolve()
+
+    raw = TELEMETRY.read_bytes()
+    body = client.get(f"/api/docs/{TELEMETRY_SLUG}").json()
+    assert body["available"] is True
+    assert body["markdown"] == raw.decode("utf-8")
+    assert body["title"] == "Telemetry"
+    assert body["repo_path"] == "docs/telemetry.md"
+
+
 # ── graceful absence, not a 500 ───────────────────────────────────────────────
 def test_a_build_without_docs_reports_unavailable_rather_than_failing(
     client: TestClient, monkeypatch, tmp_path

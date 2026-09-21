@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     ARRAY,
@@ -436,6 +437,12 @@ class Run(Base):
         # already has a project/workspace to scope by and none looks up a
         # conversation's runs without one.
         Index("runs_project_conversation_created", "project_id", "conversation_id", "created_at"),
+        # N10: the telemetry payload build (tret/services/telemetry.py's
+        # `build_payload`) scopes almost every query to a `created_at` window
+        # with no project/workspace to lead on — the two composite indexes
+        # above don't serve that, so without this bare index the same scan
+        # falls back to a full table seq scan on every sender-loop tick.
+        Index("runs_created_at", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -953,3 +960,28 @@ class EgressCall(Base):
     created_at: Mapped[datetime] = created_at_col()
 
     __table_args__ = (Index("ix_egress_calls_created_at", "created_at"),)
+
+
+class InstanceState(Base):
+    """The first instance-level (not workspace-, not user-scoped) key/value
+    store — small, infrequently-written facts about this deployment as a
+    whole, not about anything inside it. Introduced for opt-in telemetry
+    (`tret/services/telemetry.py`): `telemetry_enabled` (the admin's DB
+    toggle, meaningful only in `TRET_TELEMETRY=admin` mode), the minted
+    `telemetry_instance_id` (a bare random UUIDv4 — never derived from
+    anything, deleted the moment telemetry turns off), `telemetry_last_sent_at`
+    and `telemetry_recent` (the last 10 send attempts, kept locally so an
+    admin can see exactly what was — or would be — sent).
+
+    One row per key rather than one wide row: a future instance-level setting
+    gets its own key with no migration, the same reasoning `dataset_rows`
+    keyed on `(dataset_id, row_index)` rather than a fixed column list. `value`
+    is JSONB so a key's shape is whatever that key needs (a bool, a string, a
+    list of small objects) without a column per key either.
+    """
+
+    __tablename__ = "instance_state"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)

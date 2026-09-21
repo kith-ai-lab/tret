@@ -239,7 +239,8 @@ see [eco-accounting.md](eco-accounting.md).
   findings reference documents by id.
 - tret makes no outbound calls except to the LLM providers you configure (plus
   the optional OpenRouter catalog fetch, `TRET_OPENROUTER_CATALOG=false` to
-  disable). No telemetry.
+  disable). No telemetry unless an admin turns it on — see §9 and
+  [telemetry.md](telemetry.md).
 - **Single-instance enforcement.** The run event bus is in-process
   (`fly.toml`'s "Do NOT scale horizontally" comment; `docs/architecture.md`),
   so tret takes a session-level `pg_try_advisory_lock` on Postgres at boot and
@@ -290,6 +291,10 @@ a grep.
 | `local` | a self-hosted model server at `TRET_LOCAL_BASE_URL` | on |
 | `research` | `web_search` and `fetch_url` | **off** |
 | `search` | the web search backend itself (`TRET_SEARXNG_BASE_URL` or Brave) | follows research |
+| `telemetry` | anonymous, aggregate usage reports to `telemetry.kithailab.com` | **off** (opt-in; see [telemetry.md](telemetry.md)) |
+
+`TRET_TELEMETRY=off` or `DO_NOT_TRACK=1` locks telemetry off regardless of
+this class or anything else — see telemetry.md's resolution order.
 
 Every switch narrows and none widens. `TRET_EGRESS` is the master; each
 `TRET_EGRESS_<CLASS>` narrows it further; `POST /api/settings/egress` (admin)

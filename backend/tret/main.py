@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from starlette.datastructures import MutableHeaders
 
+from tret import __version__
 from tret.api import (
     analytics,
     auth,
@@ -26,6 +27,7 @@ from tret.api import (
     routing,
     runs,
     settings as settings_api,
+    telemetry as telemetry_api,
     workspaces as workspaces_api,
 )
 from tret.config import enforce_production_safety, get_settings
@@ -35,6 +37,7 @@ from tret.engine.extensions import get_extension_registry, load_extensions
 from tret.net import log_egress_at_boot
 from tret.providers.catalog import get_catalog
 from tret.services import lifecycle
+from tret.services.telemetry import sender_loop as telemetry_sender_loop
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tret")
@@ -251,6 +254,11 @@ async def lifespan(app: FastAPI):
     # first (the router also calls `warm_once()` as a backstop, for the run that
     # arrives before this task finishes).
     warm_task = asyncio.create_task(get_catalog().warm())
+    # Opt-in anonymous telemetry (tret/services/telemetry.py) — same shape as
+    # warm_task above: created here, cancelled on shutdown below. Off by
+    # default; the task itself resolves whether it is actually allowed to
+    # send anything on each tick (contract §1) and never raises.
+    telemetry_task = asyncio.create_task(telemetry_sender_loop())
     # Before "ready", so anything switched off is visible above the line an
     # operator reads as success. A deployment with egress off looks exactly like
     # a deployment with a bad API key; this is the difference.
@@ -267,6 +275,9 @@ async def lifespan(app: FastAPI):
         warm_task.cancel()
         with suppress(asyncio.CancelledError):
             await warm_task
+        telemetry_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await telemetry_task
         # Drain whatever runs are still executing before this process exits
         # — see _drain_in_flight_runs's docstring for the deploy bug this
         # closes. Skipped under the same "lost" condition the startup sweep
@@ -322,7 +333,7 @@ def create_app() -> FastAPI:
     # not run on the shipped development secrets. See docs/hardening.md.
     enforce_production_safety(log=log)
 
-    app = FastAPI(title="tret", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="tret", version=__version__, lifespan=lifespan)
     app.add_middleware(SecurityHeadersMiddleware)
     app.include_router(auth.router)
     # Teams, members and invites (api/workspaces.py) — always mounted, like
@@ -374,6 +385,10 @@ def create_app() -> FastAPI:
     # `configured: false` (GET /api/connections/providers) until an operator
     # sets its client id/secret or an extension supplies one.
     app.include_router(connections_api.router)
+    # Opt-in anonymous telemetry admin card (tret/api/telemetry.py) — always
+    # mounted, like settings_api above: it reports the effective state
+    # honestly (locked off by default) rather than the route disappearing.
+    app.include_router(telemetry_api.router)
     # After every core router: an extension's own router (if it adds one) is
     # additive to the open-source API surface, never a replacement for it.
     # No-op with TRET_EXTENSIONS unset — load_extensions still runs, and sets

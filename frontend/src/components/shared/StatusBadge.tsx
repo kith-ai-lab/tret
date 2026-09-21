@@ -39,6 +39,10 @@ const STATUS_COLOR: Record<string, string> = {
   // state, not a neutral one.
   active: 'badge-green',
   error: 'badge-red',
+  // telemetry send log (Settings → Anonymous usage statistics): 'failed'
+  // shares the red above; 'sent' is its own key since nothing else uses that
+  // exact word.
+  sent: 'badge-green',
 }
 
 export function StatusBadge({ status }: { status: string }) {

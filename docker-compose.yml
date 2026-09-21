@@ -87,6 +87,19 @@ services:
       # An app-level allowlist is a deterrent; a proxy the workload cannot
       # bypass is a boundary. Point this at yours for anything internet-facing.
       TRET_EGRESS_PROXY: ${TRET_EGRESS_PROXY:-}
+      # Opt-in anonymous telemetry (docs/telemetry.md). admin (default) leaves
+      # it to the instance admin, off-by-default until they opt in from the
+      # UI/CLI; off locks it off; on is for a headless install. DO_NOT_TRACK
+      # (read from the process environment, not a TRET_ var — see
+      # docs/telemetry.md) beats whatever this says.
+      TRET_TELEMETRY: ${TRET_TELEMETRY:-admin}
+      TRET_TELEMETRY_URL: ${TRET_TELEMETRY_URL:-https://telemetry.kithailab.com/v1/report}
+      # The ambient convention every tool checks the same way — no TRET_
+      # prefix, read straight from the process environment (docs/telemetry.md)
+      # — beats whatever TRET_TELEMETRY says. Not wired, it never reaches the
+      # container at all, since compose interpolates .env into this block and
+      # nothing else copies it in.
+      DO_NOT_TRACK: ${DO_NOT_TRACK:-}
       # Web search backend: "" (none) | brave | searxng. searxng keeps the query
       # itself inside your network.
       TRET_SEARCH_PROVIDER: ${TRET_SEARCH_PROVIDER:-}

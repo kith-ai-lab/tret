@@ -55,6 +55,15 @@ SERVED_DOCS: dict[str, dict[str, str]] = {
             "good for."
         ),
     },
+    "telemetry": {
+        "filename": "telemetry.md",
+        "title": "Telemetry",
+        "repo_path": "docs/telemetry.md",
+        "summary": (
+            "The opt-in, off-by-default anonymous usage report: exactly what it "
+            "sends, how to turn it on or off, and how to verify both for yourself."
+        ),
+    },
 }
 
 _MISSING_NOTE = (

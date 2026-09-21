@@ -41,7 +41,9 @@ def client(monkeypatch):
 
 def test_status_reports_every_class(client):
     body = client.get("/api/settings/egress").json()
-    assert set(body["classes"]) == {"provider", "catalog", "local", "research", "search"}
+    assert set(body["classes"]) == {
+        "provider", "catalog", "local", "research", "search", "telemetry",
+    }
     assert body["classes"]["research"]["mode"] == "on"
     # Status must report the mode actually ENFORCED, not just what `search`
     # mirrors from `research`. With research on but no search backend

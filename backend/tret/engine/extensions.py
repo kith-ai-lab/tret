@@ -63,6 +63,20 @@ persists — core keeps only the current document plus its own
 contract as a post-run hook: every hook runs, a raising hook is logged and
 never propagates, and no session is opened when nothing is registered.
 
+An eighth seam, `add_telemetry_override` / `telemetry_forced_off`, is for the
+opt-in anonymous telemetry reporter (`tret/services/telemetry.py`) and is
+deliberately the ONE seam in this module that is NOT fail-open. An override is
+a synchronous `() -> str | None`: `None` means no opinion, `"off"` forces
+telemetry off. `telemetry_forced_off()` asks every registered override in
+turn and stops at the first that says `"off"` — and an override that *raises*
+is also treated as `"off"` (logged, never propagated). Fail-*private* here,
+the opposite of every other seam: what is being decided is whether data may
+leave the deployment at all, and a broken extension must never be the reason
+a report goes out that should have been suppressed. tret_cloud registers
+`ext.add_telemetry_override(lambda: "off")`, guarded by
+`hasattr(ext, "add_telemetry_override")` so an older core without this seam
+does not break it — a hosted deployment never reports, unconditionally.
+
 Before `load_extensions` has ever run, `get_extension_registry()` returns a
 default `ExtensionAPI` that allows everything and does nothing — every seam
 in it is empty and inert. That is no longer the deployed state of the pre-run
@@ -160,6 +174,12 @@ FactorLayerProvider = Callable[[AsyncSession, uuid.UUID], Awaitable["dict | None
 WorkspaceSettingsHook = Callable[
     [AsyncSession, uuid.UUID, str, dict | None, dict | None, uuid.UUID | None], Awaitable[None]
 ]
+# () -> "off" | None. Sync, like the OAuth client provider above: a pure
+# in-process opinion, not a database question. "off" forces telemetry off;
+# None means the override has no opinion and the next one (or the ordinary
+# state resolution in tret/services/telemetry.py) decides. See
+# `telemetry_forced_off` for the fail-*private* contract this one seam has.
+TelemetryOverride = Callable[[], "str | None"]
 
 
 class ExtensionAPI:
@@ -178,6 +198,7 @@ class ExtensionAPI:
         self._oauth_client_providers: list[OAuthClientProvider] = []
         self._factor_layer_providers: list[FactorLayerProvider] = []
         self._workspace_settings_hooks: list[WorkspaceSettingsHook] = []
+        self._telemetry_overrides: list[TelemetryOverride] = []
 
     def include_router(self, router: APIRouter) -> None:
         if self._app is not None:
@@ -203,6 +224,9 @@ class ExtensionAPI:
 
     def add_workspace_settings_hook(self, fn: WorkspaceSettingsHook) -> None:
         self._workspace_settings_hooks.append(fn)
+
+    def add_telemetry_override(self, fn: TelemetryOverride) -> None:
+        self._telemetry_overrides.append(fn)
 
     async def run_startup_tasks(self) -> None:
         """Await every registered startup task, in registration order."""
@@ -428,6 +452,27 @@ class ExtensionAPI:
                     await ext_db.rollback()
                     log.exception("workspace settings hook %r raised", hook)
 
+    def check_telemetry_override(self) -> bool:
+        """True if any registered override forces telemetry off.
+
+        Fail-*private*, not fail-open — the one deliberate exception in this
+        class; see `TelemetryOverride`'s own comment and the module docstring's
+        eighth-seam paragraph for why. Synchronous and side-effect-free, so
+        (unlike every other seam here) there is no session to isolate: an
+        override is a pure in-process opinion, called on every state
+        resolution (tret/services/telemetry.py), not something that touches
+        the database.
+        """
+        for fn in self._telemetry_overrides:
+            try:
+                result = fn()
+            except Exception:
+                log.exception("telemetry override %r raised; treating as forced off", fn)
+                return True
+            if result == "off":
+                return True
+        return False
+
 
 _registry: ExtensionAPI | None = None
 
@@ -472,3 +517,14 @@ def get_extension_registry() -> ExtensionAPI:
     if _registry is None:
         _registry = ExtensionAPI(None)
     return _registry
+
+
+def telemetry_forced_off() -> bool:
+    """True when a registered `add_telemetry_override` says telemetry must be
+    off — the `"extension"` branch of `tret/services/telemetry.py`'s state
+    resolution (contract §1, step 2). A thin wrapper over
+    `get_extension_registry().check_telemetry_override()`, mirroring how the
+    other seams are reached through the module-level registry rather than by
+    constructing an `ExtensionAPI` directly.
+    """
+    return get_extension_registry().check_telemetry_override()

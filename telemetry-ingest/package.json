@@ -1,0 +1,22 @@
+{
+  "name": "tret-telemetry-ingest",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Cloudflare Worker: opt-in anonymous telemetry ingest for self-hosted tret instances (D1-backed, public aggregates).",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "migrate:local": "wrangler d1 migrations apply tret-telemetry --local",
+    "migrate:remote": "wrangler d1 migrations apply tret-telemetry --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.6.0",
+    "vitest": "^2.1.9",
+    "wrangler": "^4.0.0"
+  }
+}

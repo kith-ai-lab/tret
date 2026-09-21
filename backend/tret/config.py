@@ -1,4 +1,5 @@
-"""Application configuration. Env-only (see .env.example); no telemetry, no phone-home.
+"""Application configuration. Env-only (see .env.example); no telemetry unless an
+admin opts in (docs/telemetry.md).
 
 `environment=production` (TRET_ENVIRONMENT) turns the shipped development
 defaults into hard startup errors — see `production_config_problems` and
@@ -452,7 +453,8 @@ class Settings(BaseSettings):
     # the Find tab / update badges degrade to a friendly empty state) and
     # tret makes zero marketplace network calls — no installed-pack slug,
     # search query, or version check ever leaves the deployment. README's
-    # "No telemetry, ever" would be false for a self-hoster if this defaulted
+    # "No telemetry unless an admin turns it on" would be false for a
+    # self-hoster if this defaulted
     # to Kith's own registry, so it does not: an operator who wants Find/
     # Install sets `TRET_PACK_REGISTRY_URL` themselves, to Kith's registry
     # (https://cloud.tret.kithailab.com/api/marketplace) or a private mirror.
@@ -495,6 +497,33 @@ class Settings(BaseSettings):
     # Force every outbound request through one proxy. The app-level allowlist is
     # a deterrent; a proxy that the workload cannot bypass is a boundary.
     egress_proxy: str = ""  # e.g. http://egress-proxy.internal:3128
+
+    # ── opt-in anonymous telemetry (tret/services/telemetry.py) ───────────────
+    # admin (DEFAULT) | off | on. Off by default in effect: `admin` leaves the
+    # decision to the instance admin (a DB toggle, itself default false), so a
+    # fresh install makes zero telemetry requests and holds no instance id
+    # until someone opts in from the UI or CLI. `off` locks it off — the DB
+    # toggle is ignored, the UI control is disabled. `on` is for a headless
+    # install: locked on, no admin has to visit a UI to opt in. Whatever this
+    # says, `DO_NOT_TRACK` (read straight from `os.environ`, not a field here —
+    # it is the ambient convention every tool checks the same way, not a knob
+    # tret owns) and a registered `add_telemetry_override` (tret-cloud forces
+    # this off unconditionally) both beat it. See docs/telemetry.md.
+    telemetry: str = "admin"
+    # Where a report is POSTed (tret.net's `telemetry` egress class). Blank
+    # locks telemetry off — there is nowhere to send it — same as the class
+    # itself being off. Repointing this at a fork's own collector also widens
+    # that egress class's host allowlist to include the new host, alongside
+    # the literal `telemetry.kithailab.com` (tret/net/policy.py).
+    telemetry_url: str = "https://telemetry.kithailab.com/v1/report"
+
+    @field_validator("telemetry", mode="before")
+    @classmethod
+    def _known_telemetry_mode(cls, value):
+        candidate = str(value if value is not None else "").strip().lower()
+        if candidate not in ("admin", "off", "on"):
+            raise ValueError(f"telemetry must be one of admin|off|on, got {value!r}")
+        return candidate
 
     # Per-run budgets for the connected-source tools (engine/tools.py:
     # list_connected_sources / search_connected_files / read_connected_file),

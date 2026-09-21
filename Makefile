@@ -1,4 +1,4 @@
-.PHONY: help demo backend frontend test lint
+.PHONY: help demo backend frontend test lint telemetry-preview
 
 .DEFAULT_GOAL := help
 
@@ -19,3 +19,6 @@ test: ## Run the backend test suite
 
 lint: ## Lint the backend with ruff
 	cd backend && .venv/bin/ruff check tret
+
+telemetry-preview: ## Preview the next anonymous telemetry payload (never sends it)
+	cd backend && .venv/bin/tret telemetry preview

@@ -3253,3 +3253,70 @@ export const lessonsApi = {
   retireLesson: (packId: string, lessonId: string) =>
     request<PackLesson>(`/packs/${packId}/lessons/${lessonId}/retire`, { method: 'POST' }),
 }
+
+// ── Telemetry (Settings → Anonymous usage statistics) ───────────────────────
+// Instance-level, not workspace-level: gated on `User.global_role === 'admin'`,
+// the same instance-admin check InstanceUsersSection uses, not the per-workspace
+// `role` the budget/emissions settings above gate on. Off by default; the admin
+// can see the exact next payload and the last 10 sent before ever turning it on.
+// See docs/telemetry.md for what the payload does and does not contain. Kept as
+// its own exported object, end-of-file, the same shape budgetApi/lessonsApi
+// above already established for a feature added after `api`'s own growth was
+// called out as reason enough to stop appending to it.
+
+/** Why the toggle is locked, when it is — `null` means the admin/DB setting
+ *  decides. Mirrors the backend's `locked_reason` closed set exactly; an
+ *  unrecognized value (a newer backend) still renders, just with no canned
+ *  sentence — see TelemetrySection's fallback text. */
+export type TelemetryLockedReason =
+  | 'do_not_track'
+  | 'extension'
+  | 'env_off'
+  | 'no_url'
+  | 'egress_off'
+  | 'env_on'
+
+/** One row of the local (never transmitted) send log — up to the last 10,
+ *  newest first. `payload` is the exact JSON body that attempt POSTed (or
+ *  would have, on the shape both GET and the preview share). */
+export interface TelemetryRecentEntry {
+  sent_at: string
+  status: 'sent' | 'failed'
+  http_status: number | null
+  payload: Record<string, unknown>
+}
+
+/** GET/PUT /api/admin/telemetry response (backend: backend/tret/api/telemetry.py, admin-only —
+ *  a non-admin gets a plain 403, which TelemetrySection treats as "this card
+ *  does not exist for this account" rather than an error to surface). */
+export interface TelemetryStatus {
+  enabled: boolean
+  env_mode: string
+  db_enabled: boolean
+  /** True whenever `locked_reason` is not null (including `env_on` — locked
+   *  ON, not just locked off). The toggle is disabled either way. */
+  locked: boolean
+  locked_reason: TelemetryLockedReason | null
+  /** Null until telemetry has been ON at least once. */
+  instance_id: string | null
+  last_sent_at: string | null
+  endpoint: string
+  recent: TelemetryRecentEntry[]
+}
+
+/** GET /api/admin/telemetry/preview. `payload` is the exact next report,
+ *  built the same way a real send builds it — even while off, so an admin can
+ *  read it before ever flipping the switch. `instance_id` inside `payload` is
+ *  the literal string "(minted when enabled)" when none exists yet; no id is
+ *  minted by asking for a preview. */
+export interface TelemetryPreview {
+  payload: Record<string, unknown>
+  would_send: boolean
+}
+
+export const telemetryApi = {
+  getTelemetryStatus: () => request<TelemetryStatus>('/admin/telemetry'),
+  getTelemetryPreview: () => request<TelemetryPreview>('/admin/telemetry/preview'),
+  setTelemetryEnabled: (enabled: boolean) =>
+    request<TelemetryStatus>('/admin/telemetry', { method: 'PUT', body: { enabled } }),
+}

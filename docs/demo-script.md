@@ -82,4 +82,5 @@ Fictional but hand-designed so every demo path hits something interesting:
   cited value against the run's actual dataset retrievals. Un-retrieved
   numbers are validation errors the model must fix.
 - *"Is my data sent anywhere?"* — Only to the LLM providers you configure.
-  No telemetry, env-only config, self-hosted.
+  Telemetry is opt-in and off by default (see docs/telemetry.md if asked),
+  env-only config, self-hosted.
