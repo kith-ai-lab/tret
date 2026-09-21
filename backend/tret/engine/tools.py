@@ -38,11 +38,16 @@ Trust-doctrine notes:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
+import random
 import re
 import uuid
+import weakref
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
@@ -65,10 +70,13 @@ from tret.net.fetch import (
 )
 from tret.net.search import SearchUnavailable, get_search_provider
 from tret.providers.base import ToolSpec
+from tret.router_llm.objectives import THRIFT_OBJECTIVES
 from tret.services import connections as connections_service
 from tret.services import lessons as lessons_service
 from tret.services import retrieval as retrieval_service
 from tret.services.emissions import energy_wh_field
+
+log = logging.getLogger("tret.tools")
 
 
 @dataclass
@@ -119,6 +127,19 @@ class RunContext:
     # it off the run's own task_input and `run_harness_task` refuses to go past
     # MAX_DELEGATION_DEPTH.
     delegation_depth: int = 0
+    # How many child runs `_prepare_child` has started for THIS run, across
+    # every delegation tool, over this run's whole lifetime — the width cap
+    # (`max_children_per_run`) is lifetime, not "in flight", so a run that
+    # delegates one at a time and a run that fans out in one batch are bounded
+    # the same way. Incremented by `_prepare_child` on every success; never
+    # decremented, so a child that later fails still counts against the cap.
+    children_started: int = 0
+    # The routing objective this run's model was chosen under (`balanced`,
+    # `quality`, ...; see router_llm/objectives.py). Set by the engine once
+    # routing has resolved it (harness.py); None for a RunContext a test
+    # builds directly. Carried here so a future delegation tool can propagate
+    # the parent's objective to a child that does not specify its own.
+    objective: str | None = None
     # This run's own effective cost cap (harness cap narrowed by `_cost_cap_usd`
     # in task_input, if any — see harness.py where this is set), used by
     # `run_harness_task` to carve a child's budget out of what is left of it.
@@ -1689,6 +1710,20 @@ class PreparedChild:
     child_id: uuid.UUID
     harness_name: str
     task_type: str
+    # The CHILD's own delegation depth (parent's `ctx.delegation_depth + 1`),
+    # carried alongside the row so `_await_child` can size that child's
+    # concurrency slot (see `_child_slot`) without a DB round trip.
+    depth: int = 1
+    # Stamped onto `Run.delegation_kind` — see that column's own comment.
+    # "task" is a single `run_harness_task` delegation; a future batch/subagent
+    # caller passes something else.
+    kind: str = "task"
+    batch_id: uuid.UUID | None = None
+    # This child's position within a parallel batch (None outside one), and a
+    # short caller-supplied name for the UI — both purely descriptive, echoed
+    # back on the delegation events and never read by any tool.
+    index: int | None = None
+    label: str | None = None
 
 
 async def _prepare_child(
@@ -1701,6 +1736,9 @@ async def _prepare_child(
     batch_id: uuid.UUID | None = None,
     budget_share: int = 1,
     commit: bool = True,
+    index: int | None = None,
+    label: str | None = None,
+    reserve: int = 1,
 ) -> PreparedChild:
     """Resolve a delegation target and insert the child `Run` row.
 
@@ -1715,7 +1753,12 @@ async def _prepare_child(
     `budget_share` is this child's share of what's left of the parent's cost
     cap (1 for a single delegation; a future parallel-batch caller passes the
     fan-out width so N siblings split one budget instead of each claiming all
-    of it) — see the carve-up below.
+    of it) — see the carve-up below. `index` / `label` are purely descriptive
+    (see `PreparedChild`). `reserve` is how many children the caller intends to
+    start in total right now (1 for a single delegation; a batch caller checks
+    the whole width up front by passing the fan-out count) — it widens only the
+    lifetime-cap CHECK below, never the increment, which is always by 1 per
+    child actually prepared.
     """
     # Lazy imports avoid a circular dependency with the engine module.
     from tret.db.models import Harness, Run
@@ -1723,6 +1766,18 @@ async def _prepare_child(
 
     if task_type in ("chat", "freeform"):
         raise ToolError("run_harness_task is for specialist pack tasks, not chat/freeform")
+
+    # Lifetime width cap, checked before any DB work: a run that keeps
+    # re-delegating (one at a time, or in one batch — `reserve` covers both)
+    # stops here. <= 0 is unlimited, same convention as the other delegation
+    # settings (config.py).
+    max_children = get_settings().max_children_per_run
+    if max_children > 0 and ctx.children_started + reserve > max_children:
+        raise ToolError(
+            f"Delegation limit reached: this run has already started {ctx.children_started} of "
+            f"its {max_children} allowed delegated runs. Finish the work here with the tools you "
+            "have, or report what is missing."
+        )
 
     if ctx.delegation_depth >= MAX_DELEGATION_DEPTH:
         raise ToolError(
@@ -1862,7 +1917,55 @@ async def _prepare_child(
     else:
         await ctx.db.flush()
 
-    return PreparedChild(child_id=child.id, harness_name=harness.name, task_type=task_type)
+    # Counted per child actually prepared, never by `reserve` — `reserve` only
+    # widened the check above, so a batch caller that reserves N up front and
+    # then prepares them one at a time still ends up with the right total.
+    ctx.children_started += 1
+
+    return PreparedChild(
+        child_id=child.id,
+        harness_name=harness.name,
+        task_type=task_type,
+        depth=ctx.delegation_depth + 1,
+        kind=kind,
+        batch_id=batch_id,
+        index=index,
+        label=label[:80] if label else None,
+    )
+
+
+# Process-wide slots bounding how many DELEGATED children may execute at once
+# — one pool of `max_concurrent_child_runs` PER DEPTH LEVEL, not one shared
+# pool. A single shared semaphore can deadlock: depth-1 children could hold
+# every slot while each of them blocks inside its own delegation waiting for a
+# depth-2 slot that can only free up once a depth-1 child finishes and
+# releases its slot — a cycle that never resolves. Per-depth pools cannot wait
+# on themselves this way, because a depth-1 child's slot and a depth-2 child's
+# slot are never the same pool. Runs a person started never take a slot: only
+# `_await_child` (delegated children) acquires one.
+#
+# Keyed by the running event loop as well as by depth: tests (and `tret run`)
+# spin up more than one event loop in a single process, and an
+# `asyncio.Semaphore` that has ever had a waiter is bound to the loop it first
+# waited on — reusing it from a different loop raises. `WeakKeyDictionary` lets
+# a finished loop's pools be collected instead of accumulating for the life of
+# the process.
+_CHILD_SLOTS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[int, asyncio.Semaphore]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _child_slot(depth: int) -> asyncio.Semaphore | None:
+    """The semaphore a delegated child at `depth` must hold while executing,
+    or None when `max_concurrent_child_runs <= 0` (unlimited)."""
+    limit = get_settings().max_concurrent_child_runs
+    if limit <= 0:
+        return None
+    pools = _CHILD_SLOTS.setdefault(asyncio.get_running_loop(), {})
+    slot = pools.get(depth)
+    if slot is None:
+        slot = pools[depth] = asyncio.Semaphore(limit)
+    return slot
 
 
 async def _await_child(ctx: RunContext, prepared: PreparedChild) -> tuple[Run | None, list[Finding]]:
@@ -1875,31 +1978,45 @@ async def _await_child(ctx: RunContext, prepared: PreparedChild) -> tuple[Run | 
     from tret.engine.harness import get_harness_engine
 
     engine = get_harness_engine()
-    # Registered before `execute()` and cleared in `finally` regardless of how
-    # the child finishes, so the window in which the engine knows this run is a
-    # child of `ctx.run_id` covers exactly the child's own lifetime — no wider.
-    # The child's `parent_run_id` column is already set by `_prepare_child`,
-    # but cancellation needs an in-process fast path rather than a DB round
-    # trip per hop, and this in-memory graph is that fast path (see
+    # Registered before the concurrency slot is even requested — not just
+    # before `execute()` — and cleared in `finally` regardless of how the
+    # child finishes, so the window in which the engine knows this run is a
+    # child of `ctx.run_id` covers this call's *whole* lifetime, including any
+    # time spent queued for a slot. That matters for cancellation: the engine
+    # checks `_is_cancelled` at a run's first iteration (`HarnessEngine`
+    # below), so a child still waiting for a slot when its parent is cancelled
+    # must already be registered for that check to ever see it. The child's
+    # `parent_run_id` column is already set by `_prepare_child`, but
+    # cancellation needs an in-process fast path rather than a DB round trip
+    # per hop, and this in-memory graph is that fast path (see
     # `HarnessEngine._is_cancelled` / `.cancel`).
     engine.register_delegation(child_id=prepared.child_id, parent_id=ctx.run_id)
-    await get_event_bus().publish(
-        ctx.run_id,
-        RunEvent(
-            "delegation_started",
-            {
-                "child_run_id": str(prepared.child_id),
-                "harness": prepared.harness_name,
-                "task_type": prepared.task_type,
-            },
-        ),
-    )
+    slot = _child_slot(prepared.depth)
+    slot_held = False
     # Read results through a fresh session — the engine ran in its own.
     from tret.db.engine import get_session_factory
 
     done: Run | None = None
     findings: list = []
     try:
+        if slot is not None:
+            await slot.acquire()
+            slot_held = True
+        await get_event_bus().publish(
+            ctx.run_id,
+            RunEvent(
+                "delegation_started",
+                {
+                    "child_run_id": str(prepared.child_id),
+                    "harness": prepared.harness_name,
+                    "task_type": prepared.task_type,
+                    "kind": prepared.kind,
+                    "batch_id": str(prepared.batch_id) if prepared.batch_id else None,
+                    "index": prepared.index,
+                    "label": prepared.label,
+                },
+            ),
+        )
         await engine.execute(prepared.child_id)
         async with get_session_factory()() as read_db:
             done = await read_db.get(Run, prepared.child_id)
@@ -1913,25 +2030,32 @@ async def _await_child(ctx: RunContext, prepared: PreparedChild) -> tuple[Run | 
                 .all()
             )
     finally:
+        # Slot released before unregistering/publishing so the next queued
+        # sibling at this depth can be scheduled as soon as possible, rather
+        # than waiting on the bookkeeping below.
+        if slot_held:
+            slot.release()
         engine.unregister_delegation(prepared.child_id)
         # Published from the same `finally` as unregistration — not after the
         # result dict below is built — so a `delegation_started` always gets a
         # matching finish, even on a path `engine.execute()` does not normally
         # take (it converts every run failure into a `failed` Run row and
         # returns; this only matters if something outside that raises first,
-        # e.g. opening the read session above). "unknown" is the honest word
-        # when there is no `done` to report a real status from.
-        await get_event_bus().publish(
-            ctx.run_id,
-            RunEvent(
-                "delegation_finished",
-                {
-                    "child_run_id": str(prepared.child_id),
-                    "harness": prepared.harness_name,
-                    "status": done.status if done is not None else "unknown",
-                },
-            ),
-        )
+        # e.g. opening the read session above, or the slot wait itself being
+        # cancelled). "unknown" is the honest word when there is no `done` to
+        # report a real status from.
+        finished_payload = {
+            "child_run_id": str(prepared.child_id),
+            "harness": prepared.harness_name,
+            "status": done.status if done is not None else "unknown",
+            "kind": prepared.kind,
+            "batch_id": str(prepared.batch_id) if prepared.batch_id else None,
+            "index": prepared.index,
+            "label": prepared.label,
+        }
+        if done is not None:
+            finished_payload["cost_usd"] = float(done.cost_usd or 0)
+        await get_event_bus().publish(ctx.run_id, RunEvent("delegation_finished", finished_payload))
     return done, findings
 
 
@@ -2049,6 +2173,334 @@ async def run_harness_task(
     finally:
         await _record_delegated_cost(ctx, prepared.child_id)
     return json.dumps(_summarize_child(prepared, done, findings), default=str)
+
+
+# Stagger between one batch child's start and the next, in seconds, plus up to
+# 0.1s of random jitter — so N first provider requests from one fan-out don't
+# land in the same instant. A module constant so tests can zero it out.
+FANOUT_STAGGER_SECONDS = 0.15
+# Random extra delay per child on top of the stagger, so retries and restarts
+# of a batch do not fall back into lockstep. A constant so tests can zero it.
+FANOUT_JITTER_SECONDS = 0.1
+# How long a timed-out child gets to notice the engine's cooperative cancel
+# before its task is torn down. The worst case for one `delegate_parallel`
+# call is therefore `delegation_timeout_seconds` plus this.
+FANOUT_CANCEL_GRACE_SECONDS = 30.0
+
+
+async def _close_out_abandoned_child(engine, child_id: uuid.UUID) -> None:
+    """Give a child whose task had to be torn down a terminal status.
+
+    `HarnessEngine.execute` turns every ordinary failure into a terminal row,
+    but it cannot see its own task being cancelled, and a child cancelled while
+    still staggered or queued for a slot never reached `execute` at all. Left
+    alone, either shows as queued/running until the next boot's orphan sweep
+    (services/reconcile.py) — while the parent has already told the model it
+    was stopped. Runs on a session of its own, like everything else that reads
+    or writes a child from the concurrent side of a batch.
+    """
+    from tret.db.engine import get_session_factory
+
+    try:
+        async with get_session_factory()() as own_db:
+            child = await own_db.get(Run, child_id)
+            if child is not None and child.status in ("queued", "running"):
+                child.status = "cancelled"
+                child.error = "delegation_timeout: stopped by its parent's parallel delegation time limit"
+                child.finished_at = datetime.now(timezone.utc)
+                await own_db.commit()
+    except Exception:
+        log.exception("delegate_parallel: could not close out abandoned child %s", child_id)
+    # `engine.cancel()` put the id in the engine's cancelled set, which only
+    # `execute()`'s own `finally` clears — and this child's never ran, or never
+    # got that far.
+    forget = getattr(engine, "forget_cancelled", None)
+    if forget is not None:
+        forget(child_id)
+
+
+def _fit_batch_results(results: list[dict], budget: int) -> None:
+    """Shrink `results` in place until the whole batch fits `budget` bytes.
+
+    `execute_tool` caps every tool result with a blind byte cut
+    (`_cap_result_text`). On a batch that would produce invalid JSON and
+    silently drop whichever children come last, and the model would go on to
+    report on a batch it only saw the front of. So the batch is made to fit
+    before it gets there: the largest finding payload still present is replaced
+    by a stub, repeatedly, until the document fits. Findings are stored on
+    their child runs regardless, so nothing is lost — only not repeated here.
+    """
+
+    def size() -> int:
+        return len(json.dumps(results, default=str).encode())
+
+    while size() > budget:
+        largest: tuple[int, dict] | None = None
+        for result in results:
+            for finding in result.get("findings") or []:
+                payload = finding.get("payload")
+                if isinstance(payload, dict) and payload.get("truncated") is True:
+                    continue
+                weight = len(json.dumps(payload, default=str))
+                if largest is None or weight > largest[0]:
+                    largest = (weight, finding)
+        if largest is None:
+            return  # nothing left to trim; `_cap_result_text` remains the backstop
+        finding = largest[1]
+        finding["payload"] = {"truncated": True, "finding_id": finding.get("finding_id")}
+        finding["note"] = "Full finding stored on the child run; list it with list_prior_findings."
+
+
+@builtin(
+    "delegate_parallel",
+    "Run several INDEPENDENT specialist tasks at the same time and get all their results back "
+    "together — e.g. the same assessment for several sites, or different task types over the same "
+    "inputs. Use this only when no task needs another's result; for a single task, or a sequence "
+    "where one step depends on the last, use run_harness_task instead. Every task pays its own full "
+    "context and model cost, and all of them share what is left of this run's budget, so do not "
+    "split work that one task could do on its own. Findings recorded by any of them are DRAFTS "
+    "awaiting human approval.",
+    {
+        "type": "object",
+        "required": ["tasks"],
+        "properties": {
+            "tasks": {
+                "type": "array",
+                "minItems": 2,
+                "items": {
+                    "type": "object",
+                    "required": ["task_type", "task_input"],
+                    "properties": {
+                        "task_type": {
+                            "type": "string",
+                            "description": "Task type slug from the capability catalog",
+                        },
+                        "task_input": {
+                            "type": "object",
+                            "description": "Inputs matching the task's input fields",
+                        },
+                        "harness_name": {
+                            "type": "string",
+                            "description": "Optional specific harness to use",
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": "Short name for this piece of work, shown to the user",
+                        },
+                    },
+                },
+            },
+        },
+    },
+)
+async def delegate_parallel(ctx: RunContext, tasks: list) -> str:
+    if not isinstance(tasks, list) or not all(
+        isinstance(t, dict) and isinstance(t.get("task_type"), str) and isinstance(t.get("task_input"), dict)
+        for t in tasks
+    ):
+        raise ToolError("tasks must be a list of objects, each with a string task_type and object task_input")
+    if any(not isinstance(t.get("label"), (str, type(None))) for t in tasks):
+        raise ToolError("label, when given, must be a string")
+    if any(not isinstance(t.get("harness_name"), (str, type(None))) for t in tasks):
+        raise ToolError("harness_name, when given, must be a string")
+    if len(tasks) < 2:
+        raise ToolError("delegate_parallel needs at least 2 tasks — use run_harness_task for a single task")
+
+    # Width limit: `max_fanout` (<= 0 is unlimited), narrowed further for the
+    # thrift objectives. Every child re-pays this run's whole context preamble
+    # from scratch, so a wide fan-out is exactly the kind of spend
+    # `token_conservation`/`eco` exist to avoid — those objectives may still
+    # delegate, just not wide, so they are capped at 2 rather than refused.
+    limit = get_settings().max_fanout
+    if ctx.objective in THRIFT_OBJECTIVES:
+        limit = min(limit, 2) if limit > 0 else 2
+    if limit > 0 and len(tasks) > limit:
+        raise ToolError(
+            f"delegate_parallel allows at most {limit} tasks at a time"
+            f"{f' under the {ctx.objective} objective' if ctx.objective in THRIFT_OBJECTIVES else ''} "
+            f"— got {len(tasks)}. Run the rest in a second call."
+        )
+
+    batch_id = uuid.uuid4()
+    children_started_before = ctx.children_started
+    prepared: list[PreparedChild] = []
+    try:
+        for i, item in enumerate(tasks):
+            try:
+                child = await _prepare_child(
+                    ctx,
+                    item["task_type"],
+                    item["task_input"],
+                    item.get("harness_name"),
+                    commit=False,
+                    kind="task",
+                    batch_id=batch_id,
+                    budget_share=len(tasks),
+                    index=i,
+                    label=item.get("label"),
+                    reserve=len(tasks) - i,
+                )
+            except ToolError as e:
+                raise ToolError(
+                    f"tasks[{i}] ({item['task_type']}): {e} — no task in this batch was started."
+                ) from e
+            prepared.append(child)
+        await ctx.db.commit()
+    except BaseException:
+        # Nothing was committed (only flushed), and the engine rolls `ctx.db`
+        # back right after this tool raises (harness.py) — so no child row
+        # survives. `ctx.children_started`, though, is in-memory state this
+        # loop already bumped for the prepares that succeeded before the
+        # failing one, and a rollback does not touch it — restore it by hand.
+        # Any exception, not just ToolError: a malformed argument that trips a
+        # TypeError, or the commit itself failing, must not let a model burn
+        # through the run's lifetime delegation allowance without ever having
+        # started a child.
+        ctx.children_started = children_started_before
+        raise
+
+    async def _run_one(item: PreparedChild) -> tuple["Run | None", list]:
+        # Stagered start, not a shared rate limiter: the point is only to
+        # avoid N simultaneous requests hitting the provider at once.
+        await asyncio.sleep(
+            item.index * FANOUT_STAGGER_SECONDS + random.uniform(0, FANOUT_JITTER_SECONDS)
+        )
+        return await _await_child(ctx, item)
+
+    from tret.engine.harness import get_harness_engine
+
+    def _record_outcome(t: asyncio.Task, p: PreparedChild) -> None:
+        if t.cancelled():
+            outcomes[p.child_id] = RuntimeError("cancelled at timeout")
+            return
+        exc = t.exception()
+        outcomes[p.child_id] = exc if exc is not None else t.result()
+
+    child_tasks = {asyncio.create_task(_run_one(p)): p for p in prepared}
+    outcomes: dict[uuid.UUID, tuple["Run | None", list] | BaseException] = {}
+    timed_out: set[uuid.UUID] = set()
+    try:
+        timeout = get_settings().delegation_timeout_seconds
+        done, pending = await asyncio.wait(
+            child_tasks.keys(), timeout=timeout if timeout > 0 else None
+        )
+        for t in done:
+            _record_outcome(t, child_tasks[t])
+        if pending:
+            # Cooperative cancel first — the engine's own cancel leaves the
+            # child run in a proper terminal state instead of tearing its
+            # loop down mid-iteration. Hard task-cancellation below is the
+            # last resort, for whatever refuses to notice within 30s.
+            engine = get_harness_engine()
+            for t in pending:
+                p = child_tasks[t]
+                timed_out.add(p.child_id)
+                engine.cancel(p.child_id)
+            done2, pending2 = await asyncio.wait(pending, timeout=FANOUT_CANCEL_GRACE_SECONDS)
+            for t in done2:
+                _record_outcome(t, child_tasks[t])
+            for t in pending2:
+                p = child_tasks[t]
+                t.cancel()
+                try:
+                    await t
+                except BaseException:
+                    pass
+                outcomes[p.child_id] = RuntimeError("cancelled at timeout")
+                await _close_out_abandoned_child(engine, p.child_id)
+    except asyncio.CancelledError:
+        for t in child_tasks:
+            t.cancel()
+        for t in child_tasks:
+            try:
+                await t
+            except BaseException:
+                pass
+        raise
+    finally:
+        # Sequential again: every prepared child gets its cost recorded onto
+        # the parent, each in its own try/except so one failure here cannot
+        # skip the others' accounting.
+        for p in prepared:
+            try:
+                await _record_delegated_cost(ctx, p.child_id)
+            except Exception:
+                log.exception("delegate_parallel: failed to record cost for child %s", p.child_id)
+
+    # A wide batch's naive JSON dump could dwarf the ordinary per-tool cap, so
+    # findings are pre-trimmed here rather than left to `_cap_result_text`'s
+    # blind byte cut, which would silently drop whichever child sorts last.
+    per_child_budget = max(MAX_RESULT_BYTES // len(tasks), 500)
+
+    results = []
+    any_findings = False
+    completed = 0
+    failed = 0
+    for p in prepared:
+        outcome = outcomes.get(p.child_id)
+        if outcome is None or isinstance(outcome, BaseException):
+            failed += 1
+            results.append(
+                {
+                    "index": p.index,
+                    "label": p.label,
+                    "task_type": p.task_type,
+                    "child_run_id": str(p.child_id),
+                    "status": "error",
+                    "error": str(outcome) if outcome else "result could not be read back",
+                    "findings": [],
+                }
+            )
+            continue
+        done_run, findings = outcome
+        if done_run is None:
+            failed += 1
+            results.append(
+                {
+                    "index": p.index,
+                    "label": p.label,
+                    "task_type": p.task_type,
+                    "child_run_id": str(p.child_id),
+                    "status": "error",
+                    "error": "result could not be read back",
+                    "findings": [],
+                }
+            )
+            continue
+        summary = _summarize_child(p, done_run, findings)
+        summary["index"] = p.index
+        summary["label"] = p.label
+        summary["task_type"] = p.task_type
+        for f in summary["findings"]:
+            if len(json.dumps(f["payload"], default=str)) > per_child_budget:
+                f["payload"] = {"truncated": True, "finding_id": f["finding_id"]}
+                f["note"] = (
+                    "Full finding stored on the child run; list it with list_prior_findings."
+                )
+        if summary["findings"]:
+            any_findings = True
+        if p.child_id in timed_out:
+            summary["timed_out"] = True
+            summary["note"] = (
+                f"{summary.get('note', '')} Stopped at the {timeout}s time limit; "
+                "whatever it had recorded by then is included above.".strip()
+            )
+        if done_run.status == "completed":
+            completed += 1
+        else:
+            failed += 1
+        results.append(summary)
+
+    _fit_batch_results(results, MAX_RESULT_BYTES - 1024)
+    note = f"{completed} of {len(tasks)} tasks completed"
+    if failed:
+        note += f"; {failed} failed"
+    if any_findings:
+        note += ". Findings are DRAFTS awaiting human approval — say so when you report them."
+    return json.dumps(
+        {"batch_id": str(batch_id), "results": results, "note": note},
+        default=str,
+    )
 
 
 @builtin(

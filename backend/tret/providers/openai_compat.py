@@ -19,6 +19,8 @@ import httpx
 from tret.net import CLASS_PROVIDER, EgressDenied, open_client
 
 from tret.providers.base import (
+    RATE_LIMIT_MAX_RETRIES,
+    RATE_LIMIT_STATUS,
     RETRY_DELAY_SECONDS,
     JsonCompletion,
     Msg,
@@ -35,6 +37,7 @@ from tret.providers.base import (
     looks_like_html,
     mark_cache_breakpoint,
     normalize_call_slug,
+    rate_limit_delay,
     summarize_html_error,
 )
 
@@ -44,14 +47,17 @@ class _StreamFailure(Exception):
     whether a second attempt is worth making — see `OpenAICompatProvider.stream`.
 
     Internal to this module: never escapes `stream()`, which always converts
-    it to a `ProviderError` (retried once first, when `retryable` says so and
-    nothing has been yielded to the caller yet).
+    it to a `ProviderError` (retried, per the 5xx and 429 policies in
+    `providers.base`, when nothing has been yielded to the caller yet).
     """
 
-    def __init__(self, message: str, status: int | None, *, retryable: bool):
+    def __init__(
+        self, message: str, status: int | None, *, retryable: bool, retry_after: str | None = None
+    ):
         self.message = message
         self.status = status
         self.retryable = retryable
+        self.retry_after = retry_after
         super().__init__(message)
 
 
@@ -385,7 +391,15 @@ class OpenAICompatProvider(Provider):
         # already reached the caller, and a partial stream is not something a
         # second attempt can safely replace — the caller may already have
         # acted on what it received.
-        for attempt in range(2):
+        #
+        # 429 gets its own counter, independent of the 5xx one above (see
+        # `providers.base`'s rate-limit-retry docstring) — a request that
+        # already used its one 5xx retry can still get its 429 retries, and
+        # vice versa. The two counters together put a hard ceiling of
+        # 1 + 1 + RATE_LIMIT_MAX_RETRIES attempts on this loop.
+        rate_limit_attempts = 0
+        retried_5xx = False
+        while True:
             yielded_any = False
             try:
                 async for event in self._stream_attempt(body, model=model):
@@ -393,8 +407,17 @@ class OpenAICompatProvider(Provider):
                     yield event
                 return
             except _StreamFailure as exc:
-                if exc.retryable and not yielded_any and attempt == 0:
+                if (
+                    not yielded_any
+                    and exc.status == RATE_LIMIT_STATUS
+                    and rate_limit_attempts < RATE_LIMIT_MAX_RETRIES
+                ):
+                    await asyncio.sleep(rate_limit_delay(rate_limit_attempts, exc.retry_after))
+                    rate_limit_attempts += 1
+                    continue
+                if exc.retryable and not yielded_any and not retried_5xx:
                     await asyncio.sleep(RETRY_DELAY_SECONDS)
+                    retried_5xx = True
                     continue
                 raise ProviderError(self.name, exc.message, exc.status) from exc
 
@@ -438,6 +461,7 @@ class OpenAICompatProvider(Provider):
                             message,
                             resp.status_code,
                             retryable=is_retryable_status(resp.status_code, html_body=html),
+                            retry_after=resp.headers.get("retry-after"),
                         )
                     async for line in resp.aiter_lines():
                         if not line.startswith("data:"):
@@ -558,11 +582,14 @@ class OpenAICompatProvider(Provider):
         provider_body = self._provider_body(True)
         if provider_body:
             body["provider"] = provider_body
-        # Same retry-once policy as `stream()` (see `providers.base`'s
-        # retry-constants docstring): a non-streaming call has no partial
-        # output to protect, so the only question is whether the failure
-        # itself is worth a second try.
-        for attempt in range(2):
+        # Same retry policy as `stream()` (see `providers.base`'s retry
+        # constants): a non-streaming call has no partial output to protect,
+        # so the only question is whether the failure itself is worth another
+        # try — one 5xx retry, plus up to `RATE_LIMIT_MAX_RETRIES` independent
+        # 429 retries.
+        rate_limit_attempts = 0
+        retried_5xx = False
+        while True:
             async with open_client(self.egress_class, timeout=timeout) as client:
                 try:
                     resp = await client.post(
@@ -574,8 +601,18 @@ class OpenAICompatProvider(Provider):
                 raw = resp.text
                 html = looks_like_html(raw, resp.headers.get("content-type"))
                 message = summarize_html_error(resp.status_code, raw) if html else raw[:2000]
-                if is_retryable_status(resp.status_code, html_body=html) and attempt == 0:
+                if (
+                    resp.status_code == RATE_LIMIT_STATUS
+                    and rate_limit_attempts < RATE_LIMIT_MAX_RETRIES
+                ):
+                    await asyncio.sleep(
+                        rate_limit_delay(rate_limit_attempts, resp.headers.get("retry-after"))
+                    )
+                    rate_limit_attempts += 1
+                    continue
+                if is_retryable_status(resp.status_code, html_body=html) and not retried_5xx:
                     await asyncio.sleep(RETRY_DELAY_SECONDS)
+                    retried_5xx = True
                     continue
                 raise ProviderError(self.name, message, resp.status_code)
             break

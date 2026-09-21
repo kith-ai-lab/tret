@@ -13,6 +13,7 @@ test_run_harness_task_selection.py rather than inventing a new DB pattern.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from decimal import Decimal
 from types import SimpleNamespace
@@ -20,8 +21,10 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 
+from tret.config import get_settings
 from tret.db.models import Run
 from tret.engine.compaction import ELIDABLE_TOOLS
+from tret.engine.events import RunEvent
 from tret.engine.harness import _effective_max_cost, _spent
 from tret.engine.tools import (
     COST_CAP_KEY,
@@ -29,11 +32,27 @@ from tret.engine.tools import (
     PreparedChild,
     ToolError,
     _await_child,
+    _child_slot,
     _prepare_child,
     _record_delegated_cost,
     _summarize_child,
 )
 from tests.test_run_harness_task_selection import _ctx, _setup, db  # noqa: F401 (fixture)
+
+
+@pytest.fixture()
+def _settings_override(monkeypatch):
+    """Set one or more `TRET_`-prefixed env vars and clear the `get_settings`
+    cache so `tools.py`'s (same, module-level) `get_settings` picks them up —
+    matches the pattern in tests/test_connected_tools.py."""
+
+    def _set(**env: object) -> None:
+        for key, value in env.items():
+            monkeypatch.setenv(f"TRET_{key.upper()}", str(value))
+        get_settings.cache_clear()
+
+    yield _set
+    get_settings.cache_clear()
 
 
 def test_delegation_tools_contains_run_harness_task():
@@ -417,3 +436,321 @@ def test_spent_adds_cost_usd_and_delegated_cost_usd():
 def test_spent_treats_none_fields_as_zero():
     run = SimpleNamespace(cost_usd=None, delegated_cost_usd=None)
     assert _spent(run) == Decimal("0")
+
+
+# ── PreparedChild: depth/kind/batch_id/index/label ──────────────────────────
+# Plumbing for the coming `delegate_parallel` tool — `run_harness_task`'s own
+# behaviour is unchanged (it never passes index/label and lets depth/kind
+# default).
+
+
+async def test_prepare_child_depth_is_parent_depth_plus_one(db):  # noqa: F811
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+    ctx.delegation_depth = 1
+
+    prepared = await _prepare_child(ctx, "assess_risk", {})
+
+    assert prepared.depth == 2
+
+
+async def test_prepare_child_defaults_kind_batch_index_label(db):  # noqa: F811
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    prepared = await _prepare_child(ctx, "assess_risk", {})
+
+    assert prepared.depth == 1
+    assert prepared.kind == "task"
+    assert prepared.batch_id is None
+    assert prepared.index is None
+    assert prepared.label is None
+
+
+async def test_prepare_child_carries_index_and_label(db):  # noqa: F811
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    prepared = await _prepare_child(ctx, "assess_risk", {}, index=2, label="fetch invoices")
+
+    assert prepared.index == 2
+    assert prepared.label == "fetch invoices"
+
+
+async def test_prepare_child_truncates_label_to_80_chars(db):  # noqa: F811
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    prepared = await _prepare_child(ctx, "assess_risk", {}, label="x" * 200)
+
+    assert prepared.label == "x" * 80
+
+
+# ── delegation event payloads ────────────────────────────────────────────────
+
+
+async def test_await_child_events_carry_kind_batch_index_label(db, monkeypatch):  # noqa: F811
+    import tret.engine.tools as tools_module
+
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+    batch_id = uuid.uuid4()
+    prepared = await _prepare_child(
+        ctx, "assess_risk", {}, kind="subagent", batch_id=batch_id, index=1, label="fetch"
+    )
+
+    published: list[RunEvent] = []
+
+    class _Recorder:
+        async def publish(self, run_id, event):
+            published.append(event)
+
+    monkeypatch.setattr(tools_module, "get_event_bus", lambda: _Recorder())
+
+    done, _findings = await _await_child(ctx, prepared)
+
+    started = next(e for e in published if e.type == "delegation_started")
+    finished = next(e for e in published if e.type == "delegation_finished")
+    for event in (started, finished):
+        assert event.data["kind"] == "subagent"
+        assert event.data["batch_id"] == str(batch_id)
+        assert event.data["index"] == 1
+        assert event.data["label"] == "fetch"
+    # `delegation_started` never had a cost to report; `delegation_finished`
+    # gains the child's own `cost_usd` once `done` is known.
+    assert "cost_usd" not in started.data
+    assert finished.data["cost_usd"] == float(done.cost_usd or 0)
+
+
+async def test_await_child_events_batch_id_is_none_outside_a_batch(db, monkeypatch):  # noqa: F811
+    import tret.engine.tools as tools_module
+
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+    prepared = await _prepare_child(ctx, "assess_risk", {})
+
+    published: list[RunEvent] = []
+
+    class _Recorder:
+        async def publish(self, run_id, event):
+            published.append(event)
+
+    monkeypatch.setattr(tools_module, "get_event_bus", lambda: _Recorder())
+
+    await _await_child(ctx, prepared)
+
+    for event in published:
+        assert event.data["batch_id"] is None
+        assert event.data["index"] is None
+        assert event.data["label"] is None
+
+
+# ── per-depth child-run slots ────────────────────────────────────────────────
+
+
+class _ConcurrencyEngine:
+    """Fake `HarnessEngine`: `execute` holds its "slot" long enough for two
+    concurrent calls to be observed, and `register`/`unregister_delegation`
+    just record call order — matched to the real engine's own lineage
+    bookkeeping, which `_await_child` calls unconditionally around `execute`.
+    """
+
+    def __init__(self):
+        self.current = 0
+        self.max_seen = 0
+        self.events: list[tuple[str, uuid.UUID]] = []
+
+    def register_delegation(self, *, child_id, parent_id):
+        self.events.append(("register", child_id))
+
+    def unregister_delegation(self, child_id):
+        self.events.append(("unregister", child_id))
+
+    async def execute(self, run_id):
+        self.events.append(("execute_start", run_id))
+        self.current += 1
+        self.max_seen = max(self.max_seen, self.current)
+        await asyncio.sleep(0.02)
+        self.current -= 1
+        self.events.append(("execute_end", run_id))
+
+
+async def _prepared_pair(db, *, depths=(0, 0)):  # noqa: F811
+    """Two `(ctx, PreparedChild)` pairs off the same parent, at the given
+    `ctx.delegation_depth`s — so `prepared.depth` is `depth + 1` for each."""
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    pairs = []
+    for depth in depths:
+        ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+        ctx.delegation_depth = depth
+        pairs.append((ctx, await _prepare_child(ctx, "assess_risk", {})))
+    return pairs
+
+
+async def test_child_slots_serialize_same_depth_children_at_limit_one(
+    db, monkeypatch, _settings_override  # noqa: F811
+):
+    _settings_override(max_concurrent_child_runs=1)
+    import tret.engine.harness as harness_module
+
+    engine = _ConcurrencyEngine()
+    monkeypatch.setattr(harness_module, "get_harness_engine", lambda: engine)
+
+    pairs = await _prepared_pair(db)
+    await asyncio.gather(*(_await_child(ctx, prepared) for ctx, prepared in pairs))
+
+    assert engine.max_seen == 1
+
+
+async def test_child_slots_allow_two_at_once_at_limit_two(
+    db, monkeypatch, _settings_override  # noqa: F811
+):
+    _settings_override(max_concurrent_child_runs=2)
+    import tret.engine.harness as harness_module
+
+    engine = _ConcurrencyEngine()
+    monkeypatch.setattr(harness_module, "get_harness_engine", lambda: engine)
+
+    pairs = await _prepared_pair(db)
+    await asyncio.gather(*(_await_child(ctx, prepared) for ctx, prepared in pairs))
+
+    assert engine.max_seen == 2
+
+
+async def test_child_slots_are_per_depth_not_shared(
+    db, monkeypatch, _settings_override  # noqa: F811
+):
+    """Even at limit 1, children at DIFFERENT depths run concurrently — one
+    shared pool would deadlock a depth-1 parent that is itself waiting inside
+    `execute()` for a depth-2 slot only a depth-1 finish could ever free."""
+    _settings_override(max_concurrent_child_runs=1)
+    import tret.engine.harness as harness_module
+
+    engine = _ConcurrencyEngine()
+    monkeypatch.setattr(harness_module, "get_harness_engine", lambda: engine)
+
+    pairs = await _prepared_pair(db, depths=(0, 1))
+    assert [prepared.depth for _ctx, prepared in pairs] == [1, 2]
+
+    await asyncio.gather(*(_await_child(ctx, prepared) for ctx, prepared in pairs))
+
+    assert engine.max_seen == 2
+
+
+async def test_child_slot_limit_zero_is_unlimited(
+    db, monkeypatch, _settings_override  # noqa: F811
+):
+    _settings_override(max_concurrent_child_runs=0)
+    import tret.engine.harness as harness_module
+
+    engine = _ConcurrencyEngine()
+    monkeypatch.setattr(harness_module, "get_harness_engine", lambda: engine)
+    assert _child_slot(1) is None
+
+    pairs = await _prepared_pair(db)
+    await asyncio.gather(*(_await_child(ctx, prepared) for ctx, prepared in pairs))
+
+    assert engine.max_seen == 2
+
+
+async def test_register_delegation_runs_before_the_slot_is_acquired(
+    db, monkeypatch, _settings_override  # noqa: F811
+):
+    """A child still queued for a slot is already registered, so a cancel of
+    the parent reaches it — see the comment in `_await_child`."""
+    _settings_override(max_concurrent_child_runs=1)
+    import tret.engine.harness as harness_module
+
+    engine = _ConcurrencyEngine()
+    monkeypatch.setattr(harness_module, "get_harness_engine", lambda: engine)
+
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+    prepared = await _prepare_child(ctx, "assess_risk", {})
+
+    slot = _child_slot(prepared.depth)
+    await slot.acquire()  # hold the only slot before the child even starts
+    try:
+        task = asyncio.create_task(_await_child(ctx, prepared))
+        await asyncio.sleep(0)  # let it run up to the (blocking) acquire
+        assert ("register", prepared.child_id) in engine.events
+        assert ("execute_start", prepared.child_id) not in engine.events
+    finally:
+        slot.release()
+    await task
+    assert ("execute_start", prepared.child_id) in engine.events
+
+
+# ── lifetime children cap ────────────────────────────────────────────────────
+
+
+async def test_prepare_child_raises_when_the_lifetime_cap_is_reached(
+    db, _settings_override  # noqa: F811
+):
+    _settings_override(max_children_per_run=2)
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    await _prepare_child(ctx, "assess_risk", {})
+    await _prepare_child(ctx, "assess_risk", {})
+    assert ctx.children_started == 2
+
+    before = (await db.execute(select(func.count()).select_from(Run))).scalar()
+    with pytest.raises(ToolError) as excinfo:
+        await _prepare_child(ctx, "assess_risk", {})
+    assert "Delegation limit reached" in str(excinfo.value)
+
+    after = (await db.execute(select(func.count()).select_from(Run))).scalar()
+    assert after == before  # no row inserted
+    assert ctx.children_started == 2  # unchanged by the refused attempt
+
+
+async def test_prepare_child_reserve_refuses_up_front(db, _settings_override):  # noqa: F811
+    _settings_override(max_children_per_run=2)
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    with pytest.raises(ToolError):
+        await _prepare_child(ctx, "assess_risk", {}, reserve=3)
+
+    assert ctx.children_started == 0
+
+
+async def test_prepare_child_lifetime_cap_zero_is_unlimited(
+    db, _settings_override  # noqa: F811
+):
+    _settings_override(max_children_per_run=0)
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    for _ in range(5):
+        await _prepare_child(ctx, "assess_risk", {})
+
+    assert ctx.children_started == 5
+
+
+# ── run_harness_task's public shape is unchanged ─────────────────────────────
+
+
+async def test_run_harness_task_result_keys_are_unchanged(db):  # noqa: F811
+    import json
+
+    from tret.engine.tools import run_harness_task
+
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    result = json.loads(await run_harness_task(ctx, "assess_risk", {}))
+
+    assert set(result.keys()) == {
+        "child_run_id",
+        "status",
+        "model_used",
+        "cost_usd",
+        "delegated_cost_usd",
+        "energy_wh",
+        "co2e_g",
+        "error",
+        "findings",
+        "note",
+    }

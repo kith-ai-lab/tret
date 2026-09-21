@@ -9,11 +9,14 @@ help for the providers whose upstream honours Anthropic-style `cache_control`.
 """
 from __future__ import annotations
 
+import random
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
 
@@ -247,6 +250,57 @@ RETRYABLE_STATUSES = frozenset({502, 503, 504, 529})
 def is_retryable_status(status: int, *, html_body: bool) -> bool:
     """Whether a failed request is worth retrying once, from its status alone."""
     return status in RETRYABLE_STATUSES or (status >= 500 and html_body)
+
+
+# ── rate-limit retry (2026-09-20) ───────────────────────────────────────────
+# 429 gets its own policy rather than folding into the 5xx one above: a 5xx
+# retry bets a transient fault on the upstream has already cleared, but a 429
+# is the provider deliberately telling us to slow down — often *how long* it
+# wants us to wait, via `Retry-After` — and worth several tries, not one.
+# Parallel delegation makes this the common case rather than the rare one:
+# once a run can start several children at the same instant, N simultaneous
+# first requests hitting the same provider key is normal, not a fluke.
+RATE_LIMIT_STATUS = 429
+RATE_LIMIT_MAX_RETRIES = 3
+RATE_LIMIT_BASE_DELAY_SECONDS = 2.0
+RATE_LIMIT_MAX_DELAY_SECONDS = 30.0
+
+
+def _seconds_until(retry_after: str) -> float | None:
+    """`retry_after` decoded per RFC 9110 §10.2.3: either a non-negative
+    integer/float count of seconds, or an HTTP-date to compute a delta
+    against now. Returns `None` when it is neither (a header worth ignoring
+    rather than failing the request over)."""
+    try:
+        return max(float(retry_after), 0.0)
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(retry_after)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max((when - datetime.now(timezone.utc)).total_seconds(), 0.0)
+
+
+def rate_limit_delay(attempt: int, retry_after: str | None, *, rng=random.random) -> float:
+    """How long to wait before the `attempt`-th (0-based) retry of a 429.
+
+    The provider's own `Retry-After` wins when present and parseable; failing
+    that, exponential backoff from `RATE_LIMIT_BASE_DELAY_SECONDS`. Either way
+    a jitter of up to +25% is added — so several child runs that got
+    rate-limited by the same burst don't all wake up and retry in lockstep —
+    then the result is clamped to `[0, RATE_LIMIT_MAX_DELAY_SECONDS]`.
+    `rng` is injectable so tests can pin the jitter.
+    """
+    base = _seconds_until(retry_after) if retry_after else None
+    if base is None:
+        base = RATE_LIMIT_BASE_DELAY_SECONDS * (2**attempt)
+    delayed = base * (1 + rng() * 0.25)
+    return min(max(delayed, 0.0), RATE_LIMIT_MAX_DELAY_SECONDS)
 
 
 _HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)

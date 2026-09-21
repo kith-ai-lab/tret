@@ -26,7 +26,10 @@ DELEGATION_DEPTH_KEY = "_delegation_depth"
 # compaction elidable set, the chat activity summary) key off this set, so a
 # new delegation tool (a parallel batch tool, an ad-hoc subagent tool) inherits
 # that handling by being added here rather than by repeating the literal name.
-DELEGATION_TOOLS = frozenset({"run_harness_task"})
+# `delegate_parallel` (engine/tools.py) is the parallel-batch tool this
+# comment used to describe as a future addition — it fans several children out
+# from one call instead of `run_harness_task`'s one-at-a-time delegation.
+DELEGATION_TOOLS = frozenset({"run_harness_task", "delegate_parallel"})
 
 # Engine-plumbing key (hidden from the model — see `build_user_message`,
 # engine/context.py) carrying the ceiling the engine carved for a delegated

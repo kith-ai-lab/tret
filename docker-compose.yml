@@ -197,6 +197,13 @@ services:
       # Cap on team workspaces one user may own via POST /api/workspaces.
       # 0 (the default) is unlimited.
       TRET_MAX_TEAM_WORKSPACES_PER_USER: ${TRET_MAX_TEAM_WORKSPACES_PER_USER:-0}
+      # Delegation width and the database pool it leans on (see .env.example).
+      TRET_MAX_FANOUT: ${TRET_MAX_FANOUT:-4}
+      TRET_MAX_CHILDREN_PER_RUN: ${TRET_MAX_CHILDREN_PER_RUN:-8}
+      TRET_MAX_CONCURRENT_CHILD_RUNS: ${TRET_MAX_CONCURRENT_CHILD_RUNS:-6}
+      TRET_DELEGATION_TIMEOUT_SECONDS: ${TRET_DELEGATION_TIMEOUT_SECONDS:-900}
+      TRET_DB_POOL_SIZE: ${TRET_DB_POOL_SIZE:-10}
+      TRET_DB_MAX_OVERFLOW: ${TRET_DB_MAX_OVERFLOW:-10}
       # Single sign-on (generic OIDC, tret/api/oidc.py). password is every
       # self-hosted deployment; the OIDC router only mounts once
       # TRET_OIDC_ISSUER is also set.

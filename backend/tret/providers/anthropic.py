@@ -19,6 +19,8 @@ import anthropic
 from tret.net import CLASS_PROVIDER, build_client
 
 from tret.providers.base import (
+    RATE_LIMIT_MAX_RETRIES,
+    RATE_LIMIT_STATUS,
     RETRY_DELAY_SECONDS,
     JsonCompletion,
     Msg,
@@ -35,6 +37,7 @@ from tret.providers.base import (
     looks_like_html,
     mark_cache_breakpoint,
     normalize_call_slug,
+    rate_limit_delay,
     summarize_html_error,
 )
 
@@ -68,10 +71,13 @@ class _StreamFailure(Exception):
     always converted to a `ProviderError` before it can escape.
     """
 
-    def __init__(self, message: str, status: int | None, *, retryable: bool):
+    def __init__(
+        self, message: str, status: int | None, *, retryable: bool, retry_after: str | None = None
+    ):
         self.message = message
         self.status = status
         self.retryable = retryable
+        self.retry_after = retry_after
         super().__init__(message)
 
 
@@ -95,7 +101,10 @@ def _failure_from_api_error(e: anthropic.APIError) -> _StreamFailure:
         html = looks_like_html(raw, response.headers.get("content-type"))
         message = summarize_html_error(e.status_code, raw) if html else str(e)
         return _StreamFailure(
-            message, e.status_code, retryable=is_retryable_status(e.status_code, html_body=html)
+            message,
+            e.status_code,
+            retryable=is_retryable_status(e.status_code, html_body=html),
+            retry_after=response.headers.get("retry-after"),
         )
     return _StreamFailure(str(e), getattr(e, "status_code", None), retryable=False)
 
@@ -350,7 +359,15 @@ class AnthropicProvider(Provider):
         # first token: `yielded_any` tracks whether anything has already
         # reached the caller, and a partial stream is not something a second
         # attempt can safely replace.
-        for attempt in range(2):
+        #
+        # 429 gets its own counter, independent of the 5xx one above (see
+        # `providers.base`'s rate-limit-retry docstring) — a request that
+        # already used its one 5xx retry can still get its 429 retries, and
+        # vice versa. The two counters together put a hard ceiling of
+        # 1 + 1 + RATE_LIMIT_MAX_RETRIES attempts on this loop.
+        rate_limit_attempts = 0
+        retried_5xx = False
+        while True:
             yielded_any = False
             try:
                 async for event in self._stream_attempt(kwargs):
@@ -358,8 +375,17 @@ class AnthropicProvider(Provider):
                     yield event
                 return
             except _StreamFailure as exc:
-                if exc.retryable and not yielded_any and attempt == 0:
+                if (
+                    not yielded_any
+                    and exc.status == RATE_LIMIT_STATUS
+                    and rate_limit_attempts < RATE_LIMIT_MAX_RETRIES
+                ):
+                    await asyncio.sleep(rate_limit_delay(rate_limit_attempts, exc.retry_after))
+                    rate_limit_attempts += 1
+                    continue
+                if exc.retryable and not yielded_any and not retried_5xx:
                     await asyncio.sleep(RETRY_DELAY_SECONDS)
+                    retried_5xx = True
                     continue
                 raise ProviderError("anthropic", exc.message, exc.status) from exc
 
@@ -420,11 +446,15 @@ class AnthropicProvider(Provider):
         max_tokens: int = 1024,
         timeout: float = 30.0,
     ) -> JsonCompletion:
-        # Same retry-once policy as `stream()` — see `providers.base`'s retry
+        # Same retry policy as `stream()` — see `providers.base`'s retry
         # constants and this class's `_failure_from_api_error`. A
         # non-streaming call has no partial output to protect, so the only
-        # question is whether the failure itself is worth a second try.
-        for attempt in range(2):
+        # question is whether the failure itself is worth another try — one
+        # 5xx retry, plus up to `RATE_LIMIT_MAX_RETRIES` independent 429
+        # retries.
+        rate_limit_attempts = 0
+        retried_5xx = False
+        while True:
             try:
                 msg = await self._client.messages.create(
                     model=model,
@@ -439,8 +469,16 @@ class AnthropicProvider(Provider):
                 break
             except anthropic.APIError as e:
                 failure = _failure_from_api_error(e)
-                if failure.retryable and attempt == 0:
+                if (
+                    failure.status == RATE_LIMIT_STATUS
+                    and rate_limit_attempts < RATE_LIMIT_MAX_RETRIES
+                ):
+                    await asyncio.sleep(rate_limit_delay(rate_limit_attempts, failure.retry_after))
+                    rate_limit_attempts += 1
+                    continue
+                if failure.retryable and not retried_5xx:
                     await asyncio.sleep(RETRY_DELAY_SECONDS)
+                    retried_5xx = True
                     continue
                 raise ProviderError("anthropic", failure.message, failure.status) from e
         for block in msg.content:

@@ -266,6 +266,13 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
     if chat_harness is not None:
         if "run_method" not in (chat_harness.tool_names or []):
             chat_harness.tool_names = [*chat_harness.tool_names, "run_method"]
+        # `delegate_parallel` rides along with `run_harness_task`, never on its
+        # own: an operator who deliberately removed delegation entirely should
+        # not have half of it silently reappear.
+        if "run_harness_task" in (chat_harness.tool_names or []) and "delegate_parallel" not in (
+            chat_harness.tool_names or []
+        ):
+            chat_harness.tool_names = [*chat_harness.tool_names, "delegate_parallel"]
         missing_connector_tools = [
             n
             for n in ("list_connected_sources", "search_connected_files", "read_connected_file")
@@ -293,6 +300,7 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
         model_policy={"mode": "auto", "max_cost_tier": "standard"},
         tool_names=[
             "run_harness_task",
+            "delegate_parallel",
             "run_method",
             "read_document",
             "search_documents",

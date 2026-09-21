@@ -232,6 +232,35 @@ class Settings(BaseSettings):
     # scan an operator never asked to allow.
     max_team_workspaces_per_user: int = 0
 
+    # ── delegation (tret/engine/tools.py, tret/engine/harness.py) ─────────────
+    # A run may start child runs (`run_harness_task`, `delegate_parallel`).
+    # Depth is fixed in code (`MAX_DELEGATION_DEPTH`); these bound *width*.
+    # Spend is bounded separately, by the root run's own cost cap.
+    #
+    # Children one `delegate_parallel` call may start at once.
+    max_fanout: int = 4
+    # Children one run may start over its whole lifetime, across every
+    # delegation tool — a model that keeps re-delegating stops here.
+    max_children_per_run: int = 8
+    # Delegated child runs executing at once, per delegation depth, across the
+    # whole process. Children queue for a slot; runs a person started never do.
+    # Keep it well under the database pool below: every executing run holds a
+    # session of its own.
+    max_concurrent_child_runs: int = 6
+    # Wall-clock limit (seconds) for one `delegate_parallel` call. Children
+    # still running are cancelled and reported as timed out. The sequential
+    # `run_harness_task` is not timed: its child is bounded by its own
+    # iteration and cost caps, as it always has been.
+    delegation_timeout_seconds: int = 900
+
+    # ── database pool (tret/db/engine.py) ─────────────────────────────────────
+    # Stated rather than inherited from SQLAlchemy (whose default is 5 + 10
+    # overflow) because parallel delegation makes the pool load-bearing: every
+    # executing run holds a session. Check the Postgres server's
+    # `max_connections` before raising either.
+    db_pool_size: int = 10
+    db_max_overflow: int = 10
+
     # ── login (tret/api/auth.py, tret/api/oidc.py) ────────────────────────────
     # password (default — every self-hosted deployment) | oidc (single sign-on
     # only; POST /api/auth/login and every password-setting endpoint refuse

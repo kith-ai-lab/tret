@@ -33,7 +33,19 @@ def normalize_database_url(url: str) -> str:
 def get_engine():
     global _engine
     if _engine is None:
-        _engine = create_async_engine(normalize_database_url(get_settings().database_url), pool_pre_ping=True)
+        settings = get_settings()
+        url = normalize_database_url(settings.database_url)
+        kwargs: dict = {"pool_pre_ping": True}
+        # Parallel delegation makes the pool load-bearing: once a run can hold
+        # several children executing at once, each with its own session, the
+        # pool can no longer be sized by whatever SQLAlchemy defaults to
+        # implicitly. Postgres-only: sqlite (`tret run`/local mode and most
+        # tests) uses NullPool/SingleThreadPool under asyncio, which reject
+        # `pool_size`/`max_overflow` as unknown kwargs.
+        if url.startswith("postgresql"):
+            kwargs["pool_size"] = settings.db_pool_size
+            kwargs["max_overflow"] = settings.db_max_overflow
+        _engine = create_async_engine(url, **kwargs)
     return _engine
 
 

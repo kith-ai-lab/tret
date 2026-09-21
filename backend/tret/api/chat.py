@@ -74,7 +74,7 @@ async def _capability_catalog(db: AsyncSession, workspace_id, project_id) -> str
         .all()
     )
     pack_map = await pack_map_for_harnesses(db, [h.id for h in harnesses])
-    lines = ["## Capability catalog (for run_harness_task)"]
+    lines = ["## Capability catalog (for run_harness_task and delegate_parallel)"]
     seen = set()
     for h in harnesses:
         for pack in pack_map.get(h.id, []):
@@ -403,7 +403,20 @@ def _assistant_message(run: Run) -> dict:
                 entry = {"tool": tc.get("name"), "summary": ""}
                 if tc.get("name") in DELEGATION_TOOLS:
                     args = tc.get("arguments") or {}
-                    entry["summary"] = f"delegated {args.get('task_type', '?')}"
+                    if tc.get("name") == "delegate_parallel":
+                        batch = args.get("tasks") or []
+                        # De-duplicated, in call order — a batch that repeats
+                        # a task_type over several inputs should read as one
+                        # kind of work, not a wall of the same word.
+                        types: list[str] = []
+                        for t in batch:
+                            slug = t.get("task_type", "?")
+                            if slug not in types:
+                                types.append(slug)
+                        shown = ", ".join(types[:4]) + ("…" if len(types) > 4 else "")
+                        entry["summary"] = f"delegated {len(batch)} tasks in parallel: {shown}"
+                    else:
+                        entry["summary"] = f"delegated {args.get('task_type', '?')}"
                 else:
                     entry["summary"] = _tool_result_summary(tool_results.get(tc.get("id")))
                 activity.append(entry)

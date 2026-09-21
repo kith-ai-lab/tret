@@ -427,6 +427,44 @@ which can only lower a harness's own cap, never raise it), and refuses to
 delegate at all once that remaining share drops below a $0.05 floor — a
 budget too small to buy a delegated run anything.
 
+The chat harness also carries `delegate_parallel`, for several INDEPENDENT
+tasks the model wants to run at once (the same assessment over several sites,
+say) rather than one after another. It is one tool call, not several
+concurrent `run_harness_task`s, because every tool in a run's turn shares one
+`AsyncSession` (`RunContext.db`), which SQLAlchemy will not let two coroutines
+touch at the same time — see the "ONE AT A TIME" comment on the engine's
+tool-call loop (`engine/harness.py`). `delegate_parallel` resolves that by
+splitting into two phases around a single concurrent middle: it prepares every
+child sequentially (inserts each `Run` row, carves each an equal share of what
+the batch has left of the parent's budget, all against `ctx.db`) and commits
+once, then runs the children concurrently with `ctx.db` untouched, then goes
+sequential again to record each child's cost onto the parent. Preparation is
+all-or-nothing — if any task in the batch fails validation (an unknown
+`task_type`, the depth or lifetime cap, an underfunded budget share), nothing
+in the batch is committed and none of it runs — but once the batch is running,
+each child's outcome is independent: one child failing or timing out shows up
+as an `"error"` (or `"timed_out"`) entry in that child's own result slot
+without affecting its siblings. Width is bounded by `TRET_MAX_FANOUT` (per
+call) and `TRET_MAX_CHILDREN_PER_RUN` (lifetime, shared with
+`run_harness_task`), narrowed further for the `token_conservation`/`eco`
+objectives since every child re-pays this run's whole context preamble from
+scratch — exactly the spend those objectives exist to minimize.
+`TRET_MAX_CONCURRENT_CHILD_RUNS` still caps how many of a batch's children (or
+any other depth's children) may actually execute at once, per depth level. A
+batch that runs past `TRET_DELEGATION_TIMEOUT_SECONDS` has its still-running
+children cooperatively cancelled through the engine's own `cancel()` (the same
+mechanism a person cancelling a run uses) rather than torn down mid-loop, so a
+timed-out child still ends in a proper terminal state.
+
+The retrieval budgets — web fetches, connected-source reads, bytes and
+searches (`TRET_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN`,
+`TRET_CONNECTIONS_MAX_*_PER_RUN`) — stay per run and are deliberately *not*
+carved across a delegation tree the way the cost cap is. Splitting them would
+halve what a specialist gets on the ordinary chat-to-specialist path, which is
+where nearly all delegation happens, to guard against a total the other limits
+already bound: a tree's spend is capped by its root's cost cap, and its size by
+the depth ceiling and `TRET_MAX_CHILDREN_PER_RUN`.
+
 ## SDK and CLI
 
 `tret.sdk.Router` and the `tret run` CLI (`tret/local_run.py`) are a second,

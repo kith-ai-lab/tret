@@ -1098,6 +1098,14 @@ class HarnessEngine:
         self._cancelled.add(run_id)
         self._cancelled |= self._descendants_of(run_id)
 
+    def forget_cancelled(self, run_id: uuid.UUID) -> None:
+        """Drop `run_id` from the cancelled set. `execute()` does this for every
+        run it finishes; this is for a delegated child that was cancelled
+        before `execute()` ever ran for it (engine/tools.py::
+        `_close_out_abandoned_child`), whose id would otherwise sit here for the
+        life of the process."""
+        self._cancelled.discard(run_id)
+
     async def execute(
         self, run_id: uuid.UUID, *, _emissions_test_hook=None
     ) -> None:
@@ -1476,6 +1484,10 @@ class HarnessEngine:
         tool_specs = [builtins[n] for n in enabled_names]
 
         # ── context, accounted ───────────────────────────────────────────────
+        # Resolved once and reused below for the RunContext: `objective_of` is
+        # pure over `model_policy`, but computing it twice would risk the two
+        # call sites drifting if `model_policy` is ever mutated in between.
+        objective = objective_of(model_policy)
         assembled = assemble_context(
             harness,
             pack,
@@ -1486,7 +1498,7 @@ class HarnessEngine:
             lessons=(
                 await approved_lessons(db, workspace_id, pack.slug) if lessons_on else None
             ),
-            objective=objective_of(model_policy),
+            objective=objective,
         )
         system = assembled.system
         user_message = build_user_message(run, pack, documents)
@@ -1589,6 +1601,7 @@ class HarnessEngine:
             # `MAX_DELEGATION_DEPTH`. The runs API strips this key from what a
             # caller sends (api/runs.py), but the engine does not rely on that.
             delegation_depth=max(0, int(run.task_input.get(DELEGATION_DEPTH_KEY) or 0)),
+            objective=objective,
             max_cost_usd=max_cost,
         )
         # The grounding check (engine/grounding.py) only makes sense where a

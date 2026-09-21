@@ -41,11 +41,20 @@ MAX_RETAINED_COMPLETED_RUNS = 32
 class RunEvent:
     # Every type the engine actually publishes, verified against the
     # RunEvent(...) constructions in engine/harness.py (plus `delegation_started`
-    # / `delegation_finished`, published on the parent's bus from
-    # `run_harness_task` in engine/tools.py; and `budget_alert`, published by
+    # / `delegation_finished`, published on the parent's bus from `_await_child`
+    # in engine/tools.py; and `budget_alert`, published by
     # `services/budgets.py::budget_alert_post_run_hook` on the finishing run's
     # own bus). `status` used to be listed here and has never existed anywhere
     # in the codebase — a documented event a client could wait on forever.
+    #
+    # `delegation_started` / `delegation_finished` both carry `child_run_id`,
+    # `harness`, `kind` (`Run.delegation_kind` — "task" for a single
+    # `run_harness_task` delegation), `batch_id` (str or None) and `index` /
+    # `label` (a parallel-batch child's position and caller-supplied name, both
+    # None outside a batch) — see `PreparedChild` in engine/tools.py.
+    # `delegation_started` also carries `task_type`; `delegation_finished`
+    # carries `status` ("unknown" if the child's row could not be read back)
+    # and, when it could, the child's own `cost_usd`.
     type: str  # routing|context_composition|text_delta|tool_call|tool_result|
     #            finding_recorded|usage|budget_warning|budget_alert|
     #            tools_withheld|context_pressure|compaction|model_switch|
