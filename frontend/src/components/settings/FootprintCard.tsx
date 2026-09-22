@@ -80,6 +80,11 @@ function BasisRows({ rows }: { rows: EmissionsByBasis[] }) {
 }
 
 function FootprintBody({ data }: { data: BillingFootprint }) {
+  // A period with no runs comes back with `totals: null` — a new workspace's
+  // first visit to Settings always lands here.
+  if (!data.totals) {
+    return <div className="empty">No runs in this period yet.</div>
+  }
   const summable = data.totals.carbon_is_summable !== false
   const mixedBases = data.by_basis && data.by_basis.length > 1
 

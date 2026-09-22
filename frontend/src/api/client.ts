@@ -2206,7 +2206,8 @@ export interface BillingFootprint {
   from: string
   to: string
   runs: number
-  totals: EmissionsTotals
+  /** null when the period has no runs to roll up. */
+  totals: EmissionsTotals | null
   by_basis?: EmissionsByBasis[]
   credits_usd_consumed: number
   /** The single GHG Protocol basis every rolled-up run in this window shares
