@@ -1534,13 +1534,36 @@ class _SearchApiUnsupported(Exception):
     only its per-drive `/root/search` fallback result."""
 
 
+class _SearchApiUnavailable(Exception):
+    """The Microsoft Search API kept failing server-side (5xx) or at the
+    transport level through every `_SEARCH_API_ATTEMPTS` try. Observed live:
+    `/search/query` 500s for minutes at a time while per-drive
+    `/root/search` keeps answering. Internal to `search_connected_files`,
+    which falls back to the per-drive search exactly as for
+    `_SearchApiUnsupported` — unless the last failure was at the transport
+    level (`transport=True`): Graph as a whole is then unreachable, and
+    fanning out to up to `_MAX_FALLBACK_DRIVES` more timed-out requests
+    would only stall the run."""
+
+    def __init__(self, message: str, *, transport: bool) -> None:
+        super().__init__(message)
+        self.transport = transport
+
+
+# One retry, briefly spaced, before falling back: a single transient 500 is
+# common enough that retrying is cheaper than the fallback's per-drive
+# fan-out, but a sustained outage should not stall a run for long.
+_SEARCH_API_ATTEMPTS = 2
+_SEARCH_API_RETRY_DELAY_SECONDS = 0.75
+
+
 async def _search_query(access_token: str, query: str) -> dict:
     """POST one `/search/query` request for `query`, scoped to drive items.
-    Raises `_SearchApiUnsupported` for a 4xx response (see that class) and
-    `RuntimeError` for anything else that keeps the call from completing —
-    same transport-vs-support split `_graph_get` draws, just with the two
-    outcomes needing to be told apart here instead of always being the same
-    `RuntimeError`."""
+    Raises `_SearchApiUnsupported` for a 4xx response (see that class),
+    `_SearchApiUnavailable` when a 5xx or transport error persists through
+    every attempt (retried, see `_SEARCH_API_ATTEMPTS`), and `RuntimeError`
+    when egress policy refuses the call — that one is a configuration
+    problem no retry or fallback can fix."""
     body = {
         "requests": [
             {
@@ -1551,26 +1574,32 @@ async def _search_query(access_token: str, query: str) -> dict:
             }
         ]
     }
-    try:
-        async with build_client(
-            _EGRESS_CLASS, policy=_policy(_GRAPH_SEARCH_QUERY_URL), timeout=15.0
-        ) as client:
-            response = await client.post(
-                _GRAPH_SEARCH_QUERY_URL,
-                json=body,
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-    except EgressDenied as exc:
-        raise RuntimeError(f"connections egress is unavailable: {exc}") from exc
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"could not reach Microsoft Graph: {exc}") from exc
-    if 400 <= response.status_code < 500:
-        raise _SearchApiUnsupported(f"Microsoft Search API returned {response.status_code}")
-    try:
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"could not reach Microsoft Graph: {exc}") from exc
-    return response.json()
+    failure = ""
+    transport = False
+    for attempt in range(_SEARCH_API_ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(_SEARCH_API_RETRY_DELAY_SECONDS)
+        try:
+            async with build_client(
+                _EGRESS_CLASS, policy=_policy(_GRAPH_SEARCH_QUERY_URL), timeout=15.0
+            ) as client:
+                response = await client.post(
+                    _GRAPH_SEARCH_QUERY_URL,
+                    json=body,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+        except EgressDenied as exc:
+            raise RuntimeError(f"connections egress is unavailable: {exc}") from exc
+        except httpx.HTTPError as exc:
+            failure, transport = f"could not reach Microsoft Graph: {exc}", True
+            continue
+        if 400 <= response.status_code < 500:
+            raise _SearchApiUnsupported(f"Microsoft Search API returned {response.status_code}")
+        if response.status_code >= 500:
+            failure, transport = f"Microsoft Search API returned {response.status_code}", False
+            continue
+        return response.json()
+    raise _SearchApiUnavailable(failure, transport=transport)
 
 
 async def _search_via_search_api(
@@ -1594,7 +1623,7 @@ async def _search_via_search_api(
 
 async def _search_via_drive_fallback(
     access_token: str, query: str, sources_by_drive: dict[str, ConnectedSource]
-) -> list[SearchHit]:
+) -> tuple[list[SearchHit], int]:
     """Per-drive `GET /drives/{id}/root/search(q='{query}')`, for the
     personal-Microsoft-account case the tenant-only Search API refuses.
     Capped to the first `_MAX_FALLBACK_DRIVES` allowed drives — a personal
@@ -1612,15 +1641,21 @@ async def _search_via_drive_fallback(
     whose `parentReference.driveId` is present and isn't one of this
     workspace's allowed drives is dropped outright rather than merely
     repinned, on the same "don't trust it enough to launder it" reasoning.
+
+    Returns the hits and how many drives actually answered, so a caller can
+    tell "no matches" from "every drive failed" (per-drive failures are
+    swallowed here).
     """
     encoded_query = quote(query, safe="")
     hits: list[SearchHit] = []
+    answered = 0
     for source in list(sources_by_drive.values())[:_MAX_FALLBACK_DRIVES]:
         path = f"/drives/{quote(source.drive_id, safe='')}/root/search(q='{encoded_query}')"
         try:
             body = await _graph_get(access_token, path)
         except RuntimeError:
             continue
+        answered += 1
         for item in body.get("value", []):
             parent_drive_id = (item.get("parentReference") or {}).get("driveId")
             if parent_drive_id is not None and parent_drive_id not in sources_by_drive:
@@ -1629,7 +1664,7 @@ async def _search_via_drive_fallback(
             if parsed is None:
                 continue
             hits.append(replace(parsed, item_ref=make_item_ref(M365, source.drive_id, item.get("id"))))
-    return hits
+    return hits, answered
 
 
 async def search_connected_files(
@@ -1648,7 +1683,11 @@ async def search_connected_files(
     to a per-drive `/root/search` call (capped to
     `_MAX_FALLBACK_DRIVES` drives) only when the Search API itself refuses
     with a 4xx — the shape a personal Microsoft account's connection gets
-    back, since Search is a tenant-only surface. `max_results` is clamped to
+    back, since Search is a tenant-only surface — or when it keeps
+    answering 5xx after one retry (`_SearchApiUnavailable`), in which case a
+    fallback where no drive answered is raised as a `RuntimeError` rather
+    than reported as "no matches". A transport failure that outlasts the
+    retry raises straight away. `max_results` is clamped to
     `[1, 20]` regardless of what is asked for. Raises `ValueError` for an
     empty (or whitespace-only) `query`, and `ConnectionUnavailable` (via
     `list_connected_sources`) under the same conditions that function does.
@@ -1679,7 +1718,16 @@ async def search_connected_files(
     try:
         hits = await _search_via_search_api(token, query, sources_by_drive)
     except _SearchApiUnsupported:
-        hits = await _search_via_drive_fallback(token, query, sources_by_drive)
+        hits, _answered = await _search_via_drive_fallback(token, query, sources_by_drive)
+    except _SearchApiUnavailable as exc:
+        if exc.transport:
+            raise RuntimeError(str(exc)) from exc
+        log.warning("connections: Microsoft Search API unavailable, using per-drive search: %s", exc)
+        hits, answered = await _search_via_drive_fallback(token, query, sources_by_drive)
+        if not answered:
+            # Every drive failed too: report the outage rather than a clean
+            # "no matches" a run would act on.
+            raise RuntimeError(f"{exc}; per-drive search failed as well") from exc
     result = hits[:max_results]
     await record_connection_activity(
         db,

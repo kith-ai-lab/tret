@@ -634,6 +634,138 @@ async def test_search_falls_back_to_per_drive_search_for_a_personal_account(
     assert hits[0].name == "notes.txt"
 
 
+_ONE_HIT_DRIVE_SEARCH = {
+    "value": [{"id": "item-1", "name": "notes.txt", "parentReference": {"driveId": "drive-1", "path": "/drive/root:"}}]
+}
+
+
+@pytest.fixture
+def no_search_retry_delay(monkeypatch):
+    monkeypatch.setattr(connections_module, "_SEARCH_API_RETRY_DELAY_SECONDS", 0)
+
+
+async def _seed_one_drive(seed):
+    workspace = make_workspace()
+    conn = make_connection(
+        workspace, selected_resources={"read": [{"drive_id": "drive-1", "label": "Docs", "kind": "site_drive"}]}
+    )
+    await seed(workspace, conn)
+    return workspace
+
+
+async def test_search_retries_a_transient_5xx_from_the_search_api(
+    configured_m365, session_factory, seed, no_search_retry_delay
+):
+    """One 500 then a 200: the retry answers, and the per-drive fallback is
+    never called."""
+    workspace = await _seed_one_drive(seed)
+    body = _search_query_response(drive_id="drive-1", item_id="item-1", name="a.txt", summary=None)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        route = mock.post(f"{GRAPH}/search/query").mock(
+            side_effect=[httpx.Response(500, json={}), httpx.Response(200, json=body)]
+        )
+        # No per-drive route is mocked: respx fails any unmatched request, so
+        # a fallback call would fail this test.
+        async with session_factory() as db:
+            hits = await search_connected_files(db, workspace.id, "a")
+
+    assert route.call_count == 2
+    assert [h.item_ref for h in hits] == ["m365:drive-1:item-1"]
+
+
+async def test_search_falls_back_to_per_drive_search_when_the_search_api_keeps_failing(
+    configured_m365, session_factory, seed, no_search_retry_delay
+):
+    """A 500 that outlasts the retry falls back to per-drive search, the
+    same path a personal account's 4xx takes."""
+    workspace = await _seed_one_drive(seed)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        route = mock.post(f"{GRAPH}/search/query").mock(return_value=httpx.Response(500, json={}))
+        mock.get(url__regex=rf"{GRAPH}/drives/drive-1/root/search.*").mock(
+            return_value=httpx.Response(200, json=_ONE_HIT_DRIVE_SEARCH)
+        )
+        async with session_factory() as db:
+            hits = await search_connected_files(db, workspace.id, "notes")
+
+    assert route.call_count == connections_module._SEARCH_API_ATTEMPTS
+    assert [h.item_ref for h in hits] == ["m365:drive-1:item-1"]
+
+
+async def test_search_persistent_transport_error_raises_without_the_fallback(
+    configured_m365, session_factory, seed, no_search_retry_delay
+):
+    """Graph unreachable at the transport level: retried once, then an
+    error — no per-drive fan-out of more timeouts (none is mocked, so a
+    fallback call would fail this test)."""
+    workspace = await _seed_one_drive(seed)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        route = mock.post(f"{GRAPH}/search/query").mock(side_effect=httpx.ConnectTimeout("timed out"))
+        async with session_factory() as db:
+            with pytest.raises(RuntimeError, match="could not reach Microsoft Graph"):
+                await search_connected_files(db, workspace.id, "notes")
+
+    assert route.call_count == connections_module._SEARCH_API_ATTEMPTS
+
+
+async def test_search_outage_with_every_drive_failing_raises_instead_of_reporting_no_matches(
+    configured_m365, session_factory, seed, no_search_retry_delay
+):
+    """Search API down and the per-drive search failing too: a run must see
+    an error, not a clean "no matches" it would act on."""
+    workspace = await _seed_one_drive(seed)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.post(f"{GRAPH}/search/query").mock(return_value=httpx.Response(503, json={}))
+        mock.get(url__regex=rf"{GRAPH}/drives/drive-1/root/search.*").mock(
+            return_value=httpx.Response(500, json={})
+        )
+        async with session_factory() as db:
+            with pytest.raises(RuntimeError, match="per-drive search failed as well"):
+                await search_connected_files(db, workspace.id, "notes")
+
+
+async def test_search_outage_with_a_genuinely_empty_fallback_reports_no_matches(
+    configured_m365, session_factory, seed, no_search_retry_delay
+):
+    """Search API down but the drive answers with zero hits: that is a real
+    "no matches", not an error."""
+    workspace = await _seed_one_drive(seed)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.post(f"{GRAPH}/search/query").mock(return_value=httpx.Response(500, json={}))
+        mock.get(url__regex=rf"{GRAPH}/drives/drive-1/root/search.*").mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        async with session_factory() as db:
+            hits = await search_connected_files(db, workspace.id, "nothing-here")
+
+    assert hits == []
+
+
+async def test_search_does_not_retry_a_4xx(configured_m365, session_factory, seed, no_search_retry_delay):
+    workspace = await _seed_one_drive(seed)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        route = mock.post(f"{GRAPH}/search/query").mock(return_value=httpx.Response(400, json={}))
+        mock.get(url__regex=rf"{GRAPH}/drives/drive-1/root/search.*").mock(
+            return_value=httpx.Response(200, json=_ONE_HIT_DRIVE_SEARCH)
+        )
+        async with session_factory() as db:
+            hits = await search_connected_files(db, workspace.id, "notes")
+
+    assert route.call_count == 1
+    assert len(hits) == 1
+
+
 async def test_drive_fallback_pins_hits_to_the_source_drive_and_drops_disallowed(
     configured_m365, session_factory, seed
 ):
