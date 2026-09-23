@@ -253,7 +253,7 @@ def _prompt(objective: str | None = None, n: int = 3) -> str:
 
 
 def test_prompt_version_was_bumped():
-    assert ROUTING_PROMPT_VERSION == "route-v5"
+    assert ROUTING_PROMPT_VERSION == "route-v6"
 
 
 def test_the_default_objective_renders_the_historical_prompt_plus_effort():
@@ -321,16 +321,17 @@ def test_objective_rules_say_what_each_objective_means():
 
 
 def test_energy_is_shown_only_where_the_objective_reasons_about_it():
-    # n=5 rather than the default 3: the catalog now opens with claude-fable-5,
-    # claude-fable-5-1, claude-opus-4-8, claude-opus-5 (R/R/XL/XL) before
-    # claude-sonnet-5 (L) — the model this assertion anchors on — appears.
+    # n=6 rather than the default 3: the catalog now opens with claude-fable-5,
+    # claude-fable-5-1, claude-opus-4-8, claude-opus-5, claude-opus-5-5
+    # (R/R/XL/XL/XL) before claude-sonnet-5 (L) — the model this assertion
+    # anchors on — appears.
     for objective in ("eco", "token_conservation"):
-        prompt = _prompt(objective, n=5)
+        prompt = _prompt(objective, n=6)
         # L is the calibrated class fitted from Claude 3.7 Sonnet, in Wh per
         # million output-equivalent tokens (services/emissions.py).
         assert "| energy: L (~2399.3371 Wh/Mtok, est.)" in prompt
     for objective in ("balanced", "quality"):
-        assert "Wh/Mtok" not in _prompt(objective, n=5)
+        assert "Wh/Mtok" not in _prompt(objective, n=6)
 
 
 # ── effort ───────────────────────────────────────────────────────────────────

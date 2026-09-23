@@ -570,6 +570,39 @@ class Settings(BaseSettings):
     # excludes it from every shape and objective for this long — see
     # `router_llm.router._apply_cooldown`. 0 disables the check entirely.
     router_cooldown_minutes: float = 30.0
+    # 2026-09-23: with `CANDIDATE_LIMIT` capped at 20 and 17 curated entries,
+    # a newly-caught-up OpenRouter model (`providers.catalog.refresh_dynamic`)
+    # essentially never sorted high enough to reach the router — see
+    # `router_llm.router._candidates_with_fit`'s slot reservation. This many of
+    # the 20 slots are reserved for uncurated models released within
+    # `router_new_model_window_days`, so a new release becomes usable within a
+    # day of shipping without a `models.yaml` edit. 0 disables the reservation
+    # entirely — ordering is then byte-for-byte what it always was, which is
+    # how Tret Cloud runs (its `openrouter_catalog=false` already yields zero
+    # uncurated models, so this is belt-and-braces there, not load-bearing).
+    router_new_model_slots: int = 3
+
+    @field_validator("router_new_model_slots", mode="after")
+    @classmethod
+    def _clamp_router_new_model_slots(cls, value: int) -> int:
+        """Clamp to `[0, CANDIDATE_LIMIT // 2]` (10, `CANDIDATE_LIMIT` in
+        `router_llm.router` is 20 — not imported here to avoid a cycle with
+        that module's own `from tret.config import get_settings`).
+
+        An operator-set value at or above `CANDIDATE_LIMIT` would let the new-
+        model reservation crowd out every proven, evidence-led candidate
+        instead of merely getting one uncurated release a fair chance at
+        being seen — the failure mode this field exists to avoid, not
+        reproduce at a different setting. `router_llm.router._reserve_new_
+        model_slots` clamps identically at read time as a second line of
+        defense for a `Settings`-like object built without this validator.
+        """
+        return max(0, min(value, 10))
+    # How recent "new" means for the reservation above (and for the "NEW,
+    # unreviewed" marker in the router prompt, `router_llm.prompts`) — a model
+    # counts as new if the first day of its `released` (YYYY-MM) month is
+    # within this many days of today. An unknown `released` is never new.
+    router_new_model_window_days: int = 60
 
     # Headless CLI ledger (`tret run`, tret/local_run.py). One JSON line is
     # appended here per run: what it cost, what it's estimated to have emitted,

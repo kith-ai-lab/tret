@@ -11,7 +11,8 @@
 # ── optional cost-model fields (all default to "none of this applies") ───────
 # cache_read_multiplier / cache_write_multiplier: override the module defaults
 #   (0.1x / 1.25x of input price) for a model whose provider prices its cache
-#   differently — e.g. claude-fable-5-1's 0.025x cache reads.
+#   differently — e.g. claude-fable-5-1's 0.025x cache reads and
+#   claude-opus-5-5's 0.05x cache reads.
 # pricing_tiers: a list of {above_prompt_tokens, input_multiplier,
 #   output_multiplier} steps. Above the threshold the *whole* request (not
 #   just the excess) bills at the multiplied rate — GPT-6 Astra doubles
@@ -170,6 +171,42 @@ models:
     supports_tools: true
     # supports_effort: true — claude-opus-5 is named in the effort doc's
     # supported-models list.
+    supports_effort: true
+
+  # Verified 2026-09-23 against Anthropic's model docs: $4/$20 per MTok, cache
+  # reads $0.20, 1M context, 128K max output. Breaking vs Opus 5: thinking
+  # cannot be disabled, forced tool_choice any/tool returns 400, effort
+  # default medium.
+  - id: anthropic/claude-opus-5-5
+    provider: anthropic
+    wire_id: claude-opus-5-5
+    display_name: Claude Opus 5.5
+    released: 2026-09
+    context_window: 1000000
+    input_price_per_mtok: 4.0
+    output_price_per_mtok: 20.0
+    # cache_read_multiplier: 0.05 — Anthropic prices Opus 5.5 cache reads at
+    # $0.20/MTok = 0.05x the $4 input price (module default is 0.1x).
+    cache_read_multiplier: 0.05
+    cache_write_multiplier: 1.25
+    # cost_tier: premium — _tier_from_price (catalog.py) would classify a
+    # bare $20 output price as "standard" (>= $4, < $30), not "premium". That
+    # function is only enforced against price_changes entries and live
+    # OpenRouter fetches, not against a curated entry's own base price, so
+    # declaring premium here loads without error; premium also matches this
+    # model's product positioning (Opus line, same tier as Opus 5/Fable 5.1)
+    # better than its raw price band would suggest.
+    cost_tier: premium
+    # XL: same reasoning as Opus 5 — the next non-thinking-first entry in the
+    # Opus line, no measured anchor. Bias note: thinking cannot be disabled on
+    # this model, so its real generation work (hidden reasoning tokens) is
+    # more likely undercounted here than for Opus 5.
+    energy_class: XL
+    strengths: [deep reasoning, long-form drafting, nuanced judgment, agentic tool use]
+    supports_tools: true
+    # supports_effort: true — Opus 5.5 accepts output_config.effort like Opus
+    # 5; its default effort is "medium" rather than "high", but tret always
+    # sends effort explicitly so that default never applies.
     supports_effort: true
 
   - id: anthropic/claude-sonnet-5

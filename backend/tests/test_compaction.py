@@ -352,6 +352,33 @@ async def test_the_summarizer_call_is_metered_against_its_own_model():
     assert spend["energy_accounting"]["model"] == model.id
 
 
+class _BilledButNoToolCallProvider:
+    """2026-09-23 fix: the call reached the provider and was billed, but
+    never produced a usable tool call — the failure `ProviderError.usage`
+    exists for (a downgraded tool_choice=auto call answering in prose)."""
+
+    async def complete_json(self, **kwargs):
+        raise ProviderError(
+            "anthropic",
+            "No tool_use block in structured completion",
+            usage=Usage(input_tokens=800, output_tokens=15),
+            model=kwargs.get("model", ""),
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_billed_no_tool_call_failure_still_records_spend():
+    model = _summarizer_model()
+    text, spend = await summarize(_BilledButNoToolCallProvider(), model, "some text")
+    assert text is None
+    assert spend is not None
+    assert spend["kind"] == "compaction_summary"
+    assert spend["model"] == model.id
+    assert spend["input_tokens"] == 800
+    assert spend["output_tokens"] == 15
+    assert spend["cost_usd"] > 0
+
+
 @pytest.mark.asyncio
 async def test_an_unusable_summary_is_still_paid_for():
     # The tokens were spent whatever came back. Dropping the cost of a bad

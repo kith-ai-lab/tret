@@ -285,6 +285,15 @@ class OpenAICompatProvider(Provider):
             **(default_headers or {}),
         }
         self._extra_body = extra_body or {}
+        # 2026-09-23 — some models (Claude Opus 5.5 and Claude Fable 5.1
+        # reached via OpenRouter, and likely future ones) return a 400 for a
+        # forced tool_choice (OpenRouter translates the OpenAI-style
+        # `{"type": "function", "function": {...}}` `complete_json` sends
+        # into the underlying provider's forced-choice shape). Once a wire
+        # model id has been seen to reject that, later calls on this instance
+        # skip straight to `tool_choice: "auto"` instead of re-paying for the
+        # failed attempt. Keyed by wire model id, scoped to this instance.
+        self._no_forced_tool_choice: set[str] = set()
 
     def _apply_cache_control(self, body: dict, messages: list[Msg]) -> None:
         """Hook: add prompt-cache breakpoints to an outgoing request body.
@@ -555,33 +564,40 @@ class OpenAICompatProvider(Provider):
         tool_name: str = "respond",
         max_tokens: int = 1024,
         timeout: float = 30.0,
+        allow_auto_fallback: bool = True,
     ) -> JsonCompletion:
-        body = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "description": "Respond with the structured result.",
-                        "parameters": schema,
-                    },
-                }
-            ],
-            "tool_choice": {"type": "function", "function": {"name": tool_name}},
-            "max_tokens": max_tokens,
-            **self._extra_body,
-        }
         # A forced tool call always carries `tools`, so this is unconditionally
         # the "tools present" case; the same operator prefs apply as on an
         # agent turn.
         provider_body = self._provider_body(True)
-        if provider_body:
-            body["provider"] = provider_body
+
+        def _build_body(*, forced: bool, effective_system: str) -> dict:
+            body = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": effective_system},
+                    {"role": "user", "content": prompt},
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "description": "Respond with the structured result.",
+                            "parameters": schema,
+                        },
+                    }
+                ],
+                "tool_choice": (
+                    {"type": "function", "function": {"name": tool_name}} if forced else "auto"
+                ),
+                "max_tokens": max_tokens,
+                **self._extra_body,
+            }
+            if provider_body:
+                body["provider"] = provider_body
+            return body
+
         # Same retry policy as `stream()` (see `providers.base`'s retry
         # constants): a non-streaming call has no partial output to protect,
         # so the only question is whether the failure itself is worth another
@@ -589,6 +605,14 @@ class OpenAICompatProvider(Provider):
         # 429 retries.
         rate_limit_attempts = 0
         retried_5xx = False
+        # 2026-09-23 — one-time downgrade from forced tool_choice to auto,
+        # independent of the 5xx/429 retry counters above (it is not a
+        # transient-failure retry; it is a "this model rejects this request
+        # shape" fallback, tried at most once per call).
+        forced = model not in self._no_forced_tool_choice
+        tried_auto_fallback = not allow_auto_fallback
+        effective_system = system
+        body = _build_body(forced=forced, effective_system=effective_system)
         while True:
             async with open_client(self.egress_class, timeout=timeout) as client:
                 try:
@@ -614,6 +638,30 @@ class OpenAICompatProvider(Provider):
                     await asyncio.sleep(RETRY_DELAY_SECONDS)
                     retried_5xx = True
                     continue
+                if (
+                    forced
+                    and not tried_auto_fallback
+                    and resp.status_code == 400
+                    # OpenRouter's own top-level error.message is often just
+                    # "Provider returned error" — the actual reason (e.g.
+                    # `tool_choice: type "tool" and "any" are not supported
+                    # for this model.`) lives nested in error.metadata.raw
+                    # (and error.metadata.previous_errors[*].raw), a JSON
+                    # string embedded inside the response body. Searched
+                    # against the untruncated `raw` body text rather than the
+                    # (possibly 2000-char-truncated) `message` used for the
+                    # exception, so a long previous_errors list can't push
+                    # the substring past the truncation point.
+                    and "tool_choice" in raw.lower()
+                ):
+                    self._no_forced_tool_choice.add(model)
+                    forced = False
+                    tried_auto_fallback = True
+                    effective_system = (
+                        f"{system}\n\nRespond only by calling the `{tool_name}` tool."
+                    )
+                    body = _build_body(forced=forced, effective_system=effective_system)
+                    continue
                 raise ProviderError(self.name, message, resp.status_code)
             break
         data = resp.json()
@@ -635,7 +683,14 @@ class OpenAICompatProvider(Provider):
                     )
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             raise ProviderError(self.name, f"Malformed structured completion: {e}") from e
-        raise ProviderError(self.name, "No forced tool call in structured completion")
+        raise ProviderError(
+            self.name,
+            "No forced tool call in structured completion",
+            usage=usage,
+            model=model,
+            served_by=served_by,
+            inference_geo=inference_geo,
+        )
 
 
 class KimiProvider(OpenAICompatProvider):

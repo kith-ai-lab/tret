@@ -50,7 +50,7 @@ FALLBACK_TABLE: dict[str, list[str]] = {
         "kimi/kimi-k2",
     ],
     "drafting": [
-        "anthropic/claude-opus-4-8",
+        "anthropic/claude-opus-5-5",
         "anthropic/claude-sonnet-5",
         "openrouter/google/gemini-3.6-flash",
     ],

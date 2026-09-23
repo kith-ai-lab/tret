@@ -15,6 +15,7 @@ historical behavior, so existing harnesses route unchanged.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import date, timedelta
 
 from tret.providers.catalog import ModelInfo
 from tret.router_llm.priors_base import ModelPrior
@@ -152,6 +153,30 @@ def released_rank(model: ModelInfo) -> int:
         return -(int(year) * 12 + int(month))
     except (AttributeError, ValueError):
         return 0
+
+
+# 2026-09-23: shared by the router's new-model slot reservation
+# (`router_llm.router._candidates_with_fit`) and the "NEW, unreviewed" marker
+# in the router prompt (`router_llm.prompts.render_router_prompt`) — one place
+# for the date math so the two never quietly drift apart on what "new" means.
+def is_new_model(released: str | None, today: date, window_days: int) -> bool:
+    """Is `released` (YYYY-MM) within `window_days` of `today`?
+
+    Compared against the *first day of the release month*, not the unknown
+    exact release day — so the answer only ever depends on the calendar month
+    OpenRouter reported, not on which day of that month `today` happens to be.
+    An unknown/unparseable `released` is never new: there is nothing to base
+    freshness on, and treating "unknown" as "new" would put every malformed
+    entry ahead of models tret actually knows the age of.
+    """
+    if not released:
+        return False
+    try:
+        year, month = released.split("-")[:2]
+        release_start = date(int(year), int(month), 1)
+    except (ValueError, TypeError):
+        return False
+    return release_start >= today - timedelta(days=window_days)
 
 
 def _out_price(m: ModelInfo):

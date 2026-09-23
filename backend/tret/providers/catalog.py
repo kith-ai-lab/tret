@@ -525,6 +525,34 @@ def _tier_from_price(output_price: Decimal) -> str:
     return "economy"
 
 
+# 2026-09-23: `strengths` for an uncurated entry, derived from structured
+# OpenRouter fields ONLY. Never `m.get("description")` — that is free-text a
+# third party wrote, it reaches `router_llm/prompts.py`'s candidate lines
+# verbatim, and an LLM router reading its own prompt is exactly the surface a
+# prompt-injection payload in that description would target. Everything here
+# comes from fields the router already trusts enough to price and gate on
+# (supported_parameters, context_length) or a narrow, defensively-guarded
+# architecture dict — never the free-text description or name.
+def _uncurated_strengths(m: dict, supported: list, context_window: int) -> list[str]:
+    tags: list[str] = []
+    if "reasoning" in supported:
+        tags.append("reasoning")
+    if "structured_outputs" in supported or "response_format" in supported:
+        tags.append("structured outputs")
+    architecture = m.get("architecture")
+    if isinstance(architecture, dict):
+        input_modalities = architecture.get("input_modalities")
+        modality = architecture.get("modality")
+        has_image = (isinstance(input_modalities, list) and "image" in input_modalities) or (
+            isinstance(modality, str) and "image" in modality
+        )
+        if has_image:
+            tags.append("vision")
+    if context_window >= 500_000:
+        tags.append("long context")
+    return tags
+
+
 def _parse_price_change_date(model_id: str, pc: dict) -> date:
     """A `price_changes` entry's `effective` value, as a clear ValueError on
     anything that is not an ISO `YYYY-MM-DD` date — `date.fromisoformat` on a
@@ -720,6 +748,13 @@ class ModelCatalog:
             tret_id = f"openrouter/{wire_id}"
             if not wire_id or tret_id in self._static:
                 continue
+            # 2026-09-23: OpenRouter lists async batch endpoints (e.g.
+            # "openai/gpt-6-luna:batch") alongside the interactive base id.
+            # They are not usable for a synchronous run, so they are dropped
+            # here rather than in a filter downstream — every other suffix
+            # variant (":free" etc.) is kept.
+            if wire_id.endswith(":batch"):
+                continue
             supported = m.get("supported_parameters") or []
             if "tools" not in supported:
                 continue
@@ -761,16 +796,17 @@ class ModelCatalog:
                         cache_kwargs["cache_read_multiplier"] = cache_read_price / in_price
                 except Exception:  # noqa: BLE001 - enrichment only, never fatal
                     pass
+            context_window = int(m.get("context_length") or 0)
             dynamic[tret_id] = ModelInfo(
                 id=tret_id,
                 provider="openrouter",
                 wire_id=wire_id,
                 display_name=m.get("name", wire_id),
-                context_window=int(m.get("context_length") or 0),
+                context_window=context_window,
                 input_price_per_mtok=in_price,
                 output_price_per_mtok=out_price,
                 cost_tier=_tier_from_price(out_price),
-                strengths=[],
+                strengths=_uncurated_strengths(m, supported, context_window),
                 supports_tools=True,
                 # Same source as supports_tools above: OpenRouter's unified
                 # `reasoning.effort` shows up as "reasoning" in this entry's
@@ -918,6 +954,10 @@ class ModelCatalog:
                 tool_name="probe_tool_support",
                 max_tokens=64,
                 timeout=_LOCAL_PROBE_TIMEOUT,
+                # This probe exists to answer whether the model honors a
+                # *forced* tool_choice — the 2026-09-23 auto-fallback would
+                # otherwise let a model that only supports "auto" pass it.
+                allow_auto_fallback=False,
             )
             ok = _probe_answered(result.payload)
         except Exception:

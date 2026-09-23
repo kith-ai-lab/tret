@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 
 from tret.engine.context import estimate_tokens
 from tret.engine.delegation import DELEGATION_TOOLS
+from tret.providers.base import ProviderError
 from tret.providers.base import Msg, ToolSpec
 from tret.services.emissions import overhead_call
 
@@ -448,7 +449,9 @@ async def summarize(
     The spend is returned even when the summary is unusable, because the tokens
     were spent either way — a summarizer that answers with an empty string still
     cost money, and that is precisely the case where silently dropping the cost
-    would flatter the numbers.
+    would flatter the numbers. The same is true when the provider call was
+    billed but never produced a tool call at all (`ProviderError.usage` set):
+    the spend still comes back, just with `summary=None`.
 
     `factors` (a `tret.services.emission_factors.FactorSet | None`) is passed
     straight through to `overhead_call`, so a summarizer call started under the
@@ -468,6 +471,19 @@ async def summarize(
             max_tokens=1500,
             timeout=timeout,
         )
+    except ProviderError as e:
+        # 2026-09-23 — the call reached the provider and was billed even
+        # though it never produced a usable summary (see anthropic.py's and
+        # openai_compat.py's "No ... tool call in structured completion"
+        # raises, now likelier since the tool_choice=auto fallback lets the
+        # model answer in prose instead of calling the tool). `e.usage` is
+        # only set for exactly that case — every other `ProviderError` (a
+        # network failure, a 5xx that exhausted its retry) never reached the
+        # provider with a billable response, so there is nothing to record.
+        if e.usage is not None:
+            spend = overhead_call("compaction_summary", model, e.usage, factors=factors)
+            return None, spend
+        return None, None
     except Exception:  # noqa: BLE001 - a lost summarizer must not fail the run
         return None, None
     spend = overhead_call("compaction_summary", model, completion.usage, factors=factors)

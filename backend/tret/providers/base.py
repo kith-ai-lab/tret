@@ -219,9 +219,33 @@ ProviderEvent = TextDelta | ToolCallComplete | TurnComplete
 
 
 class ProviderError(Exception):
-    def __init__(self, provider: str, message: str, status: int | None = None):
+    def __init__(
+        self,
+        provider: str,
+        message: str,
+        status: int | None = None,
+        *,
+        # 2026-09-23 — a `complete_json` call that reached the provider and was
+        # billed, but whose response didn't carry the forced tool call the
+        # caller needed (see anthropic.py's and openai_compat.py's "No ...
+        # tool call in structured completion" raises), must not make that
+        # spend invisible. `usage` carries what the call actually cost so a
+        # caller that cares (context compaction, the router) can still meter
+        # it via the same `overhead_call(...)` path a success uses. `None` —
+        # every raise before this existed, and every other failure mode,
+        # where nothing was billed — keeps a caller that just wants the
+        # error binding no differently than before.
+        usage: "Usage | None" = None,
+        model: str | None = None,
+        served_by: str | None = None,
+        inference_geo: str | None = None,
+    ):
         self.provider = provider
         self.status = status
+        self.usage = usage
+        self.model = model
+        self.served_by = served_by
+        self.inference_geo = inference_geo
         super().__init__(f"[{provider}] {message}")
 
 
@@ -394,6 +418,14 @@ class Provider(ABC):
         tool_name: str = "respond",
         max_tokens: int = 1024,
         timeout: float = 30.0,
+        # Whether a tool_choice 400 may be retried once with tool_choice
+        # downgraded to "auto" (see each implementation's "one-time downgrade"
+        # comment). True everywhere except the local tool-capability probe
+        # (`providers/catalog.py`'s `_probe_supports_tools`), which exists
+        # specifically to answer whether a model honors a *forced* tool
+        # choice — silently falling back to auto there would make every
+        # model pass the probe it is meant to fail.
+        allow_auto_fallback: bool = True,
     ) -> JsonCompletion:
         """Non-streaming structured completion via a forced tool call.
 

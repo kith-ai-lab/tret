@@ -1721,6 +1721,10 @@ class HarnessEngine:
         # services/emissions.overhead_call for why folding them in would be
         # wrong rather than just coarse.
         overhead_calls: list[dict] = [decision.spend] if decision.spend else []
+        # Router-call attempts within this same routing decision that were
+        # billed but raised before a decision existed to carry them (see
+        # `RoutingDecision.failed_call_spend`) — almost always empty.
+        overhead_calls.extend(decision.failed_call_spend)
         run.overhead = overhead_block(overhead_calls)
 
         # One segment per model this run uses. Almost always exactly one.

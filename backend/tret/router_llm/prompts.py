@@ -4,9 +4,19 @@ the version is persisted in every RoutingDecision so past routings stay interpre
 from __future__ import annotations
 
 import hashlib
+from datetime import date, datetime, timezone
 
+from tret.config import get_settings
 from tret.providers.catalog import ModelInfo
-from tret.router_llm.objectives import DEFAULT_OBJECTIVE, default_effort
+from tret.router_llm.objectives import DEFAULT_OBJECTIVE, default_effort, is_new_model
+
+
+def _today() -> date:
+    """Today's date (UTC) — mirrors `providers.catalog._today` /
+    `router_llm.router._today`, so a test can freeze it independently with
+    `monkeypatch.setattr(prompts, "_today", ...)`.
+    """
+    return datetime.now(timezone.utc).date()
 
 # route-v4 added the TRACK RECORD section. With no recorded outcomes the
 # section was omitted entirely and the rendered prompt was byte-identical to
@@ -19,7 +29,14 @@ from tret.router_llm.objectives import DEFAULT_OBJECTIVE, default_effort
 # objective and a shape, so there is always a default to state), so every
 # route-v5 prompt differs from what route-v4 would have rendered for the same
 # call, evidence or no evidence.
-ROUTING_PROMPT_VERSION = "route-v5"
+#
+# route-v6 (2026-09-23) appends a "NEW, unreviewed (released YYYY-MM)" marker
+# to a candidate line for a recently-released uncurated model (see
+# `router_llm.router._reserve_new_model_slots` / `objectives.is_new_model`).
+# Byte-identical to v5 whenever no candidate is new — no uncurated dynamic
+# catalog, `router_new_model_slots=0`, or simply no recent releases — which is
+# the common case for most installs most of the time.
+ROUTING_PROMPT_VERSION = "route-v6"
 
 ROUTER_SYSTEM = """\
 You are a model-selection router for an analyst workbench. Pick the single best \
@@ -212,6 +229,12 @@ def render_router_prompt(
         "CANDIDATES",
     ]
     show_energy = objective in _ENERGY_IN_CANDIDATES
+    # 2026-09-23: the same "new" definition the router's slot reservation uses
+    # (`router_llm.router._reserve_new_model_slots`) — an unreviewed model the
+    # reservation surfaced should read as unreviewed to the router model too,
+    # not silently blend in among the curated entries it is now sitting beside.
+    new_window_days = getattr(get_settings(), "router_new_model_window_days", 60)
+    today = _today()
     for m in candidates:
         strengths = ", ".join(m.strengths) if m.strengths else "(uncurated)"
         released = m.released or "unknown"
@@ -222,9 +245,14 @@ def render_router_prompt(
             if show_energy
             else ""
         )
+        new_marker = (
+            f" | NEW, unreviewed (released {m.released})"
+            if not m.curated and is_new_model(m.released, today, new_window_days)
+            else ""
+        )
         lines.append(
             f"  - id: {m.id} | released: {released} | tier: {m.cost_tier} | "
-            f"ctx: {m.context_window} | strengths: {strengths}{energy}"
+            f"ctx: {m.context_window} | strengths: {strengths}{energy}{new_marker}"
         )
     lines += ["", "CONSTRAINTS", f"  max_cost_tier: {max_cost_tier}"]
     lines += effort_block(objective, task_shape, max_cost_tier)

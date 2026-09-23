@@ -861,6 +861,23 @@ def test_new_september_models_load_with_the_expected_cost_model():
     assert opus_5.input_price_per_mtok == Decimal("5")
     assert opus_5.output_price_per_mtok == Decimal("25")
 
+    opus_55 = catalog.get("anthropic/claude-opus-5-5")
+    assert opus_55 is not None
+    assert opus_55.wire_id == "claude-opus-5-5"
+    assert opus_55.input_price_per_mtok == Decimal("4")
+    assert opus_55.output_price_per_mtok == Decimal("20")
+    # cost_tier is declared "premium" even though a bare $20 output price
+    # would classify as "standard" under _tier_from_price ($4 <= x < $30) —
+    # that function is only enforced against price_changes entries and live
+    # OpenRouter fetches, not a curated entry's own base price, so this loads
+    # without error.
+    assert opus_55.cost_tier == "premium"
+    assert opus_55.cache_read_multiplier == Decimal("0.05")
+    assert opus_55.cache_write_multiplier == Decimal("1.25")
+    assert opus_55.energy_class == "XL"
+    assert opus_55.supports_effort is True
+    assert opus_55.supports_tools is True
+
     astra = catalog.get("openrouter/openai/gpt-6-astra")
     assert astra is not None
     assert astra.cost_tier == "premium"

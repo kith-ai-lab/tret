@@ -30,7 +30,7 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from tret.config import get_settings
 from tret.providers.base import ProviderError
@@ -49,6 +49,7 @@ from tret.router_llm.objectives import (
     candidate_sort_key,
     default_effort,
     evidence_tier,
+    is_new_model,
     objective_of,
     within_cost_tier,
 )
@@ -78,6 +79,24 @@ __all__ = ["TIER_ORDER", "ModelRouter", "RoutingDecision", "RoutingUnavailable"]
 # How many candidates the router model is shown. The list is a prompt cost too.
 CANDIDATE_LIMIT = 20
 
+
+def _clamp_new_model_slots(slots: int) -> int:
+    """Clamp `router_new_model_slots` to `[0, CANDIDATE_LIMIT // 2]`.
+
+    2026-09-23 — an operator-set value above this was never rejected at
+    config time (see `config.Settings`), and `_reserve_new_model_slots`
+    trusted it outright: a slots value at or above `CANDIDATE_LIMIT` could
+    reserve the *entire* candidate list for uncurated new models, crowding
+    out every proven one the objective's own evidence-led ordering would
+    otherwise have shown the router. Half the limit still lets the
+    reservation dominate a quiet catalog day without ever being able to
+    consume it. `config.Settings` clamps the same way at parse time for the
+    normal path (an env var read at boot); this is the belt to that
+    braces — it also protects a caller (tests, `candidates_for`) that
+    builds a `Settings`-like object bypassing that validator.
+    """
+    return max(0, min(slots, CANDIDATE_LIMIT // 2))
+
 # Exploration (see `ModelRouter._exploration_pick`) only ever runs under these
 # two: the default objective, on the one shape cheap and safe enough to spend
 # a coin flip on. `extraction` pulls fields out of a document into a
@@ -102,6 +121,93 @@ def _max_cost_tier(model_policy: dict) -> str:
     """
     tier = (model_policy or {}).get("max_cost_tier") or DEFAULT_MAX_COST_TIER
     return tier if tier in TIER_ORDER else DEFAULT_MAX_COST_TIER
+
+
+def _today() -> date:
+    """Today's date (UTC) — mirrors `providers.catalog._today`.
+
+    Kept as its own module-level function (rather than imported) so a test can
+    freeze "today" for the new-model reservation below with
+    `monkeypatch.setattr(router, "_today", ...)` the same way catalog tests
+    freeze pricing, independent of whatever the catalog's own clock is doing.
+    """
+    return datetime.now(timezone.utc).date()
+
+
+def _reserve_new_model_slots(
+    candidates: list[ModelInfo],
+    priors: dict[str, ModelPrior] | None,
+    objective: str,
+) -> list[ModelInfo]:
+    """Reserve up to `settings.router_new_model_slots` of the candidate list's
+    slots for recently-released uncurated models, so one becomes reachable
+    within a day of shipping instead of waiting for a `models.yaml` edit.
+
+    `candidates` has already been filtered by `allowed`/provider-key/cost-tier,
+    sorted by the objective (evidence leading), and narrowed by context fit —
+    this only ever reorders/includes what already survived every one of those,
+    it never widens the policy. A local model is never "new" here (it is
+    zero-cost and never uncurated in the first place; see `within_cost_tier`'s
+    docstring on what `local` means), and a proven-poor model is excluded the
+    same way `fallback._drop_proven_poor` excludes one, using the same
+    `evidence_tier`/`TIER_POOR` reading.
+
+    Cold-start guarantee: with `settings.router_new_model_slots == 0` (or no
+    uncurated models at all — e.g. `TRET_OPENROUTER_CATALOG=false`, how Tret
+    Cloud runs), `reserved` is empty and this returns `candidates` unchanged,
+    so the final `out[:CANDIDATE_LIMIT]` slice in `_candidates_with_fit` is
+    byte-for-byte what it has always been.
+
+    2026-09-23 — the same guarantee now also holds for a new model that
+    would have reached the router on its own merits: a reserved model
+    already inside `candidates[:CANDIDATE_LIMIT]` (the natural top) keeps
+    its natural position instead of being popped out to the end of the
+    list. It still counts against `slots` — the reservation is a cap on how
+    many new models this function vouches for in total, not just on how
+    many it has to go out of its way to move — but only a reserved model
+    *beyond* that natural cutoff is actually pulled forward, and only up to
+    however many slots the already-in-place ones didn't use, displacing the
+    tail of the natural list exactly as before.
+    """
+    settings = get_settings()
+    # getattr, not settings.router_new_model_slots: some tests substitute a
+    # narrow fake Settings (e.g. test_cooldown_disabled_via_settings_never_
+    # excludes) that only defines the fields their own scenario cares about —
+    # this feature must degrade to "off" against one of those, not raise.
+    slots = getattr(settings, "router_new_model_slots", 0)
+    slots = _clamp_new_model_slots(slots)
+    if slots <= 0:
+        return candidates
+    today = _today()
+    window_days = getattr(settings, "router_new_model_window_days", 60)
+    new_models = [
+        m
+        for m in candidates
+        if not m.curated
+        and m.provider != "local"
+        and is_new_model(m.released, today, window_days)
+        and evidence_tier(priors.get(m.id) if priors else None) != TIER_POOR
+    ]
+    if not new_models:
+        return candidates
+    # Objective order first (stable sort), then newest-first as the primary
+    # key (a second stable sort preserves the objective order among ties) —
+    # "newest-first, then by the objective's own key" per the reservation spec.
+    new_models.sort(key=candidate_sort_key(objective, priors))
+    new_models.sort(key=lambda m: m.released or "", reverse=True)
+    reserved = new_models[:slots]
+    if not reserved:
+        return candidates
+    # A reserved model already inside the natural top CANDIDATE_LIMIT needs no
+    # help reaching the router — it keeps its position, and only spends its
+    # slot in the reservation count, not in the "must be moved" list below.
+    natural_top_ids = {m.id for m in candidates[:CANDIDATE_LIMIT]}
+    to_pull_in = [m for m in reserved if m.id not in natural_top_ids]
+    if not to_pull_in:
+        return candidates
+    pull_ids = {m.id for m in to_pull_in}
+    base = [m for m in candidates if m.id not in pull_ids]
+    return base[: CANDIDATE_LIMIT - len(to_pull_in)] + to_pull_in
 
 
 def _apply_context_fit(
@@ -376,6 +482,15 @@ class RoutingDecision:
     # energy class and its provider's own grid factor — see
     # services/emissions.overhead_call. Null when no router was contacted.
     spend: dict | None = None
+    # 2026-09-23 — spend from earlier router-call attempts in the same
+    # `route()` invocation that were billed but raised before a decision
+    # existed to carry them (`ProviderError.usage`; see the `except
+    # ProviderError` branch in the LLM-router loop above). Almost always
+    # empty — the common case is either no failure or a failure with nothing
+    # billed. `spend` above stays the *this decision's own call* record;
+    # these are the calls that came before it and would otherwise have gone
+    # unmetered.
+    failed_call_spend: list[dict] = field(default_factory=list)
     fallback_used: bool = False
     override: str | None = None  # "user_pin" | "run_override" | None
     latency_ms: int = 0
@@ -480,6 +595,7 @@ class ModelRouter:
         # before it — only ever narrows or reorders what survived the earlier
         # filters. See `_apply_context_fit`.
         out, context_fit = _apply_context_fit(out, min_context_window, priors)
+        out = _reserve_new_model_slots(out, priors, objective)
         return out[:CANDIDATE_LIMIT], context_fit
 
     async def candidates_for(
@@ -496,6 +612,13 @@ class ModelRouter:
         same provider-key check, the same cost ceiling. Re-deriving that list in
         the engine is how the two would drift, and a drift here means a switch
         landing outside the harness policy.
+
+        2026-09-23: this calls `_candidates` -> `_candidates_with_fit`, so it
+        also inherits the new-model slot reservation. That is desirable, not
+        incidental: a mid-run switch (e.g. away from a failing model) should be
+        able to reach a just-released model exactly as an initial routing
+        decision can — a supervisor stuck choosing only among the same 17
+        curated entries defeats the point of the reservation.
         """
         await self._catalog.warm_once()
         objective = objective_of(model_policy)
@@ -884,6 +1007,12 @@ class ModelRouter:
         router_usable = router_info is not None
         prompt = None
         prompt_fingerprint = None
+        # 2026-09-23 — spend from router calls that were billed but raised
+        # (`ProviderError.usage` set) before a `RoutingDecision` existed to
+        # carry it. Whatever decision this call eventually returns — a later
+        # retry's success, or the deterministic fallback below — reports
+        # these alongside its own `spend` so none of it goes unmetered.
+        failed_call_spend: list[dict] = []
         if router_usable:
             prompt = render_router_prompt(
                 task_type=task_type,
@@ -985,12 +1114,42 @@ class ModelRouter:
                             router_prompt=prompt,
                             router_prompt_sha256=prompt_fingerprint,
                             spend=spend,
+                            failed_call_spend=failed_call_spend,
                             latency_ms=int((time.monotonic() - start) * 1000),
                             effort=chosen_effort,
                             router_served_by=completion.served_by,
                             exploration=exploration,
                         )
-                except ProviderError:
+                except ProviderError as e:
+                    # 2026-09-23 — a call that reached the router model and
+                    # was billed, but never returned a usable tool call
+                    # (`e.usage` set — see providers/base.py's `ProviderError.
+                    # usage` and anthropic.py's/openai_compat.py's "No ...
+                    # tool call" raises), must not vanish from the audit
+                    # trail the way it would if this `continue` were left
+                    # alone. There is no `RoutingDecision` to attach it to
+                    # yet — the router hasn't chosen a model, may retry, or
+                    # may fall through to the deterministic fallback below —
+                    # so it accumulates here and rides whatever decision this
+                    # call eventually returns.
+                    if e.usage is not None:
+                        from tret.services.emission_settings import factor_set_for
+
+                        try:
+                            routing_factors = factor_set_for(
+                                router_info.provider,
+                                workspace_doc=emissions_workspace_doc,
+                                managed_doc=emissions_managed_doc,
+                                model_id=router_info.id,
+                                at=emissions_at,
+                            )
+                        except Exception:
+                            routing_factors = None
+                        failed_call_spend.append(
+                            overhead_call(
+                                "routing", router_info, e.usage, factors=routing_factors
+                            )
+                        )
                     continue
 
         # 2. Deterministic fallback. The cost ceiling travels with it: this path
@@ -1046,6 +1205,7 @@ class ModelRouter:
             # unavailable exactly when it mattered.
             router_prompt=prompt,
             router_prompt_sha256=prompt_fingerprint,
+            failed_call_spend=failed_call_spend,
             fallback_used=True,
             # `fallback_model` picks from its own catalog scan, not from
             # `candidates` (see that function's docstring), so the chosen

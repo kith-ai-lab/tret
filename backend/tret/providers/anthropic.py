@@ -316,6 +316,14 @@ class AnthropicProvider(Provider):
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key, http_client=build_client(CLASS_PROVIDER, timeout=600.0)
         )
+        # 2026-09-23 — Claude Opus 5.5 and Claude Fable 5.1 (and, per the
+        # provider, likely future models) return a 400 for a forced
+        # tool_choice (`{"type": "tool", "name": ...}` / `{"type": "any"}`).
+        # `complete_json` forces the tool on every call; once a wire model id
+        # has been seen to reject that, later calls skip straight to
+        # `{"type": "auto"}` instead of re-paying for the failed attempt.
+        # Keyed by wire model id, scoped to this provider instance.
+        self._no_forced_tool_choice: set[str] = set()
 
     async def stream(
         self,
@@ -445,6 +453,7 @@ class AnthropicProvider(Provider):
         tool_name: str = "respond",
         max_tokens: int = 1024,
         timeout: float = 30.0,
+        allow_auto_fallback: bool = True,
     ) -> JsonCompletion:
         # Same retry policy as `stream()` — see `providers.base`'s retry
         # constants and this class's `_failure_from_api_error`. A
@@ -454,15 +463,27 @@ class AnthropicProvider(Provider):
         # retries.
         rate_limit_attempts = 0
         retried_5xx = False
+        # 2026-09-23 — one-time downgrade from forced tool_choice to auto,
+        # independent of the 5xx/429 retry counters above (it is not a
+        # transient-failure retry; it is a "this model rejects this request
+        # shape" fallback, tried at most once per call). `forced` tracks which
+        # shape this attempt used so the except branch below knows whether a
+        # downgrade-and-retry is even possible.
+        forced = model not in self._no_forced_tool_choice
+        tried_auto_fallback = not allow_auto_fallback
+        effective_system = system
         while True:
+            tool_choice = (
+                {"type": "tool", "name": tool_name} if forced else {"type": "auto"}
+            )
             try:
                 msg = await self._client.messages.create(
                     model=model,
-                    system=system,
+                    system=effective_system,
                     messages=[{"role": "user", "content": prompt}],
                     tools=[{"name": tool_name, "description": "Respond with the structured result.",
                             "input_schema": schema}],
-                    tool_choice={"type": "tool", "name": tool_name},
+                    tool_choice=tool_choice,
                     max_tokens=max_tokens,
                     timeout=timeout,
                 )
@@ -480,6 +501,19 @@ class AnthropicProvider(Provider):
                     await asyncio.sleep(RETRY_DELAY_SECONDS)
                     retried_5xx = True
                     continue
+                if (
+                    forced
+                    and not tried_auto_fallback
+                    and failure.status == 400
+                    and "tool_choice" in failure.message.lower()
+                ):
+                    self._no_forced_tool_choice.add(model)
+                    forced = False
+                    tried_auto_fallback = True
+                    effective_system = (
+                        f"{system}\n\nRespond only by calling the `{tool_name}` tool."
+                    )
+                    continue
                 raise ProviderError("anthropic", failure.message, failure.status) from e
         for block in msg.content:
             if block.type == "tool_use" and block.name == tool_name:
@@ -490,7 +524,14 @@ class AnthropicProvider(Provider):
                     served_by=SERVED_BY,
                     inference_geo=_inference_geo_of(msg),
                 )
-        raise ProviderError("anthropic", "No tool_use block in structured completion")
+        raise ProviderError(
+            "anthropic",
+            "No tool_use block in structured completion",
+            usage=_usage_of(getattr(msg, "usage", None)),
+            model=model,
+            served_by=SERVED_BY,
+            inference_geo=_inference_geo_of(msg),
+        )
 
     async def count_tokens(
         self,
