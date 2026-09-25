@@ -295,7 +295,11 @@ async def test_prepare_child_refuses_below_the_floor_and_inserts_no_row(db):  # 
 
     with pytest.raises(ToolError) as excinfo:
         await _prepare_child(ctx, "assess_risk", {}, budget_share=3)
-    assert "not enough to delegate" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "not enough to delegate" in message
+    # 2dp, not the raw repeating-decimal division (0.10 / 3 = 0.0333...).
+    assert "$0.03 per child" in message
+    assert "0.0333" not in message
 
     after = (await db.execute(select(func.count()).select_from(Run))).scalar()
     assert after == before  # no row inserted
@@ -548,6 +552,37 @@ async def test_prepare_child_engine_label_overrides_model_supplied_task_input_la
     assert prepared.label == "Real Label"
     child = await db.get(Run, prepared.child_id)
     assert child.task_input[LABEL_KEY] == "Real Label"
+
+
+async def test_prepare_child_drops_model_supplied_engine_keys_from_task_input(
+    db,  # noqa: F811
+):
+    """A TASK child's task_input is the model's free-form dict — every
+    `_`-prefixed key in it (engine plumbing like `_model_override`,
+    `_objective`, `_history`) must be dropped before the engine stamps its
+    own, so a model can't steer a child's model/objective/history by naming
+    them itself. A normal key is untouched."""
+    from tret.engine.tools import DELEGATION_DEPTH_KEY
+
+    workspace_id, project_id, parent_id, _specialist_id = await _setup(db)
+    ctx = _ctx(db, workspace_id=workspace_id, project_id=project_id, run_id=parent_id)
+
+    prepared = await _prepare_child(
+        ctx,
+        "assess_risk",
+        {
+            "_model_override": "gpt-nope",
+            "_objective": "token_conservation",
+            "_history": [{"role": "user", "content": "hi"}],
+            "site": "Cedar Landing",
+        },
+    )
+
+    child = await db.get(Run, prepared.child_id)
+    assert child.task_input == {
+        "site": "Cedar Landing",
+        DELEGATION_DEPTH_KEY: 1,
+    }
 
 
 # ── delegation event payloads ────────────────────────────────────────────────

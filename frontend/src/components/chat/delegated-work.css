@@ -87,6 +87,17 @@
   font-size: 10.5px;
 }
 
+/* Live-only heartbeat suffix (delegation_progress) — sits right after the
+   label while a child is still running, so a multi-minute delegation reads
+   as progress rather than a hang. */
+.dw-progress {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Completed-turn disclosure — same collapse pattern as .chat-footprint. */
 .dw-disclosure {
   margin-top: 6px;

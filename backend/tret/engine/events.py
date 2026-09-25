@@ -55,11 +55,24 @@ class RunEvent:
     # `delegation_started` also carries `task_type`; `delegation_finished`
     # carries `status` ("unknown" if the child's row could not be read back)
     # and, when it could, the child's own `cost_usd`.
+    #
+    # `delegation_progress` is also published on the *parent's* bus (from
+    # `HarnessEngine._publish_delegation_progress` in engine/harness.py, called
+    # from the iteration loop and from `_publish_tool_calls`) — never on a root
+    # run's own bus, since a root has no parent to notify. Between
+    # `delegation_started` and `delegation_finished` a child can run for
+    # minutes with nothing on the parent's stream to show for it, so this
+    # heartbeats `{child_run_id, iteration, max_iterations, tool, model}` once
+    # per iteration (`tool` None) and once per tool call that iteration issues
+    # (`tool` its name). These count toward the *parent's* backlog cap
+    # (`RunEventBus._max_backlog`, 5000 by default) like any other event on
+    # that bus, but at `max_iterations` events-per-iteration volumes that cap
+    # is nowhere close to binding.
     type: str  # routing|context_composition|text_delta|tool_call|tool_result|
     #            finding_recorded|usage|budget_warning|budget_alert|
     #            tools_withheld|context_pressure|compaction|model_switch|
     #            switch_refused|delegation_started|delegation_finished|
-    #            lesson_proposed|done|error
+    #            delegation_progress|lesson_proposed|done|error
     data: dict = field(default_factory=dict)
     ts: float = field(default_factory=time.time)
 

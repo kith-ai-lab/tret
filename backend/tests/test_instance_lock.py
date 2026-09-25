@@ -414,3 +414,74 @@ async def test_release_tolerates_a_dead_connection(caplog, raise_on):
     caplog.clear()
     await lock.release()
     assert caplog.text == ""
+
+
+class _FakeReleaseConn:
+    """A lock connection at shutdown whose `execute` raises one specific
+    exception (or none) — simpler than `_FakeConn` above since these tests
+    don't care about implicit-transaction bookkeeping, only which exception
+    from the unlock statement gets which log level, and that `close()` still
+    runs regardless."""
+
+    def __init__(self, exc: Exception | None):
+        self._exc = exc
+        self.calls: list[str] = []
+
+    async def execute(self, stmt, params=None):
+        self.calls.append("execute")
+        if self._exc is not None:
+            raise self._exc
+        return _FakeResult(None)
+
+    async def commit(self):
+        self.calls.append("commit")
+
+    async def close(self):
+        self.calls.append("close")
+
+
+async def test_release_tolerates_an_already_closed_lock_connection(caplog):
+    """The bug this fixes: the lock connection is held for the process's
+    whole life and closed by the time shutdown's unlock runs, so
+    `pg_advisory_unlock` raises `InterfaceError` for a lock Postgres already
+    released the instant that socket died — every deploy logged a full
+    traceback for exactly this. That expected case is one INFO line, and
+    cleanup (`close()`) still has to run even though the unlock itself
+    failed."""
+    from sqlalchemy.exc import InterfaceError
+
+    conn = _FakeReleaseConn(InterfaceError("connection is closed", None, None))
+    lock = il.InstanceLock(conn, "held")
+
+    with caplog.at_level(logging.INFO, logger="tret.instance_lock"):
+        await lock.release()  # must not raise
+
+    assert "already closed" in caplog.text
+    assert "Traceback" not in caplog.text
+    assert conn.calls == ["execute", "close"]  # commit skipped, cleanup still ran
+
+
+async def test_release_still_unlocks_and_cleans_up_normally():
+    conn = _FakeReleaseConn(None)
+    lock = il.InstanceLock(conn, "held")
+
+    await lock.release()
+
+    assert conn.calls == ["execute", "commit", "close"]
+
+
+async def test_release_logs_a_warning_not_info_for_an_unrelated_error(caplog):
+    """An exception that isn't the closed-connection family is a real,
+    possibly-new failure mode — it must stay visible at WARNING (just without
+    the traceback noise), not get swallowed at INFO alongside the expected
+    case."""
+    conn = _FakeReleaseConn(RuntimeError("boom"))
+    lock = il.InstanceLock(conn, "held")
+
+    with caplog.at_level(logging.INFO, logger="tret.instance_lock"):
+        await lock.release()  # must not raise
+
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+    assert "boom" in caplog.text
+    assert "Traceback" not in caplog.text
+    assert conn.calls == ["execute", "close"]  # commit skipped, cleanup still ran

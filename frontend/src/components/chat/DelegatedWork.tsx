@@ -29,6 +29,11 @@ interface Row {
   costUsd: number | null
   batchId: string | null
   index: number | null
+  /** Live-only, from `delegation_progress` (useRunStream.ts) — undefined for
+   *  `childToRow`'s persisted rows, which have no such event to read. */
+  iteration?: number | null
+  maxIterations?: number | null
+  lastTool?: string | null
 }
 
 function resolveLabel(
@@ -83,6 +88,13 @@ function DelegatedWorkRows({ rows }: { rows: Row[] }) {
           {g.rows.map((row) => (
             <Link key={row.childRunId} to={`/runs/${row.childRunId}`} className="dw-row">
               <span className="dw-label">{row.label}</span>
+              {row.status === 'running' && row.iteration != null && (
+                <span className="dw-progress">
+                  · step {row.iteration}
+                  {row.maxIterations != null ? `/${row.maxIterations}` : ''}
+                  {row.lastTool ? ` · ${row.lastTool}` : ''}
+                </span>
+              )}
               {row.harness && <span className="dw-harness">{row.harness}</span>}
               <StatusBadge status={row.status} />
               {row.costUsd != null && <span className="dw-cost">{formatCost(row.costUsd)}</span>}
@@ -106,6 +118,9 @@ export function DelegatedWork({ items }: { items: DelegationItem[] }) {
     costUsd: item.costUsd,
     batchId: item.batchId,
     index: item.index,
+    iteration: item.iteration,
+    maxIterations: item.maxIterations,
+    lastTool: item.lastTool,
   }))
   return (
     <div className="dw-block">

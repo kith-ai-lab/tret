@@ -58,12 +58,26 @@ import logging
 from typing import Literal
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, InterfaceError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tret.config import get_settings
 from tret.db.engine import get_engine
 
 log = logging.getLogger("tret.instance_lock")
+
+# The lock connection is held for the process lifetime and never returned to
+# a pool, so by the time `release()` runs at shutdown its socket may already
+# be gone (the driver notices on the next statement, not proactively) — the
+# raw asyncpg exception can surface unwrapped by SQLAlchemy in that case.
+# asyncpg is an optional dependency of the (non-Postgres) test/CLI install,
+# so this import is guarded; an empty tuple below just never matches.
+try:
+    from asyncpg.exceptions import InterfaceError as _AsyncpgInterfaceError
+
+    ASYNCPG_INTERFACE_ERRORS: tuple[type[BaseException], ...] = (_AsyncpgInterfaceError,)
+except ImportError:  # pragma: no cover - asyncpg absent (sqlite-only install)
+    ASYNCPG_INTERFACE_ERRORS = ()
 
 # Arbitrary but fixed, exactly like db/migrate.py's SCHEMA_LOCK_KEY, and
 # deliberately a different value so the two locks (schema-upgrade-in-
@@ -208,21 +222,47 @@ class InstanceLock:
         lock the instant that connection's underlying socket goes away, so a
         failure here is noisy shutdown logging, never a stuck lock — and it
         must never be allowed to raise out of the lifespan's `finally`.
+
+        The expected shape of that is the process's *own* shutdown having
+        already closed this exact connection before the lifespan gets here —
+        `pg_advisory_unlock` then raises `InterfaceError` (or a connection-
+        invalidated `DBAPIError`, or the raw asyncpg error if it isn't wrapped)
+        for a lock Postgres already released the instant the socket went
+        away. That expected case is one INFO line, not a traceback — every
+        deploy was logging a full traceback for exactly this, drowning out
+        real shutdown errors. Anything else is still a WARNING (no traceback)
+        so a genuinely new failure mode does not go unnoticed. Either way,
+        `conn.close()` still has to run — hence the `finally` below.
         """
         if self._conn is None:
             return
         conn, self._conn = self._conn, None
+        warning = (
+            "failed to cleanly release the instance lock connection — it was likely "
+            "already dead or terminated; Postgres drops a session-scoped advisory lock "
+            "on its own once the underlying connection is gone, so this is not a stuck lock: %s"
+        )
         try:
             await conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": INSTANCE_LOCK_KEY})
             await conn.commit()
-            await conn.close()
-        except Exception:
-            log.warning(
-                "failed to cleanly release the instance lock connection — it was likely "
-                "already dead or terminated; Postgres drops a session-scoped advisory lock "
-                "on its own once the underlying connection is gone, so this is not a stuck lock",
-                exc_info=True,
+        except (InterfaceError, DBAPIError, *ASYNCPG_INTERFACE_ERRORS) as exc:
+            already_closed = isinstance(exc, (InterfaceError, *ASYNCPG_INTERFACE_ERRORS)) or (
+                isinstance(exc, DBAPIError) and exc.connection_invalidated
             )
+            if already_closed:
+                log.info(
+                    "instance lock connection was already closed at shutdown; the "
+                    "session-level advisory lock is already released along with it"
+                )
+            else:
+                log.warning(warning, exc)
+        except Exception as exc:
+            log.warning(warning, exc)
+        finally:
+            try:
+                await conn.close()
+            except Exception as exc:
+                log.warning(warning, exc)
 
 
 async def acquire_instance_lock() -> InstanceLock:

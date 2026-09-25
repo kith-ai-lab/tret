@@ -69,6 +69,13 @@ export interface DelegationItem {
    *  could not report one, or 'running' while still in flight. */
   status: 'running' | string
   costUsd: number | null
+  /** From `delegation_progress` (harness.py, published on this run's own bus
+   *  while the child is in flight — see the handler below). Undefined until
+   *  the first progress frame for this child arrives; null is never used here
+   *  since the engine always sends an iteration/model once it sends anything. */
+  iteration?: number | null
+  maxIterations?: number | null
+  lastTool?: string | null
 }
 
 /** The engine crossed a run's soft output budget and told the model to finalize
@@ -368,6 +375,26 @@ export function useRunStream(runId: string | null): RunStreamState {
         }
         const next = [...s.delegations]
         next[idx] = { ...next[idx], status, costUsd }
+        return { ...s, delegations: next }
+      }),
+    )
+    on('delegation_progress', (d) =>
+      setState((s) => {
+        const childRunId = String(d.child_run_id ?? '')
+        if (!childRunId) return s
+        // The `delegation_started` frame may not have arrived yet (backlog
+        // ordering, or a reconnect that dropped it) — a progress frame never
+        // creates the row itself, only updates one that already exists.
+        const idx = s.delegations.findIndex((x) => x.childRunId === childRunId)
+        if (idx === -1) return s
+        const next = [...s.delegations]
+        next[idx] = {
+          ...next[idx],
+          iteration: typeof d.iteration === 'number' ? d.iteration : next[idx].iteration,
+          maxIterations:
+            typeof d.max_iterations === 'number' ? d.max_iterations : next[idx].maxIterations,
+          lastTool: typeof d.tool === 'string' ? d.tool : null,
+        }
         return { ...s, delegations: next }
       }),
     )

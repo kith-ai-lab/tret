@@ -1906,6 +1906,8 @@ class HarnessEngine:
                 run.status = "cancelled"
                 break
 
+            await self._publish_delegation_progress(run, iteration, max_iterations)
+
             assistant_text: list[str] = []
             tool_calls: list[ToolCall] = []
             turn: TurnComplete | None = None
@@ -2476,7 +2478,7 @@ class HarnessEngine:
             # its write succeeded, and persisted state never contradicts the
             # run's status or events.** Commit-on-success / rollback-on-error
             # below is the other half of that invariant.
-            await self._publish_tool_calls(run.id, tool_calls)
+            await self._publish_tool_calls(run.id, tool_calls, run=run, iteration=iteration, max_iterations=max_iterations)
             for tc in tool_calls:
                 spec = self._spec_for(tool_specs, tc.name)
                 findings_before = len(ctx.findings_created)
@@ -3407,12 +3409,68 @@ class HarnessEngine:
     def _spec_for(tool_specs, name):
         return next((t for t in tool_specs if t.name == name), None)
 
-    async def _publish_tool_calls(self, run_id: uuid.UUID, tool_calls: list[ToolCall]) -> None:
+    async def _publish_tool_calls(
+        self,
+        run_id: uuid.UUID,
+        tool_calls: list[ToolCall],
+        *,
+        run: Run | None = None,
+        iteration: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        # `run`/`iteration`/`max_iterations` are optional so a caller that only
+        # wants the `tool_call` events (none exist today, but the params are
+        # kept optional rather than required) doesn't have to thread them
+        # through. When they're given, each tool call also gets a
+        # `delegation_progress` heartbeat on the parent's bus — see
+        # `_publish_delegation_progress`.
         for tc in tool_calls:
             await self.bus.publish(
                 run_id,
                 RunEvent("tool_call", {"tool": tc.name, "id": tc.id, "arguments": tc.arguments}),
             )
+            if run is not None and iteration is not None and max_iterations is not None:
+                await self._publish_delegation_progress(run, iteration, max_iterations, tool=tc.name)
+
+    async def _publish_delegation_progress(
+        self,
+        run: Run,
+        iteration: int,
+        max_iterations: int,
+        tool: str | None = None,
+    ) -> None:
+        """Heartbeat for a delegated child, published on the PARENT's bus.
+
+        `delegation_started` / `delegation_finished` (engine/tools.py) bracket a
+        child's whole lifetime, but a child that runs for minutes between those
+        two events is otherwise invisible to the parent's SSE stream — the chat
+        UI's live "Delegated work" block can only show "running" the entire
+        time. This fills that gap with no timer: one event at the top of every
+        iteration (`tool=None`) and one per tool call that iteration issues, so
+        a child using `max_iterations` iterations and up to a handful of tools
+        per turn publishes at most `max_iterations * (1 + tools_per_turn)`
+        events — cheap, and self-limiting with the loop it rides on.
+        No-ops for a root run (`parent_run_id is None`): there is no parent bus
+        to publish progress to. These events count toward the *parent's*
+        backlog cap (`RunEventBus._max_backlog`, 5000), same as
+        `delegation_started`/`delegation_finished`; at the volumes above that
+        cap is nowhere close to binding.
+        """
+        if run.parent_run_id is None:
+            return
+        await self.bus.publish(
+            run.parent_run_id,
+            RunEvent(
+                "delegation_progress",
+                {
+                    "child_run_id": str(run.id),
+                    "iteration": iteration,
+                    "max_iterations": max_iterations,
+                    "tool": tool,
+                    "model": run.model_used,
+                },
+            ),
+        )
 
 
 async def _unknown_tool(name: str) -> tuple[str, bool]:
