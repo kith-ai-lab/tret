@@ -87,7 +87,7 @@ figures in the previews are sample data.
   white card. Behaviour is unchanged.
 - **Assistant avatar.** The brand slash replaces the letter "b" (step 5).
 
-## How it ships: a brand layer (recommended; confirm with Diego and William)
+## How it ships: a brand layer for the hosted build only (decided)
 
 tret-cloud builds tret core's `frontend/` unmodified, so the hosted Kith
 Climate app and the open-source product share one frontend. This design is
@@ -164,20 +164,22 @@ loaded:
 **Not verified:** screens whose look depends on inline styles (step 6). The
 previews exercise classes only.
 
+## Decisions (Diego, 2026-09-25)
+
+- **Scope:** a brand layer for the hosted Kith Climate build only. The
+  open-source build keeps its current look.
+- **No "Kith Climate" name in the app.** The brand shows through the design
+  system and the slash, not a label.
+- **Timing:** the developer implementing this decides when it lands.
+
 ## Open items
 
-- **Confirm the brand-layer approach** (Diego and William). The alternative is
-  restyling core for everyone, which would rebrand open-source tret.
-- **Timing.** Land after the 26 Sept QA freeze. Keep it off `main` until the
-  30 Sept open-source launch is out, unless decided otherwise.
 - **Receipt wording is unchanged.** "than frontier" and "vs frontier" come
   from `emissions.ts` and are a methodology question
   (`docs/eco-accounting.md` says "not a saving"). They are not a design
   question.
 - **Composer controls (brief Q4)** are now consistent with the other selects,
   but they still don't distinguish harness, objective and model visually.
-- **Kith Climate endorsement.** Should the app say "Kith Climate" anywhere,
-  for example on the login card or sidebar footer? Not decided.
 - **Nav grouping** for 11 items (brief Q1) is optional. The slash marker makes
   the current page clear. Grouping would be a core `App.tsx` change.
 - **Chart series 5** is a green close to the status green. Keep status colours
