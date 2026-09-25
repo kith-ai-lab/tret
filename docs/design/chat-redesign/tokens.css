@@ -1,0 +1,73 @@
+/* tret — chat redesign v1: design tokens.
+
+   Written against frontend/src/theme/global.css: same variable names, so
+   adopting this is a variable swap, not a rename. Values are from the design
+   canvas (source/Main.dc.html) unless marked otherwise.
+
+   Markers:
+     (designed)  value taken directly from the canvas
+     (new)       token the canvas introduces that global.css does not have yet
+     (derived)   the canvas does not use this token; value proposed here so the
+                 dark set is complete in the same warm family. Review before
+                 shipping.
+     (kept)      unchanged from global.css today
+
+   Fonts: the canvas loads 'Instrument Sans' / 'JetBrains Mono' from Google
+   Fonts; the app's self-hosted variable fonts (--sans / --mono) are the same
+   families, so keep those. */
+
+/* ---- Light: unchanged except two new tokens ---------------------------- */
+:root {
+  --text-faint: rgba(33, 31, 26, 0.4);             /* (new) timestamps, placeholders, hints */
+  --shadow: 0 10px 34px rgba(33, 31, 26, 0.14);    /* (new) popovers / menus */
+}
+
+/* ---- Dark: warm ink + copper accent (replaces the blue-gray set) ------- */
+[data-theme="dark"] {
+  /* Surfaces */
+  --bg: #17140f;                                   /* (designed) was #0e1013 */
+  --bg-panel: #1e1a14;                             /* (designed) was #14171c */
+  --bg-input: #100e0a;                             /* (designed) was #0b0d10 */
+  --bg-hover: #241f18;                             /* (designed) was #1a1e24 */
+  --border: rgba(246, 244, 238, 0.14);             /* (designed) was #262b33 */
+  --border-subtle: rgba(246, 244, 238, 0.08);      /* (designed) was #1d2127 */
+
+  /* Text */
+  --text: #f1ede4;                                 /* (designed) was #d7dbe1 */
+  --text-muted: rgba(246, 244, 238, 0.56);         /* (designed) was #7d8590 */
+  --text-faint: rgba(246, 244, 238, 0.36);         /* (new) */
+
+  /* Accent: copper, not blue. The one change the brief asked for. */
+  --accent: #e0a868;                               /* (designed) was #8ab4f8 */
+  --accent-dim: rgba(224, 168, 104, 0.15);         /* (designed) */
+  --accent-border: rgba(224, 168, 104, 0.34);      /* (designed) */
+  --accent-contrast: #1c150d;                      /* (designed) */
+
+  /* Semantic status */
+  --green: #7ed3a6;                                /* (designed) was #56c17e */
+  --green-dim: rgba(126, 211, 166, 0.14);          /* (derived) */
+  --green-border: rgba(126, 211, 166, 0.34);       /* (designed) */
+  --red: #e0917a;                                  /* (designed) was #e06c6c */
+  --red-dim: rgba(224, 145, 122, 0.14);            /* (derived) */
+  --red-border: rgba(224, 145, 122, 0.34);         /* (derived) */
+  --violet: #b7a3e8;                               /* (designed) was #b18ae8 */
+  --violet-dim: rgba(183, 163, 232, 0.15);         /* (designed) */
+  --violet-border: rgba(183, 163, 232, 0.34);      /* (designed) */
+  /* amber / blue: not in the canvas. Blue stops being the accent, so it is
+     free to stay a plain semantic "info" blue. */
+  --amber: #d9a648;                                /* (kept) */
+  --amber-dim: rgba(217, 166, 72, 0.14);           /* (kept) */
+  --amber-border: rgba(217, 166, 72, 0.3);         /* (kept) */
+  --blue: #8ab4f8;                                 /* (kept) */
+  --blue-dim: rgba(138, 180, 248, 0.12);           /* (kept) */
+  --blue-border: rgba(138, 180, 248, 0.3);         /* (kept) */
+  --gray: rgba(246, 244, 238, 0.56);               /* (derived) = --text-muted */
+  --gray-dim: rgba(246, 244, 238, 0.1);            /* (derived) */
+  --gray-border: rgba(246, 244, 238, 0.24);        /* (derived) */
+  --gray-stripe: rgba(246, 244, 238, 0.04);        /* (derived) */
+
+  --shadow: 0 16px 44px rgba(0, 0, 0, 0.55);       /* (new) */
+
+  /* --chart-1..6: kept as today (dark-tuned ramp already warm-compatible). */
+  /* --brand-slash: unchanged; identical in both themes by design. */
+}
