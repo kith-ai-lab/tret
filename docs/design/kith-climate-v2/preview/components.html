@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en" data-brand="kith-climate">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tret · Kith Climate v2 preview · views</title>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg">
+<!-- The app's real stylesheet, then the brand layer. Every class below is one
+     global.css defines and a view renders. All names and figures are sample
+     data. Preview-only layout (section headings, the grid) is inline. -->
+<link rel="stylesheet" href="../../../../frontend/src/theme/global.css">
+<link rel="stylesheet" href="../brand-kith-climate.css">
+<script src="_preview.js"></script>
+<style>
+  .pv-h { margin: 36px 0 12px; font: 500 11px/1 system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; color: #62666a; }
+  .pv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; align-items: start; }
+</style>
+</head>
+<body>
+<div id="root">
+<div class="app-shell">
+
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <span class="wordmark" aria-label="tret" style="font-size:20px"><span class="wm-text">tre</span><span class="wm-slash-box"><span class="wm-slash"></span></span><span class="wm-text">t</span></span>
+    </div>
+    <div class="workspace-switcher">
+      <button type="button" class="workspace-switcher-trigger">
+        <span class="workspace-switcher-name">Harborview Advisory</span>
+        <span class="workspace-switcher-kind">team</span>
+      </button>
+    </div>
+    <nav>
+      <a href="#">Chat</a>
+      <a href="#">Workbench</a>
+      <a href="#" class="active" aria-current="page">Runs</a>
+      <a href="#">Approvals</a>
+      <a href="#">Analytics</a>
+      <a href="#">Emissions</a>
+      <a href="#">Deliverables</a>
+      <a href="#">Documents</a>
+      <a href="#">Packs</a>
+      <a href="#">Harnesses</a>
+      <a href="#">Settings</a>
+    </nav>
+    <button type="button" class="theme-toggle"><span aria-hidden="true">☀</span>Light</button>
+    <div class="sidebar-footer">
+      <div class="who">Dana Whitfield</div>
+      <div class="role">analyst</div>
+      <button class="btn btn-sm">Log out</button>
+    </div>
+  </aside>
+
+  <div class="main-col">
+    <main class="main">
+
+      <!-- Runs (list view) -->
+      <h1 class="view-title">Runs</h1>
+      <p class="view-sub">Every run, chat-triggered or direct, with its routing, cost, carbon and full audit trail.</p>
+
+      <div class="tabs">
+        <button class="tab active">All</button>
+        <button class="tab">Chat</button>
+        <button class="tab">Direct</button>
+      </div>
+
+      <div class="row" style="margin-bottom:16px;flex-wrap:wrap">
+        <select style="width:180px" aria-label="Status"><option>All statuses</option></select>
+        <input type="text" placeholder="Search by run, harness or model" style="width:280px">
+        <label class="runs-delegated-toggle check-row"><input type="checkbox" checked> show delegated runs</label>
+        <span style="flex:1"></span>
+        <button class="btn btn-primary">New run</button>
+      </div>
+
+      <div class="panel" style="padding:4px 8px">
+        <table class="mono-table">
+          <thead><tr><th>Run</th><th>Harness</th><th>Model</th><th>Status</th><th class="num">Cost</th><th class="num">CO₂e (est.)</th><th>Started</th></tr></thead>
+          <tbody>
+            <tr class="clickable" tabindex="0"><td>r_8f21c</td><td>vendor-score-check</td><td>haiku-4.5</td><td><span class="badge badge-green">completed</span></td><td class="num">$0.0213</td><td class="num">0.41 g<span class="band-under">0.25–0.66</span></td><td>14:02</td></tr>
+            <tr class="clickable" tabindex="0"><td>r_8f1d0</td><td>tcfd-drafting</td><td>sonnet-5</td><td><span class="badge badge-blue pulse">running</span></td><td class="num">$0.1170</td><td class="num">2.30 g<span class="band-under">1.40–3.70</span></td><td>13:58</td></tr>
+            <tr class="clickable" tabindex="0"><td>r_8f0a9</td><td>evidence-extract</td><td>haiku-4.5</td><td><span class="badge badge-amber">completed_without_output</span></td><td class="num">$0.0040</td><td class="num">0.08 g<span class="band-under">0.05–0.13</span></td><td>13:41</td></tr>
+            <tr class="clickable" tabindex="0"><td>r_8e77f</td><td>vendor-score-check</td><td>local · llama-3.3</td><td><span class="badge badge-red">failed</span></td><td class="num">$0.0000</td><td class="num">—</td><td>12:15</td></tr>
+            <tr class="clickable" tabindex="0"><td>r_8e61b</td><td>dataset-survey</td><td>haiku-4.5</td><td><span class="badge badge-gray">cancelled</span></td><td class="num">$0.0011</td><td class="num">0.02 g<span class="band-under">0.01–0.03</span></td><td>11:50</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pv-h">Approvals · forms · states</div>
+      <div class="pv-grid">
+
+        <div class="panel">
+          <div class="row" style="justify-content:space-between;margin-bottom:10px">
+            <div class="mono-label">Finding F-0192</div>
+            <span class="badge badge-amber">draft</span>
+          </div>
+          <div style="font-size:15px;font-weight:500;margin-bottom:6px">Alder Point flood score: use with caveat</div>
+          <p class="prose-stream" style="color:var(--text-muted);margin-bottom:14px">Score vintage is inside policy; the elevation model (2019) and defence data are not.</p>
+          <div class="row" style="flex-wrap:wrap;margin-bottom:14px">
+            <span class="chip">doctrine v3.2</span><span class="chip">climate-risk pack</span><span class="badge badge-violet">override</span>
+          </div>
+          <div class="row">
+            <button class="btn btn-approve">Approve</button>
+            <button class="btn btn-reject">Reject</button>
+            <span style="flex:1"></span>
+            <button class="btn btn-sm">View run</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="mono-label" style="margin-bottom:14px">Provider key</div>
+          <div class="field"><label class="mono-label">Provider</label><select><option>OpenRouter</option></select></div>
+          <div class="field"><label class="mono-label">API key</label><input type="password" placeholder="sk-or-…"></div>
+          <div class="field"><label class="mono-label">Note</label><textarea rows="2" placeholder="Who owns this key and when it rotates"></textarea></div>
+          <label class="check-row"><input type="checkbox" checked> Use for delegated runs <span class="desc">— sub-runs inherit this key</span></label>
+          <div class="row" style="margin-top:16px">
+            <button class="btn btn-primary">Save key</button>
+            <button class="btn">Cancel</button>
+            <span style="flex:1"></span>
+            <button class="btn btn-sm btn-danger">Remove</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="mono-label" style="margin-bottom:12px">Status badges</div>
+          <div class="row" style="flex-wrap:wrap;gap:8px;margin-bottom:16px">
+            <span class="badge badge-green">approved</span><span class="badge badge-amber">open</span><span class="badge badge-red">rejected</span><span class="badge badge-blue">submitted</span><span class="badge badge-violet">admin</span><span class="badge badge-gray">queued</span>
+          </div>
+          <div class="callout callout-note" style="margin-bottom:10px"><span class="callout-title">Note</span>Carbon figures are estimates from token counts. They are never measured.</div>
+          <div class="callout callout-warn" style="margin-bottom:12px"><span class="callout-title">Caveat</span>Two factors in this run are placeholders. Treat the total as indicative.</div>
+          <div class="fine-print">Factor provenance: grid intensity from explicit configuration (us-east). <button class="link-button">Methodology</button></div>
+          <div class="hr"></div>
+          <div class="row"><span class="empty" style="padding:0">No data requests open.</span></div>
+          <div class="error-text" style="margin-top:6px">Couldn't reach the provider. The run is queued and will retry.</div>
+        </div>
+
+      </div>
+
+      <div class="pv-h">Emissions · analytics</div>
+      <div class="pv-grid">
+
+        <div class="panel">
+          <div class="mono-label" style="margin-bottom:12px">Model mix, last 30 days</div>
+          <div class="stacked-bar" style="height:12px;gap:2px;margin-bottom:12px">
+            <span style="width:38%;background:var(--chart-1)"></span><span style="width:22%;background:var(--chart-2)"></span><span style="width:16%;background:var(--chart-3)"></span><span style="width:12%;background:var(--chart-4)"></span><span style="width:8%;background:var(--chart-5)"></span><span style="width:4%;background:var(--chart-6)"></span>
+          </div>
+          <div class="row" style="flex-wrap:wrap;gap:6px 16px;font-size:12.5px;color:var(--text-muted)">
+            <span><i class="swatch" style="background:var(--chart-1)"></i>haiku-4.5 38%</span><span><i class="swatch" style="background:var(--chart-2)"></i>sonnet-5 22%</span><span><i class="swatch" style="background:var(--chart-3)"></i>gpt-5-mini 16%</span><span><i class="swatch" style="background:var(--chart-4)"></i>gemini-3-flash 12%</span><span><i class="swatch" style="background:var(--chart-5)"></i>llama-3.3 8%</span><span><i class="swatch" style="background:var(--chart-6)"></i>other 4%</span>
+          </div>
+          <div class="mono-label" style="margin:20px 0 8px">Runs per day</div>
+          <div class="spark">
+            <div class="spark-col"><i style="height:30%"></i></div><div class="spark-col"><i style="height:45%"></i></div><div class="spark-col"><i style="height:38%"></i></div><div class="spark-col"><i style="height:62%"></i></div><div class="spark-col"><i style="height:55%"></i></div><div class="spark-col"><i style="height:20%"></i></div><div class="spark-col"><i style="height:15%"></i></div><div class="spark-col"><i style="height:48%"></i></div><div class="spark-col"><i style="height:70%"></i></div><div class="spark-col"><i style="height:66%"></i></div><div class="spark-col"><i style="height:81%"></i></div><div class="spark-col"><i style="height:59%"></i></div><div class="spark-col"><i style="height:24%"></i></div><div class="spark-col"><i style="height:18%"></i></div><div class="spark-col"><i style="height:52%"></i></div><div class="spark-col"><i style="height:77%"></i></div><div class="spark-col"><i style="height:90%"></i></div><div class="spark-col"><i style="height:68%"></i></div>
+          </div>
+          <div class="spark-axis"><span>Sep 8</span><span>Sep 25</span></div>
+        </div>
+
+        <div class="panel">
+          <div class="mono-label" style="margin-bottom:12px">Scope 2, location vs market basis</div>
+          <div class="stack" style="gap:10px">
+            <div class="cmp-row"><span>location</span><span class="cmp-track"><span style="width:84%;background:var(--chart-1)"></span></span><span class="cmp-val">412 g</span></div>
+            <div class="cmp-row"><span>market</span><span class="cmp-track"><span style="width:51%;background:var(--chart-3)"></span></span><span class="cmp-val">251 g</span></div>
+          </div>
+          <div class="config-stats" style="margin-top:18px">
+            <div class="config-stat"><div class="mono-label">Runs</div><div class="mono-body">1,284</div></div>
+            <div class="config-stat"><div class="mono-label">Spend</div><div class="mono-body">$41.20</div></div>
+            <div class="config-stat"><div class="mono-label">CO₂e (est.)</div><div class="mono-body">663 g<span class="band-under">402–1,060</span></div></div>
+          </div>
+          <div class="ticker" style="margin-top:16px"><span class="t-item"><span class="t-key">live</span><span class="t-val">3 runs</span></span><span class="t-item"><span class="t-key">tokens</span><span class="t-val">18,402</span></span><span class="t-item"><span class="t-key">cost</span><span class="t-val">$0.2210</span></span></div>
+        </div>
+
+      </div>
+
+      <div class="pv-h">Documents · list / detail · drop zone · code</div>
+      <div class="list-detail">
+        <div class="list-detail-list" style="width:240px">
+          <button class="list-item active">q3-governance-questionnaire.pdf<span class="sub">done · 42 pages</span></button>
+          <button class="list-item">flood_scores_2026.csv<span class="sub">done · 1,204 rows</span></button>
+          <button class="list-item">alder-point-survey-2019.pdf<span class="sub">pending</span></button>
+        </div>
+        <div class="list-detail-detail">
+          <div class="dropzone" style="margin-bottom:16px">Drop documents here, or click to choose files</div>
+          <pre class="code-block">{
+  "document": "q3-governance-questionnaire.pdf",
+  "extracted_findings": 7,
+  "status": "done"
+}</pre>
+          <details class="tool-row" style="margin-top:12px" open>
+            <summary><span class="tool-name">lookup_dataset</span><span>flood_scores_2026 · 3 rows</span></summary>
+            <div class="tool-body">site_id=S-003  score=0.71  vintage=2026-03</div>
+          </details>
+        </div>
+      </div>
+
+      <div class="pv-h">Modal · login</div>
+      <div class="pv-grid">
+        <div class="modal-backdrop" style="position:relative;inset:auto;z-index:auto;min-height:320px;border-radius:8px">
+          <div class="modal-panel" style="max-width:420px">
+            <div class="modal-head"><h2 class="modal-title">Emissions methodology</h2><span style="flex:1"></span><button class="icon-btn" aria-label="Close">✕</button></div>
+            <div class="modal-body md"><p>Energy is estimated from input and output token counts against a model's published profile, then converted with the configured grid factor.</p><h3>What is not counted</h3><p>Embodied hardware and network transfer.</p></div>
+            <div class="modal-foot"><button class="btn btn-sm">Close</button></div>
+          </div>
+        </div>
+        <div class="login-wrap" style="height:auto;padding:24px 0;background:var(--bg);border-radius:8px">
+          <div class="login-card">
+            <div class="sidebar-brand" style="padding:0 0 18px"><span class="wordmark" aria-label="tret" style="font-size:24px"><span class="wm-text">tre</span><span class="wm-slash-box"><span class="wm-slash"></span></span><span class="wm-text">t</span></span></div>
+            <div class="field"><label class="mono-label">Email</label><input type="email" placeholder="name@company.com"></div>
+            <div class="field"><label class="mono-label">Password</label><input type="password"></div>
+            <button class="btn btn-primary" style="width:100%">Sign in</button>
+            <div class="login-divider">or</div>
+            <button class="btn" style="width:100%">Continue with SSO</button>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+</div>
+</div>
+</body>
+</html>

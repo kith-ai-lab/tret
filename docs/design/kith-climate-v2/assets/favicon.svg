@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#1A1D21"/>
+  <defs>
+    <linearGradient id="green" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5B9A8B" stop-opacity=".1"/>
+      <stop offset=".25" stop-color="#5B9A8B"/>
+      <stop offset=".75" stop-color="#5B9A8B"/>
+      <stop offset="1" stop-color="#5B9A8B" stop-opacity=".1"/>
+    </linearGradient>
+  </defs>
+  <!-- Tile and slash match the kithclimate.com favicon (#1A1D21 tile): #5B9A8B, tip fades, 8deg tilt.
+       Kept 6px wide (vs the 9:130 ratio) so it stays legible at 16px. -->
+  <g transform="rotate(8 32 32)">
+    <rect x="29" y="14" width="6" height="36" rx="3" fill="url(#green)"/>
+  </g>
+</svg>
