@@ -425,7 +425,14 @@ def create_app() -> FastAPI:
                 if served is not None:
                     return FileResponse(served)
                 # Unknown paths are SPA deep links: hand back the app shell.
-                return FileResponse(index)
+                # `no-cache` (revalidate, not "never store"): the shell is the
+                # only unhashed file, and served without a header a browser
+                # heuristically kept it for days — after a deploy, users ran
+                # the old bundle until they hard-reloaded, because the stale
+                # shell still named the old hashed asset. The assets under
+                # /assets carry a content hash in their name and stay
+                # cacheable as before.
+                return FileResponse(index, headers={"Cache-Control": "no-cache"})
 
     return app
 

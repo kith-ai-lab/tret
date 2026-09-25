@@ -128,6 +128,17 @@ def test_spa_deep_links_fall_through_to_index(client):
         assert _is_index(client.get(path)), path
 
 
+def test_the_app_shell_is_served_with_no_cache(client):
+    """The shell is the one unhashed file: a browser that keeps it past a
+    deploy keeps naming the old bundle. Deep links get the same header."""
+    for path in ("/", "/runs/abc"):
+        response = client.get(path)
+        assert _is_index(response)
+        assert response.headers.get("cache-control") == "no-cache"
+    # Hashed assets are not touched by this.
+    assert "no-cache" not in (client.get("/assets/app-abc123.js").headers.get("cache-control") or "")
+
+
 def test_assets_mount_is_still_protected(client):
     # Control from the audit: StaticFiles already refuses traversal. If this
     # ever starts returning 200 the mount has regressed independently.
