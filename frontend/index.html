@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-brand="__TRET_BRAND__">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,11 +8,15 @@
     <script>
       // Applied before first paint so a stored dark preference never flashes
       // light. Absent/invalid storage falls through to the light default set
-      // in global.css — no attribute needed for that case.
+      // in global.css — no attribute needed for that case. The kith-climate
+      // brand is light only, so it ignores a stored dark preference.
       (function () {
+        var html = document.documentElement
+        var brand = html.getAttribute('data-brand')
+        if (!brand) html.removeAttribute('data-brand')
         try {
           var t = localStorage.getItem('tret-theme')
-          if (t === 'dark') document.documentElement.setAttribute('data-theme', 'dark')
+          if (t === 'dark' && brand !== 'kith-climate') html.setAttribute('data-theme', 'dark')
         } catch (e) {}
       })()
     </script>

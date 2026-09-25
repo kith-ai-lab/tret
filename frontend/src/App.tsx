@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 
 import { api, ApiError, type User } from './api/client'
+import { LIGHT_ONLY } from './brand'
 import { FirstRunSetup } from './components/shared/FirstRunSetup'
 import { AppRoutes } from './router'
 import { Login } from './views/Login'
@@ -14,12 +15,15 @@ const THEME_KEY = 'tret-theme'
 // Mirrors the inline script in index.html <head>, which already applied the
 // stored preference before first paint — this just brings React's state in
 // sync with whatever's on <html> so the toggle reflects reality on mount.
+// A light-only brand pins light and never writes the stored preference, so the
+// user's choice survives for the open-source build.
 function useTheme(): [Theme, () => void] {
   const [theme, setTheme] = useState<Theme>(() =>
-    document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light',
+    !LIGHT_ONLY && document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light',
   )
 
   useEffect(() => {
+    if (LIGHT_ONLY) return
     if (theme === 'dark') {
       document.documentElement.setAttribute('data-theme', 'dark')
     } else {
@@ -133,15 +137,17 @@ function Sidebar({
         ))}
         <MarketplaceReviewNavItem />
       </nav>
-      <button
-        type="button"
-        className="theme-toggle"
-        onClick={onToggleTheme}
-        title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-      >
-        <span aria-hidden="true">{theme === 'dark' ? '☾' : '☀'}</span>
-        {theme === 'dark' ? 'Dark' : 'Light'}
-      </button>
+      {!LIGHT_ONLY && (
+        <button
+          type="button"
+          className="theme-toggle"
+          onClick={onToggleTheme}
+          title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+        >
+          <span aria-hidden="true">{theme === 'dark' ? '☾' : '☀'}</span>
+          {theme === 'dark' ? 'Dark' : 'Light'}
+        </button>
+      )}
       <div className="sidebar-footer">
         <div className="who" title={user.email}>
           {user.display_name}

@@ -542,7 +542,11 @@ function Thread({
 }
 
 function AssistantAvatar() {
-  return <div className="chat-avatar">b</div>
+  return (
+    <div className="chat-avatar">
+      <span className="chat-avatar-slash" />
+    </div>
+  )
 }
 
 function AssistantTurn({ message }: { message: ChatMessage }) {
