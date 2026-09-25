@@ -283,7 +283,7 @@ export function CrossBasisNotice({ energy }: { energy: EnergyAccounting }) {
         style={{
           marginBottom: 8,
           fontFamily: 'var(--mono)',
-          fontSize: 10.5,
+          fontSize: 'var(--fs-xs)',
           color: 'var(--text-muted)',
         }}
       >
@@ -374,7 +374,7 @@ export function EmissionsCalc({ energy }: { energy: EnergyAccounting }) {
         <details className="tool-row">
           <summary>
             <span className="tool-name">factor provenance, caveats and sensitivity</span>
-            <span style={{ color: 'var(--text-muted)', fontSize: 10.5 }}>
+            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-xs)' }}>
               {formatTokens(energy.factors?.length ?? 0)} factors ·{' '}
               {formatTokens(energy.caveats?.length ?? 0)} named biases
             </span>

@@ -325,7 +325,7 @@ function EmptyWindow({ days }: { days: number }) {
       <div className="mono-label" style={{ marginBottom: 8 }}>
         No runs in the last {days} days
       </div>
-      <div className="fine-print" style={{ fontSize: 11.5 }}>
+      <div className="fine-print" style={{ fontSize: 'var(--fs-sm)' }}>
         Once a run finishes, this page fills in with:
         <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
           <li>total estimated gCO₂e and energy for the window, and how many runs carry an estimate</li>
@@ -351,7 +351,7 @@ function NoEstimates({ totals }: { totals: EmissionsTotals }) {
       <div className="mono-label" style={{ marginBottom: 8 }}>
         No estimates in this window
       </div>
-      <div className="fine-print" style={{ fontSize: 11.5 }}>
+      <div className="fine-print" style={{ fontSize: 'var(--fs-sm)' }}>
         All {formatTokens(totals.runs)} run(s) here carry no footprint estimate — they are reported
         as having no figure, not as having emitted nothing. A run has no estimate when it failed
         before any model call, or when it predates emissions accounting.
@@ -1242,7 +1242,7 @@ function Factors({ data }: { data: EmissionsAnalytics }) {
           <details className="tool-row">
             <summary>
               <span className="tool-name">recording bases in this window</span>
-              <span style={{ color: 'var(--text-muted)', fontSize: 10.5 }}>
+              <span style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-xs)' }}>
                 {f.recorded.length} combination{f.recorded.length === 1 ? '' : 's'} of deployment,
                 grid intensity, PUE, basis and factor source
               </span>

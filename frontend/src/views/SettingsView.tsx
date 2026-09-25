@@ -182,7 +182,7 @@ function SpendBudgetSection() {
                     <label
                       key={t}
                       className="row"
-                      style={{ gap: 4, alignItems: 'center', fontFamily: 'var(--mono)', fontSize: 12 }}
+                      style={{ gap: 4, alignItems: 'center', fontFamily: 'var(--mono)', fontSize: 'var(--fs-sm)' }}
                     >
                       <input type="checkbox" checked={alerts.includes(t)} onChange={() => toggleAlert(t)} />
                       {Math.round(t * 100)}%
@@ -209,7 +209,7 @@ function SpendBudgetSection() {
               )}
             </div>
             {capIsValid && capValue < 5 && (
-              <div className="mono-body" style={{ marginTop: 8, color: 'var(--text-muted)', fontSize: 12 }}>
+              <div className="mono-body" style={{ marginTop: 8, color: 'var(--text-muted)', fontSize: 'var(--fs-sm)' }}>
                 Runs reserve their own cost cap (default $5) before starting; caps below that rely
                 on the run's actual spend.
               </div>
@@ -405,7 +405,7 @@ function WorkspaceMembersSection() {
       render: (m) => (
         <div>
           <div>{m.display_name}</div>
-          <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>{m.email}</div>
+          <div style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-xs)' }}>{m.email}</div>
         </div>
       ),
     },
@@ -573,7 +573,7 @@ function WorkspaceMembersSection() {
             style={{
               marginTop: 6,
               fontFamily: 'var(--mono)',
-              fontSize: 10.5,
+              fontSize: 'var(--fs-xs)',
               color: 'var(--text-muted)',
             }}
           >
@@ -771,7 +771,7 @@ function InstanceUsersSection() {
             style={{
               marginTop: 6,
               fontFamily: 'var(--mono)',
-              fontSize: 10.5,
+              fontSize: 'var(--fs-xs)',
               color: 'var(--text-muted)',
             }}
           >
@@ -812,7 +812,7 @@ function InstanceUsersSection() {
               style={{
                 marginTop: 8,
                 fontFamily: 'var(--mono)',
-                fontSize: 11,
+                fontSize: 'var(--fs-xs)',
                 color: 'var(--text-muted)',
               }}
             >
@@ -925,7 +925,7 @@ function ProviderKeys() {
             style={{
               marginBottom: 14,
               fontFamily: 'var(--mono)',
-              fontSize: 10.5,
+              fontSize: 'var(--fs-xs)',
               color: 'var(--text-muted)',
             }}
           >
@@ -994,7 +994,7 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
       <div
         style={{
           fontFamily: 'var(--mono)',
-          fontSize: 11,
+          fontSize: 'var(--fs-xs)',
           color: 'var(--text-muted)',
           marginTop: 4,
         }}
@@ -1016,7 +1016,7 @@ function SetupGuide() {
           <div
             style={{
               fontFamily: 'var(--mono)',
-              fontSize: 11,
+              fontSize: 'var(--fs-xs)',
               color: 'var(--text-muted)',
               marginTop: 4,
             }}
@@ -1059,7 +1059,7 @@ function SetupGuide() {
             style={{
               marginTop: 14,
               fontFamily: 'var(--mono)',
-              fontSize: 11,
+              fontSize: 'var(--fs-xs)',
               color: 'var(--text-muted)',
             }}
           >
@@ -1112,7 +1112,7 @@ function TestResult({ result }: { result: LocalProviderTest }) {
           style={{
             marginTop: 6,
             fontFamily: 'var(--mono)',
-            fontSize: 11,
+            fontSize: 'var(--fs-xs)',
             color: 'var(--text-muted)',
           }}
         >
@@ -1140,7 +1140,7 @@ function TestResult({ result }: { result: LocalProviderTest }) {
           style={{
             marginTop: 4,
             fontFamily: 'var(--mono)',
-            fontSize: 11,
+            fontSize: 'var(--fs-xs)',
             color: 'var(--text-muted)',
           }}
         >
@@ -1184,7 +1184,7 @@ function TestResult({ result }: { result: LocalProviderTest }) {
           style={{
             marginTop: 6,
             fontFamily: 'var(--mono)',
-            fontSize: 11,
+            fontSize: 'var(--fs-xs)',
             color: 'var(--text-muted)',
           }}
         >
@@ -1211,7 +1211,7 @@ function LocalModels({ configured }: { configured: boolean }) {
           <div
             style={{
               fontFamily: 'var(--mono)',
-              fontSize: 11,
+              fontSize: 'var(--fs-xs)',
               color: 'var(--text-muted)',
               marginTop: 4,
             }}

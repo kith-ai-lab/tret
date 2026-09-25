@@ -62,6 +62,13 @@
   );
   --mono: "JetBrains Mono Variable", ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --sans: "Instrument Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* Small-text size steps for inline styles (style={{ fontSize: 'var(--fs-xs)' }}).
+     Inline styles beat any stylesheet, so a literal size can't be restyled by a
+     brand layer; a variable can. Brand layers redefine these. */
+  --fs-2xs: 10px;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13.5px;
 }
 
 [data-theme="dark"] {

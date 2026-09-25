@@ -92,7 +92,7 @@ export function ContextComposition({ composition }: { composition: Composition }
         <details className="tool-row" style={{ marginTop: 10 }}>
           <summary>
             <span className="tool-name">blocks</span>
-            <span style={{ color: 'var(--text-muted)', fontSize: 10.5 }}>
+            <span style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-xs)' }}>
               {composition.blocks.length} accounted · {formatTokens(composition.total_chars)} chars
             </span>
           </summary>

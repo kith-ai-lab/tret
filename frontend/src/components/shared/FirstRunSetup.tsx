@@ -107,7 +107,7 @@ export function FirstRunSetup() {
 function SelfHostWelcome({ isAdmin, closeWelcome }: { isAdmin: boolean; closeWelcome: () => void }) {
   return (
     <div className="stack" style={{ gap: 16 }}>
-      <div style={{ fontSize: 13.5, lineHeight: 1.6 }}>
+      <div style={{ fontSize: 'var(--fs-md)', lineHeight: 1.6 }}>
         tret sends every task to an AI model, and no provider is set up yet. The fastest
         path is to paste one API key — an OpenRouter key alone is enough (it reaches many
         models), and Anthropic or Moonshot (kimi) keys work too.
@@ -163,7 +163,7 @@ function CloudWelcome({
 
   return (
     <div className="stack" style={{ gap: 16 }}>
-      <div style={{ fontSize: 13.5, lineHeight: 1.6 }}>
+      <div style={{ fontSize: 'var(--fs-md)', lineHeight: 1.6 }}>
         tret runs AI models for you — no provider account or API key required. Usage is billed
         from a prepaid credit balance{status.enabled ? '' : ' once this workspace adds some'}.
       </div>

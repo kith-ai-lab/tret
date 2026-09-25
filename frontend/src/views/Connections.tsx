@@ -579,7 +579,7 @@ function M365WriteBackSection({
                 <div key={target.slug} className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
                   <div className="row" style={{ gap: 8, minWidth: 0 }}>
                     <span className="mono-body">{target.label}</span>
-                    <span className="desc" style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
+                    <span className="desc" style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)' }}>
                       {target.path}
                     </span>
                     <span className="chip" style={{ fontFamily: 'var(--mono)' }}>
@@ -677,7 +677,7 @@ function M365ActivitySection() {
                     <tr key={row.id}>
                       <td>{row.created_at ? formatDateTime(row.created_at) : '—'}</td>
                       <td>{row.action}</td>
-                      <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{row.target ?? '—'}</td>
+                      <td style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)' }}>{row.target ?? '—'}</td>
                       <td>{row.bytes ?? '—'}</td>
                       <td>{row.detail ?? '—'}</td>
                     </tr>

@@ -85,7 +85,7 @@ export function DelegationPanel({ run }: { run: RunDetail }) {
         <>
           {isFirstOfBatch.get(c.id) && (
             <div
-              style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}
+              style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-2xs)', color: 'var(--text-muted)', marginBottom: 2 }}
             >
               parallel batch
             </div>
@@ -96,7 +96,7 @@ export function DelegationPanel({ run }: { run: RunDetail }) {
           {c.delegation_label ? (
             <>
               <span className="mono-body">{c.delegation_label}</span>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)', color: 'var(--text-muted)' }}>
                 {c.delegation_kind === 'subagent' ? 'subagent' : c.task_type}
               </div>
             </>
@@ -200,7 +200,7 @@ export function DelegationPanel({ run }: { run: RunDetail }) {
             {formatWh(run.tree.energy_wh) ?? NO_ESTIMATE}
           </div>
           <div
-            style={{ marginTop: 4, fontFamily: 'var(--mono)', fontSize: 10.5, color: 'var(--text-muted)' }}
+            style={{ marginTop: 4, fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)', color: 'var(--text-muted)' }}
           >
             Each run&rsquo;s own cost covers only its own model calls; delegated work is counted on
             the run that did it.

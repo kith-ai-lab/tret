@@ -69,7 +69,7 @@ function EntryDetail({ entry }: { entry: EmissionsFactorHistoryEntry }) {
         <tbody>
           {entry.changed_keys.map((key) => (
             <tr key={key}>
-              <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{key}</td>
+              <td style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)' }}>{key}</td>
               <td>{renderPathValue(valueAtPath(entry.before, key))}</td>
               <td>{renderPathValue(valueAtPath(entry.after, key))}</td>
             </tr>
@@ -86,10 +86,10 @@ function HistoryEntryRow({ entry }: { entry: EmissionsFactorHistoryEntry }) {
       <summary>
         <span style={{ color: 'var(--text-muted)' }}>{formatDateTime(entry.created_at)}</span>
         <span className="tool-name">{entry.user_email ?? entry.user_id ?? 'unknown user'}</span>
-        <span style={{ color: 'var(--text-muted)', fontSize: 10.5 }}>{entry.action}</span>
+        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-xs)' }}>{entry.action}</span>
         <span className="row" style={{ gap: 4, flexWrap: 'wrap', flex: 1 }}>
           {entry.changed_keys.map((key) => (
-            <span key={key} className="chip" style={{ fontSize: 10, padding: '1px 7px' }}>
+            <span key={key} className="chip" style={{ fontSize: 'var(--fs-2xs)', padding: '1px 7px' }}>
               {key}
             </span>
           ))}

@@ -43,7 +43,7 @@ const DEFAULT_LOOP: LoopConfig = {
 
 /** The muted one-line explanation under a control. Matches the objective and
  *  cost-tier fields, which have always used exactly these three properties. */
-const HINT = { fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--mono)' } as const
+const HINT = { fontSize: 'var(--fs-xs)', color: 'var(--text-muted)', fontFamily: 'var(--mono)' } as const
 
 const ESCALATION_DESCRIPTIONS: Record<string, string> = {
   off: 'A run never changes model, however stuck it gets.',
@@ -422,7 +422,7 @@ function HarnessEditor({
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 6, borderRadius: 4 }}
                 >
                   {i === 0 && (
-                    <span className="badge badge-gray" style={{ padding: '1px 5px', fontSize: 9 }}>
+                    <span className="badge badge-gray" style={{ padding: '1px 5px', fontSize: 'var(--fs-2xs)' }}>
                       primary
                     </span>
                   )}
@@ -515,7 +515,7 @@ function HarnessEditor({
               </option>
             ))}
           </select>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+          <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
             {OBJECTIVE_DESCRIPTIONS[form.model_policy.objective ?? DEFAULT_OBJECTIVE]}
             {form.model_policy.mode === 'pinned' && ' — applies when routing is automatic'}
           </div>
@@ -552,7 +552,7 @@ function HarnessEditor({
                 ))}
                 {!knownTier && <option value={costTier}>{costTier} (as stored)</option>}
               </select>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+              <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
                 {knownTier
                   ? COST_TIER_DESCRIPTIONS[knownTier]
                   : 'Not a tier this build recognizes — kept exactly as stored unless you change it.'}

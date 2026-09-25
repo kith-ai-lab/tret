@@ -214,7 +214,7 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
           <div className="mono-label" style={{ margin: '10px 0 4px' }}>
             Reasoning (verbatim)
           </div>
-          <div className="mono-body" style={{ fontSize: 11.5, whiteSpace: 'pre-wrap' }}>
+          <div className="mono-body" style={{ fontSize: 'var(--fs-sm)', whiteSpace: 'pre-wrap' }}>
             {routing.reasoning || '—'}
           </div>
 
@@ -238,7 +238,7 @@ export function RoutingBadge({ routing, tier }: { routing: RoutingDecision | nul
                 <>
                   <pre
                     className="code-block"
-                    style={{ maxHeight: 320, marginTop: 8, fontSize: 11 }}
+                    style={{ maxHeight: 320, marginTop: 8, fontSize: 'var(--fs-xs)' }}
                   >
                     {routing.router_prompt}
                   </pre>

@@ -152,7 +152,7 @@ export function Runs() {
           {(r.delegated_cost_usd ?? 0) > 0 && (
             <>
               <br />
-              <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+              <span style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-xs)' }}>
                 +{formatCost(r.delegated_cost_usd ?? 0)} delegated
               </span>
             </>

@@ -264,7 +264,7 @@ function UsageHistory() {
       header: 'Run',
       render: (e) =>
         e.run_id ? (
-          <span title={e.run_id} style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
+          <span title={e.run_id} style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)' }}>
             {e.run_id.slice(0, 8)}
           </span>
         ) : (

@@ -175,7 +175,7 @@ export function Analytics() {
                 <div
                   style={{
                     fontFamily: 'var(--mono)',
-                    fontSize: 10.5,
+                    fontSize: 'var(--fs-xs)',
                     color: 'var(--text-muted)',
                   }}
                 >
@@ -226,7 +226,7 @@ export function Analytics() {
               style={{
                 marginTop: 8,
                 fontFamily: 'var(--mono)',
-                fontSize: 10.5,
+                fontSize: 'var(--fs-xs)',
                 color: 'var(--text-muted)',
               }}
             >
@@ -404,7 +404,7 @@ function NetworkAccessPanel({ egress }: { egress: GuardrailEgressStats }) {
       <div
         style={{
           fontFamily: 'var(--mono)',
-          fontSize: 10.5,
+          fontSize: 'var(--fs-xs)',
           color: 'var(--text-muted)',
         }}
       >
@@ -457,7 +457,7 @@ function RoutingGroupTable({ group }: { group: RoutingGroup }) {
           style={{
             marginTop: 6,
             fontFamily: 'var(--mono)',
-            fontSize: 10.5,
+            fontSize: 'var(--fs-xs)',
             color: 'var(--text-muted)',
           }}
         >
@@ -568,7 +568,7 @@ function Section({
         style={{
           marginBottom: 8,
           fontFamily: 'var(--mono)',
-          fontSize: 10.5,
+          fontSize: 'var(--fs-xs)',
           color: 'var(--text-muted)',
         }}
       >

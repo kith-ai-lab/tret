@@ -286,7 +286,7 @@ function ConnectedWriteBlock({ finding }: { finding: FindingDetail }) {
         </div>
         <div
           className="fine-print"
-          style={{ fontFamily: 'var(--mono)', fontSize: 11, marginTop: 2 }}
+          style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)', marginTop: 2 }}
         >
           {payload.target_path}/tret/{payload.filename}
         </div>

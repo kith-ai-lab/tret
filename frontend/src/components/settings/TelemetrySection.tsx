@@ -206,7 +206,7 @@ function TelemetryPreviewModal({
                   <summary>
                     <span style={{ color: 'var(--text-muted)' }}>{formatDateTime(entry.sent_at)}</span>
                     <StatusBadge status={entry.status} />
-                    <span style={{ color: 'var(--text-muted)', fontSize: 10.5 }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-xs)' }}>
                       {entry.http_status ?? '—'}
                     </span>
                   </summary>

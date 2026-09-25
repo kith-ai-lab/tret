@@ -554,7 +554,7 @@ function FieldError({ errors, field }: { errors: DraftError[]; field: string }) 
   const hit = errors.find((e) => e.field === field)
   if (!hit) return null
   return (
-    <div className="error-text" style={{ marginTop: 2, fontSize: 10.5 }}>
+    <div className="error-text" style={{ marginTop: 2, fontSize: 'var(--fs-xs)' }}>
       {hit.message}
     </div>
   )

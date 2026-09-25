@@ -79,7 +79,7 @@ export function PackBuilder() {
                 {createMutation.isPending ? 'Creating…' : '+ New draft'}
               </button>
               {createMutation.isError && (
-                <div className="error-text" style={{ marginBottom: 8, fontSize: 11 }}>
+                <div className="error-text" style={{ marginBottom: 8, fontSize: 'var(--fs-xs)' }}>
                   {(createMutation.error as Error).message}
                 </div>
               )}
@@ -393,7 +393,7 @@ function DraftEditor({ draft, onDeleted }: { draft: DraftDetail; onDeleted: () =
                 : `${validateMutation.data.errors.length} error${validateMutation.data.errors.length === 1 ? '' : 's'}`}
             </div>
             {validateMutation.data.errors.length > 0 && (
-              <ul style={{ margin: 0, paddingLeft: 18, fontFamily: 'var(--mono)', fontSize: 11.5 }}>
+              <ul style={{ margin: 0, paddingLeft: 18, fontFamily: 'var(--mono)', fontSize: 'var(--fs-sm)' }}>
                 {validateMutation.data.errors.map((e, i) => (
                   <li key={i} style={{ color: 'var(--red)' }}>
                     {e}
@@ -685,7 +685,7 @@ function DoctrineEditor({
             ) : (
               <textarea
                 rows={20}
-                style={{ fontFamily: 'var(--mono)', fontSize: 12.5 }}
+                style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-sm)' }}
                 value={content}
                 onChange={(e) => setFiles({ ...files, [active]: e.target.value })}
               />
@@ -964,7 +964,7 @@ function TaskTypesEditor({
                 ))}
               </select>
               {schemaOptions.length === 0 && (
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text-muted)', marginTop: 4 }}>
                   Add a schema in the Schemas tab first.
                 </div>
               )}
@@ -1335,7 +1335,7 @@ function SchemasEditor({
             </div>
             <textarea
               rows={20}
-              style={{ fontFamily: 'var(--mono)', fontSize: 12 }}
+              style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-sm)' }}
               value={content}
               onChange={(e) => setFiles({ ...files, [active]: e.target.value })}
             />
@@ -1572,7 +1572,7 @@ function TemplatesEditor({
             ) : (
               <textarea
                 rows={20}
-                style={{ fontFamily: 'var(--mono)', fontSize: 12.5 }}
+                style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-sm)' }}
                 value={content}
                 onChange={(e) => setFiles({ ...files, [active]: e.target.value })}
               />

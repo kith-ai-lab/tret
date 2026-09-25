@@ -152,7 +152,7 @@ export function Workbench() {
                 ))}
               </select>
               {selectedTask.output_contract && (
-                <div style={{ fontSize: 11.5, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+                <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
                   {selectedTask.output_contract}
                 </div>
               )}
@@ -299,7 +299,7 @@ function SchemaFields({
             />
           )}
           {spec.description && (
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+            <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
               {spec.description}
             </div>
           )}

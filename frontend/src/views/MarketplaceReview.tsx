@@ -57,7 +57,7 @@ function MarketplaceReviewBody({ queue }: { queue: ReviewQueueItem[] }) {
                 <>
                   {q.slug} v{q.version}
                   {q.has_methods && (
-                    <span className="badge badge-red" style={{ marginLeft: 6, fontSize: 9.5, padding: '1px 6px' }}>
+                    <span className="badge badge-red" style={{ marginLeft: 6, fontSize: 'var(--fs-2xs)', padding: '1px 6px' }}>
                       methods
                     </span>
                   )}
@@ -156,8 +156,8 @@ function HarnessPresetsReview({ presets, taskTypes }: { presets: HarnessPreset[]
                           className="chip"
                           style={
                             extra.has(t)
-                              ? { fontSize: 10, padding: '1px 7px', borderColor: 'var(--red-border)', color: 'var(--red)' }
-                              : { fontSize: 10, padding: '1px 7px' }
+                              ? { fontSize: 'var(--fs-2xs)', padding: '1px 7px', borderColor: 'var(--red-border)', color: 'var(--red)' }
+                              : { fontSize: 'var(--fs-2xs)', padding: '1px 7px' }
                           }
                           title={
                             extra.has(t)
@@ -256,14 +256,14 @@ function ReviewDetailPane({ id }: { id: string }) {
           <span className={`badge ${d.check_results.valid ? 'badge-green' : 'badge-red'}`}>
             {d.check_results.valid ? 'pass' : 'fail'}
           </span>
-          <span style={{ color: 'var(--text-muted)', fontSize: 11.5 }}>
+          <span style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-sm)' }}>
             {d.check_results.size_bytes.toLocaleString()} bytes · content{' '}
             {d.check_results.content_hash ? d.check_results.content_hash.slice(0, 12) : '—'} · doctrine{' '}
             {d.check_results.doctrine_sha ? d.check_results.doctrine_sha.slice(0, 12) : '—'}
           </span>
         </div>
         {d.check_results.errors.length > 0 && (
-          <ul style={{ margin: 0, paddingLeft: 18, fontFamily: 'var(--mono)', fontSize: 11.5 }}>
+          <ul style={{ margin: 0, paddingLeft: 18, fontFamily: 'var(--mono)', fontSize: 'var(--fs-sm)' }}>
             {d.check_results.errors.map((e, i) => (
               <li key={i} style={{ color: 'var(--red)' }}>
                 {e}
@@ -351,7 +351,7 @@ function ReviewDetailPane({ id }: { id: string }) {
           </button>
         </div>
         {notesRequired && (
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+          <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text-muted)', marginTop: 6 }}>
             Notes are required before requesting changes or rejecting — approving alone may leave
             them empty.
           </div>

@@ -196,7 +196,7 @@ function UpdateBadge({
   return (
     <span
       className="badge badge-blue"
-      style={compact ? { fontSize: 9.5, padding: '1px 6px', marginLeft: 6 } : undefined}
+      style={compact ? { fontSize: 'var(--fs-2xs)', padding: '1px 6px', marginLeft: 6 } : undefined}
       title={`The marketplace registry lists v${latest} of this pack — you have v${installedVersion} installed.`}
     >
       v{latest} available
@@ -361,7 +361,7 @@ function PackDetailPane({ packId, canManage }: { packId: string; canManage: bool
           </div>
           <HarnessPresetsTable presets={pack.harnesses} />
           <div
-            style={{ marginTop: 8, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}
+            style={{ marginTop: 8, fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)', color: 'var(--text-muted)' }}
           >
             Installing this pack created these as ordinary, editable harnesses in this workspace — see
             the Harnesses view to change or archive them.
@@ -466,7 +466,7 @@ function PackLessons({ packId }: { packId: string }) {
             {proposed.map((l) => (
               <div key={l.id} className="panel">
                 <div className="mono-body">{l.text}</div>
-                <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 4 }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-sm)', marginTop: 4 }}>
                   {l.rationale}
                 </div>
                 {canReview && (
@@ -515,7 +515,7 @@ function PackLessons({ packId }: { packId: string }) {
                     {!l.in_effect && (
                       <span
                         className="badge badge-amber"
-                        style={{ marginLeft: 8, fontSize: 10, padding: '1px 6px' }}
+                        style={{ marginLeft: 8, fontSize: 'var(--fs-2xs)', padding: '1px 6px' }}
                         title="Over the 40-item / 4,000-character cap on what a run's prompt carries — approved, but not currently sent to any run."
                       >
                         over cap — not sent to runs
@@ -542,7 +542,7 @@ function PackLessons({ packId }: { packId: string }) {
       )}
 
       {retired.length > 0 && (
-        <div style={{ marginTop: 10, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+        <div style={{ marginTop: 10, fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)', color: 'var(--text-muted)' }}>
           {retired.length} retired lesson{retired.length === 1 ? '' : 's'} — no longer shown to runs.
         </div>
       )}
@@ -677,7 +677,7 @@ function PackMethods({ packId }: { packId: string }) {
       render: (m) => (
         <span className="row" style={{ gap: 4, display: 'inline-flex', flexWrap: 'wrap' }}>
           {(m.inputs ?? []).map((inp) => (
-            <span key={inp} className="chip" style={{ fontSize: 10, padding: '1px 7px' }}>
+            <span key={inp} className="chip" style={{ fontSize: 'var(--fs-2xs)', padding: '1px 7px' }}>
               {inp}
             </span>
           ))}
@@ -710,7 +710,7 @@ function PackMethods({ packId }: { packId: string }) {
         style={{
           marginTop: 8,
           fontFamily: 'var(--mono)',
-          fontSize: 11,
+          fontSize: 'var(--fs-xs)',
           color: 'var(--text-muted)',
         }}
       >

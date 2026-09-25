@@ -379,11 +379,11 @@ function ConversationRail({
         ) : error ? (
           // "No conversations yet" over a failed fetch reads as "your history is
           // gone", which would send a user off to retype work they still have.
-          <div className="error-text" style={{ padding: '8px 4px', fontSize: 11 }}>
+          <div className="error-text" style={{ padding: '8px 4px', fontSize: 'var(--fs-xs)' }}>
             Could not load conversations — {error.message}
           </div>
         ) : conversations.length === 0 ? (
-          <div className="empty" style={{ padding: '8px 4px', fontSize: 11 }}>
+          <div className="empty" style={{ padding: '8px 4px', fontSize: 'var(--fs-xs)' }}>
             No conversations yet.
           </div>
         ) : (
@@ -1006,7 +1006,7 @@ function ComposerControls({
         />
       </span>
       {overrideProblem && (
-        <span className="error-text" style={{ flexBasis: '100%', fontSize: 11 }}>
+        <span className="error-text" style={{ flexBasis: '100%', fontSize: 'var(--fs-xs)' }}>
           {overrideProblem}
         </span>
       )}

@@ -58,12 +58,12 @@ export function Deliverables() {
               sub={
                 <span className="row" style={{ gap: 6, display: 'inline-flex' }}>
                   {d.approved_count > 0 && (
-                    <span className="badge badge-green" style={{ fontSize: 10, padding: '1px 6px' }}>
+                    <span className="badge badge-green" style={{ fontSize: 'var(--fs-2xs)', padding: '1px 6px' }}>
                       {d.approved_count} approved
                     </span>
                   )}
                   {d.draft_count > 0 && (
-                    <span className="badge badge-amber" style={{ fontSize: 10, padding: '1px 6px' }}>
+                    <span className="badge badge-amber" style={{ fontSize: 'var(--fs-2xs)', padding: '1px 6px' }}>
                       {d.draft_count} draft
                     </span>
                   )}
@@ -202,7 +202,7 @@ function DeliverableDetail({ deliverable }: { deliverable: Deliverable }) {
           style={{
             marginTop: 8,
             fontFamily: 'var(--mono)',
-            fontSize: 11,
+            fontSize: 'var(--fs-xs)',
             color: 'var(--text-muted)',
           }}
         >
@@ -249,7 +249,7 @@ function DeliverableDetail({ deliverable }: { deliverable: Deliverable }) {
             style={{
               marginTop: 8,
               fontFamily: 'var(--mono)',
-              fontSize: 11,
+              fontSize: 'var(--fs-xs)',
               color: 'var(--text-muted)',
             }}
           >
@@ -269,7 +269,7 @@ function DeliverableDetail({ deliverable }: { deliverable: Deliverable }) {
             style={{
               marginTop: 10,
               fontFamily: 'var(--mono)',
-              fontSize: 11,
+              fontSize: 'var(--fs-xs)',
               color: 'var(--text-muted)',
             }}
             title="Estimated from token counts and each model's energy class — never measured. Summed over distinct runs, so two sections drafted by one run are not counted twice."
@@ -479,7 +479,7 @@ function PublishToSharePointModal({
               {result.name}
             </a>
           </div>
-          <div className="fine-print" style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
+          <div className="fine-print" style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)' }}>
             {result.path}
           </div>
         </div>

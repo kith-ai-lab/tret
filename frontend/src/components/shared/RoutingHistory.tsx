@@ -154,7 +154,7 @@ export function RoutingHistoryPanel({ history }: { history: RoutingHistoryData }
           </div>
           <QualityChart group={g} />
           {g.top_pick_changes.length > 0 ? (
-            <div style={{ marginTop: 6, fontFamily: 'var(--mono)', fontSize: 10.5 }}>
+            <div style={{ marginTop: 6, fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)' }}>
               {g.top_pick_changes.map((c) => (
                 <div key={c.at}>
                   {shortDate(c.at)} — the router changed its mind:{' '}
@@ -167,7 +167,7 @@ export function RoutingHistoryPanel({ history }: { history: RoutingHistoryData }
               style={{
                 marginTop: 6,
                 fontFamily: 'var(--mono)',
-                fontSize: 10.5,
+                fontSize: 'var(--fs-xs)',
                 color: 'var(--text-muted)',
               }}
             >
@@ -176,7 +176,7 @@ export function RoutingHistoryPanel({ history }: { history: RoutingHistoryData }
           )}
         </div>
       ))}
-      <div style={{ fontFamily: 'var(--mono)', fontSize: 10.5, color: 'var(--text-muted)' }}>
+      <div style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)', color: 'var(--text-muted)' }}>
         {/* The backend's own wording. Share and quality count different things
             on purpose, and reading one as the other is the easy mistake here. */}
         {history.basis.share_counts} {history.basis.quality_counts} Amber dots mark buckets

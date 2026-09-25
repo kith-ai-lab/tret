@@ -29,7 +29,7 @@ export function ModelTimeline({ segments }: { segments: ModelSegment[] }) {
         style={{
           marginBottom: 8,
           fontFamily: 'var(--mono)',
-          fontSize: 10.5,
+          fontSize: 'var(--fs-xs)',
           color: 'var(--text-muted)',
         }}
       >
@@ -48,7 +48,7 @@ export function ModelTimeline({ segments }: { segments: ModelSegment[] }) {
             <div className="mono-label" style={{ marginTop: 4 }}>
               {REASONS[s.reason] ?? s.reason}
             </div>
-            <div className="mono-body" style={{ marginTop: 4, fontSize: 11.5 }}>
+            <div className="mono-body" style={{ marginTop: 4, fontSize: 'var(--fs-sm)' }}>
               {formatTokens(s.input_tokens)} in · {formatTokens(s.output_tokens)} out · $
               {s.cost_usd.toFixed(4)} · {s.energy_wh.toFixed(3)} Wh ({s.energy_accounting?.energy_source ?? 'legacy'}; {s.energy_accounting?.energy_boundary ?? 'unknown'} coverage) ·{' '}
               {s.energy_accounting?.energy_class ?? '—'}
@@ -87,7 +87,7 @@ export function CompactionLog({ records }: { records: CompactionRecord[] }) {
         style={{
           marginBottom: 8,
           fontFamily: 'var(--mono)',
-          fontSize: 10.5,
+          fontSize: 'var(--fs-xs)',
           color: 'var(--text-muted)',
         }}
       >
@@ -104,7 +104,7 @@ export function CompactionLog({ records }: { records: CompactionRecord[] }) {
                 {r.iteration ? `iteration ${r.iteration}` : 'before the first call'}
               </span>
             </div>
-            <div className="mono-body" style={{ marginTop: 4, fontSize: 11.5 }}>
+            <div className="mono-body" style={{ marginTop: 4, fontSize: 'var(--fs-sm)' }}>
               {r.before_est_tokens != null && r.after_est_tokens != null
                 ? `${formatTokens(r.before_est_tokens)} → ${formatTokens(r.after_est_tokens)} est. tokens`
                 : null}
@@ -149,7 +149,7 @@ export function OverheadPanel({ overhead }: { overhead: RunOverhead }) {
         style={{
           marginBottom: 8,
           fontFamily: 'var(--mono)',
-          fontSize: 10.5,
+          fontSize: 'var(--fs-xs)',
           color: 'var(--text-muted)',
         }}
       >
@@ -164,7 +164,7 @@ export function OverheadPanel({ overhead }: { overhead: RunOverhead }) {
               <span className="mono-body">{OVERHEAD_KINDS[c.kind] ?? c.kind}</span>
               <span className="mono-label">{shortModelName(c.model)}</span>
             </div>
-            <div className="mono-body" style={{ marginTop: 4, fontSize: 11.5 }}>
+            <div className="mono-body" style={{ marginTop: 4, fontSize: 'var(--fs-sm)' }}>
               {formatTokens(c.input_tokens)} in · {formatTokens(c.output_tokens)} out · $
               {c.cost_usd.toFixed(5)} · {c.energy_wh.toFixed(3)} Wh (est.) ·{' '}
               {c.energy_accounting?.energy_class ?? '—'}

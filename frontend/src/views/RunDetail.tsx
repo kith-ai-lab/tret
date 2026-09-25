@@ -135,7 +135,7 @@ export function RunDetailView() {
           <span className="mono-label" style={{ color: 'var(--amber)' }}>
             output budget reached
           </span>{' '}
-          <span className="mono-body" style={{ fontSize: 11.5 }}>
+          <span className="mono-body" style={{ fontSize: 'var(--fs-sm)' }}>
             {formatTokens(stream.budget.output_tokens)} of {formatTokens(stream.budget.budget)}{' '}
             budgeted output tokens — the model has been asked to finalize with what it already
             retrieved.
@@ -164,7 +164,7 @@ export function RunDetailView() {
           <span className="mono-label" style={{ color: 'var(--amber)' }}>
             tools withheld: {stream.toolsWithheld.tools.join(', ')}
           </span>{' '}
-          <span className="mono-body" style={{ fontSize: 11.5 }}>
+          <span className="mono-body" style={{ fontSize: 'var(--fs-sm)' }}>
             {stream.toolsWithheld.detail}
           </span>
         </div>
@@ -337,7 +337,7 @@ function StreamConnectionNote({ connection }: { connection: StreamConnection }) 
       <span className={`mono-label${reconnecting ? ' pulse' : ''}`} style={{ color: 'var(--amber)' }}>
         {reconnecting ? 'reconnecting to the live stream' : 'live stream disconnected'}
       </span>{' '}
-      <span className="mono-body" style={{ fontSize: 11.5 }}>
+      <span className="mono-body" style={{ fontSize: 'var(--fs-sm)' }}>
         {reconnecting
           ? 'The run is unaffected — it keeps executing on the server. Streamed output is replayed from the start once the connection is back.'
           : 'The run is unaffected and keeps executing on the server; this page has simply stopped receiving updates. Reload to catch up.'}
@@ -351,7 +351,7 @@ function ToolItemRow({ item }: { item: StreamItem }) {
     return (
       <div className="tool-row" style={{ padding: '6px 10px' }}>
         <span className="badge badge-amber">draft finding</span>{' '}
-        <span className="mono-body" style={{ fontSize: 11.5 }}>
+        <span className="mono-body" style={{ fontSize: 'var(--fs-sm)' }}>
           {item.finding_id}
         </span>
       </div>
@@ -366,7 +366,7 @@ function ToolItemRow({ item }: { item: StreamItem }) {
       <summary>
         <span style={{ color: 'var(--text-muted)' }}>{isCall ? '→' : '←'}</span>
         <span className="tool-name">{item.tool}</span>
-        <span style={{ color: 'var(--text-muted)', fontSize: 10.5 }}>
+        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-xs)' }}>
           {isCall ? 'call' : item.error ? 'result · error' : 'result'}
         </span>
         <span
@@ -376,7 +376,7 @@ function ToolItemRow({ item }: { item: StreamItem }) {
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
             flex: 1,
-            fontSize: 11,
+            fontSize: 'var(--fs-xs)',
           }}
         >
           {body.replace(/\s+/g, ' ').slice(0, 120)}
@@ -389,7 +389,7 @@ function ToolItemRow({ item }: { item: StreamItem }) {
             padding: '5px 10px',
             borderTop: '1px solid var(--border-subtle)',
             fontFamily: 'var(--mono)',
-            fontSize: 10.5,
+            fontSize: 'var(--fs-xs)',
             color: 'var(--text-muted)',
           }}
         >

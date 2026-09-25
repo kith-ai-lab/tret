@@ -229,7 +229,7 @@ export function M365WriteTargetPicker({
             <div className="mono-label" style={{ marginBottom: 4 }}>
               Folder
             </div>
-            <div className="mono-body" style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>
+            <div className="mono-body" style={{ fontFamily: 'var(--mono)', fontSize: 'var(--fs-xs)' }}>
               {pending.path}
             </div>
           </div>

@@ -175,7 +175,7 @@ export function EnergyDetail({ energy }: { energy: EnergyAccounting }) {
       <details className="tool-row" style={{ marginTop: 12 }}>
         <summary>
           <span className="tool-name">step-by-step derivation</span>
-          <span style={{ color: 'var(--text-muted)', fontSize: 10.5 }}>
+          <span style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-xs)' }}>
             weighted tokens → Wh/Mtok → compute Wh → x PUE → x grid intensity → scopes → provenance
           </span>
         </summary>

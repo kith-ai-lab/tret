@@ -274,7 +274,7 @@ function WorkspaceSwitcher({ user }: { user: User }) {
       )}
 
       {(switchError || createError) && (
-        <div className="error-text" style={{ marginTop: 4, fontSize: 10.5 }}>
+        <div className="error-text" style={{ marginTop: 4, fontSize: 'var(--fs-xs)' }}>
           {(switchError ?? createError)?.message}
         </div>
       )}
