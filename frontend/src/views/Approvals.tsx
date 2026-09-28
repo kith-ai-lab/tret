@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { api, ApiError, type ConnectedWritePayload, type FindingDetail } from '../api/client'
+import { ApproveAllSections } from '../components/shared/ApproveAllSections'
 import { formatDateTime } from '../components/shared/format'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { ProvenanceCard } from '../components/shared/ProvenanceCard'
@@ -239,6 +240,11 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
             </button>
           </div>
         </div>
+      )}
+      {/* Outside the draft-only panel, so the result line survives this
+          finding flipping to approved when the batch finishes. */}
+      {f.schema_slug === 'draft_section' && typeof f.subject.deliverable === 'string' && (
+        <ApproveAllSections deliverableSlug={f.subject.deliverable} minDrafts={2} />
       )}
     </div>
   )

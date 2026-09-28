@@ -10,6 +10,7 @@ import {
   formatFactor,
   orDash,
 } from '../components/shared/format'
+import { ApproveAllSections } from '../components/shared/ApproveAllSections'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { MarkdownDoc } from '../components/shared/MarkdownDoc'
 import { Modal } from '../components/shared/Modal'
@@ -209,6 +210,7 @@ function DeliverableDetail({ deliverable }: { deliverable: Deliverable }) {
           Only approved sections are included in exports — drafts go through{' '}
           <Link to="/approvals">Approvals</Link> first.
         </div>
+        <ApproveAllSections deliverableSlug={deliverable.slug} />
       </div>
 
       {/* Export controls */}

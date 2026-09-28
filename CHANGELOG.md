@@ -8,6 +8,14 @@ one that needs action on an existing install.
 
 ## [Unreleased]
 
+### Added
+
+- **Approve all sections.** Deliverables, and the Approvals page for a drafted
+  section, offer "Approve all N draft sections" for one deliverable after an
+  inline confirm. Each section still gets its own named approval, tagged as
+  coming from the batch action. Only each section's latest draft is approved,
+  and a section whose draft changed after you confirmed is skipped.
+
 ## [0.1.0] — first public release
 
 tret, an open-source AI workbench: a harness platform for running LLM agents
