@@ -76,7 +76,7 @@ log = logging.getLogger("tret")
 # script-src/frame-src/connect-src only, nothing else loosened.
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
-    "script-src 'self' 'sha256-2uazwxIKVNaSPni5VjTyuSxTIMSS7feaMo3K0rfV0Hg=' https://apis.google.com; "
+    "script-src 'self' 'sha256-t9DNwLQDLCEhXVRmNTkJe02dNWmqy1VO8ME4IVgsRDk=' https://apis.google.com; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob:; "
     "font-src 'self' data:; "
