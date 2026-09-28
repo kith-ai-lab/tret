@@ -31,7 +31,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE_FLY = REPO_ROOT / "Dockerfile.fly"
 ENTRYPOINT = REPO_ROOT / "fly-entrypoint.sh"
-FLY_TOML = REPO_ROOT / "fly.toml"
+FLY_TOML = REPO_ROOT / "fly.toml.example"
 
 
 def _dockerfile_text() -> str:

@@ -5,7 +5,7 @@ compaction.py` needs `DELEGATION_TOOLS` and is on the SDK's import path, which
 must stay free of server-only packages (tests/test_sdk_import_hygiene.py). So
 the constants live here and `tools.py` re-exports them — `from tret.engine.tools
 import DELEGATION_DEPTH_KEY, MAX_DELEGATION_DEPTH` keeps working for the engine,
-the tests and tret-cloud.
+the tests and any hosting extension.
 """
 from decimal import Decimal
 

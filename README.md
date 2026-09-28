@@ -390,8 +390,11 @@ carry; nothing in it is a name, an id tied to you, or any piece of your data.
 ## Contributing
 
 Domain packs, provider integrations, and hardening are the most valuable
-contributions right now. See [CONTRIBUTING.md](CONTRIBUTING.md).
+contributions right now. See [CONTRIBUTING.md](CONTRIBUTING.md). Everyone
+taking part agrees to the [Code of Conduct](CODE_OF_CONDUCT.md). To report a
+security issue, see [SECURITY.md](SECURITY.md) — please don't open a public
+issue for it. Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-Apache-2.0.
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).

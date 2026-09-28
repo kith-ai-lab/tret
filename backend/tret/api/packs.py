@@ -406,7 +406,7 @@ async def validate(body: ValidateBody, user: User = Depends(current_user)):
 # ── Marketplace registry client (Find / Install) ─────────────────────────────
 #
 # Everything below is a backend *proxy*: the browser never talks to the
-# registry (tret-cloud's `/api/marketplace` API) directly — every call goes
+# registry (a hosted deployment's `/api/marketplace` API) directly — every call goes
 # through this router, through `tret.net.build_client`, exactly the pattern
 # `api/oidc.py` uses for its own outbound calls. See that module's docstring
 # for the fuller argument; the short version repeated here because it is easy

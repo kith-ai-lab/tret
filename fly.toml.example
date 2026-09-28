@@ -1,7 +1,7 @@
-# The deployed Fly app predates the tret rename and Fly apps cannot be
-# renamed — "kith-bench" is the app's immutable name, not stale config.
-app = "kith-bench"
-primary_region = "iad"
+# Template for your own Fly app — see docs/deploy-fly.md. Copy it to fly.toml
+# (gitignored) and set `app` / `primary_region` to your own values.
+app = "<app-name>"
+primary_region = "<region>"
 
 [build]
   dockerfile = "Dockerfile.fly"

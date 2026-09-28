@@ -360,14 +360,14 @@ No migration. Three independent fixes:
   an orchestrator that sends a hard kill after some timeout (Fly's
   `kill_timeout`, Kubernetes' `terminationGracePeriodSeconds`, ...), make
   sure that timeout is at least `TRET_SHUTDOWN_DRAIN_SECONDS` or the process
-  is killed out from under the wait before it can do any good — tret-cloud's
-  own `fly.toml` now sets `kill_timeout = "60s"` to cover the 45s default
-  with margin. See `.env.example` for the new setting.
-- **`GET /api/billing/status` (tret-cloud) now reports `held_usd` and
+  is killed out from under the wait before it can do any good — a hosted
+  deployment's own process manager should set a kill timeout that covers the
+  45s default with margin. See `.env.example` for the new setting.
+- **An extension's `GET /api/billing/status` now reports `held_usd` and
   `available_usd`** alongside the existing `balance_usd`, so a tester (or
   the billing UI) can see an in-flight run's credit reservation instead of
   it being invisible until the run finishes. Additive fields only — nothing
-  existing changes shape. See tret-cloud's own README for details.
+  existing changes shape.
 - **The climate-risk pack's reason-code doctrine now distinguishes
   `methodology_choice` from `site_specific_factor`** when a vendor's method
   note names a technique (terrain amplification, resolution, a modelling

@@ -136,8 +136,8 @@ async def create_run(
 
     # Delegation plumbing is the engine's to stamp (engine/tools.py::
     # `_prepare_child`), never a caller's: a hand-set `_delegation_depth`
-    # would make a root run look like a delegated child — which tret-cloud's
-    # pre-run gate reads as "the parent already holds credit for this" — a
+    # would make a root run look like a delegated child — which a hosting
+    # extension's pre-run gate reads as "the parent already holds credit for this" — a
     # negative one would buy extra hops, and a hand-set `_label` would let a
     # caller forge a delegation label onto a run nothing actually delegated to.
     task_input = {

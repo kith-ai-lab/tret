@@ -107,7 +107,7 @@ async def _redeem_invites_and_resolve_workspace(
         for invite in matching:
             member = await db.get(WorkspaceMember, (user.id, invite.workspace_id))
             if member is None:
-                # tret_cloud's team-plan seat limit hooks in at exactly this
+                # a hosting extension's team-plan seat limit hooks in at exactly this
                 # point: a blocked gate skips this invite entirely — no
                 # membership, invite left `pending`, nothing redeemed for it —
                 # rather than failing the login. The invite link still works

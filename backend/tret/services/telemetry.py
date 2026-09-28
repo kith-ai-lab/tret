@@ -242,7 +242,7 @@ async def resolve_state(db: AsyncSession) -> TelemetryState:
     dnt = os.environ.get("DO_NOT_TRACK", "")
     if dnt.strip().lower() not in ("", "0", "false"):
         return TelemetryState(False, env_mode, db_enabled, "do_not_track")
-    # 2. extension override (tret-cloud forces this unconditionally)
+    # 2. extension override (a hosting extension forces this unconditionally)
     if telemetry_forced_off():
         return TelemetryState(False, env_mode, db_enabled, "extension")
     # 3. operator-locked off

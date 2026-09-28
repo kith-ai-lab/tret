@@ -16,7 +16,6 @@ as one on their own.**
 
 ## September 2026 accuracy corrections
 
-Implementation is tracked in [the emissions accuracy plan](research/emissions-plan-2026-09-17.md).
 The corrected default is `class_ladder_v2`. Exact Jegham v1 means are divided
 by their source PUE before fitting one nonnegative coefficient to the fixed
 predictor `output + 0.05 × input`. Deployment PUE is then applied once. The
@@ -1326,7 +1325,7 @@ run_override  >  harness  >  workspace  >  managed  >  env  >  dataset  >  globa
 * **`workspace`** — an operator's own configuration for one workspace, stored
   wherever the API that manages it decides to store it. This module validates
   the document; it does not read or write a database row.
-* **`managed`** — a configuration a hosting extension supplies (tret_cloud's
+* **`managed`** — a configuration a hosting extension supplies (its own
   admin console, for one). Recorded on the run as `managed:<name>` — a short
   name the document itself carries — so two different managed layers are
   never confused for one on a stored run.
@@ -1473,7 +1472,7 @@ workspace id, `"emissions"`, the document as it was stored immediately
 before the change (`None` on a first write) and immediately after (`None` on
 a DELETE), and the caller's user id — the same fail-open extension seam a
 post-run hook uses, so an extension may observe every change without the
-open-source engine knowing or caring what it does with it. tret_cloud
+open-source engine knowing or caring what it does with it. A hosting extension
 registers one of these to keep a change history; core itself keeps only the
 current document plus its own `updated_by`/`updated_at`, and a broken or
 raising hook can never turn a successful write into an error response.
@@ -1752,10 +1751,9 @@ starting sanity check rather than a result.
 The SCI mapping pins [repository revision e8d3534](https://github.com/Green-Software-Foundation/sci-ai/blob/e8d3534f72b26e7b114c9054050db60f4543bb60/SPEC.md).
 This is a review input, not a claim of ratification or conformity.
 
-The [validation runbook](research/emissions-validation-runbook.md) provides local
-commands for an allowlisted workload inventory, a measured benchmark protocol,
-held-out evaluation, cache experiments, explicit accepted-task cohorts and
-methodology shadow reports. Actual exports, reference-meter validation and a
+Validation covers local commands for an allowlisted workload inventory, a
+measured benchmark protocol, held-out evaluation, cache experiments, explicit
+accepted-task cohorts and methodology shadow reports. Actual exports, reference-meter validation and a
 representative shadow window are still required. Production history remains
 as recorded.
 

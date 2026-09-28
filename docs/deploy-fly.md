@@ -5,11 +5,11 @@ tret runs as a **single Fly app**: the backend serves the built frontend
 uploaded documents. One always-on machine — the run event bus is in-process,
 so do **not** scale horizontally (see docs/architecture.md).
 
-`min_machines_running = 1` in `fly.toml` keeps that true in the ordinary case,
+`min_machines_running = 1` in `fly.toml.example` keeps that true in the ordinary case,
 but nothing stops a second machine existing briefly (a deploy handover) or by
 mistake (`fly scale count 2`). tret backstops this itself at boot with a
 Postgres advisory lock (`TRET_INSTANCE_LOCK`, docs/hardening.md §8), and
-`fly.toml` ships `TRET_INSTANCE_LOCK = "strict"` — a single always-on machine
+`fly.toml.example` ships `TRET_INSTANCE_LOCK = "strict"` — a single always-on machine
 means a second live instance is always a bug here, never an intentional
 scale-out, so a strict boot failure is the right outcome. That's safe for the
 normal handover case (`TRET_INSTANCE_LOCK_WAIT_SECONDS` defaults to 90s,
@@ -21,7 +21,11 @@ docs/hardening.md §8 for the mechanism.
 
 ## One-time setup
 
+Start from the template: copy `fly.toml.example` to `fly.toml` (gitignored)
+and set `app` and `primary_region` to your own values.
+
 ```bash
+cp fly.toml.example fly.toml
 fly apps create <app-name> --org <org>
 fly postgres create --name <app-name>-db --org <org> --region <region> \
     --initial-cluster-size 1 --vm-size shared-cpu-1x --volume-size 3
@@ -41,7 +45,7 @@ Notes:
   so set it explicitly (same value). Plain `postgres://` URLs and libpq
   `sslmode` params are normalized automatically.
 - `TRET_ENVIRONMENT=production`, `TRET_COOKIE_SECURE=true`, and the
-  frontend/static serving are already set in `fly.toml` / `Dockerfile.fly`.
+  frontend/static serving are already set in `fly.toml.example` / `Dockerfile.fly`.
 
 ### Production mode is on, so the secrets above are not optional
 

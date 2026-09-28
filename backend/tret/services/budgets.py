@@ -18,7 +18,7 @@ Three things live here:
     that refuses a new run once spend plus that run's own `max_cost_usd`
     reservation would exceed the cap. Registered by `load_extensions`
     (`engine/extensions.py`) ahead of any proprietary extension's own gate
-    (e.g. tret_cloud's credit hold), so a deployment always has both checks
+    (e.g. a hosting extension's credit hold), so a deployment always has both checks
     in the same order. Explicitly a **soft** reservation: two runs racing
     past the same gate can both be admitted and both spend, exactly like the
     seat-limit gates in `services/workspace.py` — a hosted deployment's own

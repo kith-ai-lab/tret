@@ -242,7 +242,7 @@ see [eco-accounting.md](eco-accounting.md).
   disable). No telemetry unless an admin turns it on — see §9 and
   [telemetry.md](telemetry.md).
 - **Single-instance enforcement.** The run event bus is in-process
-  (`fly.toml`'s "Do NOT scale horizontally" comment; `docs/architecture.md`),
+  (`fly.toml.example`'s "Do NOT scale horizontally" comment; `docs/architecture.md`),
   so tret takes a session-level `pg_try_advisory_lock` on Postgres at boot and
   holds it on a dedicated connection for the life of the process
   (`tret/services/instance_lock.py`). Right after opening that connection,
@@ -264,7 +264,7 @@ see [eco-accounting.md](eco-accounting.md).
   means: `warn` (default) logs at `ERROR` and boots anyway — a false
   positive must never take a deployment down; `strict` refuses to boot
   instead, for an operator who wants that guaranteed (this is what
-  `fly.toml` ships, since a single always-on machine makes a second live
+  `fly.toml.example` ships, since a single always-on machine makes a second live
   instance always a bug, never an intentional scale-out); `off` skips the
   check. No-op on SQLite, which has no advisory locks and is never the
   deployment this guards against. The keepalive tuning only ever applies to

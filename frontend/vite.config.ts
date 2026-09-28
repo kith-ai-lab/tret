@@ -3,7 +3,7 @@ import { defineConfig, loadEnv } from 'vite'
 
 export default defineConfig(({ mode }) => {
   // Brand layer switch: empty for the open-source build, `kith-climate` for the
-  // hosted build (set in tret-cloud's Dockerfile.fly). Stamped onto <html
+  // hosted build (set in the hosted deployment's build config). Stamped onto <html
   // data-brand> so the brand CSS applies before first paint.
   const brand = loadEnv(mode, '.', 'VITE_').VITE_TRET_BRAND ?? ''
 

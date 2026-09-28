@@ -11,7 +11,7 @@ use: an included router, a pre-run gate, and a post-run hook. A fourth,
 once at boot rather than on every check. A fifth, `add_oauth_client_provider`,
 lets an extension supply OAuth client credentials for a workspace-connections
 provider (`services/connections.py`) when the operator-facing env vars are
-unset — tret_cloud's own hosted OAuth app, for one.
+unset — a hosting extension's own hosted OAuth app, for one.
 
 Fail-open by design: a pre-run gate is a business decision (insufficient
 credits, a suspended workspace), not an engine concern, so a gate that raises
@@ -27,7 +27,7 @@ A workspace gate (`add_workspace_gate`, `check_workspace_gate`) is the same
 fail-open, first-refusal-wins, veto-short-circuits contract as a pre-run gate,
 asked about a different kind of decision: not "may this run start" but "may
 this workspace-scoped action happen at all" (Phase C's motivating case is
-tret_cloud's team-plan seat limit — "may this workspace gain one more member,
+a hosting extension's team-plan seat limit — "may this workspace gain one more member,
 via an invite or its redemption"). It takes `(db, workspace_id, action)`
 rather than `(db, run, workspace_id)` — there is no `Run` in play — and
 `action` is a short machine string (`"invite"`, `"invite_redeem"`) the gate
@@ -37,7 +37,7 @@ caller switches on.
 A sixth seam, `add_factor_layer_provider` / `get_factor_layer`, lets an
 extension supply the "managed" rung of the emissions factor ladder
 (`tret/services/emission_factors.py`'s `run_override > harness > workspace >
-managed > env > dataset > global_default`) — tret_cloud's hosted admin console setting a
+managed > env > dataset > global_default`) — a hosting extension's hosted admin console setting a
 floor or a default for every workspace on the plan, say. `get_factor_layer`
 asks every registered provider in turn for one workspace's managed document
 and the first non-`None` answer wins, fail-open exactly like a gate: a
@@ -57,7 +57,7 @@ names which stored setting changed (`"emissions"` is the only one today),
 `before`/`after` are the document as stored immediately before and
 immediately after the change (either may be `None`: `before` on a first
 write, `after` on a DELETE), and `user_id` is the caller who made it.
-tret_cloud registers one of these to keep a change history core itself never
+A hosting extension registers one of these to keep a change history core itself never
 persists — core keeps only the current document plus its own
 `updated_by`/`updated_at`. Same fail-open, own-session, no-verdict-to-enforce
 contract as a post-run hook: every hook runs, a raising hook is logged and
@@ -72,7 +72,7 @@ turn and stops at the first that says `"off"` — and an override that *raises*
 is also treated as `"off"` (logged, never propagated). Fail-*private* here,
 the opposite of every other seam: what is being decided is whether data may
 leave the deployment at all, and a broken extension must never be the reason
-a report goes out that should have been suppressed. tret_cloud registers
+a report goes out that should have been suppressed. A hosting extension registers
 `ext.add_telemetry_override(lambda: "off")`, guarded by
 `hasattr(ext, "add_telemetry_override")` so an older core without this seam
 does not break it — a hosted deployment never reports, unconditionally.
@@ -148,7 +148,7 @@ WorkspaceGate = Callable[[AsyncSession, uuid.UUID, str], Awaitable[GateResult]]
 # database, so there is no async session-isolation concern to give it. Asked
 # only when the env vars services/connections.py checks first
 # (TRET_GDRIVE_CLIENT_ID/SECRET, TRET_M365_CLIENT_ID/SECRET) are unset —
-# tret_cloud registers one of these to supply its own OAuth app credentials
+# a hosting extension registers one of these to supply its own OAuth app credentials
 # without the open-source engine ever importing a proprietary package.
 OAuthClientProvider = Callable[[str], "OAuthClientConfig | None"]
 # (db, workspace_id) -> a raw `EmissionsOverrides`-shaped dict, or None. Async,
@@ -167,7 +167,7 @@ FactorLayerProvider = Callable[[AsyncSession, uuid.UUID], Awaitable["dict | None
 # immediately before and immediately after the change — either may be `None`
 # (no prior document on a first write, no document at all after a DELETE) —
 # and `user_id` is the caller who made the change. Same fail-open, own-
-# session, no-verdict-to-enforce contract as `PostRunHook`: tret_cloud
+# session, no-verdict-to-enforce contract as `PostRunHook`: a hosting extension
 # registers one of these to keep a change history core itself never
 # persists (core keeps only the current document plus its own
 # `updated_by`/`updated_at`).
@@ -489,7 +489,7 @@ def load_extensions(app: FastAPI, module_names: list[str]) -> ExtensionAPI:
     extension's own `register(ext)` runs — so a soft, informational budget
     cap and (on a hosted deployment) a hard credit hold are both checked, in
     the same order, on every deployment: open core alone, or core plus
-    tret_cloud. Imported lazily (inside this function, not at module import
+    a hosting extension. Imported lazily (inside this function, not at module import
     time) because `services/budgets.py` imports `GateResult` from this
     module — a module-level import here would cycle.
     """

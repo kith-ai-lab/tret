@@ -9,8 +9,8 @@ themselves); this module owns everything that talks to a provider or the
 **OAuth client credentials.** `get_oauth_client` resolves a provider's client
 id/secret env-first (`TRET_GDRIVE_CLIENT_ID`/`SECRET`, `TRET_M365_CLIENT_ID`/
 `SECRET` — config.py), then asks the extension registry
-(`ext.add_oauth_client_provider`, engine/extensions.py) — the seam tret_cloud
-uses to supply its own hosted OAuth app without this package ever importing
+(`ext.add_oauth_client_provider`, engine/extensions.py) — the seam a hosting
+extension uses to supply its own hosted OAuth app without this package ever importing
 anything proprietary. A provider is "configured" (`GET
 /api/connections/providers`) iff this returns non-None.
 
@@ -528,8 +528,8 @@ async def ensure_connection_usable(
     - the row exists but `status != "active"` (a refresh has already failed
       with `invalid_grant`, or the stored token no longer decrypts — see
       `_refresh`'s own docstring);
-    - the workspace's `connections.use` gate refuses (a plan gate tret_cloud
-      registers, most commonly) — the same action every HTTP route that
+    - the workspace's `connections.use` gate refuses (a plan gate a hosting
+      extension registers, most commonly) — the same action every HTTP route that
       exercises an existing connection asks via `api/connections.py::
       require_connections_gate`, checked last here since it is the one
       condition that costs a network-free but still async round trip through

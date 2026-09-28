@@ -8,7 +8,7 @@ import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { StatusBadge } from '../components/shared/StatusBadge'
 
 /** Kith's review queue (Plan Phase B/E) — cloud-only, `require_admin` (Kith
- *  staff) on the tret-cloud side. `GET /api/marketplace/review/queue` 404s
+ *  staff) on the hosting extension's side. `GET /api/marketplace/review/queue` 404s
  *  wholesale on a self-hosted build with no marketplace extension loaded, and
  *  403s for any authenticated user who is not Kith staff; either way this view
  *  does not apply, so a direct navigation here leaves rather than renders an

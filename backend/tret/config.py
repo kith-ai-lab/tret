@@ -210,7 +210,7 @@ class Settings(BaseSettings):
             raise ValueError(f"instance_lock must be one of warn|strict|off, got {value!r}")
         return candidate
 
-    # Multi-tenant SaaS mode (tret_cloud; OIDC login lands in a later phase).
+    # Multi-tenant SaaS mode (a hosting extension; OIDC login lands in a later phase).
     # False is every open-source/self-hosted deployment: bootstrap seeds one
     # workspace, every user is a member of it, and the demo content (climate
     # pack, sample harnesses) is seeded as it always has been. True changes
@@ -442,7 +442,7 @@ class Settings(BaseSettings):
     # false to ship every new workspace pack-less regardless of mode.
     seed_default_packs: bool = True
 
-    # Base URL of the pack marketplace registry (tret-cloud's `/api/marketplace`
+    # Base URL of the pack marketplace registry (a hosted deployment's `/api/marketplace`
     # API) that `GET/POST /api/packs/registry/*` (api/packs.py) proxy through
     # to for Find/Install — see that module's own note on the invariant this
     # protects: the RUN path (executing a task with an already-installed pack)
@@ -458,7 +458,7 @@ class Settings(BaseSettings):
     # to Kith's own registry, so it does not: an operator who wants Find/
     # Install sets `TRET_PACK_REGISTRY_URL` themselves, to Kith's registry
     # (https://cloud.tret.kithailab.com/api/marketplace) or a private mirror.
-    # tret-cloud's own deployment (fly.toml) sets this for itself — the
+    # A hosted deployment's own configuration sets this for itself — the
     # hosted product opts in on its own behalf, self-host never opts in for
     # the operator.
     pack_registry_url: str = ""
@@ -507,8 +507,8 @@ class Settings(BaseSettings):
     # install: locked on, no admin has to visit a UI to opt in. Whatever this
     # says, `DO_NOT_TRACK` (read straight from `os.environ`, not a field here —
     # it is the ambient convention every tool checks the same way, not a knob
-    # tret owns) and a registered `add_telemetry_override` (tret-cloud forces
-    # this off unconditionally) both beat it. See docs/telemetry.md.
+    # tret owns) and a registered `add_telemetry_override` (a hosting extension
+    # forces this off unconditionally) both beat it. See docs/telemetry.md.
     telemetry: str = "admin"
     # Where a report is POSTed (tret.net's `telemetry` egress class). Blank
     # locks telemetry off — there is nowhere to send it — same as the class
@@ -578,7 +578,7 @@ class Settings(BaseSettings):
     # `router_new_model_window_days`, so a new release becomes usable within a
     # day of shipping without a `models.yaml` edit. 0 disables the reservation
     # entirely — ordering is then byte-for-byte what it always was, which is
-    # how Tret Cloud runs (its `openrouter_catalog=false` already yields zero
+    # how a hosted deployment runs (its `openrouter_catalog=false` already yields zero
     # uncurated models, so this is belt-and-braces there, not load-bearing).
     router_new_model_slots: int = 3
 
@@ -621,7 +621,7 @@ class Settings(BaseSettings):
     # Every field below is also the bottom rung — `global_default` / `env` — of a
     # taller ladder: `tret/services/emission_factors.py` layers a per-run
     # override, a per-workspace one and a "managed" one (an extension supplies
-    # this, e.g. tret_cloud) on top of these settings, most specific first
+    # this, e.g. a hosting extension) on top of these settings, most specific first
     # (`run_override > harness > workspace > managed > env > dataset >
     # global_default`; `dataset` is the grid factor's bundled zone table, see
     # tret/services/grid_zones.py),
@@ -715,7 +715,7 @@ class Settings(BaseSettings):
     # every self-hosted deployment ships with connections entirely unconfigured, and
     # `GET /api/connections/providers` reports each as `configured: false` until either
     # these are set or an extension supplies a client via `ext.add_oauth_client_provider`
-    # (tret_cloud does this for the hosted product; see engine/extensions.py). Env
+    # (a hosting extension does this for the hosted product; see engine/extensions.py). Env
     # always wins over the extension hook, same precedence as the provider API keys
     # above.
     gdrive_client_id: str = ""
@@ -738,7 +738,7 @@ class Settings(BaseSettings):
 
     # Optional dynamic OpenRouter catalog fetch (static models.yaml always wins)
     openrouter_catalog: bool = True
-    openrouter_referer: str = "https://github.com/tret-platform/tret"
+    openrouter_referer: str = "https://github.com/kith-ai-lab/tret"
     openrouter_title: str = "tret"
     # Optional provider-selection preferences (see
     # `OpenRouterProvider._provider_body`) — a raw JSON object accepting

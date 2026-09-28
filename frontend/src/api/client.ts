@@ -2149,7 +2149,7 @@ export interface DocPage {
 export const EMISSIONS_METHODOLOGY_SLUG = 'emissions-methodology'
 
 // ── Billing ───────────────────────────────────────────────────────────────
-// GET /api/billing/status 404s when the proprietary tret-cloud extension is not
+// GET /api/billing/status 404s when no billing extension is
 // loaded into this backend — that is a capability gate, not an error, and the
 // UI renders nothing at all for it. `enabled: false` is a different state: the
 // extension is present but this workspace has not activated billing yet.
@@ -2179,7 +2179,7 @@ export interface LedgerEntry {
 export type CheckoutKind = 'credits_small' | 'credits_large' | 'solo' | 'team'
 
 /** One entry in the emissions-factor change log — GET /api/billing/emissions/history,
- *  admin/owner only (403 otherwise), 404 when tret-cloud is not loaded. `before`/`after`
+ *  admin/owner only (403 otherwise), 404 when no billing extension is loaded. `before`/`after`
  *  are the full overrides document as it stood before/after the change (null for a
  *  `put` with nothing prior, or a `delete` that cleared everything); any
  *  `grid.tables[*].csv` inside them is replaced server-side by `{ chars, sha256 }` so
@@ -2199,7 +2199,7 @@ export interface EmissionsFactorHistoryEntry {
  *  cost in credits. Same totals shape as the Emissions page (`EmissionsTotals`),
  *  including the basis-mixed-window rule: `carbon_is_summable: false` nulls the
  *  carbon figures and `by_basis` carries the per-basis subtotals instead. Any
- *  member may read it; 404s when tret-cloud is not loaded, 422 on a malformed
+ *  member may read it; 404s when no billing extension is loaded, 422 on a malformed
  *  `period`. */
 export interface BillingFootprint {
   period: string
@@ -2438,8 +2438,8 @@ export interface ImportDocumentsResult {
 // ── Marketplace: registry (Find / Install) ───────────────────────────────
 // Everything below proxies through the backend's own registry client
 // (api/packs.py's `/registry/*` routes -> `_registry_get`/`_download_pack_archive`),
-// which itself proxies tret-cloud's `/api/marketplace/*` registry API. Shapes
-// verified against tret_cloud/marketplace/{api.py,models.py} (2026-08-25).
+// which itself proxies the marketplace registry's `/api/marketplace/*` API.
+// Shapes match the marketplace registry API.
 
 /** One pack as a search result, or the base of a per-slug summary
  *  (`GET /api/packs/registry/search`'s `items`, `GET /api/packs/registry/{slug}`
@@ -2618,12 +2618,11 @@ export interface TestInstallResult {
   version: string // "{version}+draft.{n}"
 }
 
-/** `POST /api/packs/drafts/{id}/submit` (tret_cloud/marketplace/submit.py
- *  ::submit_draft) — cloud-only: the route does not exist until the
- *  tret_cloud extension is loaded, so calling it on self-host 404s, which is
- *  exactly the capability gate the UI reads. Its own small dict, deliberately
- *  narrower than `MarketplacePackVersion` below (verified against
- *  tret_cloud/marketplace). */
+/** `POST /api/packs/drafts/{id}/submit` — cloud-only: the route does not
+ *  exist until the marketplace extension is loaded, so calling it on
+ *  self-host 404s, which is exactly the capability gate the UI reads. Its
+ *  own small dict, deliberately narrower than `MarketplacePackVersion`
+ *  below (shapes match the marketplace registry API). */
 export interface SubmitDraftResult {
   version_id: string
   pack_slug: string
@@ -2633,8 +2632,8 @@ export interface SubmitDraftResult {
 
 // ── Marketplace submissions + review (cloud-only) ─────────────────────────
 // `/api/marketplace/*`, mounted via the same extension seam as `/api/billing/*`
-// — 404s entirely on a self-hosted instance with no tret-cloud extension
-// loaded. Shapes verified against tret_cloud/marketplace/api.py.
+// — 404s entirely on a self-hosted instance with no marketplace extension
+// loaded. Shapes match the marketplace registry API.
 
 /** `GET /api/marketplace/my-submissions` — an array of the caller's own full
  *  `MarketplacePackVersion` objects (`api.py::my_submissions`). */
@@ -2905,8 +2904,8 @@ export const api = {
   },
 
   // marketplace registry (Find / Install) — backend proxy, api/packs.py's own
-  // `/registry/*` routes, passing tret_cloud/marketplace's response bodies
-  // through verbatim. Shapes verified against tret_cloud/marketplace.
+  // `/registry/*` routes, passing the marketplace registry's response bodies
+  // through verbatim. Shapes match the marketplace registry API.
   registrySearch: (params: { q?: string; tags?: string; framework?: string } = {}) => {
     const qs = new URLSearchParams()
     if (params.q) qs.set('q', params.q)
@@ -2953,8 +2952,8 @@ export const api = {
   reviewDetail: (id: string) => request<ReviewDetail>(`/marketplace/review/${id}`),
   // Each decision endpoint returns the full updated version object
   // (`api.py`'s approve/request-changes/reject all end in
-  // `_version_detail_out(pack, pv)`), not a narrow `{id, state}` — verified
-  // against tret_cloud/marketplace.
+  // `_version_detail_out(pack, pv)`), not a narrow `{id, state}` — shapes
+  // match the marketplace registry API.
   reviewApprove: (id: string, notes?: string) =>
     request<MarketplacePackVersion>(`/marketplace/review/${id}/approve`, {
       method: 'POST',
@@ -3056,7 +3055,7 @@ export const api = {
     return request<EmissionsAnalytics>(`/analytics/emissions?${qs.toString()}`)
   },
 
-  // billing (tret-cloud, optional — /billing/status 404s when not loaded)
+  // billing (optional extension — /billing/status 404s when not loaded)
   billingStatus: () => request<BillingStatus>('/billing/status'),
   createCheckout: (kind: string) =>
     request<{ url: string }>('/billing/checkout', { method: 'POST', body: { kind } }),

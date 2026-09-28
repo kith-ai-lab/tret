@@ -5,7 +5,7 @@
  *  bases into a meaningless figure), the credits the period consumed, and the
  *  recorded basis as a plain sentence.
  *
- *  404s when tret-cloud is not loaded — hidden entirely, same capability-gate
+ *  404s when no billing extension is loaded — hidden entirely, same capability-gate
  *  rule as `BillingSection` and `EmissionsHistory`. Never call the avoided
  *  figure an offset: it is a same-token counterfactual, and the band around it
  *  is a judgment band, not a confidence interval.
@@ -136,8 +136,8 @@ export function FootprintCard() {
   })
 
   const error = footprintQuery.error as ApiError | null
-  // Capability gate: tret-cloud isn't loaded on this deployment. Nothing to
-  // show at all — same rule every other tret-cloud surface follows.
+  // Capability gate: no billing extension is loaded on this deployment.
+  // Nothing to show at all — same rule every other billing-extension surface follows.
   if (error && error.status === 404) return null
   // Still loading (the first fetch, before either branch above can have
   // fired yet): say nothing rather than flash the header and month picker

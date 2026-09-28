@@ -5,8 +5,8 @@ import { api, ApiError, type BillingStatus, type CheckoutKind, type LedgerEntry 
 import { formatDateTime } from './format'
 import { type Column, MonoTable } from './MonoTable'
 
-/** Billing is a capability the backend may or may not carry — the proprietary
- *  tret-cloud extension. `GET /api/billing/status` 404s when it is not loaded,
+/** Billing is a capability the backend may or may not carry — a hosting
+ *  extension. `GET /api/billing/status` 404s when it is not loaded,
  *  and that is not an error to surface, it is "this UI does not exist on this
  *  deployment": the section renders nothing at all for it. Any other failure
  *  (network hiccup, 500) renders nothing too — billing must never be the thing

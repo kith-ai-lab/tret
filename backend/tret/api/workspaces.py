@@ -380,7 +380,7 @@ async def accept_invite(
         raise HTTPException(404, "This invite link is invalid or has expired.")
     # Postgres always returns a tz-aware TIMESTAMPTZ; a naive value only shows
     # up under sqlite (dev/test), which drops tzinfo on the round trip — the
-    # same normalisation tret_cloud/api.py's cursor decode applies for the
+    # same normalisation a hosting extension's cursor decode applies for the
     # same reason. Treated as UTC either way, since that's what every
     # `expires_at` this codebase writes always is.
     expires_at = invite.expires_at

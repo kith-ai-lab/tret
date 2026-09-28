@@ -314,7 +314,7 @@ async def test_tree_totals_and_run_count_for_a_root_with_a_grandchild(client, se
 
 async def test_create_run_strips_caller_supplied_delegation_keys(client, seed, session_factory):
     """A hand-set `_delegation_depth` would make a root run look like a
-    delegated child (tret-cloud skips the credit hold for those), and a
+    delegated child (a hosting extension skips the credit hold for those), and a
     negative one would buy extra hops; `_cost_cap_usd` is likewise only ever
     the engine's to set."""
     team, project, user, harness = await _setup_workspace(seed, workspace_name="Co", email="a@example.com")

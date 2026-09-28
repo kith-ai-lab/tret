@@ -1,6 +1,8 @@
 .env
 .env.bak*
 .env.*.bak
+# Your own Fly config, copied from fly.toml.example (docs/deploy-fly.md).
+fly.toml
 __pycache__/
 *.pyc
 .venv/

@@ -4,7 +4,7 @@ Real dependency chain, real database — a real (sqlite, via
 `tests.evals.golden_world.install_sqlite_type_shims`) engine and the actual
 ORM models, driven through `httpx.AsyncClient` + `ASGITransport` directly
 against the app rather than `TestClient`'s portal thread (the same reason
-tret-cloud's own `api_client_factory` fixture does this: every fixture and
+a hosting extension's own `api_client_factory` fixture does this: every fixture and
 every request then share one asyncio event loop, so there is no cross-loop
 asyncpg-style restriction to work around). The query shapes under test here
 — membership existence, owner counts, invite status/expiry filters — are
@@ -661,7 +661,7 @@ async def test_an_unknown_token_is_a_404(client, seed):
 
 
 async def test_invite_creation_is_blocked_by_a_registered_workspace_gate(client, seed):
-    """Wiring, not the gate's own logic (tret-cloud's suite covers that): a
+    """Wiring, not the gate's own logic (a hosting extension's suite covers that): a
     blocked `check_workspace_gate` result becomes a 403 naming the reason."""
     team = make_workspace("Climate Co")
     owner = make_user("owner17@example.com")

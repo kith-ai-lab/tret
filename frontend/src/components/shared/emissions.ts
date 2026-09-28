@@ -529,7 +529,7 @@ export const NOT_SUMMABLE_CELL_HINT =
 // fourth-and-fifth precedence layer on top of the existing env/global-default
 // pair: a run override still wins over everything, a harness-level setting
 // outranks the workspace, and a workspace override outranks both an operator's
-// managed default (tret Cloud) and the plain env/global-default pair. This is
+// managed default (a hosting extension) and the plain env/global-default pair. This is
 // the vocabulary for rendering that layer wherever a factor is shown — the
 // provenance table (`FactorProvenance.tsx`) and the effective-factors table in
 // Settings. Absent on any factor recorded before layered overrides existed, in

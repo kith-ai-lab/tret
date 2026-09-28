@@ -23,8 +23,8 @@ import { ProviderKeyForm } from './ProviderKeyForm'
  *  Setting a key is admin-only (POST /settings/providers is require_admin), so
  *  non-admins get "ask your administrator" rather than a form that would 403.
  *
- *  Billing is a capability the backend may or may not carry — the proprietary
- *  tret-cloud extension — detected exactly like BillingSection.tsx does:
+ *  Billing is a capability the backend may or may not carry — a hosting
+ *  extension — detected exactly like BillingSection.tsx does:
  *  GET /billing/status with retry: false, where a 404 (or any other failure)
  *  means "no billing extension, this is a self-host" and success means Tret
  *  Cloud. Self-host keeps today's paste-a-key dialog byte-for-byte; Tret Cloud

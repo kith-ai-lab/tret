@@ -1,7 +1,7 @@
 /** The emissions-factor change log — a collapsed "Change history" section at
  *  the bottom of the Emissions factors panel.
  *
- *  Same capability-gate pattern as the rest of the tret-cloud surfaces:
+ *  Same capability-gate pattern as the rest of the billing-extension surfaces:
  *  `GET /api/billing/emissions/history` 404s when the extension is not
  *  loaded, and that is not an error, it is "this UI does not exist on this
  *  deployment" — the whole section renders nothing. A 403 (the endpoint is

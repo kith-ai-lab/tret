@@ -33,7 +33,7 @@ log = logging.getLogger("tret.net")
 
 # Sent on research requests so an operator on the receiving end can tell what
 # this is and who to talk to. Provider calls keep their SDK's own agent string.
-USER_AGENT = "tret/0.1 (+https://github.com/tret-platform/tret)"
+USER_AGENT = "tret/0.1 (+https://github.com/kith-ai-lab/tret)"
 
 
 def _hook(egress_class: str, policy: ClassPolicy):

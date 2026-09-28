@@ -413,7 +413,7 @@ async def engine():
     # instead of ever exercising the precondition checks (or the Dataset
     # NULL-out) this file pins. Postgres enforces this by default; this
     # brings sqlite in line so those paths are actually exercised here (same
-    # pattern tret-cloud's tests/conftest.py uses for the same reason).
+    # pattern a hosting extension's own test suite uses for the same reason).
     @sa.event.listens_for(eng.sync_engine, "connect")
     def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()

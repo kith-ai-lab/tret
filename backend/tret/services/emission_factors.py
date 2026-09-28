@@ -6,7 +6,7 @@ records *which rule* won on every run. This module generalises that pattern to
 every accounting constant (grid intensity, PUE, embodied hardware, the
 uncertainty band, the baseline model) and adds two more rungs above the process
 environment: a per-workspace override and a "managed" override an extension
-supplies (`tret_cloud`'s hosted product, for instance).
+supplies (a hosting extension's hosted product, for instance).
 
 **The ladder, most specific first**::
 
@@ -18,7 +18,7 @@ supplies (`tret_cloud`'s hosted product, for instance).
   yet; it is accepted and resolved today so the ladder does not need a second
   migration when something does.
 * `workspace` — an operator's own override document for one workspace.
-* `managed` — an override a hosting extension supplies (`tret_cloud`'s admin
+* `managed` — an override a hosting extension supplies (its admin
   console, say). Named `managed:<source_name>` on the run so two managed
   layers are never confused for one.
 * `env` — a `TRET_*` setting the operator actually set (via a real environment
