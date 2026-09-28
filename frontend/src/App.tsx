@@ -35,14 +35,16 @@ function useTheme(): [Theme, () => void] {
   return [theme, () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))]
 }
 
-const NAV = [
+type NavCountKey = 'approvals' | 'deliverables'
+
+const NAV: { to: string; label: string; count?: NavCountKey }[] = [
   { to: '/', label: 'Chat' },
   { to: '/workbench', label: 'Workbench' },
   { to: '/runs', label: 'Runs' },
-  { to: '/approvals', label: 'Approvals' },
+  { to: '/approvals', label: 'Approvals', count: 'approvals' },
   { to: '/analytics', label: 'Analytics' },
   { to: '/emissions', label: 'Emissions' },
-  { to: '/deliverables', label: 'Deliverables' },
+  { to: '/deliverables', label: 'Deliverables', count: 'deliverables' },
   { to: '/documents', label: 'Documents' },
   { to: '/packs', label: 'Packs' },
   { to: '/harnesses', label: 'Harnesses' },
@@ -123,6 +125,7 @@ function Sidebar({
   onToggleTheme: () => void
   onLogout: () => void
 }) {
+  const counts = useNavCounts()
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -132,7 +135,8 @@ function Sidebar({
       <nav>
         {NAV.map((n) => (
           <NavLink key={n.to} to={n.to} end={n.to === '/'}>
-            {n.label}
+            <span>{n.label}</span>
+            {n.count && <NavCount count={counts[n.count]} what={n.count} />}
           </NavLink>
         ))}
         <MarketplaceReviewNavItem />
@@ -158,6 +162,43 @@ function Sidebar({
         </button>
       </div>
     </aside>
+  )
+}
+
+/** Items waiting on a person, for the sidebar badges.
+ *
+ *  Both queries share their keys with the pages themselves (Approvals'
+ *  `['findings', 'draft']` tab, Deliverables' `['deliverables']`), so a
+ *  decision made on either page — which invalidates those keys — updates the
+ *  badge at once instead of waiting for the poll. The poll only covers work
+ *  arriving from elsewhere (a run finishing in another tab, a teammate).
+ *  `GET /findings` returns at most 100 rows by default, hence the "99+" cap.
+ *  Deliverables counts deliverables with at least one section still in draft:
+ *  the ones whose document isn't complete until someone approves. */
+function useNavCounts(): Record<NavCountKey, number> {
+  const poll = { refetchInterval: 30_000, retry: false } as const
+  const draftsQuery = useQuery({
+    queryKey: ['findings', 'draft'],
+    queryFn: () => api.listFindings({ status: 'draft' }),
+    ...poll,
+  })
+  const deliverablesQuery = useQuery({ queryKey: ['deliverables'], queryFn: api.listDeliverables, ...poll })
+  return {
+    approvals: draftsQuery.data?.length ?? 0,
+    deliverables: (deliverablesQuery.data ?? []).filter((d) => d.draft_count > 0).length,
+  }
+}
+
+function NavCount({ count, what }: { count: number; what: NavCountKey }) {
+  if (count <= 0) return null
+  const label =
+    what === 'approvals'
+      ? `${count} awaiting a decision`
+      : `${count} deliverable${count === 1 ? '' : 's'} with sections awaiting approval`
+  return (
+    <span className="nav-count" title={label} aria-label={label}>
+      {count >= 100 ? '99+' : count}
+    </span>
   )
 }
 

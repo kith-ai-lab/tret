@@ -15,6 +15,10 @@ one that needs action on an existing install.
   inline confirm. Each section still gets its own named approval, tagged as
   coming from the batch action. Only each section's latest draft is approved,
   and a section whose draft changed after you confirmed is skipped.
+- **Pending counts in the sidebar.** Approvals shows how many findings are
+  waiting for a decision, and Deliverables how many deliverables have sections
+  still awaiting approval. Both refresh every 30 seconds and immediately after
+  a decision.
 
 ## [0.1.0] — first public release
 
