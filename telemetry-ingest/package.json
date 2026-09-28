@@ -15,8 +15,23 @@
     "migrate:remote": "wrangler d1 migrations apply tret-telemetry --remote"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.6.0",
-    "vitest": "^2.1.9",
-    "wrangler": "^4.0.0"
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@vitest/runner": "^4.1.11",
+    "@vitest/snapshot": "^4.1.11",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.142.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260815.1": true,
+    "workerd@1.20260926.1": true,
+    "fsevents@2.3.3": true
+  },
+  "overrides": {
+    "sharp": "^0.35.4",
+    "@cloudflare/vitest-pool-workers": {
+      "wrangler": "$wrangler",
+      "miniflare": "5.20260926.0-alpha"
+    }
   }
 }
