@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions & discussion
+    url: https://discord.gg/XsEr3wmDUA
+    about: Ask how to use tret, get help with a pack, or chat with other users on Discord.
+  - name: Report a security vulnerability
+    url: https://github.com/kith-ai-lab/tret/blob/main/SECURITY.md
+    about: Please don't open a public issue — follow the private reporting steps in SECURITY.md.

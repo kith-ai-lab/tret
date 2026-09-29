@@ -1,5 +1,7 @@
 # tret
 
+[![Discord](https://img.shields.io/discord/1554477665413759038?label=Discord&logo=discord&logoColor=white&color=5865F2)](https://discord.gg/XsEr3wmDUA)
+
 **An open-source AI harness platform for non-technical knowledge work.**
 
 tret is what a coding agent is for engineers, built instead for analysts:
@@ -394,6 +396,13 @@ contributions right now. See [CONTRIBUTING.md](CONTRIBUTING.md). Everyone
 taking part agrees to the [Code of Conduct](CODE_OF_CONDUCT.md). To report a
 security issue, see [SECURITY.md](SECURITY.md) — please don't open a public
 issue for it. Release notes live in [CHANGELOG.md](CHANGELOG.md).
+
+## Community
+
+Questions, pack ideas, or just want to see what others are building? Join the
+[tret Discord](https://discord.gg/XsEr3wmDUA). Bugs and feature requests still
+belong in [GitHub issues](https://github.com/kith-ai-lab/tret/issues) so they
+stay tracked.
 
 ## License
 

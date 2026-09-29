@@ -3,6 +3,10 @@
 Thanks for your interest! tret is early — the most valuable contributions
 right now are **domain packs**, provider integrations, and hardening.
 
+Not sure where to start, or want to talk through a pack before writing it?
+Ask in `#contributors` or `#domain-packs` on the
+[tret Discord](https://discord.gg/XsEr3wmDUA).
+
 ## Development setup
 
 ```bash
