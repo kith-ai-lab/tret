@@ -8,19 +8,7 @@ one that needs action on an existing install.
 
 ## [Unreleased]
 
-### Added
-
-- **Approve all sections.** Deliverables, and the Approvals page for a drafted
-  section, offer "Approve all N draft sections" for one deliverable after an
-  inline confirm. Each section still gets its own named approval, tagged as
-  coming from the batch action. Only each section's latest draft is approved,
-  and a section whose draft changed after you confirmed is skipped.
-- **Pending counts in the sidebar.** Approvals shows how many findings are
-  waiting for a decision, and Deliverables how many deliverables have sections
-  still awaiting approval. Both refresh every 30 seconds and immediately after
-  a decision.
-
-## [0.1.0] — first public release
+## [0.1.0] — 2026-09-29 — first public release
 
 tret, an open-source AI workbench: a harness platform for running LLM agents
 against real work with an audit trail, approvals, and an honest cost line.
@@ -55,6 +43,15 @@ against real work with an audit trail, approvals, and an honest cost line.
   templates for Fly.io and Render.
 - **Telemetry, off by default.** Optional anonymous aggregate usage reports
   that an admin must opt in to ([docs/telemetry.md](docs/telemetry.md)).
+- **Approve all sections.** Deliverables, and the Approvals page for a drafted
+  section, offer "Approve all N draft sections" for one deliverable after an
+  inline confirm. Each section still gets its own named approval, tagged as
+  coming from the batch action. Only each section's latest draft is approved,
+  and a section whose draft changed after you confirmed is skipped.
+- **Pending counts in the sidebar.** Approvals shows how many findings are
+  waiting for a decision, and Deliverables how many deliverables have sections
+  still awaiting approval. Both refresh every 30 seconds and immediately after
+  a decision.
 
 [Unreleased]: https://github.com/kith-ai-lab/tret/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/kith-ai-lab/tret/releases/tag/v0.1.0
