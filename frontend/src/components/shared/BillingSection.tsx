@@ -67,6 +67,7 @@ function BillingPanel({ status }: { status: BillingStatus }) {
           />
         ) : (
           <BillingInactive
+            status={status}
             isAdmin={isAdmin}
             onSubscribe={(kind) => checkoutMutation.mutate(kind)}
             pending={pendingKind}
@@ -91,39 +92,81 @@ function BillingPanel({ status }: { status: BillingStatus }) {
 // ── Not yet activated ────────────────────────────────────────────────────
 
 function BillingInactive({
+  status,
   isAdmin,
   onSubscribe,
   pending,
 }: {
+  status: BillingStatus
   isAdmin: boolean
   onSubscribe: (kind: CheckoutKind) => void
   pending: CheckoutKind | null
 }) {
+  // `offers` absent = older backend: keep the subscription-only UI.
+  const offers = status.offers
+  const offerCredits = offers?.credits === true
+  const plans: Array<'solo' | 'team'> = offers ? offers.subscriptions : ['solo', 'team']
+  const nothingOffered = !offerCredits && plans.length === 0
   return (
     <div>
       <div className="mono-body" style={{ marginBottom: 12 }}>
-        Billing is not active for this workspace. Subscribe to a plan to pay by card instead of
-        bringing your own provider keys.
+        {!offers || (!offerCredits && !nothingOffered)
+          ? 'Billing is not active for this workspace. Subscribe to a plan to pay by card instead of bringing your own provider keys.'
+          : nothingOffered
+            ? 'Billing is not active for this workspace. Bring your own provider keys to run models.'
+            : plans.length === 0
+              ? 'Billing is not active for this workspace. Add prepaid credits to run on Kith-managed models, or bring your own provider keys.'
+              : 'Billing is not active for this workspace. Add prepaid credits or subscribe to a plan to pay by card, or bring your own provider keys.'}
       </div>
       {isAdmin ? (
-        <div className="row" style={{ gap: 8 }}>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={pending !== null}
-            onClick={() => onSubscribe('solo')}
-          >
-            {pending === 'solo' ? 'Redirecting…' : 'Activate billing — Solo'}
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={pending !== null}
-            onClick={() => onSubscribe('team')}
-          >
-            {pending === 'team' ? 'Redirecting…' : 'Activate billing — Team'}
-          </button>
-        </div>
+        nothingOffered ? (
+          <div className="mono-body" style={{ color: 'var(--text-muted)' }}>
+            Card payments are not available on this deployment yet.
+          </div>
+        ) : (
+          <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+            {offerCredits && (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={pending !== null}
+                  onClick={() => onSubscribe('credits_small')}
+                >
+                  {pending === 'credits_small' ? 'Redirecting…' : 'Add $20 credits'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={pending !== null}
+                  onClick={() => onSubscribe('credits_large')}
+                >
+                  {pending === 'credits_large' ? 'Redirecting…' : 'Add $100 credits'}
+                </button>
+              </>
+            )}
+            {plans.includes('solo') && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={pending !== null}
+                onClick={() => onSubscribe('solo')}
+              >
+                {pending === 'solo' ? 'Redirecting…' : 'Activate billing — Solo'}
+              </button>
+            )}
+            {plans.includes('team') && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={pending !== null}
+                onClick={() => onSubscribe('team')}
+              >
+                {pending === 'team' ? 'Redirecting…' : 'Activate billing — Team'}
+              </button>
+            )}
+          </div>
+        )
       ) : (
         <div className="mono-body" style={{ color: 'var(--text-muted)' }}>
           Ask an admin to activate billing.
@@ -154,6 +197,10 @@ function BillingActive({
   onManage: () => void
   managePending: boolean
 }) {
+  // Credits-only workspaces (plan 'none') have no subscription to show or
+  // manage. Older backends that send no `offers` keep the full stats/portal UI.
+  const hasPlan = status.offers === undefined || status.plan !== 'none'
+  const offerCredits = status.offers?.credits !== false
   return (
     <div>
       <div className="config-stats">
@@ -161,43 +208,55 @@ function BillingActive({
           <div className="mono-label">Balance</div>
           <div className="mono-body">{formatBalance(status.balance_usd)}</div>
         </div>
-        <div className="config-stat">
-          <div className="mono-label">Plan</div>
-          <div className="mono-body">
-            {status.plan} · {status.subscription_status}
-          </div>
-        </div>
-        <div className="config-stat">
-          <div className="mono-label">Seats</div>
-          <div className="mono-body">{status.seats}</div>
-        </div>
+        {hasPlan && (
+          <>
+            <div className="config-stat">
+              <div className="mono-label">Plan</div>
+              <div className="mono-body">
+                {status.plan} · {status.subscription_status}
+              </div>
+            </div>
+            <div className="config-stat">
+              <div className="mono-label">Seats</div>
+              <div className="mono-body">{status.seats}</div>
+            </div>
+          </>
+        )}
       </div>
 
       {isAdmin ? (
         <div className="row" style={{ gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
-          <button
-            type="button"
-            className="btn"
-            disabled={buyPending !== null}
-            onClick={() => onBuy('credits_small')}
-          >
-            {buyPending === 'credits_small' ? 'Redirecting…' : 'Add $20 credits'}
-          </button>
-          <button
-            type="button"
-            className="btn"
-            disabled={buyPending !== null}
-            onClick={() => onBuy('credits_large')}
-          >
-            {buyPending === 'credits_large' ? 'Redirecting…' : 'Add $100 credits'}
-          </button>
-          <button type="button" className="btn" disabled={managePending} onClick={onManage}>
-            {managePending ? 'Redirecting…' : 'Manage subscription'}
-          </button>
+          {offerCredits && (
+            <>
+              <button
+                type="button"
+                className="btn"
+                disabled={buyPending !== null}
+                onClick={() => onBuy('credits_small')}
+              >
+                {buyPending === 'credits_small' ? 'Redirecting…' : 'Add $20 credits'}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={buyPending !== null}
+                onClick={() => onBuy('credits_large')}
+              >
+                {buyPending === 'credits_large' ? 'Redirecting…' : 'Add $100 credits'}
+              </button>
+            </>
+          )}
+          {hasPlan && (
+            <button type="button" className="btn" disabled={managePending} onClick={onManage}>
+              {managePending ? 'Redirecting…' : 'Manage subscription'}
+            </button>
+          )}
         </div>
       ) : (
         <div className="mono-body" style={{ color: 'var(--text-muted)', marginTop: 10 }}>
-          Buying credits and managing the subscription requires the admin role.
+          {hasPlan
+            ? 'Buying credits and managing the subscription requires the admin role.'
+            : 'Buying credits requires the admin role.'}
         </div>
       )}
     </div>

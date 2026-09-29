@@ -2160,6 +2160,9 @@ export interface BillingStatus {
   subscription_status: string
   balance_usd: number
   seats: number
+  /** Which checkout kinds have a Stripe price configured. Absent on older
+   *  backends — treat that as "offer everything" (the pre-`offers` behavior). */
+  offers?: { credits: boolean; subscriptions: Array<'solo' | 'team'> }
 }
 
 /** One entry in the billing ledger — a credit purchase, a subscription charge,
