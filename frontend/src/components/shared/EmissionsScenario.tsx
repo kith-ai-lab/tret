@@ -25,6 +25,7 @@ import {
   type EmissionsBandOverride,
   type EmissionsGridBasisValue,
   type EmissionsOverrides,
+  type EmissionsWaterOverride,
   type EmissionsWhatifResult,
   type GridBasis,
 } from '../../api/client'
@@ -37,8 +38,19 @@ import {
   NOT_SUMMABLE_WHY,
   REGION_PIN_NOTE,
   SUMMABLE_ACROSS_BASES_NOTE,
+  WATER_BAND_SHORT,
+  WATER_BASIS_NOTE,
 } from './emissions'
-import { formatCo2eScaled, formatCostScaled, formatEnergyScaled, formatTokens, NO_ESTIMATE, orDash } from './format'
+import {
+  formatCo2eScaled,
+  formatCostScaled,
+  formatEnergyScaled,
+  formatTokens,
+  formatWaterScaled,
+  NO_ESTIMATE,
+  NO_WATER,
+  orDash,
+} from './format'
 import { Modal } from './Modal'
 import { TotalsStrip } from '../../views/Emissions'
 
@@ -60,6 +72,12 @@ interface ScenarioDraft {
    *  down to one provider since this drawer is a reduced form. */
   regionProvider: string
   regionValue: string
+  /** Water scenario keys. Band values are multipliers (0.33 = divide by 3). */
+  waterSiteWue: string
+  waterGrid: string
+  waterCountry: string
+  waterBandLow: string
+  waterBandHigh: string
 }
 
 function emptyDraft(): ScenarioDraft {
@@ -76,6 +94,11 @@ function emptyDraft(): ScenarioDraft {
     bandDerived: false,
     regionProvider: '',
     regionValue: '',
+    waterSiteWue: '',
+    waterGrid: '',
+    waterCountry: '',
+    waterBandLow: '',
+    waterBandHigh: '',
   }
 }
 
@@ -104,6 +127,25 @@ function validateDraft(draft: ScenarioDraft): string[] {
   }
   if (draft.regionProvider && draft.regionValue.trim() && !REGION_TOKEN_RE.test(draft.regionValue.trim())) {
     errors.push(`grid.regions: invalid region: '${draft.regionValue.trim()}'`)
+  }
+  // Water: same rules as the backend's WaterBlock.
+  for (const [name, text] of [
+    ['water.site_wue_l_per_kwh', draft.waterSiteWue],
+    ['water.grid_water_l_per_kwh', draft.waterGrid],
+  ] as const) {
+    const n = num(text)
+    if (text.trim() !== '' && (n === undefined || n < 0)) errors.push(`${name} must be a non-negative number`)
+  }
+  const wLow = num(draft.waterBandLow)
+  if (draft.waterBandLow.trim() !== '' && (wLow === undefined || !(wLow > 0 && wLow <= 1))) {
+    errors.push('water.band_low must be above 0 and at most 1 (0.33 means divide by 3)')
+  }
+  const wHigh = num(draft.waterBandHigh)
+  if (draft.waterBandHigh.trim() !== '' && (wHigh === undefined || wHigh < 1)) {
+    errors.push('water.band_high must be 1 or more (3 means multiply by 3)')
+  }
+  if (draft.waterCountry.trim() !== '' && !/^[A-Za-z]{3}$/.test(draft.waterCountry.trim())) {
+    errors.push('water.country must be a 3-letter ISO 3166 alpha-3 code')
   }
   return errors
 }
@@ -134,6 +176,13 @@ function draftToFactors(draft: ScenarioDraft): Partial<EmissionsOverrides> {
   if (draft.regionProvider && draft.regionValue.trim()) {
     factors.grid = { ...(factors.grid ?? {}), regions: { [draft.regionProvider]: draft.regionValue.trim() } }
   }
+  const water: EmissionsWaterOverride = {}
+  if (num(draft.waterSiteWue) !== undefined) water.site_wue_l_per_kwh = num(draft.waterSiteWue)
+  if (num(draft.waterGrid) !== undefined) water.grid_water_l_per_kwh = num(draft.waterGrid)
+  if (draft.waterCountry.trim() !== '') water.country = draft.waterCountry.trim().toUpperCase()
+  if (num(draft.waterBandLow) !== undefined) water.band_low = num(draft.waterBandLow)
+  if (num(draft.waterBandHigh) !== undefined) water.band_high = num(draft.waterBandHigh)
+  if (Object.keys(water).length > 0) factors.water = water
   return factors
 }
 
@@ -353,6 +402,38 @@ function ScenarioContent({ projectId, days }: { projectId: string | null; days: 
           </div>
         </div>
 
+        <div>
+          <div className="mono-label" style={{ marginBottom: 6 }}>
+            Water
+          </div>
+          <div className="fine-print" style={{ marginBottom: 6 }}>
+            {WATER_BASIS_NOTE} Leave blank to keep what each run recorded. {WATER_BAND_SHORT}
+          </div>
+          <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-start', gap: 10 }}>
+            {(
+              [
+                ['waterSiteWue', 'Cloud site WUE (L/kWh)', 'number'],
+                ['waterGrid', 'Grid water (L/kWh)', 'number'],
+                ['waterCountry', 'Country (ISO3)', 'text'],
+                ['waterBandLow', 'Low multiplier (0.33 = ÷3)', 'number'],
+                ['waterBandHigh', 'High multiplier (3 = ×3)', 'number'],
+              ] as const
+            ).map(([key, label, type]) => (
+              <div key={key} className="field" style={{ marginBottom: 0, width: 170 }}>
+                <label className="mono-label">{label}</label>
+                <input
+                  type={type}
+                  step="any"
+                  min={type === 'number' ? 0 : undefined}
+                  maxLength={type === 'text' ? 3 : undefined}
+                  value={draft[key]}
+                  onChange={(e) => setDraft({ ...draft, [key]: e.target.value })}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+
         {clientErrors.length > 0 && (
           <div className="error-text">
             Fix the following before comparing:
@@ -432,6 +513,16 @@ function ScenarioResult({ result }: { result: EmissionsWhatifResult }) {
           Scenario ({basisList(scenario.totals.grid_bases)} accounting)
         </div>
         <TotalsStrip totals={scenario.totals} />
+        <div className="fine-print" style={{ marginTop: 6 }}>
+          Water (est.): recorded {formatWaterScaled(recorded.totals.water_ml) ?? NO_WATER}, scenario{' '}
+          {formatWaterScaled(scenario.totals.water_ml) ?? NO_WATER}.
+          {(recorded.totals.runs_without_water ?? 0) > 0 && (
+            <>
+              {' '}The recorded figure leaves out {recorded.totals.runs_without_water} run(s) recorded before water
+              accounting; the scenario restates them from their stored energy, so the two figures cover different runs.
+            </>
+          )}
+        </div>
       </div>
 
       <div className="panel stack" style={{ gap: 10 }}>
@@ -459,6 +550,15 @@ function ScenarioResult({ result }: { result: EmissionsWhatifResult }) {
             label="Δ money"
             value={formatCostScaled(delta.avoided_usd)}
             hint="Exact arithmetic on published list prices — the one figure here that is not an estimate."
+          />
+          <DeltaStat
+            label="Δ water (est.)"
+            value={
+              delta.water_ml === null || delta.water_ml === undefined
+                ? NO_WATER
+                : (formatWaterScaled(delta.water_ml) ?? NO_WATER)
+            }
+            hint="Scenario minus recorded water. Shown only when every run in the window has a recorded water figure on both sides; a run recorded before water accounting has nothing to compare against. Negative means less water. Not an offset."
           />
           <DeltaStat label="Runs recomputed" value={formatTokens(result.runs_recomputed)} />
           {result.runs_preserved !== undefined && <DeltaStat label="Runs kept unchanged" value={formatTokens(result.runs_preserved)} />}

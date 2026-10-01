@@ -2150,9 +2150,10 @@ def caveat_records(
             "direction": "understates",
             "applies": True,
             "note": (
-                "Excluded: water, network transfer, storage, retrieval and embedding "
-                "calls, and the router's own model call — the same scope as the dollar "
-                "cost tret already reports."
+                "Excluded: network transfer, storage, retrieval and embedding calls, "
+                "and the router's own model call — the same scope as the dollar cost "
+                "tret already reports. Water is not part of this figure; it is "
+                "reported separately (docs/water-methodology.md)."
             ),
         },
         {

@@ -45,6 +45,7 @@ import {
   type EmissionsPueOverride,
   type EmissionsResolvedValue,
   type EmissionsShippedDefault,
+  type EmissionsWaterOverride,
 } from '../../api/client'
 import {
   BAND_DERIVE_NOTE,
@@ -58,9 +59,14 @@ import {
   layerMeta,
   PUE_PROFILE_LABELS,
   REGION_PIN_NOTE,
+  WATER_BAND_SHORT,
+  WATER_BASIS_NOTE,
+  WATER_HYDRO_NOTE,
+  WATER_METHODOLOGY_TRIGGER_HINT,
   TABLE_MISS_NOTE,
 } from '../shared/emissions'
 import { formatDateTime } from '../shared/format'
+import { MethodologyLink } from '../shared/MethodologyDialog'
 import { QueryError } from '../shared/MonoTable'
 import { EmissionsHistory } from './EmissionsHistory'
 
@@ -139,7 +145,19 @@ interface BandDraft {
   derived: boolean
 }
 
+/** The `water` block as strings. `band_low`/`band_high` are both multipliers on
+ *  the central figure (0.33 = divide by 3), unlike the carbon band's divisor. */
+interface WaterDraft {
+  site_wue: string
+  local_site_wue: string
+  grid_water: string
+  country: string
+  band_low: string
+  band_high: string
+}
+
 interface FormDraft {
+  water: WaterDraft
   gridDefault: GridRowDraft
   gridProviders: Record<string, GridRowDraft>
   /** One region text per provider — independent of whether a `provider@region`
@@ -245,6 +263,15 @@ function draftFromOverrides(overrides: EmissionsOverrides | Record<string, never
       derived: o.band?.derived ?? false,
     },
     baselineModel: o.baseline_model ?? '',
+    water: {
+      site_wue: o.water?.site_wue_l_per_kwh !== undefined ? String(o.water.site_wue_l_per_kwh) : '',
+      local_site_wue:
+        o.water?.local_site_wue_l_per_kwh !== undefined ? String(o.water.local_site_wue_l_per_kwh) : '',
+      grid_water: o.water?.grid_water_l_per_kwh !== undefined ? String(o.water.grid_water_l_per_kwh) : '',
+      country: o.water?.country ?? '',
+      band_low: o.water?.band_low !== undefined ? String(o.water.band_low) : '',
+      band_high: o.water?.band_high !== undefined ? String(o.water.band_high) : '',
+    },
   }
 }
 
@@ -427,14 +454,53 @@ function validateDraft(draft: FormDraft): DraftError[] {
       errors.push({ field: 'band.label', message: 'band.label is required when band.low or band.high is set' })
     }
   }
+  // Water: the same rules the backend enforces (WaterBlock).
+  const w = draft.water
+  for (const [field, text] of [
+    ['water.site_wue_l_per_kwh', w.site_wue],
+    ['water.local_site_wue_l_per_kwh', w.local_site_wue],
+    ['water.grid_water_l_per_kwh', w.grid_water],
+  ] as const) {
+    if (text.trim() === '') continue
+    const n = num(text)
+    if (n === undefined || n < 0) {
+      errors.push({ field, message: `${field} must be a non-negative number` })
+    }
+  }
+  if (w.band_low.trim() !== '') {
+    const n = num(w.band_low)
+    if (n === undefined || !(n > 0 && n <= 1)) {
+      errors.push({ field: 'water.band_low', message: 'water.band_low must be above 0 and at most 1 (0.33 means divide by 3)' })
+    }
+  }
+  if (w.band_high.trim() !== '') {
+    const n = num(w.band_high)
+    if (n === undefined || n < 1) {
+      errors.push({ field: 'water.band_high', message: 'water.band_high must be 1 or more (3 means multiply by 3)' })
+    }
+  }
+  if (w.country.trim() !== '' && !/^[A-Za-z]{3}$/.test(w.country.trim())) {
+    errors.push({ field: 'water.country', message: 'water.country must be a 3-letter ISO 3166 alpha-3 code, e.g. USA' })
+  }
   return errors
 }
 
-/** Builds the `EmissionsOverrides` body from the draft — omitting any block
- *  or row whose number was left blank, so clearing a field removes the
- *  override rather than sending it as an explicit zero. */
-function overridesFromDraft(draft: FormDraft): EmissionsOverrides {
-  const body: EmissionsOverrides = {}
+/** The form rebuilds `grid`, `pue`, `embodied`, `band`, `water` and
+ *  `baseline_model` from its inputs. Top-level keys the backend schema accepts that this form does not edit; they
+ *  are carried through untouched. Anything else is dropped, because the backend
+ *  rejects unknown keys and carrying one would make every save fail. */
+const CARRIED_KEYS = ['version', 'energy_strategy', 'model_overrides', 'source_name', 'updated_by', 'updated_at'] as const
+
+/** Builds the PUT body from the draft. The PUT replaces the whole document, so
+ *  the body starts from the document as loaded (`base`) with only the blocks this
+ *  form manages removed and rebuilt from the draft; saving can never silently
+ *  delete a block the form does not show. A blank field omits its override
+ *  rather than sending an explicit zero. */
+function overridesFromDraft(draft: FormDraft, base: EmissionsOverrides): EmissionsOverrides {
+  const baseDoc = base as Record<string, unknown>
+  const carried: Record<string, unknown> = {}
+  for (const key of CARRIED_KEYS) if (baseDoc[key] !== undefined) carried[key] = baseDoc[key]
+  const body: EmissionsOverrides = carried as EmissionsOverrides
 
   const buildGridEntry = (row: GridRowDraft, v: number): EmissionsGridOverride => ({
     g_per_kwh: v,
@@ -460,6 +526,15 @@ function overridesFromDraft(draft: FormDraft): EmissionsOverrides {
         providers[`${provider}@${region}`] = buildGridEntry(regionalRow, rv)
       }
     }
+  }
+  // Rows the form has no field for (another provider, or a region other than the
+  // one shown) are kept as stored rather than silently dropped.
+  const knownProviders = new Set<string>(EMISSIONS_OVERRIDE_PROVIDERS)
+  for (const [key, entry] of Object.entries(base.grid?.providers ?? {})) {
+    const [provider, region] = key.split('@')
+    const shownRegion = knownProviders.has(provider) ? draft.gridRegions[provider as keyof typeof draft.gridRegions]?.trim() : undefined
+    const managed = knownProviders.has(provider) && (region === undefined || (draft.regionalOpen[provider as keyof typeof draft.regionalOpen] && region === shownRegion))
+    if (!managed && entry && !(key in providers)) providers[key] = entry
   }
   const regions: Record<string, string> = {}
   for (const provider of EMISSIONS_OVERRIDE_PROVIDERS) {
@@ -500,6 +575,11 @@ function overridesFromDraft(draft: FormDraft): EmissionsOverrides {
     pue.local_profile = draft.pue.local_profile
     body.pue = pue
   }
+  // Upstream PUE disclosures have no form field; keep them.
+  const upstreams = (base.pue as Record<string, unknown> | undefined)?.upstreams
+  if (upstreams !== undefined) {
+    body.pue = { ...(body.pue ?? { label: base.pue?.label ?? '' }), upstreams } as EmissionsPueOverride
+  }
 
   const embodiedHasValue =
     draft.embodied.mode === 'per_run'
@@ -513,7 +593,7 @@ function overridesFromDraft(draft: FormDraft): EmissionsOverrides {
       const profile: EmissionsEmbodiedProfile = {
         gpus: num(draft.embodied.profile.gpus) as number,
         runs_over_lifetime: num(draft.embodied.profile.runs_over_lifetime) as number,
-        gpu_model: EMBODIED_GPU_MODEL,
+        gpu_model: base.embodied?.profile?.gpu_model ?? EMBODIED_GPU_MODEL,
       }
       const batchSize = num(draft.embodied.profile.batch_size)
       if (batchSize !== undefined) profile.batch_size = batchSize
@@ -534,6 +614,16 @@ function overridesFromDraft(draft: FormDraft): EmissionsOverrides {
   }
 
   if (draft.baselineModel.trim() !== '') body.baseline_model = draft.baselineModel.trim()
+
+  const water: EmissionsWaterOverride = {}
+  const wn = (t: string) => num(t)
+  if (wn(draft.water.site_wue) !== undefined) water.site_wue_l_per_kwh = wn(draft.water.site_wue)
+  if (wn(draft.water.local_site_wue) !== undefined) water.local_site_wue_l_per_kwh = wn(draft.water.local_site_wue)
+  if (wn(draft.water.grid_water) !== undefined) water.grid_water_l_per_kwh = wn(draft.water.grid_water)
+  if (draft.water.country.trim() !== '') water.country = draft.water.country.trim().toUpperCase()
+  if (wn(draft.water.band_low) !== undefined) water.band_low = wn(draft.water.band_low)
+  if (wn(draft.water.band_high) !== undefined) water.band_high = wn(draft.water.band_high)
+  if (Object.keys(water).length > 0) body.water = water
 
   return body
 }
@@ -750,7 +840,7 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
     const errors = validateDraft(draft)
     setClientErrors(errors)
     if (errors.length > 0) return
-    saveMutation.mutate(overridesFromDraft(draft))
+    saveMutation.mutate(overridesFromDraft(draft, overrides))
   }
 
   const clear = () => {
@@ -1350,6 +1440,15 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
           </div>
         </div>
 
+        {/* ── water ── */}
+        <WaterSection
+          draft={draft.water}
+          onChange={(water) => setDraft({ ...draft, water })}
+          disabled={disabled}
+          errors={clientErrors}
+          effective={data.effective}
+        />
+
         {/* ── baseline model ── */}
         <div>
           <div className="mono-label" style={{ marginBottom: 6 }}>
@@ -1432,6 +1531,112 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
       )}
 
       <EmissionsHistory />
+    </div>
+  )
+}
+
+// ── water ────────────────────────────────────────────────────────────────
+
+const WATER_FIELDS: {
+  key: keyof WaterDraft
+  field: string
+  label: string
+  hint: string
+  record?: string
+  unit?: string
+  type: 'number' | 'text'
+}[] = [
+  { key: 'site_wue', field: 'water.site_wue_l_per_kwh', label: 'Cloud site WUE', hint: 'Cooling water per kWh of IT energy at a cloud data centre.', record: 'site_wue_l_per_kwh', unit: 'L/kWh', type: 'number' },
+  { key: 'local_site_wue', field: 'water.local_site_wue_l_per_kwh', label: 'Local site WUE', hint: 'Same, for runs on your own hardware. Stays 0 unless you set it (for example an evaporatively cooled room).', unit: 'L/kWh', type: 'number' },
+  { key: 'grid_water', field: 'water.grid_water_l_per_kwh', label: 'Grid water factor', hint: 'Water used to generate each kWh of electricity.', record: 'grid_water_l_per_kwh', unit: 'L/kWh', type: 'number' },
+  { key: 'country', field: 'water.country', label: 'Country (ISO3)', hint: 'Picks a country grid water factor, e.g. USA, DEU, IND. Blank uses the world average.', type: 'text' },
+  { key: 'band_low', field: 'water.band_low', label: 'Low multiplier (0.33 = ÷3)', hint: 'Low end of the range as a multiplier on the central figure. Above 0, at most 1.', type: 'number' },
+  { key: 'band_high', field: 'water.band_high', label: 'High multiplier (3 = ×3)', hint: 'High end of the range as a multiplier on the central figure. 1 or more.', type: 'number' },
+]
+
+/** Water factor inputs, with what is in force now and where each value came
+ *  from. Blank falls through to the next layer, exactly as for the carbon
+ *  factors. Effective values come from the cloud and local providers' `water`
+ *  blocks; their records carry the layer and source. */
+function WaterSection({
+  draft,
+  onChange,
+  disabled,
+  errors,
+  effective,
+}: {
+  draft: WaterDraft
+  onChange: (next: WaterDraft) => void
+  disabled: boolean
+  errors: DraftError[]
+  effective: Record<string, EmissionsEffectiveFactors> | null
+}) {
+  const cloud = effective?.anthropic?.water ?? Object.values(effective ?? {}).find((e) => e.deployment === 'cloud')?.water
+  const local = effective?.local?.water
+  const recordLine = (w: typeof cloud, key: string) => {
+    const r = w?.records.find((x) => x.key === key)
+    if (!r) return null
+    const layer = layerMeta(r.layer)
+    const num = (v: unknown) => (typeof v === 'number' ? String(Number(v.toPrecision(3))) : String(v))
+    const value = typeof r.value === 'object' && r.value ? `${num(r.value.low)} / ${num(r.value.high)}` : num(r.value)
+    return (
+      <span key={key} title={`${r.source}${r.setting ? ` · change it with ${r.setting}` : ''}`}>
+        {value} {r.unit ?? ''} {layer && <span className={`badge ${layer.badge}`}>{layer.label}</span>}
+      </span>
+    )
+  }
+  return (
+    <div>
+      <div className="row" style={{ marginBottom: 6, flexWrap: 'wrap' }}>
+        <div className="mono-label">Water</div>
+        <span style={{ flex: 1 }} />
+        <span className="fine-print">
+          <MethodologyLink topic="water" label="water methodology" />
+        </span>
+      </div>
+      <div className="fine-print" style={{ marginBottom: 6 }} title={WATER_METHODOLOGY_TRIGGER_HINT}>
+        What powers each run's water estimate. Blank falls back to a managed default, an environment
+        variable, a country dataset or tret's shipped default. {WATER_BASIS_NOTE} {WATER_HYDRO_NOTE}{' '}
+        {WATER_BAND_SHORT}
+      </div>
+      <div className="row" style={{ flexWrap: 'wrap', alignItems: 'flex-start', gap: 10 }}>
+        {WATER_FIELDS.map((f) => (
+          <div key={f.key} className="field" style={{ marginBottom: 0, width: 190 }}>
+            <label className="mono-label" htmlFor={`water-${f.key}`}>
+              {f.label}
+            </label>
+            <input
+              id={`water-${f.key}`}
+              type={f.type === 'number' ? 'number' : 'text'}
+              step="any"
+              min={f.type === 'number' ? 0 : undefined}
+              maxLength={f.type === 'text' ? 3 : undefined}
+              value={draft[f.key]}
+              disabled={disabled}
+              onChange={(e) => onChange({ ...draft, [f.key]: e.target.value })}
+            />
+            <div className="fine-print" style={{ marginTop: 2 }}>
+              {f.hint}
+            </div>
+            {f.record && cloud && (
+              <div className="fine-print" style={{ marginTop: 2 }}>
+                in force (cloud): {recordLine(cloud, f.record)}
+              </div>
+            )}
+            {f.key === 'local_site_wue' && local && (
+              <div className="fine-print" style={{ marginTop: 2 }}>
+                in force (local): {recordLine(local, 'site_wue_l_per_kwh')}
+              </div>
+            )}
+            {f.key === 'band_low' && cloud && (
+              <div className="fine-print" style={{ marginTop: 2 }}>
+                in force: {recordLine(cloud, 'water_band')}
+              </div>
+            )}
+            <FieldError errors={errors} field={f.field} />
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

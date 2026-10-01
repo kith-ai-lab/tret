@@ -13,6 +13,7 @@ import {
   ESTIMATE_NOTE,
   MONEY_PCT_PRECISION_NOTE,
   MONEY_SHORT,
+  WATER_BASIS_NOTE,
   avoidedFraming,
   avoidedMoneyFraming,
   moneyPctCompact,
@@ -23,6 +24,7 @@ import {
   formatCo2e,
   formatCo2eBand,
   formatCostSigned,
+  formatWaterScaled,
   formatWh,
   orDash,
 } from './format'
@@ -56,6 +58,18 @@ export function LiveFootprint({
         <span className="t-key">{BAND_LABEL}</span>
         <span className="t-val" style={{ minWidth: '15ch' }}>
           {orDash(formatCo2eBand(usage?.co2e_g_low, usage?.co2e_g_high))}
+        </span>
+      </span>
+
+      {/* Water is a cell of its own, fixed-width like the rest, so the row does
+          not reflow when the first figure arrives. Em-dash until reported. */}
+      <span
+        className="t-item"
+        title={`Cumulative estimated water consumed. ${WATER_BASIS_NOTE} ${NO_ESTIMATE_HINT}`}
+      >
+        <span className="t-key">water</span>
+        <span className="t-val" style={{ minWidth: '9ch' }}>
+          {orDash(formatWaterScaled(usage?.water_ml))}
         </span>
       </span>
 

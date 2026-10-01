@@ -11,10 +11,10 @@ through the same factor ladder as carbon in
 [emissions-methodology.md](emissions-methodology.md); this page assumes it and
 does not repeat it.
 
-> **Status: computed on new runs; not yet shown in the interface.** Every run
-> recorded from this version on carries a `water` block in its
-> `energy_accounting`, and the analytics, what-if and export endpoints return
-> water fields. Runs recorded earlier carry no water figure.
+> **Status: computed on new runs.** Every run recorded from this version on
+> carries a `water` block in its `energy_accounting`, shown on the run page, the
+> Emissions dashboard (Water view), the what-if drawer and the emissions
+> settings. Runs recorded earlier carry no water figure and show "Not recorded".
 
 **One-line summary: water figures are estimates of freshwater consumed, for
 comparing model choices. They are derived from estimated or measured energy
@@ -360,8 +360,6 @@ Water is not part of the anonymous telemetry report.
   local scarcity. It would apply only when the serving region is known, which
   means local runs and operator-pinned provider@region, and it would be a
   second figure next to litres, never a replacement.
-- **Interface.** The run detail, dashboard, settings and what-if screens do
-  not show water yet.
 - **Measured water.** An operator with a facility water meter can set their own
   site WUE today. Per-run metered water is not planned.
 - **Embodied water** for self-hosted hardware, until a per-device figure can be

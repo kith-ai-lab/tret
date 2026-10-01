@@ -25,6 +25,7 @@ import {
 import { ScopeBar } from '../components/shared/EmissionsCalc'
 import { EmissionsScenarioButton } from '../components/shared/EmissionsScenario'
 import { MethodologyLink } from '../components/shared/MethodologyDialog'
+import { WaterDashboard } from '../components/shared/WaterDashboard'
 import {
   BAND_LABEL,
   BAND_SHORT,
@@ -123,6 +124,9 @@ function bucketBand(b: {
 
 export function Emissions() {
   const [days, setDays] = useState(30)
+  // Carbon is the page's default; Water swaps the totals and breakdowns for the
+  // water figures the same endpoint returns.
+  const [metric, setMetric] = useState<'carbon' | 'water'>('carbon')
   const emissionsQuery = useQuery({
     queryKey: ['emissions', days],
     queryFn: () => api.emissionsAnalytics(days),
@@ -163,6 +167,20 @@ export function Emissions() {
             </option>
           ))}
         </select>
+        <div className="tabs" role="tablist" aria-label="Metric" style={{ margin: 0 }}>
+          {(['carbon', 'water'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              role="tab"
+              aria-selected={metric === m}
+              className={`tab ${metric === m ? 'active' : ''}`}
+              onClick={() => setMetric(m)}
+            >
+              {m === 'carbon' ? 'Carbon' : 'Water'}
+            </button>
+          ))}
+        </div>
         {data && (
           <span className="mono-label">
             {formatTokens(data.totals.runs)} runs in window · {formatTokens(data.scan.rows_scanned)}{' '}
@@ -185,10 +203,12 @@ export function Emissions() {
         <div className="error-text">{(emissionsQuery.error as Error).message}</div>
       ) : !data ? null : (
         <>
-          <Disclaimer data={data} />
+          {metric === 'carbon' && <Disclaimer data={data} />}
 
           {data.totals.runs === 0 ? (
             <EmptyWindow days={days} />
+          ) : metric === 'water' ? (
+            <WaterDashboard data={data} />
           ) : data.totals.runs_with_estimate === 0 ? (
             <NoEstimates totals={data.totals} />
           ) : (
@@ -203,7 +223,7 @@ export function Emissions() {
             </>
           )}
 
-          <Factors data={data} />
+          {metric === 'carbon' && <Factors data={data} />}
         </>
       )}
     </div>

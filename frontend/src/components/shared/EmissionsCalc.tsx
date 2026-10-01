@@ -27,6 +27,7 @@ import { Fragment } from 'react'
 import type { EmissionsFactor, EnergyAccounting, TokenBucket } from '../../api/client'
 import { CaveatList, FactorTable, SensitivityTable } from './FactorProvenance'
 import { MethodologyLink } from './MethodologyDialog'
+import { WaterDerivation } from './WaterFootprint'
 import {
   BAND_LABEL,
   BAND_SHORT,
@@ -369,6 +370,10 @@ export function EmissionsCalc({ energy }: { energy: EnergyAccounting }) {
 
       {energy.scopes && <RunScopes energy={energy} />}
       {energy.baseline && <RunBaseline energy={energy} />}
+
+      {/* Water is derived from the same energy figure; its own factors and
+          caveats sit in the water card's details, not in the carbon table. */}
+      <WaterDerivation energy={energy} />
 
       {hasProvenance && (
         <details className="tool-row">

@@ -12,8 +12,19 @@ import {
 } from '../components/shared/ModelTimeline'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
 import { MethodV3Line } from '../components/shared/MethodV3Line'
-import { BAND_SHORT } from '../components/shared/emissions'
-import { footprintText, formatCo2eBand, formatCost, formatTokens } from '../components/shared/format'
+import { WaterPanel } from '../components/shared/WaterFootprint'
+import {
+  BAND_SHORT,
+  WATER_BAND_SHORT,
+  completeWater,
+} from '../components/shared/emissions'
+import {
+  footprintText,
+  formatCo2eBand,
+  formatCost,
+  formatTokens,
+  formatWaterScaled,
+} from '../components/shared/format'
 import { LiveFootprint } from '../components/shared/LiveFootprint'
 import { ProvenanceCard } from '../components/shared/ProvenanceCard'
 import { RoutingBadge } from '../components/shared/RoutingBadge'
@@ -93,6 +104,10 @@ export function RunDetailView() {
   const iterations = live?.iteration ?? run.iterations
   const footprint = footprintText(energyWh, co2eG)
   const footprintBand = formatCo2eBand(co2eGLow, co2eGHigh)
+  // Water rides beside the carbon figure. A run recorded before water accounting
+  // (or with only partial water) shows nothing here rather than a zero; the water
+  // card above says "Not recorded" in full.
+  const runWater = completeWater(run.energy?.water)
 
   return (
     <div className="stack">
@@ -294,6 +309,7 @@ export function RunDetailView() {
       />
 
       {run.energy && <EnergyDetail energy={run.energy} />}
+      {run.energy && <WaterPanel energy={run.energy} />}
       <MethodV3Line method={run.method_v3} />
 
       <div className="row mono-label" style={{ gap: 24, flexWrap: 'wrap' }}>
@@ -315,6 +331,11 @@ export function RunDetailView() {
           >
             {footprint}
             {footprintBand && ` · range ${footprintBand}`}
+          </span>
+        )}
+        {runWater && (
+          <span title={`Water consumed (evaporated or used up), estimated from the same energy figure. ${WATER_BAND_SHORT}`}>
+            ~{formatWaterScaled(runWater.water_ml)} water (est.)
           </span>
         )}
         {run.started_at && run.finished_at && (

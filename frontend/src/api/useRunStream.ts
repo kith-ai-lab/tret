@@ -132,6 +132,9 @@ export interface UsageInfo {
   // engine reports one.
   co2e_g_low: number | null
   co2e_g_high: number | null
+  // Cumulative water consumed, mL (estimated). null until the engine reports
+  // one, and on a backend without water accounting. Never 0 for "unknown".
+  water_ml: number | null
 }
 
 export interface RunStreamState {
@@ -418,6 +421,7 @@ export function useRunStream(runId: string | null): RunStreamState {
           avoided_usd_pct: numberOrNull(d.avoided_usd_pct),
           co2e_g_low: numberOrNull(d.co2e_g_low),
           co2e_g_high: numberOrNull(d.co2e_g_high),
+          water_ml: numberOrNull(d.water_ml),
         },
       })),
     )
@@ -443,6 +447,7 @@ export function useRunStream(runId: string | null): RunStreamState {
               avoided_usd_pct: numberOrNull(d.avoided_usd_pct) ?? s.usage.avoided_usd_pct,
               co2e_g_low: numberOrNull(d.co2e_g_low) ?? s.usage.co2e_g_low,
               co2e_g_high: numberOrNull(d.co2e_g_high) ?? s.usage.co2e_g_high,
+              water_ml: numberOrNull(d.water_ml) ?? s.usage.water_ml,
             }
           : s.usage,
       }))

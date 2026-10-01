@@ -93,6 +93,80 @@ export function formatCo2eAt(grams: number | null | undefined, scale: Co2eScale)
   return `${magnitude(grams / scale.divisor)} ${scale.unit}`
 }
 
+// ── water ────────────────────────────────────────────────────────────────
+// Water is estimated in millilitres and shown in the unit a person would reach
+// for: mL under a litre, litres up to a cubic metre, then m³. Same rules as
+// carbon — the sign is preserved, a missing figure is never a zero, and a range
+// prints both ends in one unit.
+
+/** The placeholder wording for a run with no water figure. Distinct from zero:
+ *  runs recorded before water accounting carry none. */
+export const NO_WATER = 'Not recorded'
+
+export const NO_WATER_HINT =
+  'No water figure recorded — not zero. Runs recorded before water accounting existed carry none, and a run where only some calls had water is treated the same way.'
+
+export function formatWater(ml: number | null | undefined): string | null {
+  return ml === null || ml === undefined ? null : `${magnitude(ml)} mL`
+}
+
+/** A water unit fixed from a reference magnitude, so figures meant to be read
+ *  against each other (actual vs baseline, the two ends of a band) share one. */
+export interface WaterScale {
+  divisor: number
+  unit: string
+}
+
+export function waterScaleFor(reference: number): WaterScale {
+  const abs = Math.abs(reference)
+  if (abs >= 1_000_000) return { divisor: 1_000_000, unit: 'm³' }
+  if (abs >= 1_000) return { divisor: 1_000, unit: 'L' }
+  return { divisor: 1, unit: 'mL' }
+}
+
+export function formatWaterAt(ml: number | null | undefined, scale: WaterScale): string | null {
+  if (ml === null || ml === undefined) return null
+  return `${magnitude(ml / scale.divisor)} ${scale.unit}`
+}
+
+/** Water at window scale: mL → L → m³. */
+export function formatWaterScaled(ml: number | null | undefined): string | null {
+  if (ml === null || ml === undefined) return null
+  return formatWaterAt(ml, waterScaleFor(ml))
+}
+
+/** "6.1 – 54 L", or null when either end is missing. One unit for the pair. */
+export function formatWaterBand(
+  low: number | null | undefined,
+  high: number | null | undefined,
+): string | null {
+  if (low === null || low === undefined || high === null || high === undefined) return null
+  const scale = waterScaleFor(high)
+  const lowText = formatWaterAt(low, scale)?.replace(` ${scale.unit}`, '')
+  const highText = formatWaterAt(high, scale)
+  if (!lowText || !highText) return null
+  return `${lowText} – ${highText}`
+}
+
+/** "~18 mL (6.0 – 54)" — central figure with its band in brackets, or the
+ *  central figure alone when no band was recorded. */
+export function formatWaterWithBand(
+  central: number | null | undefined,
+  low: number | null | undefined,
+  high: number | null | undefined,
+): string {
+  const centralText = formatWaterScaled(central)
+  if (centralText === null) return NO_WATER
+  if (low === null || low === undefined || high === null || high === undefined) return centralText
+  // One unit for all three numbers, so they read against each other.
+  const scale = waterScaleFor(Math.max(Math.abs(high), Math.abs(central ?? 0)))
+  const lowText = formatWaterAt(low, scale)?.replace(` ${scale.unit}`, '')
+  const highText = formatWaterAt(high, scale)?.replace(` ${scale.unit}`, '')
+  const centralAt = formatWaterAt(central, scale)
+  if (!lowText || !highText || !centralAt) return centralText
+  return `${centralAt} (${lowText} – ${highText})`
+}
+
 /** Energy at window scale: Wh → kWh → MWh. */
 export function formatEnergyScaled(wh: number | null | undefined): string | null {
   if (wh === null || wh === undefined) return null

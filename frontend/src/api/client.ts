@@ -627,6 +627,51 @@ export interface EmissionsUncertainty {
 
 /** Money against the same-token baseline. The firmest figure in the block:
  *  `prices_are_exact` is true of the *prices*, not of the counterfactual. */
+/** One water factor's provenance record (site WUE, grid water, band). Same
+ *  shape as an `EmissionsFactor` plus `water_basis` and `layer`; `value` is a
+ *  number, or `{ low, high }` for the band record (both multipliers). */
+export interface WaterFactorRecord {
+  key: string
+  label: string
+  value: number | { low: number; high: number } | null
+  unit: string | null
+  source: string
+  url: string | null
+  date: string | null
+  confidence: FactorConfidence
+  note: string
+  setting: string | null
+  water_basis?: string
+  layer?: string
+  is_confidence_interval?: boolean
+}
+
+/** `energy_accounting.water`: what a run (or roll-up) consumed in water, in
+ *  millilitres. Absent on a run recorded before water accounting existed —
+ *  "Not recorded", never 0. A roll-up with `runs_without_water > 0` covers only
+ *  some of its calls and is treated as not recorded (`completeWater`). */
+export interface WaterAccounting {
+  schema_version: number
+  /** "consumption": water evaporated or otherwise used up, not withdrawn. */
+  water_basis: string
+  water_ml: number
+  /** Cooling water at the data centre. */
+  onsite_ml: number
+  /** Water used to generate the electricity. */
+  offsite_ml: number
+  embodied_ml: number | null
+  // The judgment band (both ends in mL). Not a confidence interval.
+  water_ml_low: number
+  water_ml_high: number
+  baseline_water_ml: number | null
+  /** Signed: negative means heavier than the baseline. */
+  avoided_water_ml: number | null
+  runs_counted?: number
+  runs_without_water?: number
+  factors: WaterFactorRecord[]
+  caveats: string[]
+}
+
 export interface EmissionsCost {
   usd: number
   baseline_model: string | null
@@ -727,6 +772,8 @@ export interface EnergyAccounting {
   embodied_g?: number
   scopes?: EmissionScopes
   baseline?: EmissionsBaseline | null
+  /** Water consumption block; absent on runs recorded before water accounting. */
+  water?: WaterAccounting | null
   // ── the input/output split: buckets are NOT equally expensive ──
   input_weight?: number
   output_weight?: number
@@ -1753,6 +1800,13 @@ export interface EmissionsBucket {
   carbon_is_summable: boolean
   /** Why the carbon figures are null. Null when they are not. */
   not_summable_note: string | null
+  // ── water (mL, consumption basis) ──
+  // Null when no run in the bucket has water or the runs mix water bases.
+  // `runs_without_water` runs are counted here, never summed as 0.
+  water_ml?: number | null
+  water_onsite_ml?: number | null
+  water_offsite_ml?: number | null
+  runs_without_water?: number
 }
 
 export interface EmissionsTotals extends EmissionsBucket {
@@ -1792,6 +1846,11 @@ export interface EmissionsByDay {
   co2e_g: number | null
   avoided_co2e_g: number | null
   energy_wh: number
+  // Water for the day, mL; null when no run that day has water. See EmissionsBucket.
+  water_ml?: number | null
+  water_onsite_ml?: number | null
+  water_offsite_ml?: number | null
+  runs_without_water?: number
   grid_bases: GridBasis[]
   carbon_is_summable: boolean
 }
@@ -1988,6 +2047,19 @@ export interface EmissionsBandOverride {
  *  own without a matching regional entry somewhere in the ladder.
  *  `grid.tables` holds named hourly CSVs `grid.default.table` / a provider
  *  entry's own `table` can reference. */
+/** The workspace `water` block. Every key optional. `band_low` and `band_high`
+ *  are both MULTIPLIERS on the central figure (band_low 0.3333 = central ÷ 3),
+ *  unlike the carbon band whose low value is a divisor. `country` is ISO 3166
+ *  alpha-3. Blank means "fall through to the next layer". */
+export interface EmissionsWaterOverride {
+  site_wue_l_per_kwh?: number
+  local_site_wue_l_per_kwh?: number
+  grid_water_l_per_kwh?: number
+  country?: string
+  band_low?: number
+  band_high?: number
+}
+
 export interface EmissionsOverrides {
   version?: number
   grid?: {
@@ -1999,7 +2071,11 @@ export interface EmissionsOverrides {
   pue?: EmissionsPueOverride
   embodied?: EmissionsEmbodiedOverride
   band?: EmissionsBandOverride
+  water?: EmissionsWaterOverride
   baseline_model?: string
+  // Also on the stored document but not typed here: `energy_strategy`,
+  // `model_overrides`, `source_name`. The PUT replaces the whole document, so a
+  // save must carry them through (EmissionsFactorsPanel `overridesFromDraft`).
   updated_by?: string
   updated_at?: string
 }
@@ -2055,6 +2131,22 @@ export interface EmissionsEffectiveFactors {
   band_low: EmissionsResolvedValue
   band_high: EmissionsResolvedValue
   baseline_model: EmissionsResolvedValue
+  /** What the next run on this provider would use for water, and where each
+   *  value came from (`records[].layer`). Absent from an older backend. */
+  water?: EmissionsEffectiveWater
+}
+
+/** `effective[provider].water`. The scalars are plain numbers; the provenance
+ *  (layer, source, url, setting) lives in `records`, keyed by `key`
+ *  (`site_wue_l_per_kwh`, `grid_water_l_per_kwh`, `water_band`). */
+export interface EmissionsEffectiveWater {
+  site_wue_l_per_kwh: number
+  grid_water_l_per_kwh: number
+  band_low: number
+  band_high: number
+  water_basis: string
+  records: WaterFactorRecord[]
+  caveats: string[]
 }
 
 /** One shipped-default figure with the citation text the form shows beside its
@@ -2121,6 +2213,9 @@ export interface EmissionsWhatifDelta {
   co2e_pct: number | null
   energy_wh: number
   avoided_usd: number
+  /** Scenario minus recorded water, mL. Null unless both sides have water for
+   *  every run in the window (a pre-water run has no recorded water to diff). */
+  water_ml?: number | null
 }
 
 export interface EmissionsWhatifResult {
@@ -2167,6 +2262,9 @@ export interface DocPage {
 
 /** The one document the emissions UI links to, everywhere it shows a figure. */
 export const EMISSIONS_METHODOLOGY_SLUG = 'emissions-methodology'
+
+/** The water methodology, linked from every water figure. */
+export const WATER_METHODOLOGY_SLUG = 'water-methodology'
 
 // ── Billing ───────────────────────────────────────────────────────────────
 // GET /api/billing/status 404s when no billing extension is

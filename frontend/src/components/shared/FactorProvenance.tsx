@@ -25,6 +25,7 @@ import type {
   EmissionsFactor,
   EmissionsUncertainty,
   EmissionsUncertaintyContribution,
+  WaterFactorRecord,
 } from '../../api/client'
 import {
   bandDerivationText,
@@ -39,6 +40,7 @@ import {
   layerMeta,
   PUE_PROFILE_LABELS,
   TABLE_MISS_NOTE,
+  WATER_BASIS_NOTE,
 } from './emissions'
 import { NO_ESTIMATE, formatFactor } from './format'
 
@@ -337,4 +339,129 @@ function oneSidedNote(rows: EmissionsUncertaintyContribution[]): string {
   return `${base} One-sided (can only push the real figure up, never down): ${oneSided
     .map((r) => r.label.toLowerCase())
     .join(', ')}.`
+}
+
+// ── water ────────────────────────────────────────────────────────────────
+
+/** A water record's value. The band record carries `{ low, high }`, both
+ *  multipliers on the central figure, and prints as such. */
+function waterFactorValue(factor: WaterFactorRecord): string {
+  const { value } = factor
+  if (value === null || value === undefined) return NO_ESTIMATE
+  if (typeof value === 'object') {
+    return `${formatFactor(value.low, 3)} / ${formatFactor(value.high, 3)}`
+  }
+  return formatFactor(value, 4)
+}
+
+/** Where each constant behind a water figure came from: layer, source (with a
+ *  link where there is one), date, confidence and basis. Read from the run's own
+ *  `energy_accounting.water.factors`, like the carbon table above. */
+export function WaterFactorTable({ factors }: { factors: WaterFactorRecord[] }) {
+  if (factors.length === 0) {
+    return (
+      <div className="empty" style={{ padding: '4px 0' }}>
+        No water factor provenance is recorded for this figure.
+      </div>
+    )
+  }
+  return (
+    <div className="md-table-wrap">
+      <table className="mono-table factor-table">
+        <thead>
+          <tr>
+            <th>Factor</th>
+            <th className="num">Value</th>
+            <th>Unit</th>
+            <th>Source</th>
+            <th>Date</th>
+            <th>Confidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {factors.map((factor, i) => {
+            const meta = confidenceMeta(factor.confidence)
+            const layer = layerMeta(factor.layer)
+            const isBand = factor.key === 'water_band'
+            return (
+              <tr key={`${factor.key}-${i}`} className={meta.weak ? 'factor-weak' : undefined}>
+                <td>
+                  <div>{factor.label}</div>
+                  {isBand && (
+                    <div className="fine-print" style={{ marginTop: 2 }}>
+                      low / high multipliers on the central figure (0.33 means divide by 3)
+                    </div>
+                  )}
+                </td>
+                <td className="num" style={{ whiteSpace: 'nowrap' }}>
+                  {waterFactorValue(factor)}
+                </td>
+                <td style={{ color: 'var(--text-muted)' }}>{factor.unit ?? NO_ESTIMATE}</td>
+                <td>
+                  {factor.url ? (
+                    <a href={factor.url} target="_blank" rel="noopener noreferrer">
+                      {factor.source}
+                    </a>
+                  ) : (
+                    <span style={{ color: 'var(--text-muted)' }}>{factor.source}</span>
+                  )}
+                  {factor.note && (
+                    <div className="fine-print" style={{ marginTop: 3 }}>
+                      {factor.note}
+                    </div>
+                  )}
+                  {factor.setting && (
+                    <div className="fine-print" style={{ marginTop: 3 }}>
+                      change it with <code>{factor.setting}</code>
+                    </div>
+                  )}
+                </td>
+                <td style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                  {factor.date ?? NO_ESTIMATE}
+                </td>
+                <td>
+                  <span className={`badge ${meta.badge}`} title={meta.what}>
+                    {meta.label}
+                  </span>
+                  {layer && (
+                    <span className={`badge ${layer.badge}`} style={{ marginLeft: 4 }} title={layer.what}>
+                      {layer.label}
+                    </span>
+                  )}
+                  <span
+                    className="badge badge-gray"
+                    style={{ marginLeft: 4 }}
+                    title={WATER_BASIS_NOTE}
+                  >
+                    {factor.water_basis ?? 'consumption'}
+                  </span>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/** Water's caveats are plain sentences (no direction/key like carbon's), listed
+ *  as recorded. */
+export function WaterCaveatList({ caveats }: { caveats: string[] }) {
+  if (caveats.length === 0) {
+    return (
+      <div className="empty" style={{ padding: '4px 0' }}>
+        No water caveats were recorded for this run.
+      </div>
+    )
+  }
+  return (
+    <ul className="fine-print" style={{ margin: 0, paddingLeft: 18 }}>
+      {caveats.map((c, i) => (
+        <li key={i} style={{ marginBottom: 4 }}>
+          {c}
+        </li>
+      ))}
+    </ul>
+  )
 }

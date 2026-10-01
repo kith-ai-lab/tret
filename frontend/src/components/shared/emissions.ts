@@ -24,10 +24,15 @@ import type {
   EmissionsGridTableSummary,
   EmissionsUncertaintyDerivation,
 } from '../../api/client'
-import type { MethodV3 } from '../../api/client'
+import { WATER_METHODOLOGY_SLUG, type MethodV3, type WaterAccounting, type WaterFactorRecord } from '../../api/client'
 import { formatFactor, formatGrams } from './format'
 
 export const METHODOLOGY_DOC = 'docs/emissions-methodology.md'
+
+/** The water methodology, same arrangement: the file in the repository, and the
+ *  slug the dialog fetches it by (`GET /api/docs/water-methodology`). */
+export const WATER_METHODOLOGY_DOC = 'docs/water-methodology.md'
+export const WATER_METHODOLOGY = WATER_METHODOLOGY_SLUG
 
 /** The trigger label used everywhere a carbon figure appears. One wording, so a
  *  reader learns it once. */
@@ -737,4 +742,157 @@ export function methodV3Parts(v3: MethodV3): { label: string; value: string }[] 
     { label: 'embodied', value: `${formatGrams(v3.parts.embodied_g)} g` },
     { label: 'router', value: `${formatGrams(v3.parts.router_g)} g` },
   ]
+}
+
+// ── water ────────────────────────────────────────────────────────────────
+// Same two rules as the carbon vocabulary above: nothing here is computed that
+// the backend did not send, and the baseline comparison is never framed as an
+// offset. Water adds a third: it is *consumption* (water evaporated or otherwise
+// used up), not withdrawal, and the word has to travel with the figure.
+
+export const WATER_METHODOLOGY_TRIGGER_HINT =
+  'Read the full water methodology: how cooling water and power-generation water are counted, every factor with its source, and what the numbers may not be used for.'
+
+export const WATER_BASIS_LABEL = 'Consumption (water evaporated or used up)'
+
+export const WATER_BASIS_NOTE =
+  'Consumption means water that evaporates or is otherwise used up and does not go back to the source. It is not withdrawal, which counts water that is taken and then returned.'
+
+export const WATER_ESTIMATE_NOTE =
+  'Estimated from the same energy figure as the carbon estimate, a cooling-water factor for the data centre and a water factor for generating the electricity. Never measured.'
+
+export interface WaterPartMeta {
+  key: 'onsite' | 'offsite'
+  label: string
+  what: string
+}
+
+/** The two parts every water total is made of. Always shown together, because
+ *  where the water goes (a data centre's cooling towers vs a power plant) is the
+ *  first thing a reader asks. */
+export const WATER_PART_META: WaterPartMeta[] = [
+  {
+    key: 'onsite',
+    label: 'On-site (cooling)',
+    what: 'Water evaporated to cool the data centre that ran the model. Zero for a local run unless you set a cooling-water factor for it.',
+  },
+  {
+    key: 'offsite',
+    label: 'Off-site (power generation)',
+    what: 'Water used up generating the electricity the run drew: cooling at thermal power plants, and evaporation from hydropower reservoirs.',
+  },
+]
+
+export const WATER_HYDRO_NOTE =
+  'Hydropower reservoir evaporation is counted in full as electricity water, so places that run on hydro show a high power-generation figure. That is a bookkeeping choice that leans high, not a measurement.'
+
+export const WATER_COUNTERFACTUAL_NOTE =
+  'Same-token counterfactual: the identical tokens re-priced through the baseline model. It is an efficiency indicator for choosing between models, not a water offset, not a water credit and not a replenishment claim. A different model would not have produced identical token counts.'
+
+export const WATER_COUNTERFACTUAL_SHORT =
+  'Same-token counterfactual against the baseline model: an efficiency indicator, not an offset or credit.'
+
+/** The band wording for water. Both ends are multipliers on the central figure
+ *  and the pair is wider than carbon's, but it is the same kind of thing: a
+ *  judgment band, never a confidence interval. */
+export const WATER_BAND_SHORT =
+  'Range is a multiplicative judgment band, not a confidence interval and not a standard deviation. It is wider than the carbon range because water factors vary more between sites and countries.'
+
+/** "central ÷ 3 … central × 3" from the two multipliers water stores
+ *  (band_low 0.3333 means "divide by 3"). Carbon's low value is already a
+ *  divisor; water's is not, so it is inverted here for reading. */
+export function waterBandFactorText(
+  low: number | null | undefined,
+  high: number | null | undefined,
+): string | null {
+  if (low === null || low === undefined || high === null || high === undefined) return null
+  if (!(low > 0)) return null
+  return `central ÷ ${formatFactor(1 / low, 2)} … central × ${formatFactor(high, 2)}`
+}
+
+/** Water framing of a signed avoided figure; negative reads as a surcharge. */
+export function waterAvoidedFraming(avoided: number | null | undefined): AvoidedFraming {
+  if (avoided === null || avoided === undefined) {
+    return {
+      tone: 'unknown',
+      label: 'Avoided vs baseline (est.)',
+      note: 'No baseline comparison was recorded for water. Reported as no figure, not as zero.',
+    }
+  }
+  if (avoided > 0) {
+    return {
+      tone: 'saving',
+      label: 'Avoided vs baseline (est.)',
+      color: 'var(--green)',
+      note: 'Used less water than the baseline would have for the same tokens. An efficiency indicator only: nothing was offset and no water was returned.',
+    }
+  }
+  if (avoided < 0) {
+    return {
+      tone: 'surcharge',
+      label: 'Water surcharge vs baseline (est.)',
+      color: 'var(--red)',
+      note: 'Used more water than the baseline would have for the same tokens. This is a surcharge, not a saving.',
+    }
+  }
+  return {
+    tone: 'even',
+    label: 'Level with baseline (est.)',
+    note: 'The same as the baseline for these tokens: either the baseline model ran, or the comparison came out even.',
+  }
+}
+
+/** The baseline comparison in coarse language: the same rounding rules as
+ *  `coarseComparison` (a multiple, never a decimal), with water's own note. */
+export function coarseWaterComparison(
+  actualMl: number | null | undefined,
+  baselineMl: number | null | undefined,
+): CoarseComparison {
+  const base = coarseComparison(actualMl, baselineMl)
+  if (base.tone === 'unknown') {
+    return { ...base, note: 'No water comparison to state. Reported as no figure rather than as zero.' }
+  }
+  return { ...base, note: `${waterAvoidedFraming(base.tone === 'saving' ? 1 : base.tone === 'surcharge' ? -1 : 0).note} ${COARSE_COMPARISON_NOTE}` }
+}
+
+// Everyday size references. They follow the same discipline as the coarse
+// carbon comparison: shown only next to a figure the backend actually sent (never
+// for a missing or zero one), stated as a rough size ("about"), never to a
+// decimal, and never as an equivalence or an offset.
+const EVERYDAY_UNITS = [
+  { ml: 5, one: 'a teaspoon', many: 'teaspoons' },
+  { ml: 250, one: 'a glass of water', many: 'glasses of water' },
+  { ml: 1_000, one: 'a litre bottle', many: 'litre bottles' },
+  { ml: 150_000, one: 'a bathtub', many: 'bathtubs' },
+] as const
+
+export const WATER_EVERYDAY_NOTE =
+  'A rough size reference only: the figure rounded to a familiar volume. It is not a measurement, not an equivalence and not an offset.'
+
+/** "about 3 teaspoons", or null when there is no positive figure to size. */
+export function waterEveryday(ml: number | null | undefined): string | null {
+  if (ml === null || ml === undefined || !(ml > 0)) return null
+  if (ml < EVERYDAY_UNITS[0].ml / 2) return 'less than half a teaspoon'
+  // The largest unit the figure is at least half of.
+  let unit: (typeof EVERYDAY_UNITS)[number] = EVERYDAY_UNITS[0]
+  for (const u of EVERYDAY_UNITS) if (ml >= u.ml / 2) unit = u
+  const raw = ml / unit.ml
+  const n = raw >= 100 ? Math.round(raw / 100) * 100 : raw >= 10 ? Math.round(raw / 10) * 10 : Math.round(raw)
+  if (n <= 1) return `about ${unit.one}`
+  return `about ${n.toLocaleString('en-US')} ${unit.many}`
+}
+
+/** The run's water block, or null when it has none to show: absent (a run
+ *  recorded before water accounting) or partial (a roll-up in which some calls
+ *  had no water, so its total is not the run's). Mirrors the backend's
+ *  `complete_water`. Null reads as "Not recorded", never as 0. */
+export function completeWater(water: WaterAccounting | null | undefined): WaterAccounting | null {
+  if (!water || typeof water.water_ml !== 'number') return null
+  if (water.runs_without_water) return null
+  return water
+}
+
+/** One factor record from a water block, by key. */
+export function waterRecord(water: WaterAccounting, key: string): WaterFactorRecord | undefined {
+  return water.factors?.find((f) => f.key === key)
 }

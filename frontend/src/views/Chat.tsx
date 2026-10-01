@@ -14,6 +14,7 @@ import {
 import { useRunStream } from '../api/useRunStream'
 import { DelegatedWork, DelegatedWorkDisclosure } from '../components/chat/DelegatedWork'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
+import { WaterPanel } from '../components/shared/WaterFootprint'
 import { MethodV3Line } from '../components/shared/MethodV3Line'
 import {
   BAND_SHORT,
@@ -726,6 +727,7 @@ function FootprintDetail({ message }: { message: ChatMessage }) {
       {message.energy ? (
         <>
           <EnergyDetail energy={message.energy} />
+          <WaterPanel energy={message.energy} />
           <MethodV3Line method={message.method_v3} />
         </>
       ) : (

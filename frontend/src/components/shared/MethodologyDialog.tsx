@@ -20,8 +20,20 @@
 import { useQuery } from '@tanstack/react-query'
 import { type ReactNode, useState } from 'react'
 
-import { EMISSIONS_METHODOLOGY_SLUG, type EnergyAccounting, api } from '../../api/client'
-import { CaveatList, FactorTable, SensitivityTable } from './FactorProvenance'
+import {
+  EMISSIONS_METHODOLOGY_SLUG,
+  WATER_METHODOLOGY_SLUG,
+  type EnergyAccounting,
+  type WaterAccounting,
+  api,
+} from '../../api/client'
+import {
+  CaveatList,
+  FactorTable,
+  SensitivityTable,
+  WaterCaveatList,
+  WaterFactorTable,
+} from './FactorProvenance'
 import { MarkdownDoc } from './MarkdownDoc'
 import { Modal } from './Modal'
 import {
@@ -30,20 +42,38 @@ import {
   METHODOLOGY_DOC,
   METHODOLOGY_TRIGGER,
   METHODOLOGY_TRIGGER_HINT,
+  WATER_BAND_SHORT,
+  WATER_BASIS_NOTE,
+  WATER_ESTIMATE_NOTE,
+  WATER_METHODOLOGY_DOC,
+  WATER_METHODOLOGY_TRIGGER_HINT,
   bandFactorText,
+  waterBandFactorText,
+  waterRecord,
 } from './emissions'
 import { formatTokens } from './format'
 
 type Tab = 'factors' | 'document'
+
+/** Which methodology the dialog opens. Water has its own document, endpoint and
+ *  live-factors tab; the dialog itself is the same. */
+export type MethodologyTopic = 'emissions' | 'water'
 
 export function MethodologyDialog({
   open,
   onClose,
   energy,
   factorsSlot,
+  topic = 'emissions',
+  water,
 }: {
   open: boolean
   onClose: () => void
+  /** `water` opens the water methodology (and reads `water` for its live
+   *  factors tab) instead of the carbon one. */
+  topic?: MethodologyTopic
+  /** The run's water block, for the water topic's live-factors tab. */
+  water?: WaterAccounting | null
   /** The run whose factors to show. Null on window-scale views, which have no
    *  single run behind them. */
   energy?: EnergyAccounting | null
@@ -51,15 +81,20 @@ export function MethodologyDialog({
    *  Emissions view passes the window's recording bases instead. */
   factorsSlot?: ReactNode
 }) {
+  const isWater = topic === 'water'
+  const slug = isWater ? WATER_METHODOLOGY_SLUG : EMISSIONS_METHODOLOGY_SLUG
+  const docPath = isWater ? WATER_METHODOLOGY_DOC : METHODOLOGY_DOC
   const doc = useQuery({
-    queryKey: ['doc', EMISSIONS_METHODOLOGY_SLUG],
-    queryFn: () => api.doc(EMISSIONS_METHODOLOGY_SLUG),
+    queryKey: ['doc', slug],
+    queryFn: () => api.doc(slug),
     // Only fetch when the dialog is actually opened: 32 KB of markdown is not
     // worth pulling on every page load for a panel most readers never open.
     enabled: open,
     staleTime: 5 * 60 * 1000,
   })
-  const hasFactors = Boolean(energy?.factors?.length) || Boolean(factorsSlot)
+  const hasFactors = isWater
+    ? Boolean(water?.factors?.length) || Boolean(factorsSlot)
+    : Boolean(energy?.factors?.length) || Boolean(factorsSlot)
   const [tab, setTab] = useState<Tab>('factors')
   const active: Tab = hasFactors ? tab : 'document'
   const data = doc.data
@@ -68,12 +103,19 @@ export function MethodologyDialog({
     <Modal
       open={open}
       onClose={onClose}
-      title="Emissions methodology"
+      title={isWater ? 'Water methodology' : 'Emissions methodology'}
       subtitle={
-        <>
-          How tret turns token counts into an energy, carbon and money figure, and what those
-          figures may not be used for. {ESTIMATE_NOTE}
-        </>
+        isWater ? (
+          <>
+            How tret turns the same energy figure into a water figure, and what that figure may
+            not be used for. {WATER_ESTIMATE_NOTE}
+          </>
+        ) : (
+          <>
+            How tret turns token counts into an energy, carbon and money figure, and what those
+            figures may not be used for. {ESTIMATE_NOTE}
+          </>
+        )
       }
       headerExtra={
         data?.available ? (
@@ -88,8 +130,8 @@ export function MethodologyDialog({
       footer={
         <span className="fine-print">
           Values in the factor table are read from the run's own stored accounting, not from the
-          prose — the prose is the repository's <code>{METHODOLOGY_DOC}</code>, served as-is.{' '}
-          {BAND_SHORT}
+          prose — the prose is the repository's <code>{docPath}</code>, served as-is.{' '}
+          {isWater ? WATER_BAND_SHORT : BAND_SHORT}
         </span>
       }
     >
@@ -124,18 +166,22 @@ export function MethodologyDialog({
         aria-labelledby={hasFactors ? `methodology-tab-${active}` : undefined}
       >
         {active === 'factors' ? (
-          <LiveFactors energy={energy ?? null} factorsSlot={factorsSlot} />
+          isWater ? (
+            <LiveWaterFactors water={water ?? null} factorsSlot={factorsSlot} />
+          ) : (
+            <LiveFactors energy={energy ?? null} factorsSlot={factorsSlot} />
+          )
         ) : doc.isLoading ? (
           <div className="empty pulse">Loading the methodology…</div>
         ) : doc.isError ? (
           <DocUnavailable
-            note={`The methodology document could not be loaded: ${(doc.error as Error).message}. It is in the repository at ${METHODOLOGY_DOC}.`}
+            note={`The methodology document could not be loaded: ${(doc.error as Error).message}. It is in the repository at ${docPath}.`}
           />
         ) : !data ? null : data.available && data.markdown ? (
           <MarkdownDoc source={data.markdown} />
         ) : (
           <DocUnavailable
-            note={data.note ?? `Not available in this build. See ${METHODOLOGY_DOC}.`}
+            note={data.note ?? `Not available in this build. See ${docPath}.`}
           />
         )}
       </div>
@@ -195,6 +241,50 @@ function LiveFactors({
   )
 }
 
+/** The water counterpart of the live half: this run's own water factor records
+ *  and caveats, read from `energy_accounting.water`. */
+function LiveWaterFactors({
+  water,
+  factorsSlot,
+}: {
+  water: WaterAccounting | null
+  factorsSlot?: ReactNode
+}) {
+  if (factorsSlot) return <>{factorsSlot}</>
+  if (!water) return null
+  const bandValue = waterRecord(water, 'water_band')?.value
+  const bandText =
+    bandValue && typeof bandValue === 'object'
+      ? waterBandFactorText(bandValue.low, bandValue.high)
+      : null
+  return (
+    <div className="stack" style={{ gap: 18 }}>
+      <div>
+        <div className="mono-label" style={{ marginBottom: 4 }}>
+          Water factors applied to this run
+        </div>
+        <div className="fine-print" style={{ marginBottom: 8 }}>
+          Read from the run's stored accounting, exactly as recorded when it ran, not from the
+          document and not recomputed at today's settings. {WATER_BASIS_NOTE}
+        </div>
+        <WaterFactorTable factors={water.factors ?? []} />
+      </div>
+      {bandText && (
+        <div className="callout callout-note">
+          <span className="callout-title">On the range: {bandText}</span>
+          {WATER_BAND_SHORT}
+        </div>
+      )}
+      <div>
+        <div className="mono-label" style={{ marginBottom: 4 }}>
+          Known biases on this run
+        </div>
+        <WaterCaveatList caveats={water.caveats ?? []} />
+      </div>
+    </div>
+  )
+}
+
 function DocUnavailable({ note }: { note: string }) {
   return (
     <div className="callout callout-warn">
@@ -211,11 +301,16 @@ export function MethodologyLink({
   factorsSlot,
   label = METHODOLOGY_TRIGGER,
   className = 'link-button',
+  topic = 'emissions',
+  water,
 }: {
   energy?: EnergyAccounting | null
   factorsSlot?: ReactNode
   label?: string
   className?: string
+  /** `water` opens the water methodology instead. */
+  topic?: MethodologyTopic
+  water?: WaterAccounting | null
 }) {
   const [open, setOpen] = useState(false)
   return (
@@ -224,7 +319,7 @@ export function MethodologyLink({
         type="button"
         className={className}
         onClick={() => setOpen(true)}
-        title={METHODOLOGY_TRIGGER_HINT}
+        title={topic === 'water' ? WATER_METHODOLOGY_TRIGGER_HINT : METHODOLOGY_TRIGGER_HINT}
       >
         {label}
       </button>
@@ -233,6 +328,8 @@ export function MethodologyLink({
         onClose={() => setOpen(false)}
         energy={energy}
         factorsSlot={factorsSlot}
+        topic={topic}
+        water={water}
       />
     </>
   )
