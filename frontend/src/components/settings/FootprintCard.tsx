@@ -20,7 +20,17 @@ import {
   NOT_SUMMABLE_WHY,
   SUMMABLE_ACROSS_BASES_NOTE,
 } from '../shared/emissions'
-import { NO_ESTIMATE, formatCo2eWithBand, formatCostScaled, formatEnergyScaled, formatTokens, orDash } from '../shared/format'
+import {
+  NO_ESTIMATE,
+  NO_WATER,
+  formatCo2eWithBand,
+  formatCostScaled,
+  formatEnergyScaled,
+  formatTokens,
+  formatWaterScaled,
+  orDash,
+} from '../shared/format'
+import { WaterUncounted } from '../shared/WaterDashboard'
 import { TotalsStrip } from '../../views/Emissions'
 
 /** The current calendar month plus the 12 before it, newest first — as far
@@ -96,6 +106,17 @@ function FootprintBody({ data }: { data: BillingFootprint }) {
         <div className="config-stat">
           <div className="mono-label">Credits consumed</div>
           <div className="mono-body">{formatCostScaled(data.credits_usd_consumed)}</div>
+        </div>
+        <div className="config-stat">
+          <div className="mono-label">Water (est.)</div>
+          <div className="mono-body">{formatWaterScaled(data.totals.water_ml) ?? NO_WATER}</div>
+          {data.totals.water_ml != null && (
+            <div className="fine-print">
+              {formatWaterScaled(data.totals.water_onsite_ml)} cooling ·{' '}
+              {formatWaterScaled(data.totals.water_offsite_ml)} power generation
+            </div>
+          )}
+          <WaterUncounted n={data.totals.runs_without_water ?? undefined} />
         </div>
       </div>
 

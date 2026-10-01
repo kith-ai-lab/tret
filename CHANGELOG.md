@@ -10,6 +10,18 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Water consumption.** Every new run records an estimated water figure next
+  to its carbon: on-site cooling water (IT energy × site WUE, default 0.375
+  L/kWh from LBNL 2024; 0 for local runs) plus power-generation water
+  (facility energy × grid water factor, default 4.81 L/kWh, the WRI 2020 world
+  average, hydro evaporation included). Consumption basis only, with a ÷3/×3
+  judgment band. Stored as `energy_accounting.water`; returned by
+  `GET /api/analytics/emissions`, the what-if endpoint and deliverable exports;
+  configurable through a `water` block in the workspace emissions settings and
+  `TRET_WATER_*` env vars; shown on the run page, the Emissions dashboard
+  (Water view), the what-if drawer and the settings. Runs recorded earlier
+  show "Not recorded", never 0. Method and sources:
+  [docs/water-methodology.md](docs/water-methodology.md).
 - **Method v3 preview.** Every server-side run now also records a parallel
   emissions estimate under the revised `facility_v3` method (Kith method lab,
   2026-10-01), stored additively in `runs.routing["method_v3"]` and returned as
@@ -23,6 +35,13 @@ one that needs action on an existing install.
   gain `served_by`, and per-call records in `model_timeline` gain
   `reasoning_requested`; both are additive and absent or null on older runs.
   Curated catalog entries may carry an `openrouter_id`.
+
+### Fixed
+
+- Saving the emissions settings form no longer deletes settings the form does
+  not show (`energy_strategy`, `model_overrides`, `pue.upstreams`, grid rows for
+  other providers or regions, the embodied GPU model). The form previously
+  rebuilt the whole document on save.
 
 ## [0.1.0] — 2026-09-29 — first public release
 
