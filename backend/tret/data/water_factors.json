@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "water_basis": "consumption",
+  "note": "Shipped constants for tret water accounting. See docs/water-methodology.md. Consumption (evaporated), not withdrawal.",
+  "site_wue": {
+    "cloud": {
+      "key": "site_wue_l_per_kwh",
+      "label": "Site WUE (cooling water)",
+      "value": 0.375,
+      "unit": "L/kWh IT",
+      "source": "LBNL 2024 United States Data Center Energy Usage Report (Shehabi et al., Dec 2024)",
+      "derivation": "66 billion L direct water (p.46) / 176 TWh (p.55), 2023",
+      "url": "https://escholarship.org/content/qt32d6m0d1/qt32d6m0d1.pdf",
+      "date": "2024-12",
+      "confidence": "structural",
+      "water_basis": "consumption",
+      "note": "US fleet average. The 176 TWh denominator is facility energy, not IT energy, so the ratio leans low when applied per IT kWh."
+    },
+    "local": {
+      "key": "site_wue_l_per_kwh",
+      "label": "Site WUE (local deployment)",
+      "value": 0,
+      "unit": "L/kWh IT",
+      "source": "tret default: workstation or on-prem hardware has no evaporative cooling",
+      "derivation": "mirrors the local PUE of 1.0",
+      "url": null,
+      "date": null,
+      "confidence": "structural",
+      "water_basis": "consumption",
+      "note": "Set your own site WUE if local models run in an evaporatively cooled room."
+    }
+  },
+  "grid_water": {
+    "key": "grid_water_l_per_kwh",
+    "label": "Grid water (electricity generation)",
+    "value": 4.81,
+    "value_gal_per_kwh": 1.27,
+    "unit": "L/kWh",
+    "source": "WRI 2020 (Reig et al.), world generation-weighted average, Table 4",
+    "url": "https://www.wri.org/research/guidance-calculating-water-use-embedded-purchased-electricity",
+    "date": "2020",
+    "license": "CC BY 4.0",
+    "confidence": "structural",
+    "water_basis": "consumption",
+    "hydro_evaporation": "included_full_allocation",
+    "gal_to_l": 3.785,
+    "note": "Generation only; excludes transmission losses and fuel-chain water. Hydropower reservoir evaporation is fully allocated to electricity.",
+    "countries": {
+      "IRL": {"name": "Ireland", "gal_per_kwh": 0.39, "l_per_kwh": 1.48},
+      "DEU": {"name": "Germany", "gal_per_kwh": 0.51, "l_per_kwh": 1.93},
+      "JPN": {"name": "Japan", "gal_per_kwh": 0.61, "l_per_kwh": 2.31},
+      "USA": {"name": "United States", "gal_per_kwh": 0.83, "l_per_kwh": 3.14},
+      "IND": {"name": "India", "gal_per_kwh": 0.91, "l_per_kwh": 3.44},
+      "CHN": {"name": "China", "gal_per_kwh": 1.59, "l_per_kwh": 6.02}
+    }
+  },
+  "band": {
+    "key": "water_band",
+    "label": "Uncertainty band",
+    "low": 0.3333333333333333,
+    "high": 3,
+    "unit": "x central",
+    "source": "tret judgment band (central / 3 to central x 3)",
+    "url": null,
+    "date": null,
+    "confidence": "low",
+    "water_basis": "consumption",
+    "is_confidence_interval": false,
+    "note": "Judgment band, not a confidence interval."
+  }
+}

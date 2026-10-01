@@ -1,8 +1,8 @@
 # Third-party data bundled with tret
 
-tret ships two third-party datasets used by the emissions accounting path.
-Both are derived databases under their upstream licenses; this file is their
-NOTICE.
+tret ships three third-party datasets used by the emissions and water
+accounting paths. All are derived databases under their upstream licenses; this
+file is their NOTICE.
 
 ## Ember Yearly Electricity Data
 
@@ -30,3 +30,21 @@ NOTICE.
 - **Source:** https://www.electricitymaps.com/data-portal
 - Ships as a skeleton with **zero zones** — see `docs/grid-zones.md` for why
   and how an operator imports their own yearly CSV downloads to populate it.
+
+## WRI water use embedded in purchased electricity
+
+- **File:** `backend/tret/data/water_factors.json`
+- **License:** CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)
+- **Attribution:** Reig, P., Luo, T., Christensen, E., Sinistore, J. (2020).
+  Guidance for Calculating Water Use Embedded in Purchased Electricity. World
+  Resources Institute. Licensed under CC BY 4.0.
+- **Source:** https://www.wri.org/research/guidance-calculating-water-use-embedded-purchased-electricity
+- Provides the world-average grid water factor (1.27 gal/kWh = 4.81 L/kWh,
+  Table 4) and a few country factors (Appendix 2). Only WRI's published
+  country factors are republished; no underlying GaBi data is included. See
+  `docs/water-methodology.md`.
+- The same file also carries one cited constant, the site water-usage
+  effectiveness default (0.375 L/kWh), derived from figures in Shehabi et al.,
+  *2024 United States Data Center Energy Usage Report*, Lawrence Berkeley
+  National Laboratory (a US government-funded report), with citation:
+  https://escholarship.org/content/qt32d6m0d1/qt32d6m0d1.pdf
