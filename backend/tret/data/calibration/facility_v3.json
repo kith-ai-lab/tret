@@ -1,0 +1,4173 @@
+{
+ "_provenance": {
+  "source": "Alex Bickley method lab (Kith), methodology/decisions.md 2026-10-01, steps/*/compute/v2/outputs",
+  "pin": "a0b831b",
+  "extracted": "2026-10-01",
+  "sections": {
+   "weights": "decisions.md D1.1, R-10",
+   "curve": "steps/02-energy-rate fit.json Rev. 6 (C1, C9, R-11)",
+   "classification": "steps/02-energy-rate/compute/v2/outputs/classification.csv (run A, rungs 1-4)",
+   "measured": "steps/02-energy-rate/compute/v2/outputs/per-model-rates.csv",
+   "buckets": "steps/02-energy-rate buckets.csv",
+   "host_uplift": "D2.1, R-17",
+   "reasoning": "D2.4, C5/R-13",
+   "fleet": "D3.2",
+   "pue": "D3.1; pue.csv (pue_aws_region, pue_microsoft_geo)",
+   "embodied": "D3.3",
+   "grid": "D4.1, D4.2 R-9, D4.4, R-14; google2025 p.6; meta2025 EDI; anthropic2026-compute-deals",
+   "td": "steps/*/td-losses.csv",
+   "region_map": "steps/*/region-map.csv",
+   "band": "D5.1, C4, C8, C10, R-16"
+  }
+ },
+ "weights": {
+  "central": {
+   "input": 0.238,
+   "output": 1.0,
+   "cache_read": 0.0238,
+   "cache_write": 0.238
+  },
+  "shadow": {
+   "input": 0.05,
+   "output": 1.0,
+   "cache_read": 0.005,
+   "cache_write": 0.05
+  },
+  "range": {
+   "input": [
+    0.06101,
+    0.9686
+   ],
+   "cache_read": [
+    0.006101,
+    0.09686
+   ],
+   "cache_write": [
+    0.06101,
+    0.9686
+   ]
+  }
+ },
+ "curve": {
+  "a": 0.1623,
+  "b": 0.0002569,
+  "D": 1.109,
+  "D_range": [
+   1.095,
+   1.113
+  ],
+  "gpu_mem_gb": 80,
+  "headroom": 1.2,
+  "base_precision_bits": 8,
+  "unknown_precision_bits": [
+   8,
+   16
+  ]
+ },
+ "host_uplift": {
+  "table_host": 1.43,
+  "google": 1.43,
+  "metered": 1.0,
+  "default": 1.41,
+  "range": [
+   1.32,
+   1.67
+  ]
+ },
+ "production_step": {
+  "value": 1.18,
+  "range": [
+   1.0,
+   1.4
+  ]
+ },
+ "reasoning": {
+  "uplift": 1.3,
+  "range": [
+   0.5385,
+   1.615
+  ],
+  "shadow": 2.2,
+  "hidden_hedge_output_multiple": 10
+ },
+ "fleet": {
+  "hyperscaler": {
+   "value": 1.2,
+   "range": [
+    1.1,
+    1.31
+   ],
+   "shadow": 1.31
+  },
+  "specialist": {
+   "value": 1.6,
+   "range": [
+    1.3,
+    2.0
+   ]
+  },
+  "self_hosted": {
+   "value": 1.0
+  },
+  "hyperscaler_providers": [
+   "anthropic",
+   "openai",
+   "google",
+   "microsoft",
+   "aws",
+   "meta"
+  ]
+ },
+ "pue": {
+  "provider_fleet": {
+   "google": 1.09,
+   "aws": 1.14,
+   "microsoft": 1.17,
+   "meta": 1.08,
+   "openai": 1.17
+  },
+  "anthropic_unknown_cloud": {
+   "value": 1.14,
+   "range": [
+    1.09,
+    1.17
+   ]
+  },
+  "industry": {
+   "value": 1.54,
+   "range": [
+    1.4,
+    1.56
+   ]
+  },
+  "self_hosted": {
+   "workstation": 1.05,
+   "onprem": 1.54
+  },
+  "pue_aws_region": {
+   "eu-central-1": 1.24,
+   "eu-west-1": 1.1,
+   "eu-west-2": 1.23,
+   "eu-west-3": 1.35,
+   "eu-south-2": 1.06,
+   "eu-north-1": 1.09,
+   "me-south-1": 1.33,
+   "il-central-1": 1.27,
+   "me-central-1": 1.25,
+   "af-south-1": 1.19,
+   "ap-southeast-7": 1.38,
+   "ap-south-2": 1.43,
+   "ap-southeast-3": 1.29,
+   "ap-southeast-4": 1.07,
+   "ap-south-1": 1.4,
+   "ap-northeast-3": 1.46,
+   "ap-southeast-1": 1.3,
+   "ap-southeast-2": 1.14,
+   "ap-northeast-1": 1.25,
+   "cn-northwest-1": 1.25,
+   "sa-east-1": 1.14,
+   "us-east-1": 1.15,
+   "us-east-2": 1.12,
+   "us-west-1": 1.18,
+   "us-west-2": 1.12,
+   "ca-central-1": 1.19,
+   "ca-west-1": 1.13
+  },
+  "pue_microsoft_geo": {
+   "Americas": 1.16,
+   "Asia Pacific": 1.28,
+   "Europe, Middle East & Africa": 1.16
+  }
+ },
+ "embodied": {
+  "g_per_kwh_facility": 44,
+  "range": [
+   35,
+   47
+  ],
+  "shadow_ratio_to_operational": 0.111
+ },
+ "grid": {
+  "world_g_per_kwh": 458.49,
+  "world_basis": "Ember 2025, release 2026-06-23",
+  "eu_aggregate_g_per_kwh": 209.21,
+  "google": {
+   "location_based_g_per_kwh": 345,
+   "market_based_g_per_kwh": 94,
+   "basis": "2024 fleet average (google2025 p.6), provider-reported"
+  },
+  "meta": {
+   "market_based_g_per_kwh": 0.07371,
+   "basis": "2024 all facilities (meta2025 EDI), provider-reported"
+  },
+  "provider_geography": {
+   "anthropic": {
+    "geography": "USA",
+    "basis": "The vast majority of the new compute will be sited in the United States",
+    "source": "anthropic2026-compute-deals"
+   },
+   "openai": {
+    "geography": "WLD",
+    "basis": "OpenAI docs call the default endpoint \"global\"",
+    "source": "OpenAI API documentation"
+   }
+  },
+  "data_region": {
+   "europe": "EU",
+   "us": "USA",
+   "global": "WLD"
+  }
+ },
+ "td": {
+  "AGO": {
+   "loss_pct": 11.27,
+   "year": 2023
+  },
+  "ALB": {
+   "loss_pct": 12.35,
+   "year": 2023
+  },
+  "ARE": {
+   "loss_pct": 4.291,
+   "year": 2023
+  },
+  "ARG": {
+   "loss_pct": 21.84,
+   "year": 2024
+  },
+  "ARM": {
+   "loss_pct": 6.7,
+   "year": 2023
+  },
+  "AUS": {
+   "loss_pct": 4.711,
+   "year": 2024
+  },
+  "AUT": {
+   "loss_pct": 3.821,
+   "year": 2024
+  },
+  "AZE": {
+   "loss_pct": 7.637,
+   "year": 2023
+  },
+  "BEL": {
+   "loss_pct": 4.298,
+   "year": 2024
+  },
+  "BEN": {
+   "loss_pct": 58.62,
+   "year": 2023
+  },
+  "BFA": {
+   "loss_pct": 17.1,
+   "year": 2023
+  },
+  "BGD": {
+   "loss_pct": 7.903,
+   "year": 2023
+  },
+  "BGR": {
+   "loss_pct": 5.875,
+   "year": 2023
+  },
+  "BHR": {
+   "loss_pct": 2.691,
+   "year": 2023
+  },
+  "BIH": {
+   "loss_pct": 7.239,
+   "year": 2023
+  },
+  "BLR": {
+   "loss_pct": 6.886,
+   "year": 2023
+  },
+  "BOL": {
+   "loss_pct": 8.947,
+   "year": 2023
+  },
+  "BRA": {
+   "loss_pct": 14.97,
+   "year": 2024
+  },
+  "BRN": {
+   "loss_pct": 12.69,
+   "year": 2023
+  },
+  "BWA": {
+   "loss_pct": 20.64,
+   "year": 2023
+  },
+  "CAN": {
+   "loss_pct": 4.152,
+   "year": 2024
+  },
+  "CHE": {
+   "loss_pct": 5.013,
+   "year": 2024
+  },
+  "CHL": {
+   "loss_pct": 5.912,
+   "year": 2024
+  },
+  "CHN": {
+   "loss_pct": 3.429,
+   "year": 2023
+  },
+  "CIV": {
+   "loss_pct": 13.68,
+   "year": 2023
+  },
+  "CMR": {
+   "loss_pct": 21.97,
+   "year": 2023
+  },
+  "COD": {
+   "loss_pct": 9.098,
+   "year": 2023
+  },
+  "COG": {
+   "loss_pct": 38.45,
+   "year": 2023
+  },
+  "COL": {
+   "loss_pct": 7.777,
+   "year": 2024
+  },
+  "CRI": {
+   "loss_pct": 9.066,
+   "year": 2024
+  },
+  "CUB": {
+   "loss_pct": 18.74,
+   "year": 2023
+  },
+  "CUW": {
+   "loss_pct": 10.92,
+   "year": 2023
+  },
+  "CYP": {
+   "loss_pct": 3.04,
+   "year": 2023
+  },
+  "CZE": {
+   "loss_pct": 4.265,
+   "year": 2024
+  },
+  "DEU": {
+   "loss_pct": 5.116,
+   "year": 2024
+  },
+  "DNK": {
+   "loss_pct": 6.164,
+   "year": 2024
+  },
+  "DOM": {
+   "loss_pct": 12.8,
+   "year": 2023
+  },
+  "DZA": {
+   "loss_pct": 9.202,
+   "year": 2023
+  },
+  "ECU": {
+   "loss_pct": 17,
+   "year": 2023
+  },
+  "EGY": {
+   "loss_pct": 19.87,
+   "year": 2023
+  },
+  "ERI": {
+   "loss_pct": 11.75,
+   "year": 2023
+  },
+  "ESP": {
+   "loss_pct": 8.288,
+   "year": 2024
+  },
+  "EST": {
+   "loss_pct": 20.33,
+   "year": 2024
+  },
+  "ETH": {
+   "loss_pct": 20.73,
+   "year": 2023
+  },
+  "FIN": {
+   "loss_pct": 3.669,
+   "year": 2024
+  },
+  "FRA": {
+   "loss_pct": 6.618,
+   "year": 2024
+  },
+  "GAB": {
+   "loss_pct": 18.91,
+   "year": 2023
+  },
+  "GBR": {
+   "loss_pct": 9.854,
+   "year": 2024
+  },
+  "GEO": {
+   "loss_pct": 7.989,
+   "year": 2023
+  },
+  "GHA": {
+   "loss_pct": 11.25,
+   "year": 2023
+  },
+  "GIB": {
+   "loss_pct": 16.45,
+   "year": 2023
+  },
+  "GNQ": {
+   "loss_pct": 10.62,
+   "year": 2023
+  },
+  "GRC": {
+   "loss_pct": 9.832,
+   "year": 2024
+  },
+  "GTM": {
+   "loss_pct": 12.44,
+   "year": 2023
+  },
+  "HKG": {
+   "loss_pct": 4.269,
+   "year": 2023
+  },
+  "HND": {
+   "loss_pct": 33.84,
+   "year": 2023
+  },
+  "HRV": {
+   "loss_pct": 10.33,
+   "year": 2023
+  },
+  "HTI": {
+   "loss_pct": 14.69,
+   "year": 2022
+  },
+  "HUN": {
+   "loss_pct": 7.102,
+   "year": 2024
+  },
+  "IDN": {
+   "loss_pct": 6.453,
+   "year": 2023
+  },
+  "IND": {
+   "loss_pct": 14.16,
+   "year": 2023
+  },
+  "IRL": {
+   "loss_pct": 8.158,
+   "year": 2024
+  },
+  "IRN": {
+   "loss_pct": 10.05,
+   "year": 2023
+  },
+  "IRQ": {
+   "loss_pct": 61.81,
+   "year": 2023
+  },
+  "ISL": {
+   "loss_pct": 2.927,
+   "year": 2024
+  },
+  "ISR": {
+   "loss_pct": 3.923,
+   "year": 2024
+  },
+  "ITA": {
+   "loss_pct": 7.079,
+   "year": 2024
+  },
+  "JAM": {
+   "loss_pct": 26.89,
+   "year": 2023
+  },
+  "JOR": {
+   "loss_pct": 10.96,
+   "year": 2023
+  },
+  "JPN": {
+   "loss_pct": 4.934,
+   "year": 2024
+  },
+  "KAZ": {
+   "loss_pct": 9.724,
+   "year": 2023
+  },
+  "KEN": {
+   "loss_pct": 25.76,
+   "year": 2024
+  },
+  "KGZ": {
+   "loss_pct": 18.29,
+   "year": 2023
+  },
+  "KHM": {
+   "loss_pct": 11.59,
+   "year": 2023
+  },
+  "KOR": {
+   "loss_pct": 3.287,
+   "year": 2024
+  },
+  "KWT": {
+   "loss_pct": 9.037,
+   "year": 2023
+  },
+  "LAO": {
+   "loss_pct": 6.235,
+   "year": 2023
+  },
+  "LBN": {
+   "loss_pct": 9.644,
+   "year": 2023
+  },
+  "LBY": {
+   "loss_pct": 20.17,
+   "year": 2023
+  },
+  "LKA": {
+   "loss_pct": 9.218,
+   "year": 2023
+  },
+  "LTU": {
+   "loss_pct": 10.17,
+   "year": 2024
+  },
+  "LUX": {
+   "loss_pct": 3.501,
+   "year": 2024
+  },
+  "LVA": {
+   "loss_pct": 5.759,
+   "year": 2024
+  },
+  "MAR": {
+   "loss_pct": 18.19,
+   "year": 2023
+  },
+  "MDA": {
+   "loss_pct": 8.996,
+   "year": 2023
+  },
+  "MDG": {
+   "loss_pct": 5.271,
+   "year": 2023
+  },
+  "MEX": {
+   "loss_pct": 11.11,
+   "year": 2024
+  },
+  "MKD": {
+   "loss_pct": 13.91,
+   "year": 2023
+  },
+  "MLT": {
+   "loss_pct": 8.319,
+   "year": 2023
+  },
+  "MMR": {
+   "loss_pct": 7.807,
+   "year": 2023
+  },
+  "MNE": {
+   "loss_pct": 11.32,
+   "year": 2023
+  },
+  "MNG": {
+   "loss_pct": 14.22,
+   "year": 2023
+  },
+  "MOZ": {
+   "loss_pct": 16.62,
+   "year": 2023
+  },
+  "MUS": {
+   "loss_pct": 5.727,
+   "year": 2023
+  },
+  "MYS": {
+   "loss_pct": 6.897,
+   "year": 2023
+  },
+  "NAM": {
+   "loss_pct": 27.83,
+   "year": 2023
+  },
+  "NER": {
+   "loss_pct": 45.78,
+   "year": 2023
+  },
+  "NGA": {
+   "loss_pct": 14.15,
+   "year": 2023
+  },
+  "NIC": {
+   "loss_pct": 21.46,
+   "year": 2023
+  },
+  "NLD": {
+   "loss_pct": 3.803,
+   "year": 2024
+  },
+  "NOR": {
+   "loss_pct": 4.936,
+   "year": 2024
+  },
+  "NPL": {
+   "loss_pct": 14.41,
+   "year": 2023
+  },
+  "NZL": {
+   "loss_pct": 6.709,
+   "year": 2024
+  },
+  "OMN": {
+   "loss_pct": 7.483,
+   "year": 2023
+  },
+  "PAK": {
+   "loss_pct": 15.35,
+   "year": 2023
+  },
+  "PAN": {
+   "loss_pct": 6.575,
+   "year": 2023
+  },
+  "PER": {
+   "loss_pct": 11.34,
+   "year": 2023
+  },
+  "PHL": {
+   "loss_pct": 9.991,
+   "year": 2023
+  },
+  "POL": {
+   "loss_pct": 6.832,
+   "year": 2024
+  },
+  "PRK": {
+   "loss_pct": 15.54,
+   "year": 2023
+  },
+  "PRT": {
+   "loss_pct": 9.667,
+   "year": 2024
+  },
+  "PRY": {
+   "loss_pct": 11.88,
+   "year": 2023
+  },
+  "QAT": {
+   "loss_pct": 5.735,
+   "year": 2023
+  },
+  "ROU": {
+   "loss_pct": 9.806,
+   "year": 2023
+  },
+  "RUS": {
+   "loss_pct": 8.388,
+   "year": 2023
+  },
+  "RWA": {
+   "loss_pct": 18.27,
+   "year": 2023
+  },
+  "SAU": {
+   "loss_pct": 9.068,
+   "year": 2023
+  },
+  "SDN": {
+   "loss_pct": 27.07,
+   "year": 2023
+  },
+  "SEN": {
+   "loss_pct": 13.06,
+   "year": 2023
+  },
+  "SGP": {
+   "loss_pct": 0.23,
+   "year": 2023
+  },
+  "SLV": {
+   "loss_pct": 9.769,
+   "year": 2023
+  },
+  "SRB": {
+   "loss_pct": 10.32,
+   "year": 2023
+  },
+  "SSD": {
+   "loss_pct": 4.014,
+   "year": 2023
+  },
+  "SUR": {
+   "loss_pct": 11.6,
+   "year": 2023
+  },
+  "SVK": {
+   "loss_pct": 3.669,
+   "year": 2024
+  },
+  "SVN": {
+   "loss_pct": 5.091,
+   "year": 2024
+  },
+  "SWE": {
+   "loss_pct": 5.478,
+   "year": 2024
+  },
+  "SWZ": {
+   "loss_pct": 28.12,
+   "year": 2023
+  },
+  "SYR": {
+   "loss_pct": 21.93,
+   "year": 2023
+  },
+  "TCD": {
+   "loss_pct": 23.63,
+   "year": 2023
+  },
+  "TGO": {
+   "loss_pct": 32.45,
+   "year": 2023
+  },
+  "THA": {
+   "loss_pct": 7.161,
+   "year": 2023
+  },
+  "TJK": {
+   "loss_pct": 17.32,
+   "year": 2023
+  },
+  "TKM": {
+   "loss_pct": 9.644,
+   "year": 2023
+  },
+  "TTO": {
+   "loss_pct": 4.164,
+   "year": 2023
+  },
+  "TUN": {
+   "loss_pct": 18.34,
+   "year": 2023
+  },
+  "TUR": {
+   "loss_pct": 8.273,
+   "year": 2024
+  },
+  "TZA": {
+   "loss_pct": 16.78,
+   "year": 2023
+  },
+  "UGA": {
+   "loss_pct": 18.93,
+   "year": 2023
+  },
+  "UKR": {
+   "loss_pct": 10.17,
+   "year": 2023
+  },
+  "URY": {
+   "loss_pct": 9.691,
+   "year": 2023
+  },
+  "USA": {
+   "loss_pct": 5.312,
+   "year": 2024
+  },
+  "UZB": {
+   "loss_pct": 4.925,
+   "year": 2023
+  },
+  "VEN": {
+   "loss_pct": 21.42,
+   "year": 2023
+  },
+  "VNM": {
+   "loss_pct": 6.583,
+   "year": 2023
+  },
+  "XKX": {
+   "loss_pct": 15.05,
+   "year": 2014
+  },
+  "YEM": {
+   "loss_pct": 31.19,
+   "year": 2023
+  },
+  "ZAF": {
+   "loss_pct": 10.25,
+   "year": 2023
+  },
+  "ZMB": {
+   "loss_pct": 5.342,
+   "year": 2023
+  },
+  "ZWE": {
+   "loss_pct": 23,
+   "year": 2023
+  },
+  "WLD": {
+   "loss_pct": 6.506,
+   "year": 2024
+  }
+ },
+ "region_map": {
+  "aws:af-south-1": "ZAF",
+  "aws:ap-east-1": "HKG",
+  "aws:ap-east-2": "TWN",
+  "aws:ap-northeast-1": "JPN",
+  "aws:ap-northeast-2": "KOR",
+  "aws:ap-northeast-3": "JPN",
+  "aws:ap-south-1": "IND",
+  "aws:ap-south-2": "IND",
+  "aws:ap-southeast-1": "SGP",
+  "aws:ap-southeast-2": "AUS",
+  "aws:ap-southeast-3": "IDN",
+  "aws:ap-southeast-4": "AUS",
+  "aws:ap-southeast-5": "MYS",
+  "aws:ap-southeast-6": "NZL",
+  "aws:ap-southeast-7": "THA",
+  "aws:ca-central-1": "CAN",
+  "aws:ca-west-1": "CAN",
+  "aws:cn-north-1": "CHN",
+  "aws:cn-northwest-1": "CHN",
+  "aws:eu-central-1": "DEU",
+  "aws:eu-central-2": "CHE",
+  "aws:eu-north-1": "SWE",
+  "aws:eu-south-1": "ITA",
+  "aws:eu-south-2": "ESP",
+  "aws:eu-west-1": "IRL",
+  "aws:eu-west-2": "GBR",
+  "aws:eu-west-3": "FRA",
+  "aws:il-central-1": "ISR",
+  "aws:me-central-1": "ARE",
+  "aws:me-south-1": "BHR",
+  "aws:mx-central-1": "MEX",
+  "aws:sa-east-1": "BRA",
+  "aws:us-east-1": "USA",
+  "aws:us-east-2": "USA",
+  "aws:us-gov-east-1": "USA",
+  "aws:us-gov-west-1": "USA",
+  "aws:us-west-1": "USA",
+  "aws:us-west-2": "USA",
+  "gcp:africa-south1": "ZAF",
+  "gcp:asia-east1": "TWN",
+  "gcp:asia-east2": "HKG",
+  "gcp:asia-northeast1": "JPN",
+  "gcp:asia-northeast2": "JPN",
+  "gcp:asia-northeast3": "KOR",
+  "gcp:asia-south1": "IND",
+  "gcp:asia-south2": "IND",
+  "gcp:asia-southeast1": "SGP",
+  "gcp:asia-southeast2": "IDN",
+  "gcp:asia-southeast3": "THA",
+  "gcp:australia-southeast1": "AUS",
+  "gcp:australia-southeast2": "AUS",
+  "gcp:europe-central2": "POL",
+  "gcp:europe-north1": "FIN",
+  "gcp:europe-north2": "SWE",
+  "gcp:europe-southwest1": "ESP",
+  "gcp:europe-west1": "BEL",
+  "gcp:europe-west10": "DEU",
+  "gcp:europe-west12": "ITA",
+  "gcp:europe-west2": "GBR",
+  "gcp:europe-west3": "DEU",
+  "gcp:europe-west4": "NLD",
+  "gcp:europe-west6": "CHE",
+  "gcp:europe-west8": "ITA",
+  "gcp:europe-west9": "FRA",
+  "gcp:me-central1": "QAT",
+  "gcp:me-central2": "SAU",
+  "gcp:me-west1": "ISR",
+  "gcp:northamerica-northeast1": "CAN",
+  "gcp:northamerica-northeast2": "CAN",
+  "gcp:northamerica-south1": "MEX",
+  "gcp:southamerica-east1": "BRA",
+  "gcp:southamerica-west1": "CHL",
+  "gcp:us-central1": "USA",
+  "gcp:us-east1": "USA",
+  "gcp:us-east4": "USA",
+  "gcp:us-east5": "USA",
+  "gcp:us-south1": "USA",
+  "gcp:us-west1": "USA",
+  "gcp:us-west2": "USA",
+  "gcp:us-west3": "USA",
+  "gcp:us-west4": "USA",
+  "azure:australiacentral": "AUS",
+  "azure:australiacentral2": "AUS",
+  "azure:australiaeast": "AUS",
+  "azure:australiasoutheast": "AUS",
+  "azure:austriaeast": "AUT",
+  "azure:belgiumcentral": "BEL",
+  "azure:brazilsouth": "BRA",
+  "azure:brazilsoutheast": "BRA",
+  "azure:canadacentral": "CAN",
+  "azure:canadaeast": "CAN",
+  "azure:centralindia": "IND",
+  "azure:centralus": "USA",
+  "azure:chilecentral": "CHL",
+  "azure:chinaeast": "CHN",
+  "azure:chinaeast2": "CHN",
+  "azure:chinaeast3": "CHN",
+  "azure:chinanorth": "CHN",
+  "azure:chinanorth2": "CHN",
+  "azure:chinanorth3": "CHN",
+  "azure:denmarkeast": "DNK",
+  "azure:eastasia": "HKG",
+  "azure:eastus": "USA",
+  "azure:eastus2": "USA",
+  "azure:francecentral": "FRA",
+  "azure:francesouth": "FRA",
+  "azure:germanynorth": "DEU",
+  "azure:germanywestcentral": "DEU",
+  "azure:indiasouthcentral": "IND",
+  "azure:indonesiacentral": "IDN",
+  "azure:israelcentral": "ISR",
+  "azure:italynorth": "ITA",
+  "azure:japaneast": "JPN",
+  "azure:japanwest": "JPN",
+  "azure:koreacentral": "KOR",
+  "azure:koreasouth": "KOR",
+  "azure:malaysiawest": "MYS",
+  "azure:mexicocentral": "MEX",
+  "azure:newzealandnorth": "NZL",
+  "azure:northcentralus": "USA",
+  "azure:northeurope": "IRL",
+  "azure:norwayeast": "NOR",
+  "azure:norwaywest": "NOR",
+  "azure:polandcentral": "POL",
+  "azure:qatarcentral": "QAT",
+  "azure:southafricanorth": "ZAF",
+  "azure:southafricawest": "ZAF",
+  "azure:southcentralus": "USA",
+  "azure:southeastasia": "SGP",
+  "azure:southindia": "IND",
+  "azure:spaincentral": "ESP",
+  "azure:swedencentral": "SWE",
+  "azure:switzerlandnorth": "CHE",
+  "azure:switzerlandwest": "CHE",
+  "azure:uaecentral": "ARE",
+  "azure:uaenorth": "ARE",
+  "azure:uksouth": "GBR",
+  "azure:ukwest": "GBR",
+  "azure:usgovarizona": "USA",
+  "azure:usgovtexas": "USA",
+  "azure:usgovvirginia": "USA",
+  "azure:westcentralus": "USA",
+  "azure:westeurope": "NLD",
+  "azure:westindia": "IND",
+  "azure:westus": "USA",
+  "azure:westus2": "USA",
+  "azure:westus3": "USA",
+  "openrouter_data_region:europe": "EU",
+  "openrouter_data_region:us": "USA",
+  "openrouter_data_region:global": "WLD"
+ },
+ "azure_geography_by_iso3": {
+  "Americas": [
+   "USA",
+   "CAN",
+   "BRA",
+   "MEX",
+   "CHL"
+  ],
+  "Asia Pacific": [
+   "AUS",
+   "CHN",
+   "HKG",
+   "TWN",
+   "IND",
+   "IDN",
+   "JPN",
+   "KOR",
+   "MYS",
+   "NZL",
+   "SGP",
+   "THA"
+  ],
+  "_note": "Everything else maps to Europe, Middle East & Africa. Mapping by country is the integrator's reading; the source gives geographies only."
+ },
+ "band": {
+  "floor": 2.166,
+  "label": "judgment band, not a confidence interval",
+  "factors": {
+   "regime_x_hardware": [
+    0.4742,
+    2.109
+   ],
+   "closed_model_unknown_generic": [
+    0.6491,
+    1.501
+   ],
+   "deployment_factor_D": [
+    0.9874,
+    1.004
+   ],
+   "reasoning_uplift": [
+    0.5385,
+    1.615
+   ],
+   "td_world": [
+    0.9371,
+    1.1
+   ],
+   "td_usa": [
+    0.9903,
+    1.043
+   ],
+   "grid_usa": [
+    0.3458,
+    2.378
+   ],
+   "grid_world": [
+    0.06129,
+    1.524
+   ],
+   "grid_hourly_high": [
+    0.9,
+    1.1
+   ],
+   "grid_hourly_low_short": [
+    0.7,
+    1.5
+   ],
+   "grid_hourly_low_long": [
+    0.92,
+    1.08
+   ],
+   "grid_hourly_threshold_g_per_kwh": 200,
+   "grid_hourly_short_run_s": 3600
+  }
+ },
+ "buckets": {
+  "S": {
+   "median": 59.6,
+   "range": [
+    40.16,
+    99.36
+   ]
+  },
+  "M": {
+   "median": 85.9,
+   "range": [
+    62.95,
+    149.4
+   ]
+  },
+  "L": {
+   "median": 363.7,
+   "range": [
+    261.1,
+    957.6
+   ]
+  },
+  "XL": {
+   "median": 1016.0,
+   "range": [
+    1016,
+    1016
+   ]
+  },
+  "tier_to_class": {
+   "local": "S",
+   "economy": "M",
+   "standard": "L",
+   "premium": "XL"
+  }
+ },
+ "measured": {
+  "Qwen/Qwen3-14B": {
+   "j_per_out_tok_corrected": 0.1343,
+   "rate_wh_per_mtok_at_host_1_43": 62.95,
+   "min": 62.95,
+   "max": 62.95,
+   "precision": "bfloat16",
+   "gpus": "1"
+  },
+  "Qwen/Qwen3-235B-A22B-Instruct-2507": {
+   "j_per_out_tok_corrected": 2.043,
+   "rate_wh_per_mtok_at_host_1_43": 957.6,
+   "min": 957.6,
+   "max": 957.6,
+   "precision": "bfloat16",
+   "gpus": "8"
+  },
+  "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8": {
+   "j_per_out_tok_corrected": 1.643,
+   "rate_wh_per_mtok_at_host_1_43": 770.3,
+   "min": 694.6,
+   "max": 846,
+   "precision": "fp8",
+   "gpus": "4|8"
+  },
+  "Qwen/Qwen3-30B-A3B-Instruct-2507": {
+   "j_per_out_tok_corrected": 0.212,
+   "rate_wh_per_mtok_at_host_1_43": 99.36,
+   "min": 89.29,
+   "max": 109.4,
+   "precision": "bfloat16",
+   "gpus": "1|2"
+  },
+  "Qwen/Qwen3-32B": {
+   "j_per_out_tok_corrected": 0.2965,
+   "rate_wh_per_mtok_at_host_1_43": 139,
+   "min": 139,
+   "max": 139,
+   "precision": "bfloat16",
+   "gpus": "2"
+  },
+  "Qwen/Qwen3-8B": {
+   "j_per_out_tok_corrected": 0.09659,
+   "rate_wh_per_mtok_at_host_1_43": 45.27,
+   "min": 45.27,
+   "max": 45.27,
+   "precision": "bfloat16",
+   "gpus": "1"
+  },
+  "google/gemma-3-12b-it": {
+   "j_per_out_tok_corrected": 0.1652,
+   "rate_wh_per_mtok_at_host_1_43": 77.45,
+   "min": 77.45,
+   "max": 77.45,
+   "precision": "bfloat16",
+   "gpus": "1"
+  },
+  "google/gemma-3-27b-it": {
+   "j_per_out_tok_corrected": 0.3187,
+   "rate_wh_per_mtok_at_host_1_43": 149.4,
+   "min": 149.4,
+   "max": 149.4,
+   "precision": "bfloat16",
+   "gpus": "2"
+  },
+  "meta-llama/Llama-3.1-405B-Instruct-FP8": {
+   "j_per_out_tok_corrected": 2.167,
+   "rate_wh_per_mtok_at_host_1_43": 1016,
+   "min": 1016,
+   "max": 1016,
+   "precision": "fp8",
+   "gpus": "8"
+  },
+  "meta-llama/Llama-3.1-70B-Instruct": {
+   "j_per_out_tok_corrected": 0.557,
+   "rate_wh_per_mtok_at_host_1_43": 261.1,
+   "min": 261.1,
+   "max": 261.1,
+   "precision": "bfloat16",
+   "gpus": "4"
+  },
+  "meta-llama/Llama-3.1-8B-Instruct": {
+   "j_per_out_tok_corrected": 0.08569,
+   "rate_wh_per_mtok_at_host_1_43": 40.16,
+   "min": 40.16,
+   "max": 40.16,
+   "precision": "bfloat16",
+   "gpus": "1"
+  },
+  "meta-llama/Llama-3.3-70B-Instruct": {
+   "j_per_out_tok_corrected": 0.5996,
+   "rate_wh_per_mtok_at_host_1_43": 281.1,
+   "min": 281.1,
+   "max": 281.1,
+   "precision": "bfloat16",
+   "gpus": "4"
+  },
+  "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
+   "j_per_out_tok_corrected": 0.6969,
+   "rate_wh_per_mtok_at_host_1_43": 326.7,
+   "min": 326.7,
+   "max": 326.7,
+   "precision": "fp8",
+   "gpus": "8"
+  },
+  "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
+   "j_per_out_tok_corrected": 0.8548,
+   "rate_wh_per_mtok_at_host_1_43": 400.6,
+   "min": 366,
+   "max": 435.3,
+   "precision": "bfloat16",
+   "gpus": "4|8"
+  },
+  "nvidia/NVIDIA-Nemotron-Nano-12B-v2": {
+   "j_per_out_tok_corrected": 0.1833,
+   "rate_wh_per_mtok_at_host_1_43": 85.9,
+   "min": 85.9,
+   "max": 85.9,
+   "precision": "bfloat16",
+   "gpus": "1"
+  },
+  "nvidia/NVIDIA-Nemotron-Nano-9B-v2": {
+   "j_per_out_tok_corrected": 0.1577,
+   "rate_wh_per_mtok_at_host_1_43": 73.93,
+   "min": 73.93,
+   "max": 73.93,
+   "precision": "bfloat16",
+   "gpus": "1"
+  }
+ },
+ "classification": {
+  "upstage/solar-mini4": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 119.9,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "cohere/command-a-plus": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 496.2,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "xiaomi/mimo-v2.6-pro-ultraspeed": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 2838.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "xiaomi/mimo-v2.6-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 977.2,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "xiaomi/mimo-v2.6-pro": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2006.0,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "prism-ml/ternary-bonsai-2-27b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.98,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-5.3-flashx": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 981.7,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "~deepseek/deepseek-pro-latest": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 4114.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "~deepseek/deepseek-flash-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1957.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "inference-net/schematron-v2-turbo": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "inference-net/schematron-v2-small": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "~openai/gpt-astra-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6840.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "~openai/gpt-terra-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1181.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "inclusionai/ling-3.0-flash-vl": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 240.7,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-v4.1-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1957.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-v4.1-flash:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1957.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "nex-agi/nex-n2.5-mini": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 171.6,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "nex-agi/nex-n2.5-mini:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 171.6,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "nex-agi/nex-n2.5-pro": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1134.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "nex-agi/nex-n2.5-pro:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1134.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-6-astra": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6840.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-6-astra:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6840.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-6-astra-pro": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 6840.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-6-astra-pro:batch": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 6840.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "inclusionai/ling-3.0-flash-sante:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 240.6,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3.8-max-0902": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 8784.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "google/gemini-3.8-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.8-flash:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-fable-5.1": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6235.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-fable-5.1:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6235.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "ibm-granite/granite-4.2-8b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.44,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "tencent/hy4-preview": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2057.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "inclusionai/ling-3.0-flash-fin": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 240.6,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "inclusionai/ling-3.0-flash-fin:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 240.6,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "~z-ai/glm-flash-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 981.7,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3.8-flash": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 867.3,
+   "flags": []
+  },
+  "z-ai/glm-5.3-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 981.7,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-5.3-flash:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 981.7,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-v4-flash-vision-exp": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 772.6,
+   "flags": [
+    "estimated size",
+    "range spans classes"
+   ]
+  },
+  "tencent/hy-mt2-1.8b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.61,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "tencent/hy-mt2-30b-a3b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "~z-ai/glm-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2030.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "tencent/hy-mt2-7b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.3,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-5.3": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2030.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-5.3:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2030.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3.8-27b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.98,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3.8-27b:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.98,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "dots-studio/dots-3-note-preview:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 978.7,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "google/gemini-3.7-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.7-flash:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "qwen/qwen3.8-2.4t-a95b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 8784.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-v4-pro-0813": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 4114.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "x-ai/grok-4.6": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6538.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "liquid/lfm-2.5-2.6b:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.72,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "nvidia/nemotron-3.5-lightning": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "nvidia/nemotron-3.5-lightning:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "sakana/sakana-namazu": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 5052.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "meta/muse-glimmer-30b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.38,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "~deepseek/deepseek-v4-flash-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 974.2,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-v4-flash-0731": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 974.2,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "thinkingmachines/inkling-small": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 972.7,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "thinkingmachines/inkling-small:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 972.7,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "anthropic/claude-opus-5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-opus-5:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "inclusionai/ling-3.0-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 240.6,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "poolside/laguna-s-2.1": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 241.7,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "poolside/laguna-s-2.1:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 241.7,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "google/gemini-3.6-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.6-flash:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.5-flash-lite": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 278.3,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.5-flash-lite:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 278.3,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "meituan/longcat-2.0": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 4108.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "thinkingmachines/inkling": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2033.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "thinkingmachines/inkling:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2033.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "moonshotai/kimi-k3": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 8893.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "moonshotai/kimi-k3:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 8893.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-5.6-luna-pro": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 522.6,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-luna-pro:batch": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 522.6,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-luna": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 522.6,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-luna:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 522.6,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-terra-pro": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 1181.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-terra-pro:batch": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 1181.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-terra": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1181.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-terra:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1181.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-sol-pro": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-sol-pro:batch": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-sol": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.6-sol:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "x-ai/grok-4.5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6538.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "tencent/hy3": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 986.3,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "poolside/laguna-xs-2.1": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "poolside/laguna-xs-2.1:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "anthropic/claude-sonnet-5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1087.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-sonnet-5:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1087.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "cohere/north-mini-code:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-5.2": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 2030.0,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-5.2:free": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 2030.0,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "moonshotai/kimi-k2.7-code": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2852.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "~anthropic/claude-fable-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6235.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-fable-5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6235.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-fable-5:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6235.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "nvidia/nemotron-3.5-content-safety": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.9,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "nvidia/nemotron-3.5-content-safety:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.9,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "nvidia/nemotron-3-ultra-550b-a55b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2935.0,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "nvidia/nemotron-3-ultra-550b-a55b:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2935.0,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "minimax/minimax-m3": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 987.8,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "stepfun/step-3.7-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 485.6,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "anthropic/claude-opus-4.8": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-opus-4.8:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.5-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2634.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.5-flash:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2634.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.1-flash-lite": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 278.3,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.1-flash-lite:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 278.3,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-chat-latest": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "mistralai/mistral-medium-3-5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 287.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "mistralai/mistral-medium-3-5:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 287.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "~anthropic/claude-haiku-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 125.9,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "~openai/gpt-mini-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 596.6,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "~google/gemini-pro-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 5994.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "~moonshotai/kimi-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 8893.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "~google/gemini-flash-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "~anthropic/claude-sonnet-latest": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1087.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "qwen/qwen3.6-35b-a3b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 119.9,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3.6-max-preview": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3.6-27b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-5.5-pro": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 58780.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-5.5-pro:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 58780.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-5.5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-5.5:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-v4-pro": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 4114.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-v4-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 974.2,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "xiaomi/mimo-v2.5-pro": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2036.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "xiaomi/mimo-v2.5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 774.6,
+   "flags": [
+    "estimated size",
+    "range spans classes"
+   ]
+  },
+  "openai/gpt-5.4-image-2": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 1181.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "moonshotai/kimi-k2.6": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 5052.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "anthropic/claude-opus-4.7": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-opus-4.7:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "z-ai/glm-5.1": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 4187.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "google/gemma-4-26b-a4b-it": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 84.9,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "google/gemma-4-26b-a4b-it:free": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 84.9,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "google/gemma-4-31b-it": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 88.51,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "google/gemma-4-31b-it:free": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 88.51,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "arcee-ai/trinity-large-thinking": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1605.0,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "x-ai/grok-4.20-multi-agent": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 1181.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "x-ai/grok-4.20": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1181.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "rekaai/reka-edge": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.3,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "minimax/minimax-m2.7": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 650.3,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-5.4-nano": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 130.3,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.4-nano:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 130.3,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.4-mini": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 596.6,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.4-mini:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 596.6,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "mistralai/mistral-small-2603": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 241.7,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "mistralai/mistral-small-2603:batch": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 241.7,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "nvidia/nemotron-3-super-120b-a12b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 171.9,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "nvidia/nemotron-3-super-120b-a12b:free": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 171.9,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "qwen/qwen3.5-9b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.57,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-5.4-pro": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 58780.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.4-pro:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 58780.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.4": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1181.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.4:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1181.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.1-flash-lite-preview": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 278.3,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.1-flash-image-preview": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 5994.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "qwen/qwen3.5-35b-a3b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 119.9,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3.5-27b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.98,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3.5-122b-a10b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 242.4,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3.5-flash-02-23": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 119.9,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "google/gemini-3.1-pro-preview-customtools": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 5994.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.3-codex": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1145.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "aion-labs/aion-2.0": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 2530.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "google/gemini-3.1-pro-preview": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 5994.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3.1-pro-preview:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 5994.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-sonnet-4.6": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-sonnet-4.6:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "qwen/qwen3.5-397b-a17b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 980.2,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "minimax/minimax-m2.5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 484.8,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2583.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "anthropic/claude-opus-4.6": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-opus-4.6:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "qwen/qwen3-coder-next": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 239.8,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "stepfun/step-3.5-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 485.6,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "moonshotai/kimi-k2.5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 5052.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "upstage/solar-pro-3": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 243.2,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-4.7-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.57,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes"
+   ]
+  },
+  "openai/gpt-5.2-codex": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1145.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "bytedance-seed/seed-1.6": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 529.4,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes"
+   ]
+  },
+  "minimax/minimax-m2.1": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 484.8,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-4.7": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1003.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "google/gemini-3-flash-preview": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1408.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3-flash-preview:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1408.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "nvidia/nemotron-3-nano-30b-a3b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "openai/gpt-5.2-pro": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 51820.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.2-pro:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 51820.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.2": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1145.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.2:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1145.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "z-ai/glm-4.6v": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 354.7,
+   "flags": [
+    "estimated size",
+    "range spans classes"
+   ]
+  },
+  "openai/gpt-5.1-codex-max": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1091.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "mistralai/ministral-14b-2512": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 86.24,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "mistralai/ministral-8b-2512": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 85.44,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "mistralai/ministral-8b-2512:batch": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 85.44,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "mistralai/ministral-3b-2512": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 84.81,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "mistralai/mistral-large-2512:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2033.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-v3.2": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1789.0,
+   "flags": [
+    "estimated size"
+   ]
+  },
+  "anthropic/claude-opus-4.5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-opus-4.5:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2513.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-3-pro-image-preview": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 5994.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.1": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1091.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.1:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1091.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.1-codex": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1091.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5.1-codex-mini": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 265.1,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "moonshotai/kimi-k2-thinking": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "mistralai/voxtral-small-24b-2507": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 87.61,
+   "flags": []
+  },
+  "openai/gpt-oss-safeguard-20b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.17,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes"
+   ]
+  },
+  "minimax/minimax-m2": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 484.8,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-vl-32b-instruct": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 88.64,
+   "flags": []
+  },
+  "ibm-granite/granite-4.0-h-micro": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-5-image-mini": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 265.1,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-haiku-4.5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 125.9,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-haiku-4.5:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 125.9,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "qwen/qwen3-vl-8b-thinking": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.44,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-vl-8b-instruct": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 85.44,
+   "flags": []
+  },
+  "openai/gpt-5-image": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 1091.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-2.5-flash-image": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "qwen/qwen3-vl-30b-a3b-thinking": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-vl-30b-a3b-instruct": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": []
+  },
+  "openai/gpt-5-pro": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 20690.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5-pro:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 20690.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "z-ai/glm-4.6": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1003.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "anthropic/claude-sonnet-4.5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "anthropic/claude-sonnet-4.5:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "deepseek/deepseek-v3.2-exp": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2021.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "thedrummer/cydonia-24b-v4.1": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.57,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-vl-235b-a22b-thinking": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 493.9,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-vl-235b-a22b-instruct": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 698.5,
+   "flags": []
+  },
+  "qwen/qwen3-max": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-coder-plus": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1007.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-v3.1-terminus": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2021.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-coder-flash": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 1007.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-next-80b-a3b-thinking": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 239.8,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-next-80b-a3b-instruct": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 239.8,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "moonshotai/kimi-k2-0905": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2816.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-30b-a3b-thinking-2507": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": []
+  },
+  "nousresearch/hermes-4-405b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1566.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-chat-v3.1": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 1429.0,
+   "flags": []
+  },
+  "mistralai/mistral-medium-3.1": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 287.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "mistralai/mistral-medium-3.1:batch": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 287.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-4.5v": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 243.2,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1091.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1091.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5-mini": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 265.1,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5-mini:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 265.1,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5-nano": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 86.84,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-5-nano:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 86.84,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-oss-120b": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 85.04,
+   "flags": []
+  },
+  "openai/gpt-oss-20b": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 84.9,
+   "flags": []
+  },
+  "openai/gpt-oss-20b:batch": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 84.9,
+   "flags": []
+  },
+  "mistralai/codestral-2508": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.33,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "mistralai/codestral-2508:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.33,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-coder-30b-a3b-instruct": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": []
+  },
+  "qwen/qwen3-30b-a3b-instruct-2507": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 99.36,
+   "flags": []
+  },
+  "z-ai/glm-4.5": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1003.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "z-ai/glm-4.5-air": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 243.2,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-235b-a22b-thinking-2507": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 698.5,
+   "flags": []
+  },
+  "qwen/qwen3-coder": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 1425.0,
+   "flags": []
+  },
+  "bytedance/ui-tars-1.5-7b": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 85.48,
+   "flags": []
+  },
+  "google/gemini-2.5-flash-lite": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-2.5-flash-lite:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "qwen/qwen3-235b-a22b-2507": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 957.6,
+   "flags": []
+  },
+  "moonshotai/kimi-k2": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2006.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "cognitivecomputations/dolphin-mistral-24b-venice-edition": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.57,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "tencent/hunyuan-a13b-instruct": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 243.5,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "baidu/ernie-4.5-vl-424b-a47b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1026.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "mistralai/mistral-small-3.2-24b-instruct": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.57,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "google/gemini-2.5-flash": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-2.5-flash:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-2.5-pro": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 7444.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemini-2.5-pro:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 7444.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "deepseek/deepseek-r1-0528": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 1429.0,
+   "flags": []
+  },
+  "mistralai/mistral-medium-3": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 287.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "meta-llama/llama-guard-4-12b": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 85.97,
+   "flags": []
+  },
+  "qwen/qwen3-30b-a3b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen3-8b": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 45.27,
+   "flags": []
+  },
+  "qwen/qwen3-14b": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 62.95,
+   "flags": []
+  },
+  "qwen/qwen3-32b": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 139.0,
+   "flags": []
+  },
+  "qwen/qwen3-235b-a22b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 493.9,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/o4-mini-high": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/o4-mini": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/o4-mini:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4.1": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1115.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4.1:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1115.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4.1-mini": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 280.9,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4.1-mini:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 280.9,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4.1-nano": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 126.3,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4.1-nano:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 126.3,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "meta-llama/llama-4-maverick": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 980.2,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "meta-llama/llama-4-scout": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 400.6,
+   "flags": []
+  },
+  "deepseek/deepseek-chat-v3-0324": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2530.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "mistralai/mistral-small-3.1-24b-instruct": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.57,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "google/gemma-3-4b-it": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.9,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "google/gemma-3-12b-it": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 77.45,
+   "flags": []
+  },
+  "cohere/command-a": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 280.6,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "rekaai/reka-flash-3": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.17,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "google/gemma-3-27b-it": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 149.4,
+   "flags": []
+  },
+  "thedrummer/skyfall-36b-v2": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 126.1,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "perplexity/sonar-reasoning-pro": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 2021.0,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed"
+   ]
+  },
+  "mistralai/mistral-saba": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.57,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/o3-mini-high": {
+   "rung": 4,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "inherited size (description/same model)",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "aion-labs/aion-rp-llama-3.1-8b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.44,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen2.5-vl-72b-instruct": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 376.7,
+   "flags": []
+  },
+  "openai/o3-mini": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/o3-mini:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "mistralai/mistral-small-24b-instruct-2501": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.57,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "perplexity/sonar": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 265.1,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-r1-distill-llama-70b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 265.1,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-r1": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2021.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "minimax/minimax-01": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 1448.0,
+   "flags": []
+  },
+  "microsoft/phi-4": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 86.24,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "deepseek/deepseek-chat": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2021.0,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "sao10k/l3.3-euryale-70b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 265.1,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/o1": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "cohere/command-r7b-12-2024": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.44,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "meta-llama/llama-3.3-70b-instruct": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 281.1,
+   "flags": []
+  },
+  "openai/gpt-4o-2024-11-20": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "qwen/qwen-2.5-coder-32b-instruct": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 88.74,
+   "flags": []
+  },
+  "thedrummer/unslopnemo-12b": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 86.01,
+   "flags": []
+  },
+  "anthracite-org/magnum-v4-72b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 265.8,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen-2.5-7b-instruct": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.3,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "meta-llama/llama-3.2-1b-instruct": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.5,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "meta-llama/llama-3.2-3b-instruct": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 84.77,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "qwen/qwen-2.5-72b-instruct": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 265.8,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "cohere/command-r-08-2024": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 125.7,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "cohere/command-r-plus-08-2024": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 277.9,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "sao10k/l3.1-euryale-70b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 265.1,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "nousresearch/hermes-3-llama-3.1-70b": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 375.2,
+   "flags": []
+  },
+  "nousresearch/hermes-3-llama-3.1-405b": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 2217.0,
+   "flags": []
+  },
+  "sao10k/l3-lunaris-8b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 85.44,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-4o-2024-08-06": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "meta-llama/llama-3.1-70b-instruct": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 261.1,
+   "flags": []
+  },
+  "meta-llama/llama-3.1-8b-instruct": {
+   "rung": 1,
+   "rate_wh_per_mtok_at_host_1_43": 40.16,
+   "flags": []
+  },
+  "mistralai/mistral-nemo": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 86.01,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-4o-mini": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4o-mini-2024-07-18": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4o-mini:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 88.11,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "google/gemma-2-27b-it": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 88.01,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-4o": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4o-2024-05-13": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4o:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 1154.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "mistralai/mixtral-8x22b-instruct": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 506.8,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "microsoft/wizardlm-2-8x22b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 509.2,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-4-turbo": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2707.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4-turbo:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 2707.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-3.5-turbo-0613": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 87.04,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-3.5-turbo-instruct": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 126.4,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-3.5-turbo-16k": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 265.1,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "undi95/remm-slerp-l2-13b": {
+   "rung": 2,
+   "rate_wh_per_mtok_at_host_1_43": 86.11,
+   "flags": [
+    "precision assumed"
+   ]
+  },
+  "gryphe/mythomax-l2-13b": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 86.11,
+   "flags": [
+    "estimated size",
+    "precision assumed"
+   ]
+  },
+  "openai/gpt-3.5-turbo": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 126.4,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-3.5-turbo:batch": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 126.4,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "range spans classes",
+    "estimate price/benchmark-derived"
+   ]
+  },
+  "openai/gpt-4": {
+   "rung": 3,
+   "rate_wh_per_mtok_at_host_1_43": 6142.0,
+   "flags": [
+    "estimated size",
+    "precision assumed",
+    "estimate price/benchmark-derived"
+   ]
+  }
+ }
+}

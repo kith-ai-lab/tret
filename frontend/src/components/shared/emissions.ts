@@ -24,7 +24,8 @@ import type {
   EmissionsGridTableSummary,
   EmissionsUncertaintyDerivation,
 } from '../../api/client'
-import { formatFactor } from './format'
+import type { MethodV3 } from '../../api/client'
+import { formatFactor, formatGrams } from './format'
 
 export const METHODOLOGY_DOC = 'docs/emissions-methodology.md'
 
@@ -717,4 +718,23 @@ export const CONTRIBUTION_EVIDENCE_LABELS: Record<string, string> = {
 export function contributionEvidenceLabel(evidence: string | null | undefined): string | null {
   if (!evidence) return null
   return CONTRIBUTION_EVIDENCE_LABELS[evidence] ?? evidence
+}
+
+// ── method v3 (preview) ──────────────────────────────────────────────────────
+/** The provenance line on the parallel v3 estimate — never the reported figure. */
+export const METHOD_V3_NOTE =
+  'Parallel estimate under the revised method (Kith method lab, 2026-10-01). Not the reported figure.'
+
+/** "Method v3 (preview): 3.5 g CO2e · band 0.81–17.6 g". */
+export function methodV3Summary(v3: MethodV3): string {
+  return `Method v3 (preview): ${formatGrams(v3.total_g)} g CO2e · band ${formatGrams(v3.band.low_g)}–${formatGrams(v3.band.high_g)} g`
+}
+
+/** One line per component, for the tooltip/expander. */
+export function methodV3Parts(v3: MethodV3): { label: string; value: string }[] {
+  return [
+    { label: 'operational', value: `${formatGrams(v3.parts.operational_g)} g` },
+    { label: 'embodied', value: `${formatGrams(v3.parts.embodied_g)} g` },
+    { label: 'router', value: `${formatGrams(v3.parts.router_g)} g` },
+  ]
 }

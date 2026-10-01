@@ -101,6 +101,11 @@ from tret.services.emissions import (
     emission_event_fields,
     energy_wh_field,
 )
+from tret.services.emissions_v3_wiring import (
+    attach_to_routing,
+    build_method_v3,
+    run_duration,
+)
 from tret.services.energy_collector import collected_meter
 from tret.services.energy_meter import NvidiaSmiMeter, NvmlEnergyMeter, meter_for_settings
 from tret.services.lessons import approved_lessons, lessons_enabled
@@ -567,6 +572,10 @@ class ModelSegment:
                 "cache_write_tokens": usage.cache_write_tokens,
                 "reasoning_tokens": usage.reasoning_tokens,
                 "reasoning_accounting": usage.reasoning_accounting,
+                # True when this call's request carried a reasoning/effort
+                # parameter (`self.effort` is None unless one was sent); None
+                # otherwise — absence of the parameter, not "reasoning off".
+                "reasoning_requested": True if self.effort else None,
                 "served_by": served_by,
                 "inference_geo": inference_geo,
                 "usage_status": usage_status,
@@ -2240,6 +2249,7 @@ class HarnessEngine:
                                 "cache_write_tokens": 0,
                                 "reasoning_tokens": None,
                                 "reasoning_accounting": None,
+                                "reasoning_requested": True if segment.effort else None,
                                 "served_by": None,
                                 "inference_geo": None,
                                 "usage_status": "unavailable",
@@ -2905,6 +2915,17 @@ class HarnessEngine:
                 "cache_misses_unexpected": sum(seg.cache_misses_unexpected for seg in segments),
             }
             run.routing = routing
+        # Parallel preview of the revised emissions method (services/
+        # emissions_v3). Additive only: persisted under `run.routing["method_v3"]`
+        # beside the cache ledger, never read back by any existing figure, and
+        # never allowed to raise into the finish path.
+        run.routing = attach_to_routing(
+            run.routing,
+            build_method_v3(
+                segments, overhead_calls, catalog=self.catalog,
+                run_duration_s=run_duration(run.started_at, run.finished_at),
+            ),
+        )
         # Evidence for the next routing decision, folded into the run's own final
         # commit. `record_outcome` never raises and returns None for runs that
         # carry no lesson (cancelled, or never routed) — see services/outcomes.py.

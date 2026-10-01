@@ -377,6 +377,9 @@ class Router:
                     "cache_write_tokens": usage.cache_write_tokens,
                     "reasoning_tokens": usage.reasoning_tokens,
                     "reasoning_accounting": usage.reasoning_accounting,
+                    "reasoning_requested": (
+                        True if (decision.effort and model.supports_effort) else None
+                    ),
                     "served_by": served_by,
                     "inference_geo": inference_geo,
                     "usage_status": "reported" if usage_reported else "missing",

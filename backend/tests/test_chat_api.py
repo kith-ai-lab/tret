@@ -829,3 +829,23 @@ async def test_capability_catalog_with_only_a_chat_harness_reports_no_specialist
         catalog = await _capability_catalog(db, team.id, project.id)
 
     assert "(no specialist tasks installed)" in catalog
+
+
+def test_assistant_message_carries_a_slim_method_v3_and_a_clean_routing():
+    from tret.providers.catalog import ModelCatalog
+    from tret.engine.harness import ModelSegment
+    from tret.providers.base import Usage
+    from tret.services.emissions_v3_wiring import attach_to_routing, build_method_v3
+
+    model = ModelCatalog().get("anthropic/claude-sonnet-5")
+    seg = ModelSegment(model=model, reason="initial")
+    seg.add(Usage(input_tokens=8000, output_tokens=1200), 1)
+    block = build_method_v3([seg], [], catalog=ModelCatalog())
+    run = _run(routing=attach_to_routing(ROUTING, block))
+    message = _assistant_message(run)
+    assert message["routing"] == ROUTING  # no v3 key leaks into routing
+    v3 = message["method_v3"]
+    assert v3["preview"] is True and v3["total_g"] == pytest.approx(block["total_g"])
+    assert "segments" not in v3 and "values" not in v3 and "factors" not in v3["band"]
+    # a run that predates v3
+    assert _assistant_message(_run(routing=ROUTING))["method_v3"] is None

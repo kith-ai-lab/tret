@@ -263,6 +263,7 @@ async def test_sdk_receipt_preserves_reasoning_upstream_and_geo(wired):
             "cache_write_tokens": 0,
             "reasoning_tokens": 3,
             "reasoning_accounting": "counted_in_output",
+            "reasoning_requested": None,
             "served_by": "supplier-a",
             "inference_geo": "us",
             "usage_status": "reported",

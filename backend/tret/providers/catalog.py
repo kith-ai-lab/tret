@@ -220,6 +220,19 @@ class ModelInfo:
     # `emissions._energy_constant_and_flags` when a run's `energy_strategy` is
     # `"active_params"` and this model has no explicit `energy_wh_per_mtok`.
     active_params_b: float | None = None
+    # Provider-declared reasoning default: does a request that carries NO
+    # reasoning parameter still make this model think? Parsed from OpenRouter's
+    # per-model `reasoning` metadata (`default_enabled` / `default_effort`) for
+    # dynamic entries, or set explicitly in models.yaml. None = unknown/absent
+    # (never read as False). Evidence for `emissions_v3`; no current figure
+    # reads it.
+    reasoning_default_enabled: bool | None = None
+    reasoning_default_effort: str | None = None
+    # The OpenRouter-style id this model is known by in the facility_v3
+    # classification table, when it differs from `id` (hyphenated direct-API
+    # versions, `kimi/` native ids). None = derive from `id`
+    # (`emissions_v3.canonical_model_id`). Evidence for `emissions_v3` only.
+    openrouter_id: str | None = None
     # Was `energy_wh_per_mtok` set explicitly (a real `models.yaml` constant,
     # an operator's own metered figure) rather than derived at construction by
     # the class ladder? Set in `__post_init__` *before* the bake below, so it
@@ -517,6 +530,19 @@ def _usable_price(price: Decimal) -> bool:
     return price.is_finite() and price >= 0
 
 
+def parse_reasoning_default(raw: object) -> tuple[bool | None, str | None]:
+    """Read OpenRouter's per-model `reasoning` metadata into (default_enabled,
+    default_effort). Anything absent or mistyped is None — never guessed."""
+    if not isinstance(raw, dict):
+        return None, None
+    enabled = raw.get("default_enabled")
+    effort = raw.get("default_effort")
+    return (
+        enabled if isinstance(enabled, bool) else None,
+        effort if isinstance(effort, str) and effort else None,
+    )
+
+
 def _tier_from_price(output_price: Decimal) -> str:
     if output_price >= Decimal("30"):
         return "premium"
@@ -689,6 +715,9 @@ class ModelCatalog:
                 strengths=m.get("strengths", []),
                 supports_tools=m.get("supports_tools", True),
                 supports_effort=m.get("supports_effort", False),
+                reasoning_default_enabled=m.get("reasoning_default_enabled"),
+                reasoning_default_effort=m.get("reasoning_default_effort"),
+                openrouter_id=m.get("openrouter_id"),
                 curated=True,
                 released=str(m["released"]) if m.get("released") else None,
                 # Unclassified curated entries fall back to their cost tier's
@@ -797,6 +826,9 @@ class ModelCatalog:
                 except Exception:  # noqa: BLE001 - enrichment only, never fatal
                     pass
             context_window = int(m.get("context_length") or 0)
+            reasoning_default_enabled, reasoning_default_effort = parse_reasoning_default(
+                m.get("reasoning")
+            )
             dynamic[tret_id] = ModelInfo(
                 id=tret_id,
                 provider="openrouter",
@@ -813,6 +845,8 @@ class ModelCatalog:
                 # own supported_parameters when the model accepts it.
                 supports_effort="reasoning" in supported,
                 curated=False,
+                reasoning_default_enabled=reasoning_default_enabled,
+                reasoning_default_effort=reasoning_default_effort,
                 released=released,
                 # Nobody has classified these by hand: estimate from the price
                 # tier (economy→M, standard→L, premium→XL).

@@ -23,6 +23,7 @@ from tret.engine.harness import get_harness_engine
 from tret.packs.links import packs_for_harness, resolve_pack_for_task
 from tret.services import lifecycle
 from tret.services.emissions import emission_summary_fields, energy_wh_field
+from tret.services.emissions_v3_wiring import method_v3_of, public_routing
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
@@ -62,7 +63,9 @@ def _run_summary(run: Run) -> dict:
         "status": run.status,
         "model_used": run.model_used,
         "provider_used": run.provider_used,
-        "routing": run.routing,
+        # `method_v3` lives inside the persisted routing blob but is its own
+        # field (get_run); `routing` here is exactly what it was before v3.
+        "routing": public_routing(run.routing),
         "input_tokens": run.input_tokens,
         "output_tokens": run.output_tokens,
         "cache_read_tokens": run.cache_read_tokens,
@@ -312,6 +315,7 @@ async def _run_tree(db: AsyncSession, run: Run) -> dict | None:
 @router.get("/{run_id}")
 async def get_run(
     run_id: uuid.UUID,
+    v3: str | None = Query(None, description="'full' returns the whole stored method_v3 block"),
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
@@ -353,6 +357,10 @@ async def get_run(
             # possibly different providers, so their energy class and grid basis
             # are their own (services/emissions.overhead_call).
             "overhead": run.overhead,
+            # Parallel preview under the revised emissions method (services/
+            # emissions_v3_wiring) — never the reported figure. Null for runs
+            # that predate it; there is no backfill.
+            "method_v3": method_v3_of(run.routing, full=(v3 == "full")),
             # The prose grounding check's verdict (engine/grounding.py):
             # {checked, status, attempts, unsupported, first_unsupported}.
             # Null for any run the check does not apply to.

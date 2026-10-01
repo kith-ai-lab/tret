@@ -447,6 +447,9 @@ async def _run_agentic_loop(
     # but flagged `estimated` so it is never mistaken for a metered figure.
     usage_estimated = False
     call_records: list[dict] = []
+    # True when the request carries a reasoning/effort parameter (same gate as
+    # the `effort=` argument below); None when it does not.
+    reasoning_requested = True if (effort and model.supports_effort) else None
 
     for iteration in range(1, max_iterations + 1):
         call_started_at = datetime.now(timezone.utc)
@@ -512,6 +515,7 @@ async def _run_agentic_loop(
                         "cache_write_tokens": est.cache_write_tokens,
                         "reasoning_tokens": None,
                         "reasoning_accounting": None,
+                        "reasoning_requested": reasoning_requested,
                         "served_by": None,
                         "inference_geo": None,
                         "usage_status": "estimated",
@@ -529,6 +533,7 @@ async def _run_agentic_loop(
                         "cache_write_tokens": 0,
                         "reasoning_tokens": None,
                         "reasoning_accounting": None,
+                        "reasoning_requested": reasoning_requested,
                         "served_by": None,
                         "inference_geo": None,
                         "usage_status": "unavailable",
@@ -555,6 +560,7 @@ async def _run_agentic_loop(
                 "cache_write_tokens": usage.cache_write_tokens,
                 "reasoning_tokens": usage.reasoning_tokens,
                 "reasoning_accounting": usage.reasoning_accounting,
+                "reasoning_requested": reasoning_requested,
                 "served_by": turn.served_by if turn is not None else None,
                 "inference_geo": turn.inference_geo if turn is not None else None,
                 "usage_status": "reported" if turn is not None else "missing",

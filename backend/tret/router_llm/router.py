@@ -1062,7 +1062,11 @@ class ModelRouter:
                         # accounted, just without the configured layers.
                         routing_factors = None
                     spend = overhead_call(
-                        "routing", router_info, completion.usage, factors=routing_factors
+                        "routing",
+                        router_info,
+                        completion.usage,
+                        factors=routing_factors,
+                        served_by=completion.served_by,
                     )
                     chosen = result.get("model_id")
                     if chosen in candidate_ids:
@@ -1147,7 +1151,11 @@ class ModelRouter:
                             routing_factors = None
                         failed_call_spend.append(
                             overhead_call(
-                                "routing", router_info, e.usage, factors=routing_factors
+                                "routing",
+                                router_info,
+                                e.usage,
+                                factors=routing_factors,
+                                served_by=e.served_by,
                             )
                         )
                     continue

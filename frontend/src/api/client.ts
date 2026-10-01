@@ -882,6 +882,23 @@ export interface RunTree {
   energy_wh: number | null
 }
 
+/** Parallel preview under the revised emissions method (backend
+ *  services/emissions_v3_wiring) — never the reported figure. Absent/null on a
+ *  run that predates it; there is no backfill. */
+export interface MethodV3 {
+  method_id: string
+  method_version: string
+  calibration_id: string
+  preview: true
+  label: string
+  note: string
+  parts: { operational_g: number; embodied_g: number; router_g: number; total_g: number }
+  band: { low_g: number; high_g: number; aggregation: string; label: string }
+  total_g: number
+  grid: { rung: string; basis: string }
+  placement: { rung: number; flags: string[]; size_source: string; provider: string }
+}
+
 export interface RunDetail extends RunSummary {
   /** Null for a run that was never delegated to and delegated nothing. */
   tree: RunTree | null
@@ -897,6 +914,8 @@ export interface RunDetail extends RunSummary {
   model_timeline: ModelSegment[] | null
   compactions: CompactionRecord[] | null
   overhead: RunOverhead | null
+  /** Additive; null for runs that predate the v3 preview. */
+  method_v3?: MethodV3 | null
 }
 
 export interface CreateRunBody {
@@ -1408,6 +1427,7 @@ export interface ChatMessage {
   // expanded/click-through view (EmissionsCalc/EnergyDetail, RoutingBadge).
   energy?: EnergyAccounting | null
   routing?: RoutingDecision | null
+  method_v3?: MethodV3 | null
   // The prose grounding check's verdict on this reply (backend
   // engine/grounding.py) — null for anything the check does not apply to
   // (a divergence/verdict task, or a run predating the check).

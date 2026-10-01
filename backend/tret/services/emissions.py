@@ -3632,7 +3632,12 @@ def _union_by_key(blocks: list[dict], field_name: str) -> list:
 
 
 def overhead_call(
-    kind: str, model: ModelInfo, usage: Usage, *, factors: "FactorSet | None" = None
+    kind: str,
+    model: ModelInfo,
+    usage: Usage,
+    *,
+    factors: "FactorSet | None" = None,
+    served_by: str | None = None,
 ) -> dict:
     """Account one overhead model call, in full, against its own model.
 
@@ -3658,10 +3663,12 @@ def overhead_call(
         reasoning_tokens=usage.reasoning_tokens,
         reasoning_accounting=usage.reasoning_accounting,
     )
+    extra = {"served_by": served_by} if served_by else {}
     return {
         "kind": kind,  # routing | compaction_summary
         "model": model.id,
         "provider": model.provider,
+        **extra,
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
         "cache_read_tokens": usage.cache_read_tokens,

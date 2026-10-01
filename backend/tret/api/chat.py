@@ -27,6 +27,7 @@ from tret.packs.links import pack_map_for_harnesses, packs_for_harness, resolve_
 from tret.router_llm.objectives import OBJECTIVES
 from tret.services import lifecycle
 from tret.services.emissions import emission_summary_fields, energy_wh_field
+from tret.services.emissions_v3_wiring import method_v3_of, public_routing
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -466,7 +467,9 @@ def _assistant_message(run: Run) -> dict:
         # reasoning, fallback_used, candidates), exactly as recorded. Both null
         # when the run never estimated/routed.
         "energy": run.energy_accounting,
-        "routing": run.routing,
+        "routing": public_routing(run.routing),
+        # Parallel preview under the revised emissions method; null on older runs.
+        "method_v3": method_v3_of(run.routing),
         # The prose grounding check's verdict on this reply (engine/
         # grounding.py) — null for anything the check does not apply to.
         "grounding": run.grounding,

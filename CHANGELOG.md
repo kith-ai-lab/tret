@@ -8,6 +8,22 @@ one that needs action on an existing install.
 
 ## [Unreleased]
 
+### Added
+
+- **Method v3 preview.** Every server-side run now also records a parallel
+  emissions estimate under the revised `facility_v3` method (Kith method lab,
+  2026-10-01), stored additively in `runs.routing["method_v3"]` and returned as
+  a new optional `method_v3` field on run detail (`GET /api/runs/{id}`, slim;
+  `?v3=full` for the whole block) and on the chat turn payload, null for runs
+  that predate it. It is labelled a preview and never replaces `co2e_g`,
+  `energy_accounting`, cost, analytics or exports, none of which change; the
+  run `routing` field is returned without it. The run receipt shows it as a
+  small secondary line.
+- **New optional evidence keys.** Overhead (router / compaction) call records
+  gain `served_by`, and per-call records in `model_timeline` gain
+  `reasoning_requested`; both are additive and absent or null on older runs.
+  Curated catalog entries may carry an `openrouter_id`.
+
 ## [0.1.0] — 2026-09-29 — first public release
 
 tret, an open-source AI workbench: a harness platform for running LLM agents

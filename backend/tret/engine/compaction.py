@@ -481,12 +481,17 @@ async def summarize(
         # network failure, a 5xx that exhausted its retry) never reached the
         # provider with a billable response, so there is nothing to record.
         if e.usage is not None:
-            spend = overhead_call("compaction_summary", model, e.usage, factors=factors)
+            spend = overhead_call(
+                "compaction_summary", model, e.usage, factors=factors, served_by=e.served_by
+            )
             return None, spend
         return None, None
     except Exception:  # noqa: BLE001 - a lost summarizer must not fail the run
         return None, None
-    spend = overhead_call("compaction_summary", model, completion.usage, factors=factors)
+    spend = overhead_call(
+        "compaction_summary", model, completion.usage, factors=factors,
+        served_by=completion.served_by,
+    )
     summary = (completion.payload or {}).get("summary")
     usable = summary.strip() if isinstance(summary, str) and summary.strip() else None
     return usable, spend

@@ -38,6 +38,11 @@ function magnitude(value: number): string {
   return Math.round(value).toLocaleString('en-US')
 }
 
+/** Bare grams, no unit suffix — for ranges where the unit is stated once. */
+export function formatGrams(grams: number): string {
+  return magnitude(grams)
+}
+
 export function formatWh(wh: number | null | undefined): string | null {
   return wh === null || wh === undefined ? null : `${magnitude(wh)} Wh`
 }

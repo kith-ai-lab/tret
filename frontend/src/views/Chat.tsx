@@ -14,6 +14,7 @@ import {
 import { useRunStream } from '../api/useRunStream'
 import { DelegatedWork, DelegatedWorkDisclosure } from '../components/chat/DelegatedWork'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
+import { MethodV3Line } from '../components/shared/MethodV3Line'
 import {
   BAND_SHORT,
   MONEY_PCT_PRECISION_NOTE,
@@ -723,7 +724,10 @@ function FootprintDetail({ message }: { message: ChatMessage }) {
         </div>
       )}
       {message.energy ? (
-        <EnergyDetail energy={message.energy} />
+        <>
+          <EnergyDetail energy={message.energy} />
+          <MethodV3Line method={message.method_v3} />
+        </>
       ) : (
         <div className="empty" style={{ padding: '4px 0' }}>
           No carbon estimate recorded for this turn.

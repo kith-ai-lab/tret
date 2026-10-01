@@ -11,6 +11,7 @@ import {
   OverheadPanel,
 } from '../components/shared/ModelTimeline'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
+import { MethodV3Line } from '../components/shared/MethodV3Line'
 import { BAND_SHORT } from '../components/shared/emissions'
 import { footprintText, formatCo2eBand, formatCost, formatTokens } from '../components/shared/format'
 import { LiveFootprint } from '../components/shared/LiveFootprint'
@@ -293,6 +294,7 @@ export function RunDetailView() {
       />
 
       {run.energy && <EnergyDetail energy={run.energy} />}
+      <MethodV3Line method={run.method_v3} />
 
       <div className="row mono-label" style={{ gap: 24, flexWrap: 'wrap' }}>
         <span>iterations {iterations}</span>
