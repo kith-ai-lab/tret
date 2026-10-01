@@ -1278,6 +1278,8 @@ def _whatif_accounting(
     factors_doc: dict[str, Any] | EmissionsOverrides,
     fs_cache: dict,
     created_at=None,
+    recorded: dict | None = None,
+    recorded_segments: list | None = None,
 ) -> dict | None:
     """The scenario `energy_accounting` block for one run under `factors_doc`,
     or `None` if a model it used is missing from the catalog today (the caller
@@ -1320,8 +1322,25 @@ def _whatif_accounting(
     and an hourly grid table resolves *per run time*, so two runs sharing a
     provider and model but recorded at different hours must never share one
     either.
+
+    `recorded` (the run's stored accounting) and `recorded_segments` (one stored
+    accounting per `model_timeline` entry, same order) keep the run's water
+    factors as recorded when the scenario names no water key. A per-call
+    `served_by` is not stored on the run, so rebuilding water from today's
+    ladder would drop an upstream's disclosed WUE and show a phantom on-site
+    water change. See `_recorded_water_factors`.
     """
     at = _aware_utc(created_at)
+    keep_water = not _water_requested(factors_doc)
+
+    def _with_recorded_water(fs, rec: dict | None):
+        if not keep_water or not isinstance(rec, dict):
+            return fs
+        rebuilt = _water_factors_from_recorded(
+            rec.get("water") if isinstance(rec.get("water"), dict) else None,
+            it_energy_wh=rec.get("energy_wh"),
+        )
+        return fs if rebuilt is None else dataclasses.replace(fs, water=rebuilt)
 
     def _factor_set(provider: str | None, model_id: str | None):
         key = (provider, model_id, at)
@@ -1338,10 +1357,15 @@ def _whatif_accounting(
 
     if model_timeline:
         blocks = []
-        for seg in model_timeline:
+        for index, seg in enumerate(model_timeline):
             model = catalog.get(seg.get("model"))
             if model is None:
                 return None
+            seg_rec = (
+                recorded_segments[index]
+                if recorded_segments is not None and index < len(recorded_segments)
+                else seg.get("energy_accounting")
+            )
             blocks.append(
                 energy_accounting(
                     model,
@@ -1349,7 +1373,7 @@ def _whatif_accounting(
                     seg.get("output_tokens") or 0,
                     seg.get("cache_read_tokens") or 0,
                     seg.get("cache_write_tokens") or 0,
-                    factors=_factor_set(model.provider, model.id),
+                    factors=_with_recorded_water(_factor_set(model.provider, model.id), seg_rec),
                     catalog=catalog,
                 )
             )
@@ -1364,7 +1388,7 @@ def _whatif_accounting(
         output_tokens or 0,
         cache_read_tokens or 0,
         cache_write_tokens or 0,
-        factors=_factor_set(model.provider, model.id),
+        factors=_with_recorded_water(_factor_set(model.provider, model.id), recorded),
         catalog=catalog,
     )
 
@@ -1395,9 +1419,18 @@ def _water_requested(factors_doc) -> bool:
     return isinstance(factors_doc, dict) and bool(factors_doc.get("water"))
 
 
-def _water_factors_from_recorded(recorded_water: dict | None):
+def _water_factors_from_recorded(recorded_water: dict | None, it_energy_wh=None):
     """`WaterFactors` rebuilt from a stored water block's provenance records, or
-    None when the run recorded none (a pre-water run)."""
+    None when the run recorded none (a pre-water run).
+
+    A `mixed` site-WUE record (value None + variants: a run whose calls were
+    served by upstreams with different disclosed WUE) has no single figure to
+    restore. It is restored as the run's effective WUE, recorded on-site water
+    divided by the run's recorded IT energy (`it_energy_wh`); on-site water is
+    IT energy x WUE, so re-applying that ratio to the same IT energy returns
+    the recorded on-site figure exactly, and to a scenario-changed IT energy
+    scales it in proportion. None when that ratio cannot be formed.
+    """
     if not recorded_water:
         return None
     by_key = {r.get("key"): r for r in recorded_water.get("factors") or [] if isinstance(r, dict)}
@@ -1407,8 +1440,15 @@ def _water_factors_from_recorded(recorded_water: dict | None):
             return None
         embodied = by_key.get("embodied_water_ml_per_run")
         caveats = tuple(recorded_water.get("caveats") or ())
+        if wue.get("value") is None:
+            onsite, it_wh = recorded_water.get("onsite_ml"), it_energy_wh
+            if onsite is None or it_wh is None or float(it_wh) <= 0:
+                return None
+            site_wue = float(onsite) / float(it_wh)
+        else:
+            site_wue = float(wue["value"])
         return WaterFactors(
-            site_wue_l_per_kwh=float(wue["value"]),
+            site_wue_l_per_kwh=site_wue,
             grid_water_l_per_kwh=float(grid["value"]),
             band_low=float(band["value"]["low"]),
             band_high=float(band["value"]["high"]),
@@ -1535,7 +1575,9 @@ def _preserved_measured_accounting(
     recorded_water = recorded.get("water") if isinstance(recorded.get("water"), dict) else None
     water_note = None
     if not water_requested:
-        rebuilt = _water_factors_from_recorded(recorded_water)
+        rebuilt = _water_factors_from_recorded(
+            recorded_water, it_energy_wh=recorded.get("energy_wh")
+        )
         if rebuilt is not None:
             resolved = dataclasses.replace(resolved, water=rebuilt)
         else:
@@ -1658,7 +1700,7 @@ def _preserve_whatif_accounting(
                     cache_read_tokens=tokens[2], cache_write_tokens=tokens[3],
                     model_timeline=None, catalog=catalog, workspace_doc=workspace_doc,
                     managed_doc=managed_doc, factors_doc=factors_doc, fs_cache={},
-                    created_at=created_at,
+                    created_at=created_at, recorded=seg_recorded,
                 ))
         return combine_accountings(blocks), None
 
@@ -1694,6 +1736,7 @@ def _preserve_whatif_accounting(
         cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
         model_timeline=None, catalog=catalog, workspace_doc=workspace_doc,
         managed_doc=managed_doc, factors_doc=factors_doc, fs_cache={}, created_at=created_at,
+        recorded=recorded,
     ), None
 
 
@@ -1949,6 +1992,10 @@ async def _emissions_whatif_response(
                 factors_doc=factors_doc,
                 fs_cache=fs_cache,
                 created_at=created_at,
+                recorded=accounting,
+                recorded_segments=[
+                    seg.get("energy_accounting") for seg in (model_timeline or [])
+                ],
             )
         if scenario_accounting is None:
             runs_skipped += 1

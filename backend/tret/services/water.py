@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -78,9 +78,17 @@ def _load() -> dict:
         return json.load(fh)
 
 
-def _record(src: dict, *, layer: str, source: str | None = None, value=None, note: str | None = None, setting=None) -> dict:
-    """Provenance record: same keys as emissions._factor, plus water_basis and layer."""
-    return {
+def _record(
+    src: dict, *, layer: str, source: str | None = None, value=None, note: str | None = None,
+    setting=None, url: str | None = None, date: str | None = None, label: str | None = None,
+    disclosure: dict | None = None,
+) -> dict:
+    """Provenance record: same keys as emissions._factor, plus water_basis and layer.
+
+    `url`/`date`/`label`/`disclosure` are set only for an upstream's own
+    disclosure (a per-hosting-provider WUE), which carries its own citation.
+    """
+    record = {
         "key": src["key"],
         "label": src["label"],
         "value": src["value"] if value is None else value,
@@ -94,6 +102,16 @@ def _record(src: dict, *, layer: str, source: str | None = None, value=None, not
         "water_basis": src.get("water_basis", WATER_BASIS),
         "layer": layer,
     }
+    if url is not None:
+        record["url"] = url
+    if date is not None:
+        record["date"] = date
+    if label is not None:
+        record["label"] = label
+    if disclosure is not None:
+        record["disclosure"] = disclosure
+        record["water_basis"] = disclosure.get("water_basis", record["water_basis"])
+    return record
 
 
 def _check_number(name: str, value) -> float:
@@ -130,6 +148,11 @@ class WaterInput:
     layer: str
     source: str
     setting: str | None = None
+    # Set only for an upstream's own disclosure (`water.upstreams.<key>`).
+    url: str | None = None
+    as_of: str | None = None
+    label: str | None = None
+    disclosure: dict | None = field(default=None, hash=False, compare=False)
 
 
 # Most specific first; the legacy "override" layer (default_water_factors) leads.
@@ -146,7 +169,7 @@ def _layer_rank(layer: str) -> int:
 def _checked(inp: WaterInput | None, name: str) -> WaterInput | None:
     if inp is None:
         return None
-    return WaterInput(_check_number(name, inp.value), inp.layer, inp.source, inp.setting)
+    return replace(inp, value=_check_number(name, inp.value))
 
 
 def resolve_water_factors(
@@ -185,7 +208,9 @@ def resolve_water_factors(
     if site_wue is not None:
         wue = site_wue.value
         records.append(_record(wue_src, layer=site_wue.layer, source=site_wue.source, value=wue,
-                               note="Operator-supplied value.", setting=site_wue.setting))
+                               note="Operator-supplied value.", setting=site_wue.setting,
+                               url=site_wue.url, date=site_wue.as_of, label=site_wue.label,
+                               disclosure=site_wue.disclosure))
     else:
         wue = float(wue_src["value"])
         records.append(_record(wue_src, layer=LAYER_DEFAULT))

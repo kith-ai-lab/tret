@@ -484,6 +484,255 @@ def test_water_block_normalizes_country_and_accepts_a_full_document():
     assert doc.water.country == "USA"
 
 
+# ── per-upstream site WUE (water.upstreams) ──────────────────────────────────
+GOOGLE_WUE = {
+    "site_wue_l_per_kwh": 1.15, "label": "Google 2025 environmental report",
+    "url": "https://sustainability.google/reports/", "as_of": "2025-06-30",
+    "water_basis": "consumption", "denominator": "it_energy",
+}
+UP_MANAGED = {"source_name": "kith", "water": {"upstreams": {"google": GOOGLE_WUE}}}
+
+
+def _site_wue(factors):
+    return next(r for r in factors.water.records if r["key"] == "site_wue_l_per_kwh")
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"water_basis": "withdrawal"},
+        {"water_basis": None},
+        {"site_wue_l_per_kwh": -0.1},
+        {"site_wue_l_per_kwh": float("nan")},
+        {"site_wue_l_per_kwh": float("inf")},
+        {"extra_key": 1},
+        {"as_of": "last year"},
+        {"label": " "},
+        {"denominator": "facility_energy"},
+        {"evidence_type": "measured"},
+    ],
+)
+def test_water_disclosure_rejects_bad_values(patch):
+    from tret.services.emission_factors import WaterDisclosure
+
+    with pytest.raises(ValidationError):
+        WaterDisclosure(**{**GOOGLE_WUE, **patch})
+
+
+@pytest.mark.parametrize("missing", ["water_basis", "denominator"])
+def test_water_disclosure_requires_basis_and_denominator(missing):
+    from tret.services.emission_factors import WaterDisclosure
+
+    data = {k: v for k, v in GOOGLE_WUE.items() if k != missing}
+    with pytest.raises(ValidationError, match=missing):
+        WaterDisclosure(**data)
+    with pytest.raises(ValidationError):
+        EmissionsOverrides(water={"upstreams": {"google": data}})
+
+
+@pytest.mark.parametrize("key", ["gcp", "anthropic", "google-vertex", "Google"])
+def test_water_upstreams_rejects_unknown_keys(key):
+    with pytest.raises(ValidationError, match=r"\['aws', 'google'\]"):
+        EmissionsOverrides(water={"upstreams": {key: GOOGLE_WUE}})
+    # PUE's own upstream keys are deliberately not validated.
+    EmissionsOverrides(pue={"upstreams": {"other": {
+        "value": 1.1, "label": "x", "url": "u", "as_of": "2025-01-01"}}})
+    assert set(EmissionsOverrides(
+        water={"upstreams": {"aws": GOOGLE_WUE, "google": GOOGLE_WUE}}).water.upstreams
+    ) == {"aws", "google"}
+
+
+def test_water_disclosure_withdrawal_message_is_clear():
+    from tret.services.emission_factors import WaterDisclosure
+
+    with pytest.raises(ValidationError, match="withdrawal-basis"):
+        WaterDisclosure(**{**GOOGLE_WUE, "water_basis": "withdrawal"})
+    assert WaterDisclosure(**GOOGLE_WUE).water_basis == "consumption"
+
+
+@pytest.mark.parametrize("served_by", ["google-vertex/eu", "google-vertex", "google"])
+def test_upstream_wue_applies_to_a_google_served_call(served_by):
+    f = build_factor_set(provider="openrouter", managed_settings=UP_MANAGED, served_by=served_by)
+    assert f.water.site_wue_l_per_kwh == 1.15
+    rec = _site_wue(f)
+    assert (rec["layer"], rec["source"]) == ("managed", "managed:kith")
+    assert rec["setting"] == "managed.emissions.water.upstreams.google"
+    assert rec["url"] == GOOGLE_WUE["url"] and rec["date"] == "2025-06-30"
+    assert rec["label"] == GOOGLE_WUE["label"] and rec["water_basis"] == "consumption"
+    assert rec["disclosure"]["site_wue_l_per_kwh"] == 1.15
+    a = energy_accounting(
+        MODEL, *TOKENS, settings=_settings(), catalog=CATALOG, factors=f
+    )
+    assert a["water"]["onsite_ml"] == pytest.approx(a["energy_wh"] * 1.15, rel=1e-4)
+
+
+@pytest.mark.parametrize("served_by", ["anthropic", None, "amazon-bedrock", "google-vertexx"])
+def test_upstream_wue_does_not_apply_to_other_calls(served_by):
+    f = build_factor_set(provider="openrouter", managed_settings=UP_MANAGED, served_by=served_by)
+    assert f.water.site_wue_l_per_kwh == 0.375
+    assert _site_wue(f)["layer"] == "global_default"
+    assert "disclosure" not in _site_wue(f)
+
+
+def test_baseline_factor_set_ignores_upstreams():
+    f = build_factor_set(provider="openrouter", managed_settings=UP_MANAGED, served_by="google-vertex")
+    base = factor_set_for_model(f, provider="anthropic", model_id=BIG.id)
+    assert base.water.site_wue_l_per_kwh == 0.375
+
+
+def test_local_deployment_ignores_water_upstreams():
+    f = build_factor_set(provider="local", managed_settings=UP_MANAGED, served_by="google")
+    assert f.water.site_wue_l_per_kwh == 0.0
+
+
+def test_same_layer_upstream_beats_same_layer_generic():
+    doc = {"water": {"site_wue_l_per_kwh": 0.9, "upstreams": {"google": GOOGLE_WUE}}}
+    f = build_factor_set(provider="openrouter", workspace_settings=doc, served_by="google-vertex")
+    assert f.water.site_wue_l_per_kwh == 1.15
+    assert _site_wue(f)["layer"] == "workspace"
+    other = build_factor_set(provider="openrouter", workspace_settings=doc, served_by="anthropic")
+    assert other.water.site_wue_l_per_kwh == 0.9
+
+
+def test_more_specific_layer_generic_beats_less_specific_upstream():
+    # Same rule as PUE: a workspace generic value beats a managed upstream.
+    f = build_factor_set(
+        provider="openrouter", managed_settings=UP_MANAGED,
+        workspace_settings={"water": {"site_wue_l_per_kwh": 0.9}}, served_by="google-vertex",
+    )
+    assert f.water.site_wue_l_per_kwh == 0.9
+    assert _site_wue(f)["layer"] == "workspace"
+    # ...and a workspace upstream beats a managed generic value.
+    g = build_factor_set(
+        provider="openrouter",
+        managed_settings={"water": {"site_wue_l_per_kwh": 0.9}},
+        workspace_settings={"water": {"upstreams": {"google": GOOGLE_WUE}}},
+        served_by="google-vertex",
+    )
+    assert g.water.site_wue_l_per_kwh == 1.15 and _site_wue(g)["layer"] == "workspace"
+
+
+def test_run_override_and_env_precedence_around_upstreams():
+    ro = build_factor_set(
+        provider="openrouter", managed_settings=UP_MANAGED, served_by="google-vertex",
+        run_overrides={"water_site_wue_l_per_kwh": 2.0},
+    )
+    assert ro.water.site_wue_l_per_kwh == 2.0
+    env = build_factor_set(
+        provider="openrouter", managed_settings=UP_MANAGED, served_by="google-vertex",
+        settings=_settings(water_site_wue_l_per_kwh=0.9),
+    )
+    assert env.water.site_wue_l_per_kwh == 1.15
+
+
+def test_factor_set_for_call_replays_water_upstream_per_call():
+    from tret.services.emission_factors import factor_set_for_call
+
+    seg = build_factor_set(provider="openrouter", managed_settings=UP_MANAGED)
+    google = factor_set_for_call(
+        seg, provider="openrouter", model_id=MODEL.id, served_by="google-vertex/eu"
+    )
+    direct = factor_set_for_call(seg, provider="openrouter", model_id=MODEL.id, served_by="anthropic")
+    assert google.water.site_wue_l_per_kwh == 1.15
+    assert direct.water.site_wue_l_per_kwh == 0.375
+    assert seg.water.site_wue_l_per_kwh == 0.375
+
+
+def test_per_call_accounting_uses_each_calls_upstream_wue():
+    from tret.services.emission_calls import account_call_records
+
+    seg = build_factor_set(provider="openrouter", managed_settings=UP_MANAGED, model_id=MODEL.id)
+
+    def rec(i, served_by):
+        return {"iteration": i, "input_tokens": 100, "output_tokens": 10, "cache_read_tokens": 0,
+                "cache_write_tokens": 0, "reasoning_tokens": None, "reasoning_accounting": None,
+                "served_by": served_by, "usage_status": "reported"}
+
+    result = account_call_records(
+        MODEL, [rec(1, "google-vertex/eu"), rec(2, "anthropic")],
+        billed_usage={"input_tokens": 200, "output_tokens": 20,
+                      "cache_read_tokens": 0, "cache_write_tokens": 0},
+        factors=seg, settings=_settings(), catalog=CATALOG,
+    )
+    calls = result["call_accountings"]
+    assert [c["site_wue_l_per_kwh"] for c in calls] == [1.15, 0.375]
+    assert calls[0]["water_disclosure"]["url"] == GOOGLE_WUE["url"]
+    assert calls[1]["water_disclosure"] is None
+    wue = next(r for r in result["water"]["factors"] if r["key"] == "site_wue_l_per_kwh")
+    assert wue["source"] == "mixed"
+    assert {v["value"] for v in wue["variants"]} == {1.15, 0.375}
+
+
+# ── what-if keeps recorded upstream water when the scenario names no water key ──
+def _recorded_run(served_bys):
+    from tret.services.emission_calls import account_call_records
+
+    seg = build_factor_set(provider=MODEL.provider, managed_settings=UP_MANAGED, model_id=MODEL.id)
+    records = [
+        {"iteration": i, "input_tokens": 500_000, "output_tokens": 100_000, "cache_read_tokens": 0,
+         "cache_write_tokens": 0, "reasoning_tokens": None, "reasoning_accounting": None,
+         "served_by": sb, "usage_status": "reported"}
+        for i, sb in enumerate(served_bys, 1)
+    ]
+    n = len(records)
+    return account_call_records(
+        MODEL, records,
+        billed_usage={"input_tokens": 500_000 * n, "output_tokens": 100_000 * n,
+                      "cache_read_tokens": 0, "cache_write_tokens": 0},
+        factors=seg, settings=_settings(), catalog=CATALOG,
+    )
+
+
+def _whatif(recorded, factors_doc):
+    from tret.api.analytics import _whatif_accounting
+
+    return _whatif_accounting(
+        model_used=MODEL.id, input_tokens=500_000 * len(recorded["call_accountings"]),
+        output_tokens=100_000 * len(recorded["call_accountings"]),
+        cache_read_tokens=0, cache_write_tokens=0, model_timeline=None, catalog=CATALOG,
+        workspace_doc=None, managed_doc=None, factors_doc=factors_doc, fs_cache={},
+        recorded=recorded,
+    )
+
+
+@pytest.mark.parametrize("served_bys", [["google-vertex"], ["google-vertex", "anthropic"]])
+@pytest.mark.parametrize(
+    "doc", [{}, {"grid": {"default": {"g_per_kwh": 200, "basis": "location_based", "label": "x"}}},
+            {"pue": {"cloud": 1.5, "label": "x"}}],
+)
+def test_whatif_without_water_keys_keeps_recorded_onsite_water(served_bys, doc):
+    rec = _recorded_run(served_bys)
+    assert rec["water"]["onsite_ml"] > 0
+    out = _whatif(rec, doc)
+    # On-site water is IT energy x WUE; grid and PUE scenarios do not change IT energy.
+    # (Two-call runs differ from the one-shot aggregate only by per-call rounding.)
+    assert out["energy_wh"] == pytest.approx(rec["energy_wh"], abs=1e-5)
+    assert out["water"]["onsite_ml"] == pytest.approx(rec["water"]["onsite_ml"], abs=1e-4)
+    # Off-site water follows facility energy (PUE changes it, nothing else here does).
+    assert out["water"]["offsite_ml"] == pytest.approx(
+        out["energy_wh_total"] * 4.81, rel=1e-4
+    )
+    if not doc:
+        assert out["water"]["water_ml"] == pytest.approx(rec["water"]["water_ml"], abs=1e-4)
+
+
+def test_whatif_with_water_keys_still_restates_water():
+    rec = _recorded_run(["google-vertex"])
+    out = _whatif(rec, {"water": {"site_wue_l_per_kwh": 0.5}})
+    assert out["water"]["onsite_ml"] == pytest.approx(out["energy_wh"] * 0.5, rel=1e-4)
+
+
+def test_water_factors_from_recorded_handles_a_mixed_site_wue_record():
+    from tret.api.analytics import _water_factors_from_recorded
+
+    rec = _recorded_run(["google-vertex", "anthropic"])
+    wue = next(r for r in rec["water"]["factors"] if r["key"] == "site_wue_l_per_kwh")
+    assert wue["value"] is None and wue["source"] == "mixed"
+    f = _water_factors_from_recorded(rec["water"], it_energy_wh=rec["energy_wh"])
+    assert f.site_wue_l_per_kwh == pytest.approx((1.15 + 0.375) / 2, rel=1e-4)
+    assert _water_factors_from_recorded(rec["water"]) is None  # no IT energy: cannot form it
+
+
 # ── settings API ─────────────────────────────────────────────────────────────
 @pytest_asyncio.fixture
 async def settings_client(session_factory):

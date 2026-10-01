@@ -139,12 +139,49 @@ consumption factors. Lower withdrawal WUE does not mean lower consumption.
 
 **Why there are no per-provider defaults.** Tret's managed grid layer ships no
 provider entries, because no provider discloses where an API call is served.
-Water follows the same rule. Mapping a model vendor to a cloud (for example,
-"Anthropic runs on AWS") is an inference, and the AWS figure is withdrawal in
-any case. The one defensible exception is a vendor serving its own models from
-its own disclosed fleet, such as Google's 1.15 L/kWh for Gemini. That is a
-candidate for the managed layer, labelled with its basis and year, not a
-core default.
+Water follows the same rule for model *vendors*: mapping one to a cloud (for
+example, "Anthropic runs on AWS") is an inference, and the AWS figure is
+withdrawal in any case.
+
+**Per-upstream disclosures.** What a call *does* reveal, when it goes through a
+router that reports it, is the upstream that served it (`served_by`). A
+`water.upstreams` entry supplies site WUE for calls served by that upstream,
+using exactly the identities per-upstream PUE uses: the first path segment of
+`served_by`, with `google-vertex` mapped to `google` and `amazon-bedrock` to
+`aws` (so `google-vertex/eu`, `google` and `google/<anything>` all select
+`google`). Only `google` and `aws` are valid keys; a model brand alone, such as
+`anthropic`, never selects an entry. An entry must declare
+`water_basis: "consumption"` and `denominator: "it_energy"` explicitly; there
+is no default, so a withdrawal figure such as AWS's or Meta's cannot be entered
+as one by leaving the basis out. Within one settings
+layer an upstream entry beats that layer's generic `site_wue_l_per_kwh`; across
+layers the normal precedence applies, so a workspace's own generic value still
+beats a managed upstream entry. This is the same rule as per-upstream PUE. It applies to cloud runs only, and it
+changes only cooling water: power-generation water still comes from the
+grid-water ladder. The counterfactual baseline does not inherit the actual
+call's upstream.
+
+```json
+{
+  "water": {
+    "upstreams": {
+      "google": {
+        "site_wue_l_per_kwh": 1.15,
+        "label": "Google 2023-24 fleet WUE, consumption per IT kWh",
+        "url": "https://arxiv.org/abs/2508.15734",
+        "as_of": "2024-12-31",
+        "water_basis": "consumption",
+        "denominator": "it_energy"
+      }
+    }
+  }
+}
+```
+
+Google's 1.15 L/kWh (consumption, per IT kWh, the figure Google applies in its
+own inference study) is the one provider figure that meets the basis rule. A
+hosting operator can supply it through the managed layer; core ships no
+upstream entries.
 
 ### Grid water factor (electricity generation), shipped default: 4.81 L/kWh
 

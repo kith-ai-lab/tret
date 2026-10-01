@@ -151,6 +151,11 @@ def account_call_records(
             "energy_output_tokens": call_tokens[1] + extra,
             "pue": block["pue"],
             "pue_disclosure": block.get("pue_disclosure"),
+            "site_wue_l_per_kwh": call_factors.water.site_wue_l_per_kwh,
+            "water_disclosure": next(
+                (r.get("disclosure") for r in call_factors.water.records
+                 if r["key"] == "site_wue_l_per_kwh"), None,
+            ),
             "co2e_g": block.get("co2e_g"),
         })
     combined = combine_accountings(blocks)

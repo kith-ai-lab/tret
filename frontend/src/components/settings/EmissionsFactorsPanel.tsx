@@ -623,6 +623,8 @@ function overridesFromDraft(draft: FormDraft, base: EmissionsOverrides): Emissio
   if (draft.water.country.trim() !== '') water.country = draft.water.country.trim().toUpperCase()
   if (wn(draft.water.band_low) !== undefined) water.band_low = wn(draft.water.band_low)
   if (wn(draft.water.band_high) !== undefined) water.band_high = wn(draft.water.band_high)
+  // Upstream water disclosures have no form field; keep them, as for PUE.
+  if (base.water?.upstreams !== undefined) water.upstreams = base.water.upstreams
   if (Object.keys(water).length > 0) body.water = water
 
   return body

@@ -2058,6 +2058,21 @@ export interface EmissionsWaterOverride {
   country?: string
   band_low?: number
   band_high?: number
+  /** Per-upstream cooling-water disclosures (consumption basis, per IT kWh),
+   *  keyed by upstream (`google`, `aws`). No form field: set through the API
+   *  or a managed layer, and carried through untouched on save. */
+  upstreams?: Record<string, EmissionsWaterDisclosure>
+}
+
+export interface EmissionsWaterDisclosure {
+  site_wue_l_per_kwh: number
+  label: string
+  url: string
+  as_of: string
+  water_basis: 'consumption'
+  denominator: 'it_energy'
+  evidence_type?: 'provider_asserted'
+  statistic?: 'operating_fleet_average'
 }
 
 export interface EmissionsOverrides {

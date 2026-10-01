@@ -636,6 +636,56 @@ class BandBlock(BaseModel):
         return self
 
 
+class WaterDisclosure(BaseModel):
+    """An upstream operator's disclosed fleet-average on-site WUE.
+
+    Consumption basis and IT-energy denominator only: a withdrawal-basis figure
+    (AWS and Meta publish WUE as withdrawal) cannot be entered here, because the
+    water methodology counts consumption (docs/water-methodology.md).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    site_wue_l_per_kwh: float
+    label: str
+    url: str
+    as_of: str
+    # Required, no defaults: an entry pasted without them must fail closed, not
+    # be silently taken as consumption-basis / IT-energy.
+    water_basis: Literal["consumption"]
+    denominator: Literal["it_energy"]
+    evidence_type: Literal["provider_asserted"] = "provider_asserted"
+    statistic: Literal["operating_fleet_average"] = "operating_fleet_average"
+
+    @field_validator("site_wue_l_per_kwh", mode="after")
+    @classmethod
+    def _valid_value(cls, value: float) -> float:
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("upstream site WUE must be finite and >= 0")
+        return value
+
+    @field_validator("label", mode="after")
+    @classmethod
+    def _label_required(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("upstream water label must not be empty")
+        return value
+
+    @field_validator("water_basis", mode="before")
+    @classmethod
+    def _consumption_only(cls, value: Any) -> Any:
+        if value != "consumption":
+            raise ValueError(
+                f"upstream water_basis must be 'consumption', got {value!r}: a "
+                "withdrawal-basis WUE cannot be recorded as a consumption figure"
+            )
+        return value
+
+    @field_validator("as_of", mode="after")
+    @classmethod
+    def _valid_date(cls, value: str) -> str:
+        return _iso_date(value) or ""
+
+
 class WaterBlock(BaseModel):
     """`water` in an override document (docs/water-methodology.md).
 
@@ -658,6 +708,19 @@ class WaterBlock(BaseModel):
     country: str | None = None
     band_low: float | None = None
     band_high: float | None = None
+    upstreams: dict[str, WaterDisclosure] | None = None
+
+    @field_validator("upstreams", mode="after")
+    @classmethod
+    def _known_upstreams(cls, value):
+        if value:
+            unknown = sorted(set(value) - UPSTREAM_DISCLOSURE_KEYS)
+            if unknown:
+                raise ValueError(
+                    f"water.upstreams keys must be one of {sorted(UPSTREAM_DISCLOSURE_KEYS)}, "
+                    f"got {unknown}"
+                )
+        return value
 
     @field_validator(
         "site_wue_l_per_kwh", "local_site_wue_l_per_kwh", "grid_water_l_per_kwh", mode="after"
@@ -901,6 +964,23 @@ UPSTREAM_PUE_ALIASES = {
     "google-vertex": "google",
     "amazon-bedrock": "aws",
 }
+# The reviewed upstream identities that may select a per-upstream disclosure
+# (PUE and water share them).
+UPSTREAM_DISCLOSURE_KEYS = frozenset({"aws", "google"})
+
+
+def upstream_disclosure_key(served_by: str | None) -> str | None:
+    """Canonical upstream key for ``served_by``, or None when unsupported.
+
+    OpenRouter slugs can carry a region suffix (e.g. ``google-vertex/eu``), so
+    the alias lookup keys off just the first path segment; ``served_by`` itself
+    — the raw slug — stays untouched and is what call provenance records.
+    """
+    if not served_by:
+        return None
+    first = served_by.split("/", 1)[0]
+    key = UPSTREAM_PUE_ALIASES.get(first, first)
+    return key if key in UPSTREAM_DISCLOSURE_KEYS else None
 
 
 _CONTEXT_SETTINGS_FIELDS = {
@@ -1476,6 +1556,7 @@ def _water_candidates(
     harness: EmissionsOverrides | None,
     workspace: EmissionsOverrides | None,
     managed: EmissionsOverrides | None,
+    upstream_key: str | None = None,
 ) -> list[WaterInput]:
     """Every explicit value for one water factor, most specific first
     (run_override > harness > workspace > managed > env). Not validated here.
@@ -1485,6 +1566,12 @@ def _water_candidates(
     (`TRET_WATER_SITE_WUE_L_PER_KWH` / `TRET_WATER_LOCAL_SITE_WUE_L_PER_KWH`),
     so a cloud figure never leaks onto a workstation. A run override applies to
     whichever deployment the run is on.
+
+    For a CLOUD call whose canonical upstream (`upstream_key`) has a
+    `water.upstreams` disclosure in a layer, that disclosure comes immediately
+    before the SAME layer's generic `site_wue_l_per_kwh` — the same shape as
+    `_resolve_pue`, so a more specific layer's generic value still beats a
+    less specific layer's upstream disclosure. Local runs ignore upstreams.
     """
     out: list[WaterInput] = []
     override = run_overrides.get(_WATER_RUN_KEYS[which])
@@ -1499,6 +1586,14 @@ def _water_candidates(
         if block is None:
             continue
         if which == "site_wue":
+            if not local and upstream_key and block.upstreams and upstream_key in block.upstreams:
+                disclosure = block.upstreams[upstream_key]
+                out.append(WaterInput(
+                    disclosure.site_wue_l_per_kwh, layer, _layer_source(layer, doc, None),
+                    f"{layer}.emissions.water.upstreams.{upstream_key}",
+                    url=disclosure.url, as_of=disclosure.as_of, label=disclosure.label,
+                    disclosure=disclosure.model_dump(),
+                ))
             key = "local_site_wue_l_per_kwh" if local else "site_wue_l_per_kwh"
         elif which == "grid_water":
             key = "grid_water_l_per_kwh"
@@ -1579,6 +1674,7 @@ def _resolve_water(
     workspace: EmissionsOverrides | None,
     managed: EmissionsOverrides | None,
     grid: Resolved,
+    upstream_key: str | None = None,
 ) -> WaterFactors:
     """Water must never break a run, and one bad value must not take the others
     down with it. Each key is validated on its own: an invalid value at a layer
@@ -1593,13 +1689,12 @@ def _resolve_water(
         for which in ("site_wue", "grid_water", "band_low", "band_high"):
             inputs[which] = None
             for cand in _water_candidates(
-                which, deployment, settings, run_overrides, harness, workspace, managed
+                which, deployment, settings, run_overrides, harness, workspace, managed,
+                upstream_key,
             ):
                 problem = _water_value_problem(which, cand.value)
                 if problem is None:
-                    inputs[which] = WaterInput(
-                        float(cand.value), cand.layer, cand.source, cand.setting
-                    )
+                    inputs[which] = replace(cand, value=float(cand.value))
                     break
                 name = cand.setting or f"{cand.layer}:{which}"
                 problems.append(f"Ignored invalid water setting {name}: {problem}.")
@@ -1798,11 +1893,10 @@ def build_factor_set(
     # (e.g. `google-vertex/eu`), so the alias lookup keys off just the first
     # path segment; `served_by` itself — the raw slug — stays untouched and
     # is what call provenance records.
-    pue_upstream_key = served_by.split("/", 1)[0] if served_by else served_by
-    pue_served_by = UPSTREAM_PUE_ALIASES.get(pue_upstream_key, pue_upstream_key)
+    upstream_key = upstream_disclosure_key(served_by)
     pue = _resolve_pue(
         deployment, profile, settings, run_overrides, harness, workspace, managed,
-        pue_served_by if pue_served_by in {"aws", "google"} else None,
+        upstream_key,
     )
     embodied_g = _resolve_embodied(deployment, settings, run_overrides, harness, workspace, managed)
     both = band_factors(settings)
@@ -1818,7 +1912,9 @@ def build_factor_set(
     baseline_model = _resolve_baseline_model(settings, run_overrides, harness, workspace, managed)
     energy_strategy = _resolve_energy_strategy(run_overrides, harness, workspace, managed)
     model_override = _resolve_model_override(model_id, harness, workspace, managed)
-    water = _resolve_water(deployment, settings, run_overrides, harness, workspace, managed, grid)
+    water = _resolve_water(
+        deployment, settings, run_overrides, harness, workspace, managed, grid, upstream_key
+    )
 
     won = {grid.layer, pue.layer, embodied_g.layer, band_low.layer, band_high.layer,
            band_derived.layer, baseline_model.layer, energy_strategy.layer}

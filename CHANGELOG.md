@@ -22,6 +22,12 @@ one that needs action on an existing install.
   (Water view), the what-if drawer and the settings. Runs recorded earlier
   show "Not recorded", never 0. Method and sources:
   [docs/water-methodology.md](docs/water-methodology.md).
+- **Per-upstream water disclosures.** A settings layer may carry
+  `water.upstreams.<google|aws>` cooling-water figures, selected per call by
+  the same `served_by` identity as per-upstream PUE. Entries must declare
+  `water_basis: "consumption"` and `denominator: "it_energy"`, so a
+  withdrawal-basis WUE cannot be entered as one. What-if scenarios that name no
+  water keys now keep each run's recorded water factors.
 - **Method v3 preview.** Every server-side run now also records a parallel
   emissions estimate under the revised `facility_v3` method (Kith method lab,
   2026-10-01), stored additively in `runs.routing["method_v3"]` and returned as
