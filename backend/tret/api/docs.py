@@ -55,6 +55,16 @@ SERVED_DOCS: dict[str, dict[str, str]] = {
             "good for."
         ),
     },
+    "water-methodology": {
+        "filename": "water-methodology.md",
+        "title": "Water methodology",
+        "repo_path": "docs/water-methodology.md",
+        "summary": (
+            "How tret turns the energy a run used into a water-consumption estimate "
+            "(on-site cooling plus off-site generation); where every factor came from; "
+            "and what the numbers are not good for."
+        ),
+    },
     "telemetry": {
         "filename": "telemetry.md",
         "title": "Telemetry",

@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.db.models import Finding, Run
-from tret.services.emissions import energy_wh_field, grid_comparison_signature
+from tret.services.emissions import complete_water, energy_wh_field, grid_comparison_signature
 from tret.services.emissions_validation import number
 from tret.services.html_sanitize import render_markdown
 
@@ -116,6 +116,9 @@ async def assemble_deliverable(
                 # section. None where the run predates eco accounting.
                 "energy_wh": energy_wh_field(run.energy_wh) if run is not None else None,
                 "co2e_g": (run.energy_accounting or {}).get("co2e_g") if run is not None else None,
+                # Estimated water consumption (docs/water-methodology.md); None
+                # where the run predates water accounting, never 0.
+                **_water_meta(run),
             }
         )
     footprint = _deliverable_footprint(runs.values())
@@ -266,6 +269,16 @@ def _deliverable_footprint(runs) -> dict:
         # F5 additions — additive only, the shape above is unchanged.
         "energy_boundary_legacy_qualifier": legacy_qualifier,
         "energy_boundary_subtotals": boundary_subtotals if (energy and not single_run) else [],
+    }
+
+
+def _water_meta(run) -> dict:
+    """`water_ml`, `water_onsite_ml`, `water_offsite_ml` of a run, each None when absent."""
+    water = (complete_water(run.energy_accounting) if run is not None else None) or {}
+    return {
+        "water_ml": water.get("water_ml"),
+        "water_onsite_ml": water.get("onsite_ml"),
+        "water_offsite_ml": water.get("offsite_ml"),
     }
 
 

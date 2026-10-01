@@ -1170,9 +1170,8 @@ runs are the roughest estimate tret produces**, and both biases understate them.
 
 Excluded: water, network transfer, storage, retrieval and embedding calls, and the
 router's own model call — the same scope as the dollar cost tret already reports.
-Water is specified as a separate figure in
-[water-methodology.md](water-methodology.md); until that ships, no run carries
-one.
+Water is accounted as a separate figure, never folded into carbon; see
+[water-methodology.md](water-methodology.md).
 
 ## External anchors
 

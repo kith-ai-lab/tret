@@ -1135,6 +1135,7 @@ def test_summary_and_event_fields_are_null_when_there_is_no_estimate():
             "avoided_usd_pct": None,
             "co2e_g_low": None,
             "co2e_g_high": None,
+            "water_ml": None,
         }
         event = emission_event_fields(accounting)
         assert set(event) == {
@@ -1147,6 +1148,7 @@ def test_summary_and_event_fields_are_null_when_there_is_no_estimate():
             "avoided_usd_pct",
             "co2e_g_low",
             "co2e_g_high",
+            "water_ml",
         }
         assert all(v is None for v in event.values())
 
@@ -1162,6 +1164,7 @@ def test_summary_and_event_fields_read_the_stored_values():
         "avoided_usd_pct": report["baseline"]["avoided_usd_pct"],
         "co2e_g_low": report["uncertainty"]["co2e_g_low"],
         "co2e_g_high": report["uncertainty"]["co2e_g_high"],
+        "water_ml": report["water"]["water_ml"],
     }
     assert emission_event_fields(report)["baseline_co2e_g"] == report["baseline"]["co2e_g"]
     assert emission_event_fields(report)["avoided_usd"] == report["baseline"]["avoided_usd"]
@@ -1630,6 +1633,11 @@ async def test_avoided_pct_is_signed_and_safe_when_there_is_no_baseline():
         "runs_without_estimate": 0,
             "runs_without_scope_split": 0,
             "runs_without_carbon_total": 0,
+        # Water: no runs, so nothing to sum (null, not 0), nothing uncounted.
+        "water_ml": None,
+        "water_onsite_ml": None,
+        "water_offsite_ml": None,
+        "runs_without_water": 0,
         "runs_without_baseline": 0,
         "runs_without_money_comparison": 0,
         "runs_without_uncertainty_band": 0,

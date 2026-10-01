@@ -151,6 +151,12 @@ services:
       TRET_UNCERTAINTY_BAND_LOW: ${TRET_UNCERTAINTY_BAND_LOW:-2.5}
       TRET_UNCERTAINTY_BAND_HIGH: ${TRET_UNCERTAINTY_BAND_HIGH:-2.5}
       TRET_EMISSIONS_BASELINE_MODEL: ${TRET_EMISSIONS_BASELINE_MODEL:-}
+      # Water accounting (docs/water-methodology.md). Empty = shipped defaults.
+      TRET_WATER_SITE_WUE_L_PER_KWH: ${TRET_WATER_SITE_WUE_L_PER_KWH:-}
+      TRET_WATER_LOCAL_SITE_WUE_L_PER_KWH: ${TRET_WATER_LOCAL_SITE_WUE_L_PER_KWH:-}
+      TRET_WATER_GRID_L_PER_KWH: ${TRET_WATER_GRID_L_PER_KWH:-}
+      TRET_WATER_BAND_LOW: ${TRET_WATER_BAND_LOW:-}
+      TRET_WATER_BAND_HIGH: ${TRET_WATER_BAND_HIGH:-}
       # Local inference server (Ollama, LM Studio, vLLM, llama.cpp), for running
       # with no cloud provider at all — docs/local-models.md. From inside this
       # container your host's server is NOT localhost: use

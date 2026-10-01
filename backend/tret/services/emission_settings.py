@@ -202,6 +202,17 @@ def factor_set_json(factors: FactorSet) -> dict[str, Any]:
         "band_high": _resolved_json(factors.band_high),
         "baseline_model": _resolved_json(factors.baseline_model),
         "energy_strategy": _resolved_json(factors.energy_strategy),
+        # Water factor provenance records (site WUE, grid water, band), each with
+        # its true layer/source — see docs/water-methodology.md.
+        "water": {
+            "site_wue_l_per_kwh": factors.water.site_wue_l_per_kwh,
+            "grid_water_l_per_kwh": factors.water.grid_water_l_per_kwh,
+            "band_low": factors.water.band_low,
+            "band_high": factors.water.band_high,
+            "water_basis": factors.water.water_basis,
+            "records": [dict(r) for r in factors.water.records],
+            "caveats": list(factors.water.caveats),
+        },
     }
 
 

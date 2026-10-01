@@ -73,10 +73,13 @@ from tret.services.emission_settings import (
 )
 from tret.services.emissions import (
     combine_accountings,
+    complete_water,
     energy_accounting,
     grid_comparison_signature,
     resolve_baseline_model,
 )
+
+from tret.services.water import WaterFactors, compute_water
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
@@ -508,7 +511,22 @@ def _recorded_emissions(accounting) -> dict | None:
         avoided_usd = baseline.get("avoided_usd")
     if baseline_usd is None and baseline:
         baseline_usd = baseline.get("cost_usd")
+    # A roll-up block with runs_without_water > 0 is partial: count the run as
+    # having no water rather than adding a figure that covers only some of it.
+    water = complete_water(accounting)
+    water_ml = water.get("water_ml") if water else None
     return {
+        # Water (docs/water-methodology.md). None on a run recorded before water
+        # accounting, or whose water could not be computed: counted in
+        # `runs_without_water`, never summed as 0.
+        "water_ml": _d(water_ml) if water_ml is not None else None,
+        "water_onsite_ml": (
+            _d(water["onsite_ml"]) if water_ml is not None and water.get("onsite_ml") is not None else None
+        ),
+        "water_offsite_ml": (
+            _d(water["offsite_ml"]) if water_ml is not None and water.get("offsite_ml") is not None else None
+        ),
+        "water_basis": water.get("water_basis") if water_ml is not None else None,
         "model": accounting.get("model"),
         "energy_class": accounting.get("energy_class"),
         "deployment": accounting.get("deployment"),
@@ -655,6 +673,12 @@ def _emissions_bucket() -> dict:
         "scope3_g": Decimal(0),
         "runs_without_scope_split": 0,
         "runs_without_carbon_total": 0,
+        # Water: summed over the runs that carry it; the rest are counted, not zeroed.
+        "water_ml": Decimal(0),
+        "water_onsite_ml": Decimal(0),
+        "water_offsite_ml": Decimal(0),
+        "runs_without_water": 0,
+        "water_bases": set(),
         # basis (or None where a run recorded none) -> runs. More than one entry
         # means this bucket's carbon may not be added up.
         "bases": {},
@@ -689,6 +713,13 @@ def _add_to_bucket(bucket: dict, rec: dict) -> None:
         bucket["scope1_g"] += rec["scope1_g"]
         bucket["scope2_g"] += rec["scope2_g"]
         bucket["scope3_g"] += rec["scope3_g"]
+    if rec.get("water_ml") is None:
+        bucket["runs_without_water"] += 1
+    else:
+        bucket["water_ml"] += rec["water_ml"]
+        bucket["water_onsite_ml"] += rec.get("water_onsite_ml") or Decimal(0)
+        bucket["water_offsite_ml"] += rec.get("water_offsite_ml") or Decimal(0)
+        bucket["water_bases"].add(rec.get("water_basis"))
     if rec["baseline_co2e_g"] is not None:
         bucket["baseline_co2e_g"] += rec["baseline_co2e_g"]
     if rec["avoided_co2e_g"] is not None:
@@ -726,6 +757,25 @@ def _carbon(value: Decimal, summable: bool) -> float | None:
     return float(round(value, 6)) if summable else None
 
 
+def _water_fields(bucket: dict) -> dict:
+    """Water totals for one rollup row. Null where no run in the bucket carries a
+    water figure, or where the runs mix water bases (water sums only within one
+    basis). `runs_without_water` says how many runs were not counted.
+    """
+    with_water = bucket["runs"] - bucket["runs_without_water"]
+    publishable = with_water > 0 and len(bucket["water_bases"]) <= 1
+
+    def _w(value: Decimal) -> float | None:
+        return float(round(value, 6)) if publishable else None
+
+    return {
+        "water_ml": _w(bucket["water_ml"]),
+        "water_onsite_ml": _w(bucket["water_onsite_ml"]),
+        "water_offsite_ml": _w(bucket["water_offsite_ml"]),
+        "runs_without_water": bucket["runs_without_water"],
+    }
+
+
 def _bucket_json(bucket: dict, **identity) -> dict:
     """One rollup row. Carbon is null wherever the row spans two bases.
 
@@ -759,6 +809,7 @@ def _bucket_json(bucket: dict, **identity) -> dict:
         "scope3_g": _carbon(bucket["scope3_g"], summable),
         "runs_without_scope_split": bucket["runs_without_scope_split"],
         "runs_without_carbon_total": bucket["runs_without_carbon_total"],
+        **_water_fields(bucket),
         # The bases behind this row, and whether its carbon was publishable.
         "grid_bases": _bucket_bases(bucket),
         "carbon_is_summable": summable,
@@ -945,6 +996,7 @@ async def _rollup_emissions(
             "runs_without_estimate": without_estimate,
             "runs_without_scope_split": totals["runs_without_scope_split"],
             "runs_without_carbon_total": totals["runs_without_carbon_total"],
+            **_water_fields(totals),
             "runs_without_baseline": without_baseline,
             "runs_without_money_comparison": without_money,
             "runs_without_uncertainty_band": without_band,
@@ -1027,6 +1079,7 @@ async def _rollup_emissions(
                 "carbon_is_summable": _is_summable(b),
                 # Always populated, so a mixed day still has something to plot.
                 "energy_wh": float(round(b["energy_wh"], 6)),
+                **_water_fields(b),
             }
             for day, b in sorted(by_day.items())
         ],
@@ -1335,6 +1388,73 @@ def _pue_change_applies(factors_doc, provider: str | None) -> bool:
     return pue.cloud is not None
 
 
+def _water_requested(factors_doc) -> bool:
+    """Did the what-if scenario document set any water key?"""
+    if isinstance(factors_doc, EmissionsOverrides):
+        return factors_doc.water is not None
+    return isinstance(factors_doc, dict) and bool(factors_doc.get("water"))
+
+
+def _water_factors_from_recorded(recorded_water: dict | None):
+    """`WaterFactors` rebuilt from a stored water block's provenance records, or
+    None when the run recorded none (a pre-water run)."""
+    if not recorded_water:
+        return None
+    by_key = {r.get("key"): r for r in recorded_water.get("factors") or [] if isinstance(r, dict)}
+    wue, grid, band = (by_key.get(k) for k in ("site_wue_l_per_kwh", "grid_water_l_per_kwh", "water_band"))
+    try:
+        if wue is None or grid is None or band is None:
+            return None
+        embodied = by_key.get("embodied_water_ml_per_run")
+        caveats = tuple(recorded_water.get("caveats") or ())
+        return WaterFactors(
+            site_wue_l_per_kwh=float(wue["value"]),
+            grid_water_l_per_kwh=float(grid["value"]),
+            band_low=float(band["value"]["low"]),
+            band_high=float(band["value"]["high"]),
+            embodied_water_ml_per_run=float(embodied["value"]) if embodied else None,
+            water_basis=recorded_water.get("water_basis") or "consumption",
+            hydro_included=any("hydropower" in c for c in caveats),
+            records=tuple(dict(r) for r in recorded_water.get("factors") or ()),
+            caveats=(),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _restate_baseline_water(scenario: dict, recorded_water: dict | None, resolved, *, retain: bool) -> None:
+    """Keep `scenario["water"]` consistent with the retained recorded baseline.
+
+    The recorded baseline replaces the fresh one, so the water baseline must too.
+    With unchanged water factors the recorded baseline water is retained
+    (None when the run had none) and avoided recomputed against it; when the
+    scenario changes water factors, the baseline water is recomputed from the
+    retained baseline energy under the scenario's factors.
+    """
+    water = scenario.get("water")
+    if not isinstance(water, dict):
+        return
+    baseline_ml = None
+    if retain:
+        if recorded_water and recorded_water.get("baseline_water_ml") is not None:
+            baseline_ml = float(recorded_water["baseline_water_ml"])
+    else:
+        base = scenario.get("baseline") or {}
+        if base.get("energy_wh") is not None and base.get("energy_wh_total") is not None:
+            try:
+                restated = compute_water(
+                    base["energy_wh"], base["energy_wh_total"], boundary="node_it",
+                    pue=resolved.pue.value, factors=resolved.water,
+                )
+                baseline_ml = restated["water_ml"] if restated else None
+            except Exception:  # noqa: BLE001 - water never breaks a what-if
+                baseline_ml = None
+    water["baseline_water_ml"] = baseline_ml
+    water["avoided_water_ml"] = (
+        round(baseline_ml - water["water_ml"], 6) + 0.0 if baseline_ml is not None else None
+    )
+
+
 def _preserved_measured_accounting(
     *,
     recorded: dict,
@@ -1409,6 +1529,20 @@ def _preserved_measured_accounting(
         ),
     )
     boundary = _recorded_boundary(recorded)
+    # Water follows the same rule as grid and PUE: a factor the scenario did not
+    # ask to change stays as recorded, not as today's ladder resolves it.
+    water_requested = _water_requested(factors_doc)
+    recorded_water = recorded.get("water") if isinstance(recorded.get("water"), dict) else None
+    water_note = None
+    if not water_requested:
+        rebuilt = _water_factors_from_recorded(recorded_water)
+        if rebuilt is not None:
+            resolved = dataclasses.replace(resolved, water=rebuilt)
+        else:
+            water_note = (
+                "This run has no recorded water factors; its water was resolved from "
+                "today's factor ladder, not from what applied when it ran."
+            )
     scenario = energy_accounting(
         model, *tokens, factors=resolved, catalog=catalog,
         measured_energy_wh=recorded.get("energy_wh"),
@@ -1432,6 +1566,11 @@ def _preserved_measured_accounting(
         scenario["baseline"]["avoided_co2e_g"] = None
         scenario["baseline"]["avoided_pct"] = None
     scenario["baseline"]["provenance_status"] = "recorded_counterfactual_unchanged"
+    _restate_baseline_water(
+        scenario, recorded_water, resolved, retain=not water_requested and water_note is None,
+    )
+    if water_note and isinstance(scenario.get("water"), dict):
+        scenario["water"]["caveats"] = [*scenario["water"].get("caveats", []), water_note]
     scenario["cost"] = recorded.get("cost") or scenario.get("cost")
     for key in ("energy_wh_estimated", "energy_wh_by_bucket", "energy_meter"):
         if key in recorded:
@@ -1618,12 +1757,12 @@ async def emissions_whatif(
     except ValidationError as exc:
         raise HTTPException(422, detail=_validation_detail(exc)) from exc
     if body.mode == "preserve_measured_energy":
-        unsupported = sorted(set(raw_factors) - {"version", "grid", "pue"})
+        unsupported = sorted(set(raw_factors) - {"version", "grid", "pue", "water"})
         if unsupported:
             raise HTTPException(
                 422,
                 detail=(
-                    "preserve_measured_energy currently supports only grid and PUE "
+                    "preserve_measured_energy currently supports only grid and PUE (plus water) "
                     f"scenario factors; unsupported: {', '.join(unsupported)}"
                 ),
             )
@@ -1876,7 +2015,20 @@ async def _emissions_whatif_response(
         # contract, so keep it an int here.
         delta_co2e_pct = round((delta_co2e_g / recorded_co2e) * 100) if recorded_co2e else None
 
+    # Water delta only where both sides cover the same runs: a pre-water run has
+    # no recorded water, so a delta against its restated figure would be the whole
+    # restated figure, not a change.
+    recorded_water = recorded["totals"]["water_ml"]
+    scenario_water = scenario["totals"]["water_ml"]
+    water_comparable = (
+        recorded_water is not None
+        and scenario_water is not None
+        and recorded["totals"]["runs_without_water"] == 0
+        and scenario["totals"]["runs_without_water"] == 0
+    )
+
     delta = {
+        "water_ml": round(scenario_water - recorded_water, 6) if water_comparable else None,
         "co2e_g": delta_co2e_g,
         "co2e_pct": delta_co2e_pct,
         "energy_wh": round(scenario["totals"]["energy_wh"] - recorded["totals"]["energy_wh"], 6),
@@ -1908,7 +2060,9 @@ async def _emissions_whatif_response(
         "runs_skipped": runs_skipped,
         "mode": mode,
         "mode_note": (
-            "Measured energy is preserved; only compatible grid/PUE factors are repriced."
+            "Measured energy is preserved; only compatible grid/PUE/water factors are repriced. "
+            "Water factors not named in the scenario stay as recorded (runs without a "
+            "recorded water block use today's factors, with a caveat)."
             if mode == "preserve_measured_energy"
             else "Recorded accounting is compared with a token-estimated scenario."
         ),

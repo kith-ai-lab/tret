@@ -708,6 +708,18 @@ class Settings(BaseSettings):
     # highest-energy-class curated non-local model. The comparison is a
     # same-token efficiency indicator, never an offset or a reduction claim.
     emissions_baseline_model: str = ""
+    # Water accounting (docs/water-methodology.md). All optional: unset, the
+    # shipped constants in tret/data/water_factors.json apply. Consumption (not
+    # withdrawal) litres per kWh. `site_wue` is cooling water per IT kWh;
+    # `grid` is generation water per facility kWh; the band is a judgment band
+    # (central x low .. central x high), never a confidence interval.
+    water_site_wue_l_per_kwh: float | None = None
+    # Cooling water of a local (workstation / on-prem) deployment; the cloud
+    # figure above never applies to local runs. Unset = 0, like the local PUE.
+    water_local_site_wue_l_per_kwh: float | None = None
+    water_grid_l_per_kwh: float | None = None
+    water_band_low: float | None = None
+    water_band_high: float | None = None
 
     # ── workspace connections (tret/services/connections.py, tret/api/connections.py) ──
     # OAuth client credentials for the two Phase 0 providers (services/connections.py's
@@ -826,7 +838,10 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "local_grid_co2e_g_per_kwh", "local_energy_meter_gpu_index", mode="before"
+        "local_grid_co2e_g_per_kwh", "local_energy_meter_gpu_index",
+        "water_site_wue_l_per_kwh", "water_local_site_wue_l_per_kwh",
+        "water_grid_l_per_kwh", "water_band_low", "water_band_high",
+        mode="before",
     )
     @classmethod
     def _blank_means_unset(cls, value):

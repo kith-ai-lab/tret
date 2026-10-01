@@ -3,15 +3,18 @@
 How tret turns the energy a run used into a water figure; where every
 constant came from; and what the resulting numbers are *not* good for.
 
-Implementation (once it lands): `backend/tret/services/water.py`, resolved
+Implementation: `backend/tret/services/water.py` (the arithmetic), resolved
 through the same factor ladder as carbon in
-`backend/tret/services/emission_factors.py`. The energy side is
+`backend/tret/services/emission_factors.py` and attached to every run by
+`energy_accounting()` in `backend/tret/services/emissions.py`. Constants:
+`backend/tret/data/water_factors.json`. The energy side is
 [emissions-methodology.md](emissions-methodology.md); this page assumes it and
 does not repeat it.
 
-> **Status: specification.** This page fixes the method before the code is
-> written. Until the implementation ships, no run carries a water figure and
-> the emissions methodology still lists water under its exclusions.
+> **Status: computed on new runs; not yet shown in the interface.** Every run
+> recorded from this version on carries a `water` block in its
+> `energy_accounting`, and the analytics, what-if and export endpoints return
+> water fields. Runs recorded earlier carry no water figure.
 
 **One-line summary: water figures are estimates of freshwater consumed, for
 comparing model choices. They are derived from estimated or measured energy
@@ -219,7 +222,7 @@ has been sourced. An unset value is reported as *not counted*, not as zero.
 ### Uncertainty: a band, not an interval
 
 The default band is **central ÷ 3 to central × 3**, set by
-`TRET_WATER_BAND_LOW` / `TRET_WATER_BAND_HIGH`. This is wider than the carbon
+`TRET_WATER_BAND_LOW` / `TRET_WATER_BAND_HIGH` (both multipliers). This is wider than the carbon
 band (÷ 2.5 to × 2.5) for stated reasons:
 
 - The grid factor varies more than tenfold between countries (1.1–18.6 L/kWh),
@@ -288,9 +291,67 @@ A `water` block inside `energy_accounting`, alongside the carbon fields:
 }
 ```
 
-The values above are a cloud run of 10 Wh IT energy at PUE 1.18 with the shipped defaults; the baseline is illustrative. The block is computed per model segment and
-per overhead call (router, compaction), then rolled up using the same
-multi-segment rule as the carbon band.
+The values above are a cloud run of 10 Wh IT energy at PUE 1.18 with the shipped defaults; the baseline is illustrative. The block is computed per model segment and rolled up using the same
+multi-segment rule as the carbon band; router and compaction calls get their
+own blocks under `runs.overhead`, as their carbon does.
+
+## Configuration
+
+Water keys sit in the same workspace emissions document as grid, PUE and the
+band, under `water`, so the existing `emissions_factors_edit` gate and settings
+history cover them:
+
+```json
+{
+  "water": {
+    "site_wue_l_per_kwh": 1.15,
+    "local_site_wue_l_per_kwh": 0.0,
+    "grid_water_l_per_kwh": 3.14,
+    "country": "USA",
+    "band_low": 0.3333,
+    "band_high": 3.0
+  }
+}
+```
+
+Every key is optional. `site_wue_l_per_kwh` applies to cloud runs only and
+`local_site_wue_l_per_kwh` to local runs only; local stays 0 unless its own key
+is set. `band_low` and `band_high` are both multipliers on the central figure
+(`band_low` 0.3333 = central ÷ 3), unlike the carbon band, whose low value is a
+divisor. `country` (ISO 3166 alpha-3) selects a WRI country factor; without
+it, a grid factor pinned to an Ember country (`dataset:ember:country-XXX`)
+selects that country's water factor, and anything else falls back to the
+world average with a caveat. Only the six countries listed above are in the
+shipped table.
+
+Environment rung (instance-wide): `TRET_WATER_SITE_WUE_L_PER_KWH` (cloud),
+`TRET_WATER_LOCAL_SITE_WUE_L_PER_KWH` (local), `TRET_WATER_GRID_L_PER_KWH`,
+`TRET_WATER_BAND_LOW`, `TRET_WATER_BAND_HIGH`. Blank means unset. An invalid
+value at any layer is skipped, so the next rung applies, and the run carries a
+caveat naming the setting.
+
+Precedence and provenance follow the carbon ladder exactly: run override →
+workspace → managed → env → dataset (`dataset:wri2020:<ISO3>`) → shipped
+default. Each factor record names the layer that won.
+
+## Where the numbers live in the API
+
+- `runs.energy_accounting.water` — the per-run block shown above, rolled up
+  across model segments (each segment's own block is in `model_timeline`).
+  Router and compaction calls carry their water in `runs.overhead`, exactly as
+  their carbon is kept there, so it is never counted twice.
+- `GET /api/analytics/emissions` — `water_ml`, `water_onsite_ml`,
+  `water_offsite_ml` and `runs_without_water` on the totals and each
+  breakdown. Null when a bucket mixes water bases or no run in it has water.
+- `POST /api/analytics/emissions/whatif` — accepts the same `water` keys in a
+  scenario and restates water for stored runs, including runs recorded before
+  water accounting, because their tokens and energy are stored.
+  `delta.water_ml` is null unless both sides have water for every run.
+- Deliverable export — `water_ml`, `water_onsite_ml`, `water_offsite_ml` per
+  section.
+- `GET /api/docs/water-methodology` — this page, in the product.
+
+Water is not part of the anonymous telemetry report.
 
 ## Not yet included
 
@@ -299,6 +360,8 @@ multi-segment rule as the carbon band.
   local scarcity. It would apply only when the serving region is known, which
   means local runs and operator-pinned provider@region, and it would be a
   second figure next to litres, never a replacement.
+- **Interface.** The run detail, dashboard, settings and what-if screens do
+  not show water yet.
 - **Measured water.** An operator with a facility water meter can set their own
   site WUE today. Per-run metered water is not planned.
 - **Embodied water** for self-hosted hardware, until a per-device figure can be

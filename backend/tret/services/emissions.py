@@ -90,6 +90,7 @@ from tret.services.uncertainty_derivation import (
     band_record,
     derive_band,
 )
+from tret.services.water import combine_water, compute_water
 
 logger = logging.getLogger(__name__)
 
@@ -2300,6 +2301,7 @@ def _baseline_block(
     actual_factors: "FactorSet",
     actual_factor_records: list[dict],
     energy_tokens: tuple[int, int, int, int] | None = None,
+    water_sink: dict | None = None,
 ) -> dict:
     baseline = resolve_baseline_model(settings, catalog)
     if baseline is None:
@@ -2332,6 +2334,9 @@ def _baseline_block(
             ),
             model_id=baseline.id,
         )
+    if water_sink is not None:
+        # The counterfactual's own water factors, for `_water_block`; never persisted.
+        water_sink["factors"] = baseline_factors.water
     baseline_grid = baseline_factors.grid
     baseline_constant, _ = _energy_constant_and_flags(baseline, baseline_factors)
     if baseline_factors.model_override is not None:
@@ -2501,6 +2506,49 @@ def scope_split(deployment: str, electricity_g: Decimal, embodied_g: Decimal) ->
         "scope3_g": _f(scope3),
         "basis": _SCOPE_BASIS,
     }
+
+
+def _water_block(
+    model: ModelInfo,
+    factors: "FactorSet",
+    baseline: dict,
+    baseline_water_factors,
+    compute_wh: Decimal,
+    total_wh: Decimal,
+    energy_boundary: str,
+    configured_pue: Decimal,
+) -> dict | None:
+    """The `water` block for one accounting call, or None on any failure.
+
+    `configured_pue` (not the applied one) is passed because a facility-boundary
+    measurement applies PUE 1.0 yet its on-site water needs the configured PUE to
+    recover IT energy. The baseline is the same-token counterfactual priced under
+    its own model's water factors; with no baseline there is no baseline water.
+    """
+    try:
+        if baseline.get("model") == model.id and baseline.get("energy_wh") is not None:
+            # The run *is* the baseline: avoided is 0 by construction, as for carbon.
+            block = compute_water(
+                compute_wh, total_wh, boundary=energy_boundary, pue=configured_pue,
+                factors=factors.water,
+            )
+            if block is not None:
+                block["baseline_water_ml"] = block["water_ml"]
+                block["avoided_water_ml"] = 0.0
+            return block
+        has_baseline = (
+            baseline.get("energy_wh") is not None and baseline.get("energy_wh_total") is not None
+        )
+        return compute_water(
+            compute_wh, total_wh, boundary=energy_boundary, pue=configured_pue,
+            factors=factors.water,
+            baseline_energy_wh=baseline["energy_wh"] if has_baseline else None,
+            baseline_energy_wh_total=baseline["energy_wh_total"] if has_baseline else None,
+            baseline_factors=baseline_water_factors if has_baseline else None,
+        )
+    except Exception:  # noqa: BLE001 - a water bug must never break a run
+        logger.warning("water accounting failed for %s; recording water=None", model.id, exc_info=True)
+        return None
 
 
 def energy_accounting(
@@ -2832,6 +2880,7 @@ def energy_accounting(
                 "embodied_double_add_prevented caveat."
             ),
         })
+    baseline_water_sink: dict = {}
     baseline = _baseline_block(
         model,
         tokens,
@@ -2845,6 +2894,7 @@ def energy_accounting(
         factors,
         actual_factor_records,
         energy_tokens,
+        water_sink=baseline_water_sink,
     )
 
     if is_measured:
@@ -2981,6 +3031,12 @@ def energy_accounting(
         "embodied_g": _f(embodied_g) if embodied_known else None,
         "scopes": scopes,
         "baseline": baseline,
+        # Water consumption (docs/water-methodology.md). None, never 0, when it
+        # could not be computed; never allowed to fail the run.
+        "water": _water_block(
+            model, factors, baseline, baseline_water_sink.get("factors"),
+            compute_wh, total_wh, energy_boundary, pue,
+        ),
         # ── added: the input/output split ──
         "input_weight": float(ENERGY_TOKEN_WEIGHT_INPUT),
         "output_weight": float(ENERGY_TOKEN_WEIGHT_OUTPUT),
@@ -3122,6 +3178,15 @@ def energy_wh_field(energy_wh: Decimal | float | None) -> float | None:
     return float(energy_wh) if energy_wh is not None else None
 
 
+def complete_water(accounting: dict | None) -> dict | None:
+    """The run's water block, or None when absent or only partial (a roll-up in
+    which some calls/segments had no water): a partial total is not the run's."""
+    water = (accounting or {}).get("water")
+    if not isinstance(water, dict) or water.get("runs_without_water"):
+        return None
+    return water
+
+
 def emission_summary_fields(accounting: dict | None) -> dict[str, Any]:
     """The carbon fields a run *summary* carries, read as recorded.
 
@@ -3147,6 +3212,8 @@ def emission_summary_fields(accounting: dict | None) -> dict[str, Any]:
         "avoided_usd_pct": baseline.get("avoided_usd_pct"),
         "co2e_g_low": band.get("co2e_g_low"),
         "co2e_g_high": band.get("co2e_g_high"),
+        # Added with water: None on a run recorded before it existed, never 0.
+        "water_ml": (complete_water(accounting) or {}).get("water_ml"),
     }
 
 
@@ -3167,6 +3234,7 @@ def emission_event_fields(accounting: dict | None) -> dict[str, Any]:
         "avoided_usd_pct": baseline.get("avoided_usd_pct"),
         "co2e_g_low": band.get("co2e_g_low"),
         "co2e_g_high": band.get("co2e_g_high"),
+        "water_ml": (complete_water(accounting) or {}).get("water_ml"),
     }
 
 
@@ -3357,7 +3425,14 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
     if not blocks:
         return None
     if len(blocks) == 1:
-        return blocks[0]
+        only = blocks[0]
+        water = only.get("water")
+        if isinstance(water, dict) and "runs_counted" not in water:
+            # Same water shape as a real roll-up; everything else is unchanged.
+            rolled = combine_water([water])
+            rolled["factors"] = water.get("factors", [])
+            only = {**only, "water": rolled}
+        return only
 
     bases = _bases_of(blocks)
     factor_signatures = {grid_comparison_signature(block) for block in blocks}
@@ -3412,7 +3487,7 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
         | set(_SUMMABLE_NESTED)
         | set(_CARBON_TOP)
         | set(_CARBON_NESTED)
-        | {"embodied_g"}
+        | {"embodied_g", "water"}
     )
     for key in set(combined) - handled:
         if key in (
@@ -3421,6 +3496,16 @@ def combine_accountings(blocks: list[dict]) -> dict | None:
         ):
             continue
         combined[key] = _agreed([b.get(key) for b in blocks])
+
+    # Water adds within one water_basis (see water.combine_water): a segment with
+    # no water block is counted in `runs_without_water`, never as zero. Provenance
+    # records are unioned by key like the carbon ones.
+    water_blocks = [b.get("water") for b in blocks]
+    combined["water"] = combine_water(water_blocks)
+    if combined["water"] is not None:
+        combined["water"]["factors"] = _union_by_key(
+            [{"factors": (w or {}).get("factors")} for w in water_blocks], "factors"
+        )
 
     # "measured" only when every segment was; "mixed" when some but not all
     # were (a run that measured one leg and estimated another is neither

@@ -98,6 +98,14 @@ from tret.services.grid_regions import (
 from tret.services.grid_tables import GridTable, GridTableError, parse_grid_table
 from tret.services.grid_zones import grid_entry_for_region
 from tret.services.grid_ember import entry_for_region as ember_entry_for_region
+from tret.services.water import (
+    DEPLOYMENT_CLOUD as _WATER_CLOUD,
+    DEPLOYMENT_LOCAL as _WATER_LOCAL,
+    WaterFactors,
+    WaterInput,
+    default_water_factors,
+    resolve_water_factors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -628,6 +636,65 @@ class BandBlock(BaseModel):
         return self
 
 
+class WaterBlock(BaseModel):
+    """`water` in an override document (docs/water-methodology.md).
+
+    Every field is optional and resolves per factor through the same ladder as
+    carbon. `site_wue_l_per_kwh` is cooling water per IT kWh, applied to every
+    deployment; `local_site_wue_l_per_kwh` replaces it for self-hosted runs only
+    (a workstation defaults to 0, an evaporatively cooled server room does not).
+    `grid_water_l_per_kwh` is generation water per facility kWh; `country` (ISO
+    3166 alpha-3) selects that country's WRI 2020 factor from the dataset rung
+    and, when set, beats a country inferred from a pinned grid region.
+    `band_low`/`band_high` are the judgment band (central x low .. central x
+    high), never a confidence interval.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    site_wue_l_per_kwh: float | None = None
+    local_site_wue_l_per_kwh: float | None = None
+    grid_water_l_per_kwh: float | None = None
+    country: str | None = None
+    band_low: float | None = None
+    band_high: float | None = None
+
+    @field_validator(
+        "site_wue_l_per_kwh", "local_site_wue_l_per_kwh", "grid_water_l_per_kwh", mode="after"
+    )
+    @classmethod
+    def _nonneg_finite(cls, value: float | None, info) -> float | None:
+        if value is not None and (not math.isfinite(value) or value < 0):
+            raise ValueError(
+                f"water.{info.field_name} must be a non-negative finite number, got {value}"
+            )
+        return value
+
+    @field_validator("band_low", mode="after")
+    @classmethod
+    def _band_low(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(value) or not 0 < value <= 1):
+            raise ValueError(f"water.band_low must be in (0, 1], got {value}")
+        return value
+
+    @field_validator("band_high", mode="after")
+    @classmethod
+    def _band_high(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(value) or value < 1):
+            raise ValueError(f"water.band_high must be >= 1, got {value}")
+        return value
+
+    @field_validator("country", mode="after")
+    @classmethod
+    def _iso3(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        code = value.strip().upper()
+        if not re.fullmatch(r"[A-Z]{3}", code):
+            raise ValueError(f"water.country must be a 3-letter ISO 3166 alpha-3 code, got {value!r}")
+        return code
+
+
 class EmissionsOverrides(BaseModel):
     """One operator-configured override document — a workspace's, a managed
     layer's, or (reserved, unpopulated today) a harness's. Every key is
@@ -659,6 +726,7 @@ class EmissionsOverrides(BaseModel):
     pue: PueBlock | None = None
     embodied: EmbodiedBlock | None = None
     band: BandBlock | None = None
+    water: WaterBlock | None = None
     baseline_model: str | None = None
     energy_strategy: EnergyStrategy | None = None
     model_overrides: dict[str, ModelOverride] | None = None
@@ -801,6 +869,10 @@ class FactorSet:
     # default and no env rung: a model with no configured override simply uses
     # whatever `energy_strategy` and the catalog otherwise resolve.
     model_override: Resolved | None = None
+    # Water factors (docs/water-methodology.md), resolved through the same
+    # ladder; each provenance record in `water.records` carries its true layer.
+    # Defaults to the shipped cloud constants so legacy constructors still work.
+    water: WaterFactors = field(default_factory=lambda: default_water_factors(_WATER_CLOUD))
     # Inputs retained solely so a counterfactual model can resolve through the
     # exact same ladder (including region/hourly data) at the same instant.
     # Excluded from equality/repr to preserve the public value-object contract.
@@ -837,6 +909,8 @@ _CONTEXT_SETTINGS_FIELDS = {
     "datacenter_pue", "local_pue", "onprem_pue", "local_deployment_profile",
     "embodied_g_per_run", "uncertainty_band_low", "uncertainty_band_high",
     "emissions_baseline_model",
+    "water_site_wue_l_per_kwh", "water_local_site_wue_l_per_kwh", "water_grid_l_per_kwh",
+    "water_band_low", "water_band_high",
 }
 
 
@@ -1378,6 +1452,177 @@ def _resolve_band_derived(
                      None, None, None, None, derived=False)
 
 
+# ── water ─────────────────────────────────────────────────────────────────────
+_WATER_RUN_KEYS = {
+    "site_wue": "water_site_wue_l_per_kwh",
+    "grid_water": "water_grid_l_per_kwh",
+    "band_low": "water_band_low",
+    "band_high": "water_band_high",
+    "country": "water_country",
+}
+_WATER_ENV = {
+    "site_wue": ("water_site_wue_l_per_kwh", "TRET_WATER_SITE_WUE_L_PER_KWH"),
+    "grid_water": ("water_grid_l_per_kwh", "TRET_WATER_GRID_L_PER_KWH"),
+    "band_low": ("water_band_low", "TRET_WATER_BAND_LOW"),
+    "band_high": ("water_band_high", "TRET_WATER_BAND_HIGH"),
+}
+
+
+def _water_candidates(
+    which: str,
+    deployment: str,
+    settings: Settings,
+    run_overrides: dict,
+    harness: EmissionsOverrides | None,
+    workspace: EmissionsOverrides | None,
+    managed: EmissionsOverrides | None,
+) -> list[WaterInput]:
+    """Every explicit value for one water factor, most specific first
+    (run_override > harness > workspace > managed > env). Not validated here.
+
+    Site WUE is per deployment: a document's `site_wue_l_per_kwh` is the CLOUD
+    value and `local_site_wue_l_per_kwh` the LOCAL one, as are the two env vars
+    (`TRET_WATER_SITE_WUE_L_PER_KWH` / `TRET_WATER_LOCAL_SITE_WUE_L_PER_KWH`),
+    so a cloud figure never leaks onto a workstation. A run override applies to
+    whichever deployment the run is on.
+    """
+    out: list[WaterInput] = []
+    override = run_overrides.get(_WATER_RUN_KEYS[which])
+    if override is not None:
+        out.append(WaterInput(override, LAYER_RUN_OVERRIDE, GRID_SOURCE_RUN_OVERRIDE, None))
+
+    local = deployment == DEPLOYMENT_LOCAL
+    for layer, doc in (
+        (LAYER_HARNESS, harness), (LAYER_WORKSPACE, workspace), (LAYER_MANAGED, managed),
+    ):
+        block = doc.water if doc is not None else None
+        if block is None:
+            continue
+        if which == "site_wue":
+            key = "local_site_wue_l_per_kwh" if local else "site_wue_l_per_kwh"
+        elif which == "grid_water":
+            key = "grid_water_l_per_kwh"
+        else:
+            key = which
+        value = getattr(block, key)
+        if value is not None:
+            out.append(WaterInput(
+                value, layer, _layer_source(layer, doc, None), f"{layer}.emissions.water.{key}"
+            ))
+
+    field_name, env_name = _WATER_ENV[which]
+    if which == "site_wue" and local:
+        field_name, env_name = "water_local_site_wue_l_per_kwh", "TRET_WATER_LOCAL_SITE_WUE_L_PER_KWH"
+    env_value = getattr(settings, field_name, None)
+    if env_value is not None:
+        out.append(WaterInput(env_value, LAYER_ENV, LAYER_ENV, env_name))
+    return out
+
+
+def _water_value_problem(which: str, value: Any) -> str | None:
+    """Why `value` cannot be a water factor, or None when it can."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return f"not a number ({value!r})"
+    if not math.isfinite(value) or value < 0:
+        return f"must be a non-negative finite number ({value!r})"
+    if which == "band_low" and not 0 < value <= 1:
+        return f"must be in (0, 1] ({value!r})"
+    if which == "band_high" and value < 1:
+        return f"must be >= 1 ({value!r})"
+    return None
+
+
+def _water_country(
+    grid: Resolved,
+    run_overrides: dict,
+    harness: EmissionsOverrides | None,
+    workspace: EmissionsOverrides | None,
+    managed: EmissionsOverrides | None,
+) -> tuple[str | None, str | None]:
+    """(ISO3, setting) for the WRI dataset rung. An explicit `water.country`
+    (run override or any document layer) beats a country the grid factor
+    resolved to (an Ember `country-ISO3` pin)."""
+    override = run_overrides.get(_WATER_RUN_KEYS["country"])
+    if override:
+        return str(override).strip().upper(), "run_override.water_country"
+
+    hit = _first_doc_hit(harness, workspace, managed,
+                         lambda d: d.water.country if d.water is not None else None)
+    if hit is not None:
+        layer, _doc, iso = hit
+        return iso, f"{layer}.emissions.water.country"
+
+    prefix = "dataset:ember:country-"
+    if grid.source and grid.source.startswith(prefix):
+        iso = grid.source[len(prefix):]
+        return iso, f"grid.{grid.source}"
+    return None, None
+
+
+def _shipped_water(wd: str) -> WaterFactors:
+    try:
+        return default_water_factors(wd)
+    except Exception:  # noqa: BLE001 - last resort; must not raise out of build_factor_set
+        logger.warning("shipped water defaults unavailable; using literal constants", exc_info=True)
+        return WaterFactors(
+            site_wue_l_per_kwh=0.0 if wd == _WATER_LOCAL else 0.375,
+            grid_water_l_per_kwh=4.81, band_low=1 / 3, band_high=3.0,
+            caveats=("Water factor resolution failed; literal shipped constants used.",),
+        )
+
+
+def _resolve_water(
+    deployment: str,
+    settings: Settings,
+    run_overrides: dict,
+    harness: EmissionsOverrides | None,
+    workspace: EmissionsOverrides | None,
+    managed: EmissionsOverrides | None,
+    grid: Resolved,
+) -> WaterFactors:
+    """Water must never break a run, and one bad value must not take the others
+    down with it. Each key is validated on its own: an invalid value at a layer
+    is skipped (the next rung applies) and a caveat names the setting. An
+    unexpected failure falls back to the shipped defaults, logged with a
+    traceback. Never raises.
+    """
+    wd = _WATER_LOCAL if deployment == DEPLOYMENT_LOCAL else _WATER_CLOUD
+    try:
+        problems: list[str] = []
+        inputs: dict[str, WaterInput | None] = {}
+        for which in ("site_wue", "grid_water", "band_low", "band_high"):
+            inputs[which] = None
+            for cand in _water_candidates(
+                which, deployment, settings, run_overrides, harness, workspace, managed
+            ):
+                problem = _water_value_problem(which, cand.value)
+                if problem is None:
+                    inputs[which] = WaterInput(
+                        float(cand.value), cand.layer, cand.source, cand.setting
+                    )
+                    break
+                name = cand.setting or f"{cand.layer}:{which}"
+                problems.append(f"Ignored invalid water setting {name}: {problem}.")
+        iso, iso_setting = _water_country(grid, run_overrides, harness, workspace, managed)
+        factors = resolve_water_factors(
+            wd,
+            site_wue=inputs["site_wue"],
+            grid_water=inputs["grid_water"],
+            band_low=inputs["band_low"],
+            band_high=inputs["band_high"],
+            country_iso3=iso,
+            country_setting=iso_setting,
+        )
+        if problems:
+            for message in problems:
+                logger.warning(message)
+            factors = replace(factors, caveats=(*factors.caveats, *problems))
+        return factors
+    except Exception:  # noqa: BLE001 - water is additive, never fatal
+        logger.warning("water factor resolution failed; using shipped defaults", exc_info=True)
+        return _shipped_water(wd)
+
+
 # ── baseline model ────────────────────────────────────────────────────────────
 def _resolve_baseline_model(
     settings: Settings,
@@ -1573,11 +1818,18 @@ def build_factor_set(
     baseline_model = _resolve_baseline_model(settings, run_overrides, harness, workspace, managed)
     energy_strategy = _resolve_energy_strategy(run_overrides, harness, workspace, managed)
     model_override = _resolve_model_override(model_id, harness, workspace, managed)
+    water = _resolve_water(deployment, settings, run_overrides, harness, workspace, managed, grid)
 
     won = {grid.layer, pue.layer, embodied_g.layer, band_low.layer, band_high.layer,
            band_derived.layer, baseline_model.layer, energy_strategy.layer}
     if model_override is not None:
         won.add(model_override.layer)
+    # Water contributes a layer only when something above the dataset rung and
+    # the shipped default actually chose a value (the default is always there).
+    won.update(
+        record["layer"] for record in water.records
+        if record.get("layer") in (LAYER_RUN_OVERRIDE, LAYER_HARNESS, LAYER_WORKSPACE, LAYER_MANAGED, LAYER_ENV)
+    )
     layers_present = tuple(layer for layer in LAYER_PRECEDENCE if layer in won)
 
     return FactorSet(
@@ -1594,6 +1846,7 @@ def build_factor_set(
         layers_present=layers_present,
         energy_strategy=energy_strategy,
         model_override=model_override,
+        water=water,
         resolution_context=FactorResolutionContext(
             settings_values=_freeze(settings.model_dump(include=_CONTEXT_SETTINGS_FIELDS)),
             settings_fields_set=tuple(sorted(settings.model_fields_set & _CONTEXT_SETTINGS_FIELDS)),

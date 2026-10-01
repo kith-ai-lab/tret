@@ -59,7 +59,7 @@ class WaterFactors:
     embodied_water_ml_per_run: float | None = None  # None = not counted
     water_basis: str = WATER_BASIS
     hydro_included: bool = True  # grid factor came from WRI
-    records: tuple[dict, ...] = field(default_factory=tuple)
+    records: tuple[dict, ...] = field(default_factory=tuple, hash=False)
     caveats: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -117,26 +117,75 @@ def _validate_overrides(overrides: dict) -> dict[str, float]:
     return out
 
 
-def default_water_factors(
+@dataclass(frozen=True)
+class WaterInput:
+    """One already-resolved override value and where the ladder found it.
+
+    `layer`/`source` are recorded verbatim on the factor's provenance record
+    (`workspace`, `managed:<name>`, `env`, `run_override`, ...); `setting` is
+    the dotted path or env var that applied.
+    """
+
+    value: float
+    layer: str
+    source: str
+    setting: str | None = None
+
+
+# Most specific first; the legacy "override" layer (default_water_factors) leads.
+_LAYER_ORDER = (
+    LAYER_OVERRIDE, "run_override", "harness", "workspace", "managed", "env",
+    LAYER_DATASET, LAYER_DEFAULT,
+)
+
+
+def _layer_rank(layer: str) -> int:
+    return _LAYER_ORDER.index(layer) if layer in _LAYER_ORDER else len(_LAYER_ORDER)
+
+
+def _checked(inp: WaterInput | None, name: str) -> WaterInput | None:
+    if inp is None:
+        return None
+    return WaterInput(_check_number(name, inp.value), inp.layer, inp.source, inp.setting)
+
+
+def resolve_water_factors(
     deployment: str,
     *,
+    site_wue: WaterInput | None = None,
+    grid_water: WaterInput | None = None,
+    band_low: WaterInput | None = None,
+    band_high: WaterInput | None = None,
+    embodied: WaterInput | None = None,
     country_iso3: str | None = None,
-    overrides: dict | None = None,
+    country_setting: str | None = None,
 ) -> WaterFactors:
-    """Resolve factors. Precedence: overrides > country table > shipped default."""
+    """Resolve factors from per-key values the caller already walked the ladder for.
+
+    A key left `None` falls to the dataset rung (grid water, when `country_iso3`
+    names a country in the WRI table) and then the shipped default.
+    """
     if deployment not in (DEPLOYMENT_CLOUD, DEPLOYMENT_LOCAL):
         raise ValueError(f"unknown deployment {deployment!r}")
     data = _load()
-    ov = _validate_overrides(overrides or {})
+    site_wue = _checked(site_wue, "site_wue_l_per_kwh")
+    grid_water = _checked(grid_water, "grid_water_l_per_kwh")
+    band_low = _checked(band_low, "band_low")
+    band_high = _checked(band_high, "band_high")
+    embodied = _checked(embodied, "embodied_water_ml_per_run")
+    if band_low is not None and not 0 < band_low.value <= 1:
+        raise ValueError(f"band_low must be in (0, 1], got {band_low.value!r}")
+    if band_high is not None and band_high.value < 1:
+        raise ValueError(f"band_high must be >= 1, got {band_high.value!r}")
     caveats: list[str] = []
     records: list[dict] = []
 
     # site WUE
     wue_src = data["site_wue"][deployment]
-    if "site_wue_l_per_kwh" in ov:
-        wue = ov["site_wue_l_per_kwh"]
-        records.append(_record(wue_src, layer=LAYER_OVERRIDE, source="override", value=wue,
-                               note="Operator-supplied value.", setting="site_wue_l_per_kwh"))
+    if site_wue is not None:
+        wue = site_wue.value
+        records.append(_record(wue_src, layer=site_wue.layer, source=site_wue.source, value=wue,
+                               note="Operator-supplied value.", setting=site_wue.setting))
     else:
         wue = float(wue_src["value"])
         records.append(_record(wue_src, layer=LAYER_DEFAULT))
@@ -144,11 +193,11 @@ def default_water_factors(
     # grid water
     grid_src = data["grid_water"]
     hydro = True
-    if "grid_water_l_per_kwh" in ov:
-        grid = ov["grid_water_l_per_kwh"]
+    if grid_water is not None:
+        grid = grid_water.value
         hydro = False
-        records.append(_record(grid_src, layer=LAYER_OVERRIDE, source="override", value=grid,
-                               note="Operator-supplied value.", setting="grid_water_l_per_kwh"))
+        records.append(_record(grid_src, layer=grid_water.layer, source=grid_water.source, value=grid,
+                               note="Operator-supplied value.", setting=grid_water.setting))
     else:
         iso = country_iso3.strip().upper() if country_iso3 else None
         row = grid_src["countries"].get(iso) if iso else None
@@ -157,7 +206,7 @@ def default_water_factors(
             records.append(_record(
                 grid_src, layer=LAYER_DATASET, source=f"dataset:wri2020:{iso}", value=grid,
                 note=f"{row['name']}: {row['gal_per_kwh']} gal/kWh x {grid_src['gal_to_l']} L/gal.",
-                setting=iso,
+                setting=country_setting or iso,
             ))
         else:
             grid = float(grid_src["value"])
@@ -167,21 +216,26 @@ def default_water_factors(
 
     # band
     band_src = data["band"]
-    low = ov.get("band_low", float(band_src["low"]))
-    high = ov.get("band_high", float(band_src["high"]))
-    band_overridden = "band_low" in ov or "band_high" in ov
-    band_rec = _record(band_src, layer=LAYER_OVERRIDE if band_overridden else LAYER_DEFAULT,
-                       value={"low": low, "high": high}, source="override" if band_overridden else None)
+    low = band_low.value if band_low is not None else float(band_src["low"])
+    high = band_high.value if band_high is not None else float(band_src["high"])
+    won = [b for b in (band_low, band_high) if b is not None]
+    if won:
+        top = min(won, key=lambda b: _layer_rank(b.layer))
+        settings = list(dict.fromkeys(b.setting for b in won if b.setting))
+        band_rec = _record(band_src, layer=top.layer, value={"low": low, "high": high},
+                           source=top.source, setting="; ".join(settings) or None)
+    else:
+        band_rec = _record(band_src, layer=LAYER_DEFAULT, value={"low": low, "high": high})
     band_rec["is_confidence_interval"] = False
     records.append(band_rec)
 
-    embodied = ov.get("embodied_water_ml_per_run")
+    embodied_value = embodied.value if embodied is not None else None
     if embodied is not None:
         records.append({
-            "key": "embodied_water_ml_per_run", "label": "Embodied water", "value": embodied,
-            "unit": "mL/run", "source": "override", "url": None, "date": None,
+            "key": "embodied_water_ml_per_run", "label": "Embodied water", "value": embodied_value,
+            "unit": "mL/run", "source": embodied.source, "url": None, "date": None,
             "confidence": "low", "note": "Operator-supplied value.",
-            "setting": "embodied_water_ml_per_run", "water_basis": WATER_BASIS, "layer": LAYER_OVERRIDE,
+            "setting": embodied.setting, "water_basis": WATER_BASIS, "layer": embodied.layer,
         })
 
     return WaterFactors(
@@ -189,11 +243,36 @@ def default_water_factors(
         grid_water_l_per_kwh=grid,
         band_low=low,
         band_high=high,
-        embodied_water_ml_per_run=embodied,
+        embodied_water_ml_per_run=embodied_value,
         water_basis=data["water_basis"],
         hydro_included=hydro,
         records=tuple(records),
         caveats=tuple(caveats),
+    )
+
+
+def default_water_factors(
+    deployment: str,
+    *,
+    country_iso3: str | None = None,
+    overrides: dict | None = None,
+) -> WaterFactors:
+    """Resolve factors. Precedence: overrides > country table > shipped default."""
+    if deployment not in (DEPLOYMENT_CLOUD, DEPLOYMENT_LOCAL):
+        raise ValueError(f"unknown deployment {deployment!r}")
+    ov = _validate_overrides(overrides or {})
+
+    def _inp(key: str) -> WaterInput | None:
+        return WaterInput(ov[key], LAYER_OVERRIDE, "override", key) if key in ov else None
+
+    return resolve_water_factors(
+        deployment,
+        site_wue=_inp("site_wue_l_per_kwh"),
+        grid_water=_inp("grid_water_l_per_kwh"),
+        band_low=_inp("band_low"),
+        band_high=_inp("band_high"),
+        embodied=_inp("embodied_water_ml_per_run"),
+        country_iso3=country_iso3,
     )
 
 
@@ -238,7 +317,7 @@ def compute_water(
         # The baseline is always a token estimate (node IT), whatever meter the run had.
         b_total = _split(baseline_energy_wh, baseline_energy_wh_total, "node_it", pue, bf)[3]
         baseline = _f(b_total)
-        avoided = _f(b_total - total)  # signed, never clamped
+        avoided = _f(b_total - total) + 0.0  # signed, never clamped (+0.0 folds -0.0)
 
     caveats: list[str] = list(factors.caveats)
     if derived:
@@ -262,6 +341,9 @@ def compute_water(
         "avoided_water_ml": avoided,
         "factors": [dict(r) for r in factors.records],
         "caveats": caveats,
+        # Same shape as a combine_water() roll-up, so one run and many look alike.
+        "runs_counted": 1,
+        "runs_without_water": 0,
     }
 
 
@@ -274,7 +356,10 @@ def combine_water(blocks) -> dict | None:
     if not blocks:
         return None
     present = [b for b in blocks if b is not None]
-    missing = len(blocks) - len(present)
+    # An already-combined block may itself cover runs without water: count them.
+    inner_missing = sum(int(b.get("runs_without_water") or 0) for b in present)
+    counted = sum(int(b.get("runs_counted", 1)) for b in present)
+    missing = len(blocks) - len(present) + inner_missing
     if not present:
         return None
 
@@ -304,7 +389,7 @@ def combine_water(blocks) -> dict | None:
         "embodied_ml": total("embodied_ml"),
         "baseline_water_ml": total("baseline_water_ml", all_or_none=True),
         "avoided_water_ml": total("avoided_water_ml", all_or_none=True),
-        "runs_counted": len(present),
+        "runs_counted": counted,
         "runs_without_water": missing,
         "caveats": list(dict.fromkeys(caveats)),
     }
