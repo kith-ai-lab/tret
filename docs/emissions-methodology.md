@@ -1170,6 +1170,9 @@ runs are the roughest estimate tret produces**, and both biases understate them.
 
 Excluded: water, network transfer, storage, retrieval and embedding calls, and the
 router's own model call — the same scope as the dollar cost tret already reports.
+Water is specified as a separate figure in
+[water-methodology.md](water-methodology.md); until that ships, no run carries
+one.
 
 ## External anchors
 
@@ -1725,7 +1728,8 @@ lower.
   interval, and do not narrow it because a stakeholder finds it uncomfortable.
 - **Token-based estimation ignores a great deal**: batching and concurrency,
   hardware generation, accelerator utilisation, idle draw between requests,
-  speculative decoding, model parallelism, cooling water, network transfer, and
+  speculative decoding, model parallelism, cooling water (see
+  [water-methodology.md](water-methodology.md)), network transfer, and
   storage.
 - **Class assignment is judgement**, and for closed models price stands in for
   size because active parameter counts are unpublished.
