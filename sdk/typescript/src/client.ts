@@ -125,6 +125,13 @@ interface RequestOptions {
   signal?: AbortSignal
 }
 
+/** The most findings `GET /api/findings` returns in one call (its server-side
+ *  cap; the endpoint has no paging). */
+const FINDINGS_LIMIT = 500
+
+/** `TretError.detail` for a 2xx response whose body is not JSON. */
+export const NON_JSON = 'non-JSON response'
+
 const GATE_PREFIX = /^([a-z][a-z0-9_]*): ([\s\S]*)$/
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -245,7 +252,19 @@ class Http {
   async json<T>(method: string, path: string, options?: RequestOptions): Promise<T> {
     const res = await this.send(method, path, options)
     if (res.status === 204) return undefined as T
-    return (await res.json()) as T
+    // A 200 that is not JSON is not an answer from the API: typically an
+    // older single-app deployment's SPA catch-all serving index.html for a
+    // route it does not have.
+    const type = res.headers.get('content-type') ?? ''
+    const text = await res.text()
+    if (!/[/+]json\b/i.test(type)) {
+      throw new TretError(res.status, `non-JSON response from ${path} (${type || 'no content-type'})`, NON_JSON, text.slice(0, 500))
+    }
+    try {
+      return JSON.parse(text) as T
+    } catch {
+      throw new TretError(res.status, `malformed JSON from ${path}`, NON_JSON, text.slice(0, 500))
+    }
   }
 }
 
@@ -352,6 +371,8 @@ class DocumentsResource {
 class FindingsResource {
   constructor(private readonly http: Http) {}
 
+  /** Newest first. The server returns 100 unless `limit` is given, and at
+   *  most 500. */
   list(params: { runId?: string; status?: string; schemaSlug?: string; limit?: number } = {}): Promise<Finding[]> {
     return this.http.json('GET', '/api/findings', {
       query: {
@@ -428,10 +449,13 @@ class RunsResource {
    * the backlog in between (runs past 5000 events), positions no longer line
    * up and the skip falls back to the events' timestamps.
    *
-   * A run that finished long ago may have no stream left to replay; the
-   * server then only sends keepalives. When that happens (or a reconnect
-   * finds the run already finished), the iterator checks the run record and
-   * ends with a terminal event built from it, flagged `synthetic: true`.
+   * A reconnect always goes back to the stream, so a run that finished while
+   * the connection was down still delivers its trailing events and its real
+   * `done`. Only when a connection brings nothing new — a keepalive before any
+   * new event, or a close with nothing new — does the iterator read the run
+   * record; if the run is over (the server forgets a finished run's backlog
+   * once nobody is reading it), it ends with a terminal event built from the
+   * record, flagged `synthetic: true`.
    */
   events(id: string, options: EventsOptions = {}): AsyncIterable<RunEvent> {
     return { [Symbol.asyncIterator]: () => this.streamEvents(id, options) }
@@ -448,7 +472,6 @@ class RunsResource {
     let lastTs: number | null = null
     let atLastTs = 0 // how many consumed frames carry exactly `lastTs`
     let failures = 0 // consecutive connections that ended without progress
-    let connection = 0
     let lastError: unknown
 
     for (;;) {
@@ -458,22 +481,21 @@ class RunsResource {
       const controller = new AbortController()
       const onAbort = () => controller.abort(abortReason(signal!))
       signal?.addEventListener('abort', onAbort, { once: true })
+      // Whether this connection opened, and whether it delivered anything new.
+      // A reconnect always goes back to the stream first: a run that finished
+      // while we were away still has its backlog there (the trailing events
+      // and the real `done`), and only a stream with nothing new to say sends
+      // us to the run record.
+      let opened = false
+      let progressed = false
       try {
-        if (connection > 0) {
-          const finished = await this.terminalFromRecord(id, signal)
-          if (finished) {
-            yield finished
-            return
-          }
-        }
-        connection++
         const res = await this.http.send('GET', path, { signal: controller.signal }, 'text/event-stream')
         if (!res.body) throw new TretStreamError('the event stream response had no body')
+        opened = true
 
         let position = 0
         let tsMode = false // the backlog was trimmed: skip by timestamp instead
         let skippedAtTs = 0
-        let progressed = false
         for await (const frame of parseSse(res.body)) {
           if (frame.event === 'ping') {
             // Keepalives (every 30s) and nothing else on this connection:
@@ -526,6 +548,20 @@ class RunsResource {
         signal?.removeEventListener('abort', onAbort)
         controller.abort()
       }
+      if (opened && !progressed) {
+        // The stream ended with nothing we had not already seen. If the run
+        // is over, the server no longer holds its events: end from the record.
+        try {
+          const finished = await this.terminalFromRecord(id, signal)
+          if (finished) {
+            yield finished
+            return
+          }
+        } catch (error) {
+          if (isAbort(error, signal) || !isRetryable(error)) throw error
+          lastError = error
+        }
+      }
       failures++
       if (failures > maxReconnects) {
         throw new TretStreamError(
@@ -577,7 +613,10 @@ class RunsResource {
    * back the final run record and its findings, and build the Receipt.
    *
    * Resolves for any finished run, including `failed` and `cancelled` —
-   * check `run.status`. Throws `TretBudgetRefused` (status 0, `runId` set)
+   * check `run.status`. `findings` holds up to 500 of the run's findings
+   * (newest first; the server's cap per request, which has no paging);
+   * `events.findingIds` always lists every finding the run recorded, so a
+   * run past that cap can fetch the rest with `findings.get(id)`. Throws `TretBudgetRefused` (status 0, `runId` set)
    * when a pre-run gate refused the run before it started. Aborting `signal`
    * stops waiting; it does not cancel the run (call `cancel()` for that).
    */
@@ -622,7 +661,7 @@ class RunsResource {
         throw new TretBudgetRefused(0, refusal.reason, refusal.detail, refusal, run, runId)
       }
     }
-    const findings = await this.findings.list({ runId })
+    const findings = await this.findings.list({ runId, limit: FINDINGS_LIMIT })
     const receipt = buildReceipt({ run, routing: summary.routing, lastUsage: summary.lastUsage })
     return { run, events: summary, findings, receipt }
   }
@@ -704,14 +743,16 @@ export class Tret {
   }
 
   /** `GET /api/version` — `{version, git_sha}`. A server from before that
-   *  endpoint existed answers 404; then `/api/healthz` is asked instead and
-   *  both fields are null (reachable, version unknown). */
+   *  endpoint existed answers 404 (or, on a single-app deployment, its SPA
+   *  shell as HTML); then `/api/healthz` is asked instead and both fields are
+   *  null (reachable, version unknown). */
   async version(): Promise<{ version: string | null; git_sha: string | null }> {
     try {
       const info = await this.http.json<VersionInfo>('GET', '/api/version')
       return { version: info.version, git_sha: info.git_sha ?? null }
     } catch (error) {
-      if (!(error instanceof TretNotFound)) throw error
+      const missing = error instanceof TretNotFound || (error instanceof TretError && error.detail === NON_JSON)
+      if (!missing) throw error
       await this.http.json('GET', '/api/healthz')
       return { version: null, git_sha: null }
     }

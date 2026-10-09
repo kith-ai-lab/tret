@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { Tret, TretAuthError, TretNotFound } from '../src/index.js'
+import { NON_JSON, Tret, TretAuthError, TretError, TretNotFound } from '../src/index.js'
 import { json, mockFetch } from './helpers.js'
 
 const BASE = 'https://tret.test'
@@ -78,6 +78,30 @@ test('version() reads /api/version, and falls back to healthz on an older server
   })
   assert.deepEqual(await new Tret({ baseUrl: BASE, fetch: old.fetch }).version(), { version: null, git_sha: null })
   assert.deepEqual(old.calls.map((c) => c.path), ['/api/version', '/api/healthz'])
+})
+
+test('version() also falls back when the server answers with its SPA shell', async () => {
+  // An older single-app deployment: no /api/version route, so its catch-all
+  // serves index.html with a 200.
+  const html = () => new Response('<!doctype html><title>tret</title>', { headers: { 'Content-Type': 'text/html' } })
+  const m = mockFetch({ 'GET /api/version': html, 'GET /api/healthz': () => json({ ok: true }) })
+  assert.deepEqual(await new Tret({ baseUrl: BASE, fetch: m.fetch }).version(), { version: null, git_sha: null })
+})
+
+test('a 2xx that is not JSON is a TretError, never a parse crash', async () => {
+  const m = mockFetch({
+    'GET /api/packs': () => new Response('<!doctype html>', { headers: { 'Content-Type': 'text/html; charset=utf-8' } }),
+    'GET /api/harnesses': () => new Response('{not json', { headers: { 'Content-Type': 'application/json' } }),
+  })
+  const tret = new Tret({ baseUrl: BASE, fetch: m.fetch })
+  for (const call of [() => tret.packs.list(), () => tret.harnesses.list()]) {
+    await assert.rejects(call(), (e: unknown) => {
+      assert.ok(e instanceof TretError)
+      assert.equal(e.status, 200)
+      assert.equal(e.detail, NON_JSON)
+      return true
+    })
+  }
 })
 
 test('runs.create maps camelCase options onto CreateRunBody', async () => {

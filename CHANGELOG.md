@@ -56,11 +56,16 @@ one that needs action on an existing install.
   types are generated from a committed OpenAPI snapshot, which CI regenerates
   (`backend/scripts/dump_openapi.py`, no database needed) and diffs. Not on
   npm yet; [docs/embedding.md](docs/embedding.md#typescript) and the package
-  README cover installing it from a checkout.
+  README cover installing it from a checkout. A reconnect always goes back to
+  the stream before it reads the run record, so a run that finished while
+  the connection was down still delivers its trailing events. A 2xx that is
+  not JSON (an SPA shell) is a `TretError`, not a parse crash.
+  `complete()` asks for up to 500 findings, the server's cap.
 - **`GET /api/version`** returns `{version, git_sha}`. It is unauthenticated,
   like `/api/healthz`. The sha comes from `TRET_GIT_SHA` (set it when
-  building an image), else from `git rev-parse HEAD` in a source checkout,
-  else `null`.
+  building an image), else from `git rev-parse HEAD`, else `null`. The `git`
+  answer is used only when the repository's top level is the tret checkout
+  itself, and it is read off the event loop, once per process.
 - The OpenAPI schema now lists the two accepted `action` values on
   `POST /api/findings/{id}/approval`. The body (`{action, note}`) and its
   validation are unchanged.

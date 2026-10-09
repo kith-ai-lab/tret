@@ -23,12 +23,21 @@ export function json(body: unknown, status = 200, headers: Record<string, string
  *  connection mid-stream (what a proxy timeout looks like to fetch). */
 export function sse(frames: string[], end: 'close' | 'error' | 'hang' = 'close', signal?: AbortSignal): Response {
   const encoder = new TextEncoder()
+  const queue = [...frames]
+  // Pull-based, one frame per read: erroring a stream discards whatever is
+  // still queued, so a drop must happen only after the frames were read.
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      for (const frame of frames) controller.enqueue(encoder.encode(frame))
+      if (end === 'hang') {
+        signal?.addEventListener('abort', () => controller.error(signal.reason), { once: true })
+      }
+    },
+    pull(controller) {
+      const next = queue.shift()
+      if (next !== undefined) return controller.enqueue(encoder.encode(next))
       if (end === 'close') controller.close()
       else if (end === 'error') controller.error(new TypeError('terminated'))
-      else signal?.addEventListener('abort', () => controller.error(signal.reason), { once: true })
+      else return new Promise<void>(() => undefined) // hang until aborted
     },
   })
   return new Response(stream, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })

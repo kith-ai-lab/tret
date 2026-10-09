@@ -156,11 +156,15 @@ iterator ends after `done` or `error`.
   reconnects (backoff from `reconnectDelayMs`, up to `maxReconnects` in a row)
   and skips what it already delivered, by position. If the server trimmed the
   backlog in between (runs past 5,000 events), it skips by timestamp instead.
-- **Old runs.** The server keeps a finished run's events only while someone
-  is reading them and for a short while after. Asking for the events of a run
-  it has forgotten gets only keepalives, which arrive every 30 seconds. On the
-  first keepalive, the iterator reads the run record and ends with a `done` or
-  `error` built from it, marked `synthetic: true`.
+- **Finished runs.** A reconnect always goes back to the stream first, so a
+  run that finished while the connection was down still delivers its trailing
+  events and its real `done`. The server keeps a finished run's events only
+  while someone is reading them and for a short while after. When a
+  connection brings nothing new (a keepalive before any new event, or a close
+  with nothing new), the iterator reads the run record. If the run is over, it
+  ends with a `done` or `error` built from the record, marked
+  `synthetic: true`. Keepalives arrive every 30 seconds, so a long-forgotten
+  run can take that long to end.
 - **Stopping.** `break` closes the connection. Aborting `signal` closes it and
   throws an `AbortError`. Neither cancels the run; `tret.runs.cancel(id)` does
   that.
@@ -204,11 +208,14 @@ for a person. Subclasses:
 | `TretBudgetRefused` | a gate refused: `{reason, detail}`. Over HTTP, a 402 or 403 with that body. On a run, a pre-run gate (core's spend budget, a hosting extension's credits) does not refuse `POST /api/runs` itself. The run fails before its first model call, and `runs.complete()` throws this with `status: 0` and `runId` set. |
 | `TretStreamError` | the event stream could not be re-established |
 
+A 2xx whose body is not JSON (a single-app deployment's SPA shell answering
+a route it lacks) is a `TretError` whose `detail` is `NON_JSON`.
+
 ## API
 
 | | |
 |---|---|
-| `tret.version()` | `GET /api/version` → `{version, git_sha}`. Falls back to `/api/healthz` (both null) on servers that predate it. |
+| `tret.version()` | `GET /api/version` → `{version, git_sha}`. Falls back to `/api/healthz` (both null) on servers that predate it, including ones that answer with their SPA shell. |
 | `tret.healthz()` | `GET /api/healthz` |
 | `tret.auth.config() / me() / login({email, password}) / logout() / selectWorkspace(id)` | `/api/auth/*` |
 | `tret.harnesses.list() / get(id)` | `get` adds `assembled_system_prompt` and `task_types` |
@@ -216,7 +223,7 @@ for a person. Subclasses:
 | `tret.documents.upload(data, name, mime?) / list() / get(id)` | `data`: `Blob`, `ArrayBuffer` or any typed array (a Node `Buffer` too) |
 | `tret.runs.create(opts) / get(id) / list({limit, cursor, topLevelOnly}) / cancel(id)` | `list` always returns `{items, next_cursor}` |
 | `tret.runs.events(id, {signal, maxReconnects, reconnectDelayMs})` | `AsyncIterable<RunEvent>` |
-| `tret.runs.complete(opts, {onEvent, signal})` | `{run, events, findings, receipt}` |
+| `tret.runs.complete(opts, {onEvent, signal})` | `{run, events, findings, receipt}`. `findings` holds up to 500 (the server's cap); `events.findingIds` lists all of them. |
 | `tret.findings.list({runId}) / get(id) / decide(id, {approved, comment})` | |
 
 ## Types and the OpenAPI snapshot

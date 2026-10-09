@@ -9,15 +9,20 @@ is what a bug report against a deployed build actually needs.
 `git_sha` resolution, first hit wins:
   1. `TRET_GIT_SHA` — set by whoever builds the image (a container has no
      `.git` to ask, so this is the deployed-build path);
-  2. `git rev-parse HEAD` run against this checkout — the source-checkout
-     path, best-effort and bounded by a short timeout;
+  2. `git rev-parse HEAD` — only when this module is running from a tret
+     checkout: `git rev-parse --show-toplevel` must be the directory that
+     contains `backend/tret`. An installed copy (site-packages) that happens
+     to sit inside some other repository would otherwise report that
+     repository's commit as tret's;
   3. `null` — unknown, never a made-up value.
 
 Resolved once per process and cached: the answer cannot change under a
-running process, and a request must never pay for a `git` subprocess.
+running process. The first resolution runs the `git` subprocesses in a worker
+thread, so the event loop never waits on them.
 """
 from __future__ import annotations
 
+import asyncio
 import functools
 import os
 import re
@@ -39,14 +44,14 @@ class VersionOut(BaseModel):
     git_sha: str | None = None
 
 
-@functools.lru_cache(maxsize=1)
-def git_sha() -> str | None:
-    env_sha = os.environ.get("TRET_GIT_SHA", "").strip().lower()
-    if env_sha:
-        return env_sha if _SHA_RE.match(env_sha) else None
+# backend/tret/api/version.py -> the checkout root that contains backend/tret.
+CHECKOUT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _git(*args: str) -> str | None:
     try:
         out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", *args],
             cwd=Path(__file__).resolve().parent,
             capture_output=True,
             text=True,
@@ -55,10 +60,26 @@ def git_sha() -> str | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    sha = out.stdout.strip().lower()
-    return sha if out.returncode == 0 and _SHA_RE.match(sha) else None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+@functools.lru_cache(maxsize=1)
+def git_sha() -> str | None:
+    env_sha = os.environ.get("TRET_GIT_SHA", "").strip().lower()
+    if env_sha:
+        return env_sha if _SHA_RE.match(env_sha) else None
+    toplevel = _git("rev-parse", "--show-toplevel")
+    if not toplevel:
+        return None
+    try:
+        if Path(toplevel).resolve() != CHECKOUT_ROOT:
+            return None
+    except OSError:
+        return None
+    sha = (_git("rev-parse", "HEAD") or "").lower()
+    return sha if _SHA_RE.match(sha) else None
 
 
 @router.get("/version", response_model=VersionOut)
 async def version() -> VersionOut:
-    return VersionOut(version=__version__, git_sha=git_sha())
+    return VersionOut(version=__version__, git_sha=await asyncio.to_thread(git_sha))

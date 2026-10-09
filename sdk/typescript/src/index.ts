@@ -5,6 +5,7 @@
  * FormData and AbortController that Node >= 18, browsers and Electron share.
  */
 export {
+  NON_JSON,
   Tret,
   type CompleteOptions,
   type CompleteResult,

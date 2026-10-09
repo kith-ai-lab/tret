@@ -97,7 +97,8 @@ test('a dropped connection resumes without repeating or losing events (by positi
   const tret = new Tret({ baseUrl: BASE, fetch: m.fetch })
   const events = await collect(tret.runs.events('r1', { reconnectDelayMs: 1 }))
   assert.deepEqual(types(events), ['routing', 'text_delta', 'text_delta', 'usage', 'finding_recorded', 'done'])
-  assert.deepEqual(m.calls.map((c) => c.path), ['/api/runs/r1/events', '/api/runs/r1', '/api/runs/r1/events'])
+  // Straight back to the stream: no run-record check while events keep coming.
+  assert.deepEqual(m.calls.map((c) => c.path), ['/api/runs/r1/events', '/api/runs/r1/events'])
 })
 
 test('a trimmed backlog on reconnect falls back to skipping by timestamp', async () => {
@@ -125,6 +126,46 @@ test('a finished run whose stream is gone ends with a synthetic terminal event',
   assert.equal(only.data.message, 'max_iterations (8) reached without completion')
   // The hanging stream was closed when the iterator finished.
   assert.equal(m.calls[0]!.signal?.aborted, true)
+})
+
+test('a run that finished while disconnected still delivers its trailing events', async () => {
+  // Dropped after the first text_delta. By the time we reconnect the run has
+  // finished (the record says so), but the server still holds the backlog and
+  // replays all of it: the rest of the text, the finding, usage and the real
+  // done must all arrive, not a synthetic done from the record.
+  const m = mockFetch({
+    'POST /api/runs': () => json({ run_id: 'r1' }),
+    [EVENTS]: [() => sse(wire.slice(0, 2), 'error'), () => sse(wire)],
+    [RUN]: () => json(runRecord()),
+    'GET /api/findings': () => json([{ id: 'f1', run_id: 'r1', status: 'draft' }]),
+  })
+  const tret = new Tret({ baseUrl: BASE, fetch: m.fetch })
+  const seen: RunEvent[] = []
+  const result = await tret.runs.complete({ harnessId: 'h1' }, { onEvent: (e) => void seen.push(e) })
+  assert.deepEqual(types(seen), ['routing', 'text_delta', 'text_delta', 'usage', 'finding_recorded', 'done'])
+  assert.equal(seen.some((e) => e.synthetic), false)
+  assert.equal(result.events.text, 'Hello')
+  assert.deepEqual(result.events.findingIds, ['f1'])
+  assert.equal(result.events.lastUsage?.output_tokens, 300)
+  const eventCalls = m.calls.filter((c) => c.path === '/api/runs/r1/events')
+  assert.equal(eventCalls.length, 2)
+  // The record is read once, after the stream ended, not before reconnecting.
+  const order = m.calls.map((c) => c.path)
+  assert.ok(order.lastIndexOf('/api/runs/r1/events') < order.indexOf('/api/runs/r1'))
+})
+
+test('a reconnect that brings nothing new ends from the finished run record', async () => {
+  // The server forgot the backlog between connections: the second stream
+  // closes empty, so the record (failed) supplies the terminal event.
+  const m = mockFetch({
+    [EVENTS]: [() => sse(wire.slice(0, 2), 'error'), () => sse([])],
+    [RUN]: () => json(runRecord({ status: 'cancelled', error: null })),
+  })
+  const tret = new Tret({ baseUrl: BASE, fetch: m.fetch })
+  const events = await collect(tret.runs.events('r1', { reconnectDelayMs: 1 }))
+  assert.deepEqual(types(events), ['routing', 'text_delta', 'error'])
+  const last = events.at(-1)!
+  assert.ok(last.type === 'error' && last.synthetic === true && last.data.status === 'cancelled')
 })
 
 test('a 4xx on connect is thrown, not retried', async () => {
@@ -191,6 +232,8 @@ test('complete() runs to the end and returns run, summary, findings and receipt'
   assert.equal(result.events.terminal?.type, 'done')
   assert.equal(result.findings[0]?.id, 'f1')
   assert.equal(m.calls.find((c) => c.path === '/api/findings')!.query.get('run_id'), 'r1')
+  // Past the server's default of 100: complete() asks for its cap.
+  assert.equal(m.calls.find((c) => c.path === '/api/findings')!.query.get('limit'), '500')
   assert.deepEqual(result.receipt, {
     model: 'openrouter/a',
     usd: 0.0006,

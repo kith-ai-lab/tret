@@ -6,6 +6,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -52,17 +53,72 @@ def test_a_malformed_env_sha_is_reported_as_unknown_not_echoed(monkeypatch):
     assert _client().get("/api/version").json()["git_sha"] is None
 
 
-def test_without_the_env_var_git_is_asked(monkeypatch):
-    monkeypatch.delenv("TRET_GIT_SHA", raising=False)
-    calls = []
-
+def _fake_git(calls: list, *, toplevel: str | None, head: str = "0123abcd" * 5):
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, stdout="0123abcd" * 5 + "\n", stderr="")
+        if cmd == ["git", "rev-parse", "--show-toplevel"]:
+            if toplevel is None:
+                return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="not a repo")
+            return subprocess.CompletedProcess(cmd, 0, stdout=toplevel + "\n", stderr="")
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=head + "\n", stderr="")
+        raise AssertionError(f"unexpected command {cmd}")
+
+    return fake_run
+
+
+def test_without_the_env_var_the_checkout_is_asked(monkeypatch):
+    monkeypatch.delenv("TRET_GIT_SHA", raising=False)
+    calls = []
+    monkeypatch.setattr(
+        version_api.subprocess, "run", _fake_git(calls, toplevel=str(version_api.CHECKOUT_ROOT))
+    )
+    assert _client().get("/api/version").json()["git_sha"] == "0123abcd" * 5
+    assert calls == [["git", "rev-parse", "--show-toplevel"], ["git", "rev-parse", "HEAD"]]
+
+
+def test_the_checkout_root_is_the_directory_holding_backend_tret():
+    assert (version_api.CHECKOUT_ROOT / "backend" / "tret" / "api" / "version.py").is_file()
+
+
+def test_a_git_repository_that_is_not_the_tret_checkout_is_not_trusted(monkeypatch, tmp_path):
+    """tret installed into site-packages inside some other project's repo:
+    git answers, but with that project's commit. Reported as unknown."""
+    monkeypatch.delenv("TRET_GIT_SHA", raising=False)
+    calls = []
+    monkeypatch.setattr(version_api.subprocess, "run", _fake_git(calls, toplevel=str(tmp_path)))
+    assert _client().get("/api/version").json()["git_sha"] is None
+    assert ["git", "rev-parse", "HEAD"] not in calls
+
+
+def test_a_malformed_head_is_unknown(monkeypatch):
+    monkeypatch.delenv("TRET_GIT_SHA", raising=False)
+    calls = []
+    fake = _fake_git(calls, toplevel=str(version_api.CHECKOUT_ROOT), head="not-a-sha")
+    monkeypatch.setattr(version_api.subprocess, "run", fake)
+    assert _client().get("/api/version").json()["git_sha"] is None
+
+
+def test_git_runs_off_the_event_loop(monkeypatch):
+    monkeypatch.delenv("TRET_GIT_SHA", raising=False)
+    offloaded = []
+    real_to_thread = version_api.asyncio.to_thread
+
+    async def recording_to_thread(fn, *args, **kwargs):
+        offloaded.append(fn)
+        return await real_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(version_api.asyncio, "to_thread", recording_to_thread)
+    threads = []
+
+    def fake_run(cmd, **kwargs):
+        threads.append(threading.current_thread())
+        return subprocess.CompletedProcess(cmd, 128, stdout="", stderr="")
 
     monkeypatch.setattr(version_api.subprocess, "run", fake_run)
-    assert _client().get("/api/version").json()["git_sha"] == "0123abcd" * 5
-    assert calls == [["git", "rev-parse", "HEAD"]]
+    assert _client().get("/api/version").status_code == 200
+    assert offloaded == [version_api.git_sha]
+    assert threads and all(t is not threading.main_thread() for t in threads)
 
 
 @pytest.mark.parametrize(
@@ -90,16 +146,15 @@ def test_no_env_and_no_usable_git_is_null(monkeypatch, outcome):
 def test_the_sha_is_resolved_once_per_process(monkeypatch):
     monkeypatch.delenv("TRET_GIT_SHA", raising=False)
     calls = []
-
-    def fake_run(cmd, **kwargs):
-        calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, stdout="abcdef1\n", stderr="")
-
-    monkeypatch.setattr(version_api.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        version_api.subprocess,
+        "run",
+        _fake_git(calls, toplevel=str(version_api.CHECKOUT_ROOT), head="abcdef1"),
+    )
     client = _client()
+    assert client.get("/api/version").json()["git_sha"] == "abcdef1"
     client.get("/api/version")
-    client.get("/api/version")
-    assert len(calls) == 1
+    assert len(calls) == 2  # --show-toplevel + HEAD, once
 
 
 # ── the OpenAPI snapshot ─────────────────────────────────────────────────────
