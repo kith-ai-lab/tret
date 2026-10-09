@@ -42,6 +42,29 @@ one that needs action on an existing install.
   `reasoning_requested`; both are additive and absent or null on older runs.
   Curated catalog entries may carry an `openrouter_id`.
 
+- **TypeScript SDK (`@tret/sdk`, `sdk/typescript/`).** A zero-dependency
+  client for a running tret server, for Node ≥ 18, Electron and the browser
+  (ESM + CJS + types). It covers auth (bearer token, session cookie or none),
+  harnesses, packs, documents, runs, findings and `version()`. `runs.events()`
+  streams a run as a typed `AsyncIterable` of every event the engine
+  publishes, with its own SSE parser over `fetch` that reconnects on its own.
+  `runs.complete()` creates a run, streams it to the end and returns the run,
+  its findings and a `Receipt` with the Python SDK's fields; `null` there
+  means unavailable, never zero. Errors are typed: `TretAuthError`,
+  `TretNotFound`, `TretRateLimited`, and `TretBudgetRefused` for gate
+  refusals, including a run refused by the pre-run gate. Request/response
+  types are generated from a committed OpenAPI snapshot, which CI regenerates
+  (`backend/scripts/dump_openapi.py`, no database needed) and diffs. Not on
+  npm yet; [docs/embedding.md](docs/embedding.md#typescript) and the package
+  README cover installing it from a checkout.
+- **`GET /api/version`** returns `{version, git_sha}`. It is unauthenticated,
+  like `/api/healthz`. The sha comes from `TRET_GIT_SHA` (set it when
+  building an image), else from `git rev-parse HEAD` in a source checkout,
+  else `null`.
+- The OpenAPI schema now lists the two accepted `action` values on
+  `POST /api/findings/{id}/approval`. The body (`{action, note}`) and its
+  validation are unchanged.
+
 ### Fixed
 
 - Saving the emissions settings form no longer deletes settings the form does

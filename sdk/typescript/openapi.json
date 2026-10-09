@@ -1,0 +1,5820 @@
+{
+  "components": {
+    "schemas": {
+      "ApprovalBody": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "'approve' or 'reject'",
+            "enum": [
+              "approve",
+              "reject"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional reviewer comment",
+            "title": "Note"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "ApprovalBody",
+        "type": "object"
+      },
+      "AuthConfigOut": {
+        "properties": {
+          "auth_mode": {
+            "title": "Auth Mode",
+            "type": "string"
+          },
+          "oidc_configured": {
+            "title": "Oidc Configured",
+            "type": "boolean"
+          },
+          "oidc_login_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oidc Login Url"
+          }
+        },
+        "required": [
+          "auth_mode",
+          "oidc_configured"
+        ],
+        "title": "AuthConfigOut",
+        "type": "object"
+      },
+      "AuthorizeBody": {
+        "additionalProperties": false,
+        "properties": {
+          "scope_set": {
+            "default": "read",
+            "enum": [
+              "read",
+              "write"
+            ],
+            "title": "Scope Set",
+            "type": "string"
+          }
+        },
+        "title": "AuthorizeBody",
+        "type": "object"
+      },
+      "Body_install_archive_api_packs_install_archive_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_install_archive_api_packs_install_archive_post",
+        "type": "object"
+      },
+      "Body_upload_document_api_documents_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_document_api_documents_post",
+        "type": "object"
+      },
+      "CreateConversationBody": {
+        "properties": {
+          "harness_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harness Id"
+          }
+        },
+        "title": "CreateConversationBody",
+        "type": "object"
+      },
+      "CreateDraftBody": {
+        "properties": {
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug"
+        ],
+        "title": "CreateDraftBody",
+        "type": "object"
+      },
+      "CreateInviteBody": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "role": {
+            "default": "analyst",
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "CreateInviteBody",
+        "type": "object"
+      },
+      "CreateRunBody": {
+        "properties": {
+          "document_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Document Ids",
+            "type": "array"
+          },
+          "harness_id": {
+            "format": "uuid",
+            "title": "Harness Id",
+            "type": "string"
+          },
+          "model_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Override"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "task_input": {
+            "additionalProperties": true,
+            "title": "Task Input",
+            "type": "object"
+          },
+          "task_type": {
+            "default": "freeform",
+            "title": "Task Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "harness_id"
+        ],
+        "title": "CreateRunBody",
+        "type": "object"
+      },
+      "CreateUserBody": {
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          },
+          "role": {
+            "default": "analyst",
+            "title": "Role",
+            "type": "string"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
+          }
+        },
+        "required": [
+          "email",
+          "display_name",
+          "password"
+        ],
+        "title": "CreateUserBody",
+        "type": "object"
+      },
+      "CreateWorkspaceBody": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateWorkspaceBody",
+        "type": "object"
+      },
+      "DataRequestUpdate": {
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "DataRequestUpdate",
+        "type": "object"
+      },
+      "EgressOverride": {
+        "properties": {
+          "egress_class": {
+            "title": "Egress Class",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "egress_class",
+          "mode"
+        ],
+        "title": "EgressOverride",
+        "type": "object"
+      },
+      "EmissionsWhatIfRequest": {
+        "description": "`factors` is deliberately typed as a plain dict rather than\n`EmissionsOverrides` itself: the handler validates it by hand so an invalid\ndocument reports a plain validation-message string as the 422 `detail`\n(see the route below), instead of FastAPI's own structured per-field error\nbody that automatic model validation would produce.",
+        "properties": {
+          "days": {
+            "default": 30,
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "title": "Days",
+            "type": "integer"
+          },
+          "factors": {
+            "additionalProperties": true,
+            "title": "Factors",
+            "type": "object"
+          },
+          "mode": {
+            "default": "estimate_both_sides",
+            "enum": [
+              "preserve_measured_energy",
+              "estimate_both_sides"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          }
+        },
+        "title": "EmissionsWhatIfRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HarnessBody": {
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "loop_config": {
+            "additionalProperties": true,
+            "title": "Loop Config",
+            "type": "object"
+          },
+          "model_policy": {
+            "additionalProperties": true,
+            "title": "Model Policy",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pack_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pack Id"
+          },
+          "pack_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Pack Ids",
+            "type": "array"
+          },
+          "system_prompt_extra": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Prompt Extra"
+          },
+          "task_profile": {
+            "default": "freeform",
+            "title": "Task Profile",
+            "type": "string"
+          },
+          "tool_names": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tool Names",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "HarnessBody",
+        "type": "object"
+      },
+      "ImportBody": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ImportItem"
+            },
+            "maxItems": 50,
+            "title": "Items",
+            "type": "array"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "items"
+        ],
+        "title": "ImportBody",
+        "type": "object"
+      },
+      "ImportItem": {
+        "properties": {
+          "drive_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Drive Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "ImportItem",
+        "type": "object"
+      },
+      "InstallBody": {
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "InstallBody",
+        "type": "object"
+      },
+      "InviteCreateOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "email_sent": {
+            "title": "Email Sent",
+            "type": "boolean"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "invite_url": {
+            "title": "Invite Url",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "status",
+          "expires_at",
+          "created_at",
+          "invite_url",
+          "token",
+          "email_sent"
+        ],
+        "title": "InviteCreateOut",
+        "type": "object"
+      },
+      "InviteOut": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "role",
+          "status",
+          "expires_at",
+          "created_at"
+        ],
+        "title": "InviteOut",
+        "type": "object"
+      },
+      "LessonReviewBody": {
+        "additionalProperties": false,
+        "properties": {
+          "approve": {
+            "title": "Approve",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "approve"
+        ],
+        "title": "LessonReviewBody",
+        "type": "object"
+      },
+      "LoginBody": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "password": {
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "LoginBody",
+        "type": "object"
+      },
+      "MemberOut": {
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "joined_at": {
+            "format": "date-time",
+            "title": "Joined At",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "email",
+          "display_name",
+          "role",
+          "joined_at"
+        ],
+        "title": "MemberOut",
+        "type": "object"
+      },
+      "PasswordChangeBody": {
+        "properties": {
+          "current_password": {
+            "title": "Current Password",
+            "type": "string"
+          },
+          "new_password": {
+            "title": "New Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "title": "PasswordChangeBody",
+        "type": "object"
+      },
+      "PatchDraftBody": {
+        "properties": {
+          "files": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files"
+          },
+          "manifest_json": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Json"
+          }
+        },
+        "title": "PatchDraftBody",
+        "type": "object"
+      },
+      "PublishDeliverableBody": {
+        "additionalProperties": false,
+        "properties": {
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "format": {
+            "title": "Format",
+            "type": "string"
+          },
+          "target_slug": {
+            "title": "Target Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_slug",
+          "filename",
+          "format"
+        ],
+        "title": "PublishDeliverableBody",
+        "type": "object"
+      },
+      "RegistryInstallBody": {
+        "properties": {
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "version"
+        ],
+        "title": "RegistryInstallBody",
+        "type": "object"
+      },
+      "ResourceEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "drive_id": {
+            "minLength": 1,
+            "title": "Drive Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "site_drive",
+              "onedrive"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "site_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Site Id"
+          },
+          "web_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Web Url"
+          }
+        },
+        "required": [
+          "drive_id",
+          "label",
+          "kind"
+        ],
+        "title": "ResourceEntry",
+        "type": "object"
+      },
+      "ResourcesBody": {
+        "additionalProperties": false,
+        "properties": {
+          "read": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/ResourceEntry"
+                },
+                "maxItems": 50,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Read"
+          },
+          "write": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/WriteTargetEntry"
+                },
+                "maxItems": 20,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Write"
+          }
+        },
+        "title": "ResourcesBody",
+        "type": "object"
+      },
+      "RoutingPreviewBody": {
+        "properties": {
+          "compare": {
+            "default": false,
+            "title": "Compare",
+            "type": "boolean"
+          },
+          "harness_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harness Id"
+          },
+          "max_output_tokens": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 200000.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Output Tokens"
+          },
+          "model_policy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Policy"
+          },
+          "n_documents": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "N Documents",
+            "type": "integer"
+          },
+          "pack_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pack Id"
+          },
+          "system_prompt_extra": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Prompt Extra"
+          },
+          "task_type": {
+            "default": "freeform",
+            "title": "Task Type",
+            "type": "string"
+          },
+          "tool_names": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Names"
+          },
+          "web_tools_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Web Tools Enabled"
+          }
+        },
+        "title": "RoutingPreviewBody",
+        "type": "object"
+      },
+      "SendMessageBody": {
+        "properties": {
+          "model_override": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Override"
+          },
+          "objective": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objective"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "SendMessageBody",
+        "type": "object"
+      },
+      "SetKeyBody": {
+        "properties": {
+          "api_key": {
+            "title": "Api Key",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "api_key"
+        ],
+        "title": "SetKeyBody",
+        "type": "object"
+      },
+      "SetPasswordBody": {
+        "properties": {
+          "new_password": {
+            "title": "New Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "new_password"
+        ],
+        "title": "SetPasswordBody",
+        "type": "object"
+      },
+      "SwitchWorkspaceBody": {
+        "properties": {
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id"
+        ],
+        "title": "SwitchWorkspaceBody",
+        "type": "object"
+      },
+      "TelemetryToggle": {
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "TelemetryToggle",
+        "type": "object"
+      },
+      "UpdateMemberRoleBody": {
+        "properties": {
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "UpdateMemberRoleBody",
+        "type": "object"
+      },
+      "UserOut": {
+        "properties": {
+          "active": {
+            "default": true,
+            "title": "Active",
+            "type": "boolean"
+          },
+          "current_workspace_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Workspace Id"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "global_role": {
+            "title": "Global Role",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "workspaces": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceSummary"
+            },
+            "title": "Workspaces",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "display_name",
+          "role",
+          "global_role"
+        ],
+        "title": "UserOut",
+        "type": "object"
+      },
+      "ValidateBody": {
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "ValidateBody",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "VersionOut": {
+        "properties": {
+          "git_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git Sha"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version"
+        ],
+        "title": "VersionOut",
+        "type": "object"
+      },
+      "WorkspaceSummary": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "role"
+        ],
+        "title": "WorkspaceSummary",
+        "type": "object"
+      },
+      "WriteTargetEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "drive_id": {
+            "minLength": 1,
+            "title": "Drive Id",
+            "type": "string"
+          },
+          "item_id": {
+            "minLength": 1,
+            "title": "Item Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "site_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Site Id"
+          },
+          "slug": {
+            "pattern": "^[a-z0-9][a-z0-9-]{1,39}$",
+            "title": "Slug",
+            "type": "string"
+          },
+          "web_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Web Url"
+          }
+        },
+        "required": [
+          "slug",
+          "label",
+          "path",
+          "drive_id",
+          "item_id"
+        ],
+        "title": "WriteTargetEntry",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "tret",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/admin/telemetry": {
+      "get": {
+        "operationId": "get_telemetry_api_admin_telemetry_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Telemetry",
+        "tags": [
+          "telemetry"
+        ]
+      },
+      "put": {
+        "operationId": "put_telemetry_api_admin_telemetry_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TelemetryToggle"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Telemetry",
+        "tags": [
+          "telemetry"
+        ]
+      }
+    },
+    "/api/admin/telemetry/preview": {
+      "get": {
+        "operationId": "get_telemetry_preview_api_admin_telemetry_preview_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Telemetry Preview",
+        "tags": [
+          "telemetry"
+        ]
+      }
+    },
+    "/api/analytics/emissions": {
+      "get": {
+        "description": "Estimated emissions over the window, summed as recorded.\n\nA thin workspace-scoping wrapper — see `_emissions_response` for the\nactual rollup, and `_guardrails_response`'s neighbouring docstring for why\nthe split exists.",
+        "operationId": "emissions_api_analytics_emissions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 3650,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": 30,
+              "title": "Days"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Emissions",
+        "tags": [
+          "analytics"
+        ]
+      }
+    },
+    "/api/analytics/emissions/whatif": {
+      "post": {
+        "description": "What this window's emissions would look like under a different set of\nfactors — computed on the fly, never written anywhere.\n\nA thin workspace-scoping-and-validation wrapper — see\n`_emissions_whatif_response` for the recompute itself. Validates `factors`\nagainst `EmissionsOverrides` by hand (422, the validation message as a\nplain string) and checks the `emissions_whatif` workspace gate (403 on\nrefusal) before anything else runs.",
+        "operationId": "emissions_whatif_api_analytics_emissions_whatif_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmissionsWhatIfRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Emissions Whatif",
+        "tags": [
+          "analytics"
+        ]
+      }
+    },
+    "/api/analytics/guardrails": {
+      "get": {
+        "description": "Aggregate guardrail stats: method reliability, validation pressure, energy.\n\nA thin workspace-scoping wrapper around `_guardrails_response`, which does\nthe actual aggregation and stays a plain function of `(project_id, days,\nuser, db)` — `project_id=None` there still means \"no filter\", unlike this\nroute, which never lets that reach it unresolved (see `_scoped_project_id`).",
+        "operationId": "guardrails_api_analytics_guardrails_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 3650,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": 30,
+              "title": "Days"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Guardrails",
+        "tags": [
+          "analytics"
+        ]
+      }
+    },
+    "/api/analytics/routing": {
+      "get": {
+        "description": "How each model has actually performed, per shape of task and objective.\n\nA thin workspace-scoping wrapper — see `_routing_response`, and\n`_guardrails_response`'s neighbouring docstring for why the split exists.",
+        "operationId": "routing_api_analytics_routing_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 3650,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": 90,
+              "title": "Days"
+            }
+          },
+          {
+            "in": "query",
+            "name": "size_band",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Size Band"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Routing",
+        "tags": [
+          "analytics"
+        ]
+      }
+    },
+    "/api/analytics/routing/history": {
+      "get": {
+        "description": "How routing has moved over time: what got picked, how well it did, when it changed.\n\nA thin workspace-scoping wrapper — see `_routing_history_response`, and\n`_guardrails_response`'s neighbouring docstring for why the split exists.",
+        "operationId": "routing_history_endpoint_api_analytics_routing_history_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 3650,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": 180,
+              "title": "Days"
+            }
+          },
+          {
+            "in": "query",
+            "name": "bucket_days",
+            "required": false,
+            "schema": {
+              "default": 7,
+              "maximum": 90,
+              "minimum": 1,
+              "title": "Bucket Days",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Routing History Endpoint",
+        "tags": [
+          "analytics"
+        ]
+      }
+    },
+    "/api/analytics/spend/conversations": {
+      "get": {
+        "description": "Spend, grouped by the conversation that caused it, newest-spending first.\n\nA thin workspace-scoping wrapper — see `_conversation_spend_response`, and\n`_guardrails_response`'s neighbouring docstring for why the split exists.\nAvailable to any authenticated workspace member, not just admins: spend\nvisibility here matches the runs list it complements (`GET /api/runs`),\nwhich every member can already read.",
+        "operationId": "spend_by_conversation_api_analytics_spend_conversations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 3650,
+              "minimum": 1,
+              "title": "Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Spend By Conversation",
+        "tags": [
+          "analytics"
+        ]
+      }
+    },
+    "/api/auth/config": {
+      "get": {
+        "description": "Public, unauthenticated: what the login screen needs to decide which\nform(s) to show, before there is any session to check. `main.py` mounts\n`api/oidc.py`'s router once `oidc_issuer` alone is set; `oidc_configured`\nhere is deliberately stricter (issuer *and* client id *and* client\nsecret) — an issuer with no client credentials would 503 on the first\nreal call, so 'configured' means 'this will actually work', not just\n'the router exists'.",
+        "operationId": "auth_config_api_auth_config_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthConfigOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Auth Config",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/invites/{token}/accept": {
+      "post": {
+        "description": "Redeem an invite link as the logged-in user it was sent to.\n\n404 for anything that is not a live, pending invite — unknown, revoked,\nexpired, already accepted — rather than distinguishing those, the same\n\"existence itself must not leak\" reasoning `api/workspace.py` gives for\ncross-workspace reads: a used-up invite link should not tell whoever is\nholding it *why* it stopped working. Email mismatch is a 403 instead,\nbecause the invite plainly does exist and the signed-in account is simply\nnot who it was sent to — a different, nameable problem.",
+        "operationId": "accept_invite_api_auth_invites__token__accept_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "title": "Token",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Accept Invite",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "operationId": "login_api_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "operationId": "logout_api_auth_logout_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "operationId": "me_api_auth_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Me",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/password": {
+      "post": {
+        "description": "Change your own password. Every other session for the account ends.\n\ndocs/hardening.md tells operators to change the bootstrap admin password\nafter first boot; this is the endpoint that makes that instruction\nexecutable. The current password is required, so a stolen cookie alone\ncannot take the account over, and the check is rate limited so this cannot\nbe used as an unthrottled oracle for the existing password.",
+        "operationId": "change_password_api_auth_password_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChangeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Change Password",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/users": {
+      "get": {
+        "operationId": "list_users_api_auth_users_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Users",
+        "tags": [
+          "auth"
+        ]
+      },
+      "post": {
+        "operationId": "create_user_api_auth_users_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create User",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/users/{user_id}/deactivate": {
+      "post": {
+        "description": "Deactivate a user: `current_user` refuses every cookie for the account\nfrom this point on, and its password is left alone rather than cleared —\n`POST /users/{id}/password` is what restores it, and restoring no longer\nrequires picking a new password to go with it.\n\nThe row is kept, not deleted — approvals and runs point at it, and an audit\ntrail that can lose the name of the human who signed something is not an\naudit trail.",
+        "operationId": "deactivate_user_api_auth_users__user_id__deactivate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Deactivate User",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/users/{user_id}/password": {
+      "post": {
+        "description": "Set another user's password: rotation after an incident, or restoring a\ndeactivated account. Ends every session that account currently holds, and\nclears `disabled` — exactly the \"restore\" half of deactivation, unchanged\nsince before `disabled` existed as its own column.",
+        "operationId": "admin_set_password_api_auth_users__user_id__password_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetPasswordBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Admin Set Password",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/users/{user_id}/reactivate": {
+      "post": {
+        "description": "Reverse `deactivate_user`: clear `disabled`, nothing else.\n\nDeliberately NOT behind `_reject_if_password_disabled()` the way\n`admin_set_password` is — that endpoint is gated because *setting a\npassword* is meaningless once `auth_mode=oidc` (nothing authenticates\nwith one), but before this endpoint existed it was the only way to clear\n`disabled`, making deactivation irreversible on an OIDC-only deployment:\nan admin locked out under `auth_mode=oidc` had no password to be set and\ntherefore no way back in. Reactivation itself is not a password\noperation — it does not touch `password_hash` or `session_epoch` — so it\nstays available regardless of `auth_mode`.",
+        "operationId": "reactivate_user_api_auth_users__user_id__reactivate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reactivate User",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/users/{user_id}/revoke-sessions": {
+      "post": {
+        "description": "End every *cookie* session this account currently holds, without\ntouching its password or its `disabled` state. Bumps `session_epoch`,\nwhich `credential_version` folds in — every outstanding cookie's\nfingerprint stops matching immediately. The lever an OIDC-only account\n(no password to rotate) will have for \"sign me out everywhere\", and the\none to reach for after an incident when the password itself is not\nsuspected.\n\nDoes NOT revoke an OIDC bearer access token already issued for this\naccount (`api/oidc_bearer.py::authenticate_bearer`) — `session_epoch` is\nan opaque counter with no time semantics to compare a token's `iat`\nagainst, so a bearer caller has nothing here to check it against. Such a\ntoken keeps working until its own `exp`. An incident responder relying\non this endpoint to cut a compromised account off entirely must also\nrevoke the token at the IdP (or wait out its lifetime) when bearer auth\nis enabled — this endpoint alone is not sufficient in that case.",
+        "operationId": "revoke_sessions_api_auth_users__user_id__revoke_sessions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Sessions",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/auth/workspace": {
+      "post": {
+        "description": "Switch the session's active workspace. Validates membership, then\nre-mints the cookie with the new `wid` — the same re-mint `login` does,\njust against a workspace the caller picked instead of inferred.",
+        "operationId": "switch_workspace_api_auth_workspace_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchWorkspaceBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Switch Workspace",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/chat": {
+      "get": {
+        "operationId": "list_conversations_api_chat_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Conversations",
+        "tags": [
+          "chat"
+        ]
+      },
+      "post": {
+        "operationId": "create_conversation_api_chat_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConversationBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Conversation",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/{conversation_id}": {
+      "get": {
+        "operationId": "get_conversation_api_chat__conversation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Conversation",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/{conversation_id}/messages": {
+      "post": {
+        "operationId": "send_message_api_chat__conversation_id__messages_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Send Message",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/connections": {
+      "get": {
+        "operationId": "list_connections_api_connections_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Connections",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/connections/activity": {
+      "get": {
+        "description": "This workspace's connections activity log, newest first —\n`services/connections.py::record_connection_activity`'s rows, workspace-\nscoped. Admin only: the log can carry another member's search queries\nand file paths, which is exactly the kind of thing browsing/sources\nlisting never exposes about *other* members' activity today.",
+        "operationId": "list_activity_api_connections_activity_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Activity",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/connections/callback": {
+      "get": {
+        "operationId": "callback_api_connections_callback_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Callback",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/connections/m365/browse": {
+      "get": {
+        "description": "Server-side Graph browsing for the m365 import picker (Phase 1) — see\n`services/connections.py::browse_m365` for the scope/params contract.\nAny workspace member: browsing does not touch the stored token or the\nconnection row, only reads through it, so this needs no admin gate. It\ndoes, however, consult the plan gate — `require_connections_gate` with\n`USE_ACTION`, as the first statement in the body, before the m365\nconnection's token is touched at all — because browsing is exercising an\nexisting connection exactly as much as fetching a token or importing a\nfile is (see that helper's docstring for why \"use\" is asked separately\nfrom \"connect\").\n\nA `ConnectionAuthError` here means the same thing it means at `GET\n/{provider}/token` above: the m365 connection needs to be reconnected —\n409, same as that route, for the same \"actionable conflict\" reason.",
+        "operationId": "m365_browse_api_connections_m365_browse_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": "sites",
+              "title": "Scope",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "site_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Site Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "drive_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Drive Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "item_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Item Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "M365 Browse",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/connections/m365/resources": {
+      "put": {
+        "description": "Set (or clear) this workspace's m365 read allowlist and/or write\ntarget list — `selected_resources[\"read\"]`/`[\"write\"]` on the stored\nconnection row. Workspace admin only, the same role every other\nconnection-mutating route in this router requires (`authorize`,\n`disconnect`): this changes what a run can read or write, not merely\nreads through the connection the way browsing or sources listing does.\n\n`read` and `write` are independent and both optional: a body naming\nonly one leaves the other's stored value exactly as it was (see\n`ResourcesBody`'s own docstring for `None` vs. `[]`) — narrowing the\nwrite targets does not require re-sending the read allowlist, and vice\nversa. An empty `read` list clears the read restriction —\n`list_connected_sources` treats an empty (or absent) list identically,\nfalling back to \"every drive the account can see\" — so `PUT` with\n`{\"read\": []}` is exactly how a workspace goes back to unrestricted.\nAn empty `write` list clears every write target — unlike `read`, there\nis no \"everything\" fallback on the write side to fall back to (see\n`services/connections.py`'s write-back module note), so this is simply\n\"nothing may be written to.\"\n\nRequires a connection to already exist (404 if not — there is nothing\nto scope an allowlist onto) but does not itself call `ensure_connection_\nusable`/the plan gate: this is an admin narrowing what a *future*\nsuccessful use of the connection may read or write, not a use of the\nconnection itself.",
+        "operationId": "update_m365_resources_api_connections_m365_resources_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResourcesBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update M365 Resources",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/connections/m365/sources": {
+      "get": {
+        "description": "The m365 drives this workspace's runs are allowed to read live from —\n`services/connections.py::list_connected_sources`, resolved (an admin's\n`selected_resources[\"read\"]` allowlist, or everything the connected\naccount can see) and reported as `sources`. `restricted` tells the\nfrontend whether that allowlist is actually narrowing anything, so it\ncan render \"restricted to N locations\" vs. \"full account access\"\nwithout re-deriving the same fact from `sources` itself.\n\nAny workspace member, same as `m365_browse` above: this reads through\nthe connection, it does not touch or mutate it, so no admin gate. The\nplan-gate check itself now lives inside `list_connected_sources` (via\n`ensure_connection_usable`) rather than being asked separately here —\nunlike `require_connections_gate`'s 403 shape, a refusal surfaces as\n`ConnectionUnavailable` and is mapped to 409 below, the same status\nevery other \"this connection cannot be used right now\" case in this\nrouter already returns.",
+        "operationId": "m365_sources_api_connections_m365_sources_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "M365 Sources",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/connections/m365/write-targets": {
+      "get": {
+        "description": "The folders this workspace's connection is allowed to write into —\n`services/connections.py::list_write_targets`, reported as `targets`.\n`write_enabled` tells the frontend whether the connection's granted\nscopes actually cover write-back at all (see `_connection_out`'s own\ncomment on that flag) — a workspace can have targets configured from\nbefore a reconnect narrowed its scopes back down, so `targets` alone\ndoes not answer that question.\n\nAny workspace member, same as `m365_sources`: this reads through the\nconnection, it does not mutate it. `ConnectionUnavailable` (raised\nby `list_write_targets` via `ensure_connection_usable`, under the same\nconditions as everywhere else in this router) maps to 409, same as\n`m365_sources`.",
+        "operationId": "m365_write_targets_api_connections_m365_write_targets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "M365 Write Targets",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/connections/providers": {
+      "get": {
+        "operationId": "list_providers_api_connections_providers_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Providers",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/connections/{provider}": {
+      "delete": {
+        "operationId": "disconnect_api_connections__provider__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disconnect",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/connections/{provider}/authorize": {
+      "post": {
+        "operationId": "authorize_api_connections__provider__authorize_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AuthorizeBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Authorize",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/connections/{provider}/token": {
+      "get": {
+        "description": "A short-lived Google access token for the client-side Picker.\n\nThe frontend loads `https://apis.google.com/js/api.js` on demand and\ncalls Google's Picker API directly with this token (plus the developer\nkey / app id from `GET /api/connections/providers`'s `picker` field) —\nthe token never round-trips through this backend again after this call.\ngdrive only: m365's browsing goes through the server-side `/api/\nconnections/m365/browse` endpoint (Phase 1) instead of a client-side SDK,\nso there is nothing for a client to do with an m365 access token.\n\nAsks `require_connections_gate` for `USE_ACTION` — this route exercises a\nconnection that already exists, not one being created, so it is the\n\"use\", not the \"connect\", gate (see that helper's docstring). Checked\nbefore `get_connection` so a workspace whose plan has lapsed gets the 403\nwithout a DB lookup for the connection row it is about to be refused\nanyway.",
+        "operationId": "connection_token_api_connections__provider__token_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Connection Token",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/api/data-requests": {
+      "get": {
+        "operationId": "list_data_requests_api_data_requests_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Data Requests",
+        "tags": [
+          "findings"
+        ]
+      }
+    },
+    "/api/data-requests/{request_id}/status": {
+      "post": {
+        "operationId": "update_data_request_api_data_requests__request_id__status_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DataRequestUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Data Request",
+        "tags": [
+          "findings"
+        ]
+      }
+    },
+    "/api/datasets": {
+      "get": {
+        "operationId": "list_datasets_api_datasets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Datasets",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/datasets/{dataset_id}/rows": {
+      "get": {
+        "operationId": "dataset_rows_api_datasets__dataset_id__rows_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "dataset_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Dataset Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dataset Rows",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/deliverables": {
+      "get": {
+        "description": "Deliverables = draft_section findings grouped by subject.deliverable,\nlatest finding per section winning (same rule as assembly).",
+        "operationId": "list_deliverables_api_deliverables_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Deliverables",
+        "tags": [
+          "findings"
+        ]
+      }
+    },
+    "/api/deliverables/{deliverable_slug}/export": {
+      "get": {
+        "operationId": "export_deliverable_api_deliverables__deliverable_slug__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deliverable_slug",
+            "required": true,
+            "schema": {
+              "title": "Deliverable Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "markdown",
+              "title": "Format",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_draft",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Draft",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Deliverable",
+        "tags": [
+          "findings"
+        ]
+      }
+    },
+    "/api/deliverables/{deliverable_slug}/publish": {
+      "post": {
+        "description": "The human route for writing a deliverable to a connected write target\ndirectly — no `connected_write` finding, no approval step of its own: the\napprover role required to call this endpoint at all *is* the blessing.\nShares its rendering with `GET .../export` and with the approved-finding\nupload path via `services.export.render_deliverable_bytes`. Always\napproved-only content: unlike `GET .../export`'s own preview, there is\nno `include_draft` here — this route ships something, and what ships\nmust never be an unapproved draft.",
+        "operationId": "publish_deliverable_api_deliverables__deliverable_slug__publish_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deliverable_slug",
+            "required": true,
+            "schema": {
+              "title": "Deliverable Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishDeliverableBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Publish Deliverable",
+        "tags": [
+          "findings"
+        ]
+      }
+    },
+    "/api/docs/{slug}": {
+      "get": {
+        "description": "One registered document, as markdown, read from disk on every request.\n\nRead fresh rather than cached at import: editing the file in a bind-mounted\ndevelopment checkout should be visible on reload, and a stale in-memory copy\nof a methodology document is precisely the failure this endpoint exists to\nprevent.",
+        "operationId": "get_doc_api_docs__slug__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Doc Api Docs  Slug  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Doc",
+        "tags": [
+          "docs"
+        ]
+      }
+    },
+    "/api/documents": {
+      "get": {
+        "operationId": "list_documents_api_documents_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Documents",
+        "tags": [
+          "documents"
+        ]
+      },
+      "post": {
+        "description": "Store an uploaded document and extract its text.\n\nOn the size cap: a declared `Content-Length` over the cap is refused before\nany work, and the body is otherwise consumed in chunks so the cap is hit\nmid-stream. What this cannot do is refuse the *transfer*: Starlette parses\nthe multipart body (spooling parts to a temp file, not to memory) before this\nfunction is entered, so a client can still push bytes at the server. A hard\nbody limit belongs in the reverse proxy in front of tret — see\ndocs/hardening.md. What is guaranteed here is that an oversized upload is\nnever materialised in memory, never hashed, and never stored.",
+        "operationId": "upload_document_api_documents_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_document_api_documents_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/documents/{document_id}": {
+      "get": {
+        "operationId": "get_document_api_documents__document_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/findings": {
+      "get": {
+        "operationId": "list_findings_api_findings_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "schema_slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Schema Slug"
+            }
+          },
+          {
+            "in": "query",
+            "name": "run_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Run Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Findings",
+        "tags": [
+          "findings"
+        ]
+      }
+    },
+    "/api/findings/{finding_id}": {
+      "get": {
+        "operationId": "get_finding_api_findings__finding_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "finding_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Finding Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Finding",
+        "tags": [
+          "findings"
+        ]
+      }
+    },
+    "/api/findings/{finding_id}/approval": {
+      "post": {
+        "operationId": "decide_finding_api_findings__finding_id__approval_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "finding_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Finding Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Finding",
+        "tags": [
+          "findings"
+        ]
+      }
+    },
+    "/api/findings/{finding_id}/upload-retry": {
+      "post": {
+        "description": "Re-run the upload behind an approved `connected_write` finding whose\nfirst attempt failed (a transient Graph error, a connection that has\nsince been reconnected) — or whose outcome was never recorded at all:\n`payload[\"upload\"]` is `None`/missing when the process died between the\napproval's status commit and `_upload_connected_write`'s own commit, and\nthat finding would otherwise be stuck forever, since nothing else ever\nretries it. Retry accepts either. Only a finding whose upload is known\nto have succeeded (`status == \"uploaded\"`) has nothing to retry.\n\nBecause `upload_connected_file` never overwrites (Graph's own `rename`\nconflict behaviour is create-only — see that module), retrying an\nupload that actually went through but was never recorded creates a\n*second*, renamed file rather than overwriting or deduplicating the\nfirst. There is no way to tell \"never ran\" apart from \"ran and the\nrecord was lost\" from here, so that duplicate is an accepted cost of\nrecovering an unobserved outcome, not a bug in this endpoint.",
+        "operationId": "retry_finding_upload_api_findings__finding_id__upload_retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "finding_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Finding Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Finding Upload",
+        "tags": [
+          "findings"
+        ]
+      }
+    },
+    "/api/harnesses": {
+      "get": {
+        "operationId": "list_harnesses_api_harnesses_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Harnesses",
+        "tags": [
+          "harnesses"
+        ]
+      },
+      "post": {
+        "operationId": "create_harness_api_harnesses_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HarnessBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Harness",
+        "tags": [
+          "harnesses"
+        ]
+      }
+    },
+    "/api/harnesses/{harness_id}": {
+      "delete": {
+        "operationId": "archive_harness_api_harnesses__harness_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "harness_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Harness Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive Harness",
+        "tags": [
+          "harnesses"
+        ]
+      },
+      "get": {
+        "operationId": "get_harness_api_harnesses__harness_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "harness_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Harness Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Harness",
+        "tags": [
+          "harnesses"
+        ]
+      },
+      "put": {
+        "operationId": "update_harness_api_harnesses__harness_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "harness_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Harness Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HarnessBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Harness",
+        "tags": [
+          "harnesses"
+        ]
+      }
+    },
+    "/api/healthz": {
+      "get": {
+        "operationId": "healthz_api_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz"
+      }
+    },
+    "/api/models": {
+      "get": {
+        "operationId": "list_models_api_models_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Models",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/packs": {
+      "get": {
+        "operationId": "list_packs_api_packs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Packs",
+        "tags": [
+          "packs"
+        ]
+      }
+    },
+    "/api/packs/drafts": {
+      "get": {
+        "operationId": "list_drafts_api_packs_drafts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Drafts",
+        "tags": [
+          "pack-builder"
+        ]
+      },
+      "post": {
+        "operationId": "create_draft_api_packs_drafts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDraftBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Draft",
+        "tags": [
+          "pack-builder"
+        ]
+      }
+    },
+    "/api/packs/drafts/{draft_id}": {
+      "delete": {
+        "operationId": "delete_draft_api_packs_drafts__draft_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Draft",
+        "tags": [
+          "pack-builder"
+        ]
+      },
+      "get": {
+        "operationId": "get_draft_api_packs_drafts__draft_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Draft",
+        "tags": [
+          "pack-builder"
+        ]
+      },
+      "patch": {
+        "description": "Partial update: `manifest_json`, when given, *replaces* the draft's\nstored manifest wholesale (the builder's editors always hold the whole\nmanifest client-side, so there is no per-field merge to do); `files`,\nwhen given, is merged per key — a key mapped to `null` deletes that file,\nany other key is added or overwritten, and every key not mentioned is\nleft alone.\n\nOptimistic concurrency (an `If-Unmodified-Since`-style `updated_at`\nmatch) is deliberately not implemented: a draft is edited by the small\nset of admins in one workspace through one builder UI, not the\nmany-writer, external-API surface `Pack`'s own install idempotency\nguards against, so a last-write-wins PATCH is an acceptable simplicity\ntrade for Phase D. Revisit if the builder grows real-time multi-editor\ncollaboration.",
+        "operationId": "patch_draft_api_packs_drafts__draft_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchDraftBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Draft",
+        "tags": [
+          "pack-builder"
+        ]
+      }
+    },
+    "/api/packs/drafts/{draft_id}/export": {
+      "get": {
+        "description": "tar.gz download — the self-hosted author's path: export, then upload\nthrough the cloud UI (or `POST /api/packs/install/archive` directly).",
+        "operationId": "export_draft_api_packs_drafts__draft_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Draft",
+        "tags": [
+          "pack-builder"
+        ]
+      }
+    },
+    "/api/packs/drafts/{draft_id}/test-install": {
+      "post": {
+        "description": "Install the draft into the caller's own current workspace/project\nunder version `{version}+draft.{n}` — `n` is `DraftPack.test_install_seq`,\nincremented and committed *before* materialization runs, so a failed\nattempt still consumes its number rather than risking two attempts\nresolving to the same version string.\n\nSequence mirrors `install_pack_from_archive` exactly, minus the archive\nextraction step it doesn't need here: materialize straight into\n`PackStorage.staging_dir()` (same filesystem as the pack's eventual\npermanent home, so the swap below is a same-device rename, never\n`OSError(EXDEV)`) -> the unchanged `install_pack` -> `_swap_into_final_dir`\nmoves the materialized directory into `PackStorage.path_for(pack.id)` and\n`Pack.source_path` is updated to point there -> commit. The materialized\ndirectory is removed in `finally` unconditionally: on success it has\nalready been renamed away by the swap, so there is nothing left to\nremove; on any failure it is the real cleanup.",
+        "operationId": "test_install_draft_api_packs_drafts__draft_id__test_install_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Test Install Draft",
+        "tags": [
+          "pack-builder"
+        ]
+      }
+    },
+    "/api/packs/drafts/{draft_id}/validate": {
+      "post": {
+        "description": "Materialize the draft to a throwaway directory and run the real,\nunchanged `validate_pack` against it — the same error strings a\nfilesystem pack with the same flaw would produce, since a draft's\n`doctrine`/`task_types` selectors are already relative paths and\n`materialize_draft` always writes `pack.yaml`, so none of `validate_pack`'s\nerror messages ever need a server-path prefix stripped (contrast\n`api.packs._relative_pack_errors`, needed there only because an archive\nupload's staging directory might not contain a `pack.yaml` at all).",
+        "operationId": "validate_draft_api_packs_drafts__draft_id__validate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate Draft",
+        "tags": [
+          "pack-builder"
+        ]
+      }
+    },
+    "/api/packs/install": {
+      "post": {
+        "description": "Instance-admin gated, not workspace-admin: `path` names a directory on\nthe *server's* filesystem — any workspace-admin (which any user can\nbecome simply by creating their own team workspace, see\nservices/workspace.py::create_workspace) being able to call this would\nturn it into a directory-existence oracle and a doctrine-file reader over\nthe whole host, not just something scoped to that admin's own data. The\ndata this endpoint writes (the installed Pack row, `project` lookup) stays\nscoped to the caller's *current* workspace via `ctx` — only who may call\nit at all is instance-wide.",
+        "operationId": "install_api_packs_install_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Install",
+        "tags": [
+          "packs"
+        ]
+      }
+    },
+    "/api/packs/install/archive": {
+      "post": {
+        "description": "Workspace-admin gated — unlike `/install` above, not instance-admin.\n\n`/install`'s stricter gate exists because `path` names a directory on the\n*server's* filesystem, which turns any caller into a directory-existence\noracle over the whole host. An archive upload carries no such oracle: the\nonly thing a caller controls is bytes that get extracted into a staging\ndirectory and validated exactly as `/install` validates a path\n(`packs/loader.py::install_pack_from_archive`, `packs/archive.py`'s\nrejection list). A workspace's own admin installing into their own\nworkspace is the ordinary case this exists to serve.",
+        "operationId": "install_archive_api_packs_install_archive_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_install_archive_api_packs_install_archive_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Install Archive",
+        "tags": [
+          "packs"
+        ]
+      }
+    },
+    "/api/packs/methods/all": {
+      "get": {
+        "description": "All deterministic methods across this workspace's installed packs.",
+        "operationId": "list_methods_api_packs_methods_all_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Methods",
+        "tags": [
+          "packs"
+        ]
+      }
+    },
+    "/api/packs/registry/install": {
+      "post": {
+        "description": "Workspace-admin gated, same posture as `/install/archive` above: the\nonly thing a caller controls is which listed (slug, version) to install,\nnot a filesystem path.\n\nSequence: fetch the version's detail off the registry for its declared\n`content_hash` and size -> stream the archive download, capped mid-stream\n-> `install_pack_from_archive(..., expected_content_hash=<the registry's\ndeclared hash>)`, which re-verifies that hash against the archive's\n*actual* content before anything is installed (defense in depth — this\nendpoint trusts the registry's own manifest for nothing more than which\nbytes to expect). A mismatch there means the registry served bytes that\ndo not match what it itself catalogued, mapped to 502 rather than 422:\nthat is not a malformed upload from this caller, it is the registry lying\nabout — or corrupting — its own listing.",
+        "operationId": "registry_install_api_packs_registry_install_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegistryInstallBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Registry Install",
+        "tags": [
+          "packs"
+        ]
+      }
+    },
+    "/api/packs/registry/search": {
+      "get": {
+        "description": "Proxy to the registry's `GET /packs` — listed packs only, enforced\nregistry-side. Registered before `/registry/{slug}` below so the literal\npath `/registry/search` matches here rather than being swallowed as\n`slug=\"search\"` — FastAPI/Starlette match routes in registration order.",
+        "operationId": "registry_search_api_packs_registry_search_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "tags",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Tags",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "framework",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Framework",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Registry Search",
+        "tags": [
+          "packs"
+        ]
+      }
+    },
+    "/api/packs/registry/{slug}": {
+      "get": {
+        "description": "Proxy to the registry's `GET /packs/{slug}` — summary plus its version\nlist (client-side \"update available\" badging reads `latest_listed_version`\noff of this).",
+        "operationId": "registry_pack_summary_api_packs_registry__slug__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Registry Pack Summary",
+        "tags": [
+          "packs"
+        ]
+      }
+    },
+    "/api/packs/registry/{slug}/{version}": {
+      "get": {
+        "description": "Proxy to the registry's `GET /packs/{slug}/{version}` — manifest,\nintegrity hashes and the inlined doctrine preview for one version.",
+        "operationId": "registry_pack_version_api_packs_registry__slug___version__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version",
+            "required": true,
+            "schema": {
+              "title": "Version",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Registry Pack Version",
+        "tags": [
+          "packs"
+        ]
+      }
+    },
+    "/api/packs/validate": {
+      "post": {
+        "operationId": "validate_api_packs_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate",
+        "tags": [
+          "packs"
+        ]
+      }
+    },
+    "/api/packs/{pack_id}": {
+      "delete": {
+        "description": "Workspace-admin gated. 404s for a pack in another workspace (never\nconfirms it exists there), 409s while any *active* Harness, or any Run,\nFinding, or MethodRun in this workspace still references it (a used pack\nis not deletable — its task types, doctrine and methods are load-bearing\nfor whatever used it; uninstall is for a mistaken install, not a pack with\na history), and otherwise deletes the `Pack` row plus its extracted\ndirectory.\n\nAn *archived* Harness does not block the delete: an operator who installs\na preset pack by mistake archives the auto-created harness\n(`PUT /api/harnesses/{id}` with `is_archived: true`) and then deletes the\npack — the harness's own doctrine/task-type dependency on the pack is\ngone the moment it is archived (it can never run again), so there is\nnothing left for the delete to protect. Nor does the chat front door\n(`Harness.task_profile == \"chat\"`): it links every installed pack by\ndefault (`services.workspace._seed_chat_harness`), and that default link\nis advisory, not load-bearing — the chat harness never fails to run for\nlacking a pack (`api/chat.py::send_message` falls back to `pack_id=None`),\nso treating it as a blocker would make a pack it happened to auto-link\npermanently undeletable. A harness's packs are `harness_packs` link rows,\nnot a column on `Harness` (one harness may link several packs), so\narchived harnesses (and the chat harness) still linked to this pack have\nthose link rows deleted below rather than left dangling on a `pack_id`\nthat is about to not exist — left as a real FK, deleting the pack out\nfrom under one would be an integrity violation, not merely a semantic\nconcern.\n\nPack-seeded datasets are deliberately left in place (ship minimal\nuninstall; the plan's own resolved judgment call) — deleting the pack\ndoes not delete data an analyst may already be relying on. `Dataset.pack_id`\nis nullable, so those rows are severed from the pack (set to NULL) rather\nthan blocking the delete or being deleted themselves.\n\nOrdering matters here: the row delete is committed *before* the directory\nis removed, not after. `Pack.id` is a foreign key on `harness_packs`/Run/\nFinding/MethodRun (checked above) and on Dataset (severed above), so\ncommitting first is what makes the DB the source of truth — if the\ndirectory removal below fails partway, the row is already gone either\nway, and a leaked directory is a cheap, logged loose end rather than a\n`Pack` row left pointing at bytes that no longer exist (the previous\nordering's failure mode: `db.commit()` could still fail with an FK\nviolation *after* the directory was already destroyed).",
+        "operationId": "delete_pack_api_packs__pack_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pack Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Pack",
+        "tags": [
+          "packs"
+        ]
+      },
+      "get": {
+        "operationId": "get_pack_api_packs__pack_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pack Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Pack",
+        "tags": [
+          "packs"
+        ]
+      }
+    },
+    "/api/packs/{pack_id}/lessons": {
+      "get": {
+        "description": "Every lesson for this pack's slug in this workspace, any status,\nacross every version of the pack ever installed under that slug —\nmembers see the full history (proposed/approved/rejected/retired); the\nrun-time tool (`list_pack_lessons`) is the one that narrows to\napproved-plus-own-pending.",
+        "operationId": "list_lessons_api_packs__pack_id__lessons_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pack Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Lessons",
+        "tags": [
+          "lessons"
+        ]
+      }
+    },
+    "/api/packs/{pack_id}/lessons/{lesson_id}/retire": {
+      "post": {
+        "operationId": "retire_lesson_api_packs__pack_id__lessons__lesson_id__retire_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pack Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "lesson_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Lesson Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retire Lesson",
+        "tags": [
+          "lessons"
+        ]
+      }
+    },
+    "/api/packs/{pack_id}/lessons/{lesson_id}/review": {
+      "post": {
+        "operationId": "review_lesson_api_packs__pack_id__lessons__lesson_id__review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pack_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pack Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "lesson_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Lesson Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LessonReviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Lesson",
+        "tags": [
+          "lessons"
+        ]
+      }
+    },
+    "/api/projects/{project_id}/documents/import": {
+      "post": {
+        "description": "Import files picked from a connected provider straight into a\nproject's documents, without the bytes ever passing through the caller's\nbrowser: each item is downloaded server-side with the workspace\nconnection's own access token and fed into `ingest_document` — the exact\ningestion the upload endpoint above uses.\n\nOne request shares one provider and one token for every item in it, so a\nconnection that cannot refresh (`ConnectionAuthError`) fails the whole\nrequest with 409 before any item is touched. Once past that, a single\nitem failing — too big, gone, an unreadable export, or a per-item DB\nfailure (e.g. a NOT NULL or FK violation on the row) — is recorded in\n`errors` and must not fail the rest of the batch. `db.add`/`commit`\nhappen inside the same per-item\nguard as the download/ingest for that reason: a failure there is rolled\nback before the loop moves on, so the batch's own AsyncSession is never\nleft in the \"commit failed, transaction still open\" state SQLAlchemy\nwould otherwise carry into the next item.\n\n`require_connections_gate` (from `api/connections.py`) runs with `USE_\nACTION` right after the provider is validated and before anything else —\nbefore the project lookup, before the connection's token is touched,\nbefore any bytes move. Importing is exercising a stored connection, the\nsame as minting a token or browsing does, so it asks the same \"use\" gate\nthose routes do: a workspace whose plan lapses after connecting loses\nthe ability to import on its very next request, with nothing in this\nroute needing to know that happened beyond this one check.\n\nEach item that reaches the provider — a fresh import or a dedupe hit —\ngets one `ConnectionActivity` row (`_import_one`, via `services/\nconnections.py::record_connection_activity`), and re-importing the same\npicked item returns the document that import already created\n(`\"deduplicated\": true` on that item) instead of a second identical row.\nSee docs/connections.md.",
+        "operationId": "import_documents_api_projects__project_id__documents_import_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Documents",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/api/routing/preview": {
+      "post": {
+        "description": "Dry-run `ModelRouter.route()` for a saved harness or an inline policy.\n\nSpends up to four short router calls (`max_tokens=512` each — one per\nobjective evaluated) on the workspace's own provider key. That spend is\nreal but is never recorded as run spend anywhere in tret's own\naccounting — no `runs` row exists here to attach it to — so it is the\noperator's cost to carry, visible only on the provider's own bill and in\nthis endpoint's own `router_overhead_usd`/INFO log. See the module\ndocstring for why that is a documented tradeoff rather than a gap to\nclose: building a billing path for a call that produces no artifact would\nbe scaffolding for a feature (metered previews) nobody has asked for.\n\nDeterministic by construction: bounded exploration's coin flip\n(`ModelRouter._maybe_explore`) is forced off for every objective this\npreview evaluates — `adaptive.exploration` is overridden to 0 on the copy\nof the policy handed to the router, never on `model_policy` itself — so\ncalling this endpoint twice with the same policy, and a real run later\nmade under that same (untouched) policy, are unaffected by it.",
+        "operationId": "preview_routing_api_routing_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoutingPreviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Routing",
+        "tags": [
+          "routing"
+        ]
+      }
+    },
+    "/api/runs": {
+      "get": {
+        "description": "List this workspace's runs, newest first.\n\nPassing neither `limit` nor `cursor` returns the original bare list\n(capped at 50), byte-identical to every caller before paging existed.\nPassing either switches to `{\"items\": [...], \"next_cursor\": ...}`: keyset\npagination on (created_at desc, id desc) — an id tiebreak because\n`created_at` alone is not unique (bulk-seeded or same-second rows) —\nrather than an OFFSET, so a run created mid-page can never shift\nalready-seen rows into the next page or duplicate one across pages.\n`next_cursor` is omitted (null) once the last page is reached.\n`top_level_only=true` hides delegated runs (`parent_run_id IS NOT NULL`),\nleaving only runs a person, a schedule, or the API started directly;\nit defaults to false, which keeps today's behaviour unchanged.",
+        "operationId": "list_runs_api_runs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 200,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "top_level_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Top Level Only",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Runs",
+        "tags": [
+          "runs"
+        ]
+      },
+      "post": {
+        "operationId": "create_run_api_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRunBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Run",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/runs/method-runs/{method_run_id}": {
+      "get": {
+        "description": "Resolve a method/<slug>/<id> citation to its full execution manifest.",
+        "operationId": "get_method_run_api_runs_method_runs__method_run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "method_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Method Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Method Run",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/runs/{run_id}": {
+      "get": {
+        "operationId": "get_run_api_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "'full' returns the whole stored method_v3 block",
+            "in": "query",
+            "name": "v3",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "'full' returns the whole stored method_v3 block",
+              "title": "V3"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Run",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/runs/{run_id}/cancel": {
+      "post": {
+        "operationId": "cancel_run_api_runs__run_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Run",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/runs/{run_id}/children": {
+      "get": {
+        "description": "Direct children only — a run this one's `run_harness_task` call spawned\n(`parent_run_id == run_id`), not grandchildren. Oldest first, matching how\na delegation batch's children were created.",
+        "operationId": "list_run_children_api_runs__run_id__children_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Run Children",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/runs/{run_id}/events": {
+      "get": {
+        "operationId": "run_events_api_runs__run_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run Events",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/settings/egress": {
+      "get": {
+        "description": "What this deployment can reach, and what a run would be allowed to do.",
+        "operationId": "egress_settings_api_settings_egress_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Egress Settings",
+        "tags": [
+          "settings"
+        ]
+      },
+      "post": {
+        "description": "Narrow one egress class at runtime.\n\nRequesting a *wider* mode than the environment allows is accepted and has no\neffect — the response reports the mode actually in force, not the one asked\nfor, so a caller is never told it opened something it did not. That asymmetry\nis the design: an operator must be able to cut egress in a hurry without a\nredeploy, and an admin session must never be able to restore it.",
+        "operationId": "set_egress_api_settings_egress_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EgressOverride"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Egress",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/settings/egress/{egress_class}": {
+      "delete": {
+        "description": "Drop a runtime override, returning the class to whatever the env allows.",
+        "operationId": "clear_egress_override_api_settings_egress__egress_class__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "egress_class",
+            "required": true,
+            "schema": {
+              "title": "Egress Class",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Egress Override",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/settings/providers": {
+      "get": {
+        "operationId": "provider_status_api_settings_providers_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Provider Status",
+        "tags": [
+          "settings"
+        ]
+      },
+      "post": {
+        "operationId": "set_provider_key_api_settings_providers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetKeyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Provider Key",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/settings/providers/local/test": {
+      "post": {
+        "description": "Diagnose the configured local model server. Reads only; persists nothing.\n\nDeliberately takes **no body and no parameters**. The only URL this endpoint\nwill ever fetch is the server's own `TRET_LOCAL_BASE_URL`: accepting a URL\nfrom the client would turn a logged-in browser into a request forger against\nanything the backend can reach (cloud metadata endpoints, internal\nservices). Echoing the configured base URL back is fine — it is operator\nconfig, not a secret, and it is already visible to whoever set it.\n\nA fresh pass, not the cached one: it bypasses the 5-minute discovery TTL and\nre-probes tool support, because the whole point of pressing the button is to\nsee the server as it is right now (`ollama pull` a minute ago included).",
+        "operationId": "test_local_provider_api_settings_providers_local_test_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Test Local Provider",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/settings/router": {
+      "get": {
+        "operationId": "router_settings_api_settings_router_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Router Settings",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/tools": {
+      "get": {
+        "description": "Every builtin, with whether this deployment will actually offer it.\n\n`available` is separate from existence on purpose. The registry is complete —\nthat is what makes `tret/engine/tools.py` readable as the list of things an\nagent can do — while the web tools are switchable by an operator. A builder UI\nthat hid the switched-off ones would leave nowhere to explain *why* a harness\nthat lists `web_search` is not searching.",
+        "operationId": "list_tools_api_tools_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Tools",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/version": {
+      "get": {
+        "operationId": "version_api_version_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Version",
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "/api/workspace/settings/budget": {
+      "delete": {
+        "operationId": "delete_budget_settings_api_workspace_settings_budget_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Delete Budget Settings",
+        "tags": [
+          "budgets"
+        ]
+      },
+      "get": {
+        "operationId": "get_budget_settings_api_workspace_settings_budget_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Budget Settings",
+        "tags": [
+          "budgets"
+        ]
+      },
+      "put": {
+        "operationId": "put_budget_settings_api_workspace_settings_budget_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Budget Settings",
+        "tags": [
+          "budgets"
+        ]
+      }
+    },
+    "/api/workspace/settings/emissions": {
+      "delete": {
+        "operationId": "delete_emissions_settings_api_workspace_settings_emissions_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Delete Emissions Settings",
+        "tags": [
+          "emissions-settings"
+        ]
+      },
+      "get": {
+        "description": "Fails open on a stored document that no longer validates: the panel\nstill needs `overrides` (to show what is stored and offer \"clear\noverrides\") even though nothing can be safely resolved to `effective` —\nsee `_response`. A run reading the *same* broken document never 500s\neither, for the identical reason (`HarnessEngine._factors_for`); this is\nthe read side of that same fail-open contract.",
+        "operationId": "get_emissions_settings_api_workspace_settings_emissions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Emissions Settings",
+        "tags": [
+          "emissions-settings"
+        ]
+      },
+      "put": {
+        "operationId": "put_emissions_settings_api_workspace_settings_emissions_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "title": "Body",
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Emissions Settings",
+        "tags": [
+          "emissions-settings"
+        ]
+      }
+    },
+    "/api/workspaces": {
+      "post": {
+        "description": "Create a new `kind=\"team\"` workspace owned by the caller, and switch\nthe session to it — the same re-mint `POST /api/auth/workspace` does,\njust against a workspace that did not exist a moment ago. No demo\ncontent: a team someone just created wants an empty workspace, not a\nstranger's sample project (`create_workspace`'s `seed_demo_content`).",
+        "operationId": "create_team_workspace_api_workspaces_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkspaceBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Team Workspace",
+        "tags": [
+          "workspaces"
+        ]
+      }
+    },
+    "/api/workspaces/{workspace_id}/invites": {
+      "get": {
+        "operationId": "list_invites_api_workspaces__workspace_id__invites_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InviteOut"
+                  },
+                  "title": "Response List Invites Api Workspaces  Workspace Id  Invites Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Invites",
+        "tags": [
+          "workspaces"
+        ]
+      },
+      "post": {
+        "operationId": "create_invite_api_workspaces__workspace_id__invites_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInviteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteCreateOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Invite",
+        "tags": [
+          "workspaces"
+        ]
+      }
+    },
+    "/api/workspaces/{workspace_id}/invites/{invite_id}": {
+      "delete": {
+        "operationId": "revoke_invite_api_workspaces__workspace_id__invites__invite_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "invite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Invite Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Invite",
+        "tags": [
+          "workspaces"
+        ]
+      }
+    },
+    "/api/workspaces/{workspace_id}/members": {
+      "get": {
+        "operationId": "list_members_api_workspaces__workspace_id__members_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/MemberOut"
+                  },
+                  "title": "Response List Members Api Workspaces  Workspace Id  Members Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Members",
+        "tags": [
+          "workspaces"
+        ]
+      }
+    },
+    "/api/workspaces/{workspace_id}/members/{user_id}": {
+      "delete": {
+        "description": "Self-leave is always allowed (for anyone but the last owner); removing\nsomeone else requires admin. Personal workspaces refuse this outright —\n`personal_owner_id` can never leave or be removed, by founder decision\n(see db/models.py's Workspace docstring).",
+        "operationId": "remove_member_api_workspaces__workspace_id__members__user_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Member",
+        "tags": [
+          "workspaces"
+        ]
+      },
+      "patch": {
+        "operationId": "update_member_role_api_workspaces__workspace_id__members__user_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemberRoleBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Member Role",
+        "tags": [
+          "workspaces"
+        ]
+      }
+    }
+  }
+}

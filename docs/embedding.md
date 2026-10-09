@@ -314,3 +314,45 @@ Field list:
 
 There's no ledger reader shipped yet — it's a flat, append-only,
 `jq`-friendly file, not a database.
+
+## TypeScript
+
+The Python SDK and the CLI run the router in your own process. The
+TypeScript SDK, `@tret/sdk` in [`sdk/typescript/`](../sdk/typescript/README.md),
+does something different. It is a client for a **running tret server**, so a
+run gets the full workbench: the harness's packs, doctrine, tools, findings,
+approvals, the audit trail and the server's own accounting. Use it from
+Node ≥ 18, Electron or the browser. It has no runtime dependencies.
+
+```ts
+import { Tret, formatReceipt } from '@tret/sdk'
+
+const tret = new Tret({
+  baseUrl: 'https://tret.example.com',
+  auth: { kind: 'bearer', token: () => getAccessToken() }, // or { kind: 'session' } in a browser
+})
+
+const { run, findings, receipt } = await tret.runs.complete(
+  { harnessId, taskType: 'qa_review', documentIds },
+  { onEvent: (e) => e.type === 'text_delta' && process.stdout.write(e.data.text) },
+)
+await tret.findings.decide(findings[0]!.id, { approved: true, comment: 'Checked.' })
+console.log(formatReceipt(receipt))
+```
+
+`runs.events(id)` streams a run's Server-Sent Events as a typed
+`AsyncIterable` and reconnects on its own. `runs.complete()` creates the run,
+streams it to the end, then reads back the run record and its findings. Its
+`Receipt` has the same fields as the Python one above, camelCased (`usd`,
+`co2eG`, `energyWh`, the signed frontier counterfactual, `usage`, `routing`,
+`overhead`), and follows the same rule: **`null` means unavailable, never
+zero.** It differs in two ways. The figures are the server's record of the
+whole multi-turn run, not of a single call. `reportedUsd` carries the
+provider-reported cost when there is one.
+
+Not on npm yet. Install from a checkout:
+`cd sdk/typescript && npm ci && npm run build`, then
+`npm install /path/to/tret/sdk/typescript`. The
+[package README](../sdk/typescript/README.md) covers auth modes, choosing a
+workspace for bearer clients (`X-Tret-Workspace`), errors, and a full
+review-stage example.

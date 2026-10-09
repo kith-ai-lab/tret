@@ -1,0 +1,49 @@
+{
+  "name": "@tret/sdk",
+  "version": "0.1.0",
+  "description": "Typed TypeScript client for the tret API: runs, streamed run events, documents, findings and an honest cost/carbon receipt.",
+  "private": false,
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/kith-ai-lab/tret/tree/main/sdk/typescript",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kith-ai-lab/tret.git",
+    "directory": "sdk/typescript"
+  },
+  "keywords": ["tret", "llm", "agents", "harness", "sdk"],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "README.md"],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "generate": "openapi-typescript openapi.json -o src/generated/openapi.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "build": "tsup"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "openapi-typescript": "^7.13.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.0",
+    "typescript": "~5.9.3"
+  }
+}

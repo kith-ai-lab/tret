@@ -3,3 +3,7 @@
 *.bat      text eol=crlf
 *.sh       text eol=lf
 *.command  text eol=lf
+
+# Generated from the backend; CI regenerates both and fails on a diff.
+sdk/typescript/openapi.json                 linguist-generated=true
+sdk/typescript/src/generated/**             linguist-generated=true

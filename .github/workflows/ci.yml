@@ -134,6 +134,48 @@ jobs:
         working-directory: frontend
         run: npm run build
 
+  # The TypeScript SDK (sdk/typescript). Its request/response types are
+  # generated from a committed OpenAPI snapshot, so this job also proves the
+  # snapshot is current: it re-dumps the schema from the backend (no database
+  # needed, see backend/scripts/dump_openapi.py), regenerates the types, and
+  # fails on any diff. A backend change that moves the API surface has to
+  # move the snapshot and the SDK in the same commit.
+  sdk-typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install backend
+        working-directory: backend
+        run: pip install -e ".[server]" -c constraints.txt
+      - name: Install
+        working-directory: sdk/typescript
+        run: npm ci
+      - name: OpenAPI snapshot and generated types are current
+        run: |
+          python backend/scripts/dump_openapi.py sdk/typescript/openapi.json
+          (cd sdk/typescript && npm run generate)
+          if ! git diff --exit-code -- sdk/typescript/openapi.json sdk/typescript/src/generated; then
+            echo "::error::sdk/typescript/openapi.json or src/generated is stale: run python backend/scripts/dump_openapi.py sdk/typescript/openapi.json && (cd sdk/typescript && npm run generate), then commit"
+            exit 1
+          fi
+      - name: Typecheck
+        working-directory: sdk/typescript
+        run: npm run typecheck
+      - name: Test
+        working-directory: sdk/typescript
+        # Includes the check that the SDK's run-event union names exactly the
+        # events backend/tret publishes.
+        run: npm test
+      - name: Build
+        working-directory: sdk/typescript
+        run: npm run build
+
   # /api/healthz only proves the process is up — it says nothing about whether
   # the seeded pack actually installed or the app can serve an authenticated
   # request. A bootstrap that silently drops the pack (a bad path, a validation
