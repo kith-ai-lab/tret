@@ -624,6 +624,44 @@ def test_a_malformed_x_tret_workspace_header_does_not_500(client, db, monkeypatc
     assert response.json()["workspace_id"] == str(ws_a.id)
 
 
+def test_a_session_wid_wins_over_a_conflicting_x_tret_workspace_header(client, db):
+    """The header is the bearer caller's stand-in for `wid`, read only when the
+    session supplied none: a cookie caller that already selected a workspace
+    must not be moved by a header naming a different one (both memberships
+    real), so the SDK sending `X-Tret-Workspace` alongside a cookie can never
+    silently change which workspace a browser session acts on."""
+    workspace_a = _workspace("Alpha")
+    workspace_b = _workspace("Beta")
+    carol = User(
+        id=uuid.uuid4(),
+        email="carol@example.com",
+        display_name="Carol",
+        password_hash=_HASHER.hash("correct-horse-1"),
+        role="analyst",
+        session_epoch=0,
+        disabled=False,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(workspace_a)
+    db.add(workspace_b)
+    db.add(carol)
+    db.add(WorkspaceMember(user_id=carol.id, workspace_id=workspace_a.id, role="analyst"))
+    db.add(WorkspaceMember(user_id=carol.id, workspace_id=workspace_b.id, role="admin"))
+
+    login = client.post(
+        "/api/auth/login", json={"email": "carol@example.com", "password": "correct-horse-1"}
+    )
+    assert login.status_code == 200
+    switched = client.post("/api/auth/workspace", json={"workspace_id": str(workspace_a.id)})
+    assert switched.status_code == 200
+
+    response = client.get(
+        "/api/_test/workspace", headers={"X-Tret-Workspace": str(workspace_b.id)}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"workspace_id": str(workspace_a.id), "role": "analyst"}
+
+
 # ── cookie path regression ────────────────────────────────────────────────────
 def test_cookie_session_still_works_and_ignores_a_bearer_header(client, db, monkeypatch):
     """A session cookie wins outright, bearer enabled or not: `current_user`

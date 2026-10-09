@@ -28,6 +28,7 @@ from tret.api import (
     runs,
     settings as settings_api,
     telemetry as telemetry_api,
+    version as version_api,
     workspaces as workspaces_api,
 )
 from tret.config import enforce_production_safety, get_settings
@@ -399,6 +400,9 @@ def create_app() -> FastAPI:
     @app.get("/api/healthz")
     async def healthz():
         return {"ok": True}
+
+    # Release number + git sha, unauthenticated like healthz (tret/api/version.py).
+    app.include_router(version_api.router)
 
     # Single-app deployments (Fly, etc.): serve the built SPA from the backend.
     frontend_dir = get_settings().serve_frontend_dir

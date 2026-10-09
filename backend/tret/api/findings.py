@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -113,8 +113,14 @@ class ApprovalBody(BaseModel):
     # success. Keep this in step with the frontend, which sends {action, note}.
     model_config = ConfigDict(extra="forbid")
 
-    action: str  # approve | reject
-    note: str | None = None
+    # Still validated by hand in `decide_finding` (its own 422 message), so the
+    # enum here only documents the two values in the OpenAPI schema — the
+    # TypeScript SDK's generated types (sdk/typescript) are built from it.
+    action: str = Field(
+        description="'approve' or 'reject'",
+        json_schema_extra={"enum": list(APPROVAL_ACTIONS)},
+    )
+    note: str | None = Field(default=None, description="Optional reviewer comment")
 
 
 @router.post("/findings/{finding_id}/approval")

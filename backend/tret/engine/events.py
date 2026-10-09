@@ -68,10 +68,21 @@ class RunEvent:
     # (`RunEventBus._max_backlog`, 5000 by default) like any other event on
     # that bus, but at `max_iterations` events-per-iteration volumes that cap
     # is nowhere close to binding.
+    #
+    # `effort_raised` (the supervisor's effort rung, payload one entry of
+    # `run.routing["effort_changes"]`) and `provider_ignore_waived`
+    # (`{iteration, error}`, a retry without the poor-endpoint ignore list)
+    # are published by engine/harness.py too.
+    #
+    # The list below is machine-read: sdk/typescript/test/events.test.ts
+    # parses it (and every `RunEvent("<type>"` in tret/) and fails when the
+    # SDK's event union does not name the same set. Keep it in step.
+    # `ping` is not an event — it is `subscribe`'s keepalive frame.
     type: str  # routing|context_composition|text_delta|tool_call|tool_result|
     #            finding_recorded|usage|budget_warning|budget_alert|
     #            tools_withheld|context_pressure|compaction|model_switch|
-    #            switch_refused|delegation_started|delegation_finished|
+    #            switch_refused|effort_raised|provider_ignore_waived|
+    #            delegation_started|delegation_finished|
     #            delegation_progress|lesson_proposed|done|error
     data: dict = field(default_factory=dict)
     ts: float = field(default_factory=time.time)
