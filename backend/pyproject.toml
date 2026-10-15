@@ -1,6 +1,6 @@
 [project]
 name = "tret"
-version = "0.1.0"
+version = "0.2.0"
 description = "An open-source AI harness platform for non-technical knowledge work"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }

@@ -8,7 +8,42 @@ one that needs action on an existing install.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] — 2026-10-15
+
 ### Added
+
+- **Verdicts you can read.** Approvals and the run page render a
+  `divergence_verdict` as a card: verdict, reason code, confidence, the
+  methodology note and the cited dataset values, with the raw payload behind
+  a fold and every retrieved value behind another. The run page lists each
+  finding a run recorded with its status. `record_verdict` now tells the
+  model what it recorded and asks it to state the verdict in its answer.
+- **One verdict per case.** A new draft `divergence_verdict` for the same
+  site and peril supersedes the older draft in the same project (status
+  `superseded`, cross-linked through `supersedes` / `superseded_by` on the
+  finding). Approved and rejected findings are never touched. Verdicts of
+  `insufficient_data` are stored with status `noted`: they stay on the run
+  and in `GET /api/findings`, but leave the approval queue, since the data
+  request filed with them is the actionable item. The portfolio divergence
+  rollup skips superseded rows.
+- **Chat stop and resume.** A Stop button cancels the reply in flight.
+  `GET /api/chat/{id}` reports `active_run_id` (the newest live top-level run
+  on the conversation, under an hour old); the page re-attaches to it after a
+  reload instead of forgetting the run, and a second send while a reply is
+  live is refused with 409 rather than starting a second paid run.
+- **Invites that explain themselves.** `POST /api/auth/invites/{token}/accept`
+  returns 200 and switches to the team when the caller already redeemed that
+  invite (it used to say "invalid or expired"), 410 with a reason for a
+  revoked or expired invite, and 404 only for an unknown token or someone
+  else's invite. `GET /api/auth/invites/pending` lists the caller's own open
+  invites, and the first-run screen offers to accept one, or to switch to a
+  team the user already belongs to, before it offers credits.
+- **Routing errors that say why.** "No candidate models" now reports how
+  many catalog models were considered and why each was excluded (no provider
+  key per provider, above the policy's cost tier, not in the allowed list,
+  no tool support), and logs the same breakdown.
 
 - **Water consumption.** Every new run records an estimated water figure next
   to its carbon: on-site cooling water (IT energy × site WUE, default 0.375
@@ -70,12 +105,30 @@ one that needs action on an existing install.
   `POST /api/findings/{id}/approval`. The body (`{action, note}`) and its
   validation are unchanged.
 
+### Changed
+
+- **A session always has a workspace.** A browser session for a user with
+  several memberships lands on a default workspace (the cookie's workspace if
+  still a membership, else the most recently joined team, else the first
+  membership) instead of a 409 that left every workspace call failing until
+  the user picked one. Bearer (API) callers keep the explicit contract: a
+  missing or wrong `X-Tret-Workspace` header is still a 409.
+- Password login redeems pending invites the way OIDC login does.
+- Creating a team whose name matches one the caller already owns is a 409.
+- Switching, creating or joining a workspace updates the UI in place; it no
+  longer needs a reload.
+- Findings carry two new statuses, `noted` and `superseded`, next to `draft`,
+  `approved` and `rejected`. Clients that filter by status should expect
+  them; neither can be approved.
+
 ### Fixed
 
 - Saving the emissions settings form no longer deletes settings the form does
   not show (`energy_strategy`, `model_overrides`, `pue.upstreams`, grid rows for
   other providers or regions, the embodied GPU model). The form previously
   rebuilt the whole document on save.
+- Tenancy isolation tests now also cover run children, run events, method
+  runs and deliverable exports.
 
 ## [0.1.0] — 2026-09-29 — first public release
 
@@ -122,5 +175,6 @@ against real work with an audit trail, approvals, and an honest cost line.
   still awaiting approval. Both refresh every 30 seconds and immediately after
   a decision.
 
-[Unreleased]: https://github.com/kith-ai-lab/tret/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kith-ai-lab/tret/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kith-ai-lab/tret/releases/tag/v0.2.0
 [0.1.0]: https://github.com/kith-ai-lab/tret/releases/tag/v0.1.0
