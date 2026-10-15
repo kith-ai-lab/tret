@@ -45,6 +45,13 @@ def _finding_out(f: Finding, approvals: list[Approval] | None = None) -> dict:
         "status": f.status,
         "created_at": f.created_at.isoformat() if f.created_at else None,
     }
+    # Surfaced from provenance so clients need not dig for the cross-references
+    # set when a newer verdict for the same case replaces an older draft.
+    prov = f.provenance or {}
+    if prov.get("superseded_by"):
+        out["superseded_by"] = prov["superseded_by"]
+    if prov.get("supersedes"):
+        out["supersedes"] = prov["supersedes"]
     if approvals is not None:
         out["approvals"] = [
             {

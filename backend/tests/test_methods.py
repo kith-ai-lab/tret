@@ -51,6 +51,43 @@ def test_divergence_rate_status_filter():
     assert flood["verdicts_total"] == 1
 
 
+def test_divergence_rate_status_filter_noted():
+    rows = run_script(
+        "portfolio_divergence_rate.py",
+        {"status": "noted"},
+        {"findings:divergence_verdict": [*VERDICTS, {"peril": "wind", "verdict": "insufficient_data", "status": "noted"}]},
+    )
+    assert [r["peril"] for r in rows] == ["wind"]
+    assert rows[0]["verdicts_total"] == 1
+
+
+async def test_findings_input_excludes_superseded_drafts():
+    """The rollup's loader must not hand a method a superseded draft alongside
+    its replacement."""
+    import uuid
+
+    from sqlalchemy.dialects import postgresql
+
+    from tret.services.methods import _materialize_inputs
+
+    seen = []
+
+    class _Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _Db:
+        async def execute(self, stmt):
+            seen.append(str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})))
+            return _Result()
+
+    await _materialize_inputs(_Db(), uuid.uuid4(), ["findings:divergence_verdict"])
+    assert "findings.status != 'superseded'" in seen[0]
+
+
 WORKBOOK = [
     {"record_id": "CW-001", "facility": "Alder Point", "category": "scope1_stationary",
      "quantity": "100000", "unit": "therms", "data_source": "utility invoices"},

@@ -32,6 +32,7 @@ were invited to, not on your personal one.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -63,21 +64,99 @@ def _disabled_check(user: User) -> None:
         raise HTTPException(403, "This account has been deactivated. Contact an administrator.")
 
 
-async def _redeem_invites_and_resolve_workspace(
-    db: AsyncSession,
-    user: User,
-    email: str,
-    email_verified: bool,
-    *,
-    fallback_workspace_id: uuid.UUID | None,
+def _joined_at(member: WorkspaceMember) -> float:
+    """Sortable join time for a membership. `created_at` is None on a row
+    that has not been flushed yet (hand-built in a test double), so treat that
+    as 'oldest' rather than comparing None."""
+    return member.created_at.timestamp() if member.created_at is not None else 0.0
+
+
+def _join_order(member: WorkspaceMember) -> tuple[float, str]:
+    """Total order over memberships: join time, then workspace id."""
+    return (_joined_at(member), str(member.workspace_id))
+
+
+def pick_default_membership(
+    memberships: Sequence[WorkspaceMember],
+    kinds: Mapping[uuid.UUID, str],
+    preferred: uuid.UUID | None = None,
+) -> WorkspaceMember | None:
+    """The one membership a session should land in when nothing more specific
+    was chosen — the single rule `api/auth.py::_resolve_workspaces` (login and
+    `/me`), `api/workspace.py::current_workspace` and the OIDC callback below
+    all share, so they can never disagree about 'the current workspace'.
+
+    In order: `preferred` if it is one of `memberships`; else the most
+    recently joined team (`kind != 'personal'`) workspace — a user who has
+    been invited somewhere wants the team, not the personal workspace every
+    account is born with; else the first-joined membership (the sole one, for
+    self-host and most accounts). `kinds` maps workspace id to its `kind`; a
+    workspace missing from it counts as a team. Returns None only when
+    `memberships` is empty.
+    """
+    if not memberships:
+        return None
+    if preferred is not None:
+        match = next((m for m in memberships if m.workspace_id == preferred), None)
+        if match is not None:
+            return match
+    teams = [m for m in memberships if kinds.get(m.workspace_id, "team") != "personal"]
+    if teams:
+        # Ties on join time break on workspace id, never on list order (the
+        # membership queries order the same way, but callers hand in lists).
+        return max(teams, key=_join_order)
+    return min(memberships, key=_join_order)
+
+
+async def default_workspace_id(
+    db: AsyncSession, user_id: uuid.UUID, preferred: uuid.UUID | None = None
+) -> uuid.UUID | None:
+    """`pick_default_membership` over this user's stored memberships."""
+    memberships = (
+        await db.execute(
+            select(WorkspaceMember)
+            .where(WorkspaceMember.user_id == user_id)
+            .order_by(WorkspaceMember.created_at, WorkspaceMember.workspace_id)
+        )
+    ).scalars().all()
+    kinds: dict[uuid.UUID, str] = {}
+    for m in memberships:
+        workspace = await db.get(Workspace, m.workspace_id)
+        if workspace is not None:
+            kinds[m.workspace_id] = workspace.kind
+    picked = pick_default_membership(memberships, kinds, preferred)
+    return picked.workspace_id if picked is not None else None
+
+
+def account_email_is_verified(user: User) -> bool:
+    """Whether this account's email address counts as verified, for the
+    purpose of handing it the invites addressed to that address (password
+    login's redemption and `GET /api/auth/invites/pending`).
+
+    The User model carries no `email_verified` column, and the OIDC claim is
+    not stored, so this is a judgement from what *is* known: an account with a
+    password hash was provisioned by an administrator (`api/auth.py::
+    create_user`, or the bootstrap admin) — the only way a password account
+    comes to exist in core, with no self-service signup — so the address was
+    vouched for by whoever created it. An OIDC-only account (no password
+    hash) may have been JIT-provisioned from an *unverified* IdP claim, and
+    that is not recoverable here, so it is not trusted; it still gets
+    redemption at OIDC login, where the live `email_verified` claim is in
+    hand. A deployment that adds self-service password signup must verify the
+    address before it relies on this.
+    """
+    return bool(user.password_hash)
+
+
+async def redeem_pending_invites(
+    db: AsyncSession, user: User, email: str, email_verified: bool
 ) -> uuid.UUID | None:
     """Redeem every pending, unexpired invite addressed to `email` (only when
     verified — the founder decision that lets Auth0 allow unverified login
-    stops short of letting an unverified email pull someone else's invite),
-    then decide which workspace the session should land in: the most recently
-    redeemed team workspace if any, else `fallback_workspace_id` (the
-    caller's own workspace, when they just have one to fall back to), else
-    whatever this user's sole existing membership already is.
+    stops short of letting an unverified email pull someone else's invite).
+    Returns the most recently redeemed team workspace id, or None when
+    nothing was redeemed. Shared by OIDC login (below) and password login
+    (`api/auth.py::login`) so the two doors cannot drift apart.
 
     A plain `select(Invite).where(status == 'pending')` rather than an
     email-filtered query on purpose: Invite.email is compared case-
@@ -94,6 +173,7 @@ async def _redeem_invites_and_resolve_workspace(
     """
     redeemed_workspace_id: uuid.UUID | None = None
     if email_verified:
+        email = email.strip().lower()
         now = datetime.now(timezone.utc)
         pending = (
             await db.execute(
@@ -123,17 +203,30 @@ async def _redeem_invites_and_resolve_workspace(
             redeemed_workspace_id = invite.workspace_id
         if matching:
             await db.commit()
+    return redeemed_workspace_id
 
+
+async def _redeem_invites_and_resolve_workspace(
+    db: AsyncSession,
+    user: User,
+    email: str,
+    email_verified: bool,
+    *,
+    fallback_workspace_id: uuid.UUID | None,
+) -> uuid.UUID | None:
+    """`redeem_pending_invites`, then decide which workspace the session
+    should land in: the most recently redeemed team workspace if any, else
+    `fallback_workspace_id` (the caller's own workspace, when they just have
+    one to fall back to), else `default_workspace_id` — the same default
+    `/me` and `current_workspace` report, so an existing user with several
+    memberships still lands somewhere instead of with no `wid`.
+    """
+    redeemed_workspace_id = await redeem_pending_invites(db, user, email, email_verified)
     if redeemed_workspace_id is not None:
         return redeemed_workspace_id
     if fallback_workspace_id is not None:
         return fallback_workspace_id
-    memberships = (
-        await db.execute(select(WorkspaceMember).where(WorkspaceMember.user_id == user.id))
-    ).scalars().all()
-    if len(memberships) == 1:
-        return memberships[0].workspace_id
-    return None  # more than one (or zero) membership: no single answer, same as _resolve_workspaces
+    return await default_workspace_id(db, user.id)
 
 
 async def _has_pending_invite(db: AsyncSession, email: str) -> bool:
@@ -185,11 +278,9 @@ async def match_or_provision(
 
     Returns `(user, workspace_id)` — the workspace the session's `wid` should
     carry, ready for `api/auth.py::_issue_session`. `workspace_id` is `None`
-    only when it cannot be resolved to exactly one (no membership, or more
-    than one with nothing redeemed) — same "no single answer" case
-    `_resolve_workspaces` already handles for password login, and for the
-    same reason: this endpoint must always succeed, leaving workspace
-    selection to `POST /api/auth/workspace`.
+    only when the user has no membership at all; otherwise it is the redeemed
+    team, the fresh personal workspace, or `default_workspace_id` — the same
+    default `_resolve_workspaces` reports for password login.
     """
     email = email.strip().lower()
 

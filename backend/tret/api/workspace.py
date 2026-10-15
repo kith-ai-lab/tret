@@ -3,9 +3,9 @@ current user's role in it is strong enough for what they are asking to do.
 
 Every user has at least one membership by construction (services/bootstrap.py
 guarantees it for self-host; services/workspace.py's create_workspace and the
-invite-redemption flow, Phase C, maintain it going forward), so self-host's
-single-workspace deployment always takes the sole-membership path below and
-never sees the 409 — one code path serves both self-host and multi-tenant.
+invite-redemption flow, Phase C, maintain it going forward), so the 409 below
+is only ever reached by an account with none — one code path serves both
+self-host (one workspace) and multi-tenant (several, with a shared default).
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.api.auth import _session_payload, current_user
 from tret.db.engine import get_db
 from tret.db.models import Project, User, Workspace, WorkspaceMember
+from tret.services.identity import pick_default_membership
 
 # Weakest to strongest. A workspace's `owner` role belongs to whoever created
 # it (or, for a personal workspace, the person it is for) and is otherwise
@@ -48,7 +49,11 @@ async def user_memberships(db: AsyncSession, user_id: uuid.UUID) -> list[Workspa
     fake, and the per-user membership count is always small.
     """
     return (
-        await db.execute(select(WorkspaceMember).where(WorkspaceMember.user_id == user_id))
+        await db.execute(
+            select(WorkspaceMember)
+            .where(WorkspaceMember.user_id == user_id)
+            .order_by(WorkspaceMember.created_at, WorkspaceMember.workspace_id)
+        )
     ).scalars().all()
 
 
@@ -59,31 +64,40 @@ async def current_workspace(
 ) -> WorkspaceContext:
     """Resolve the workspace a request operates on.
 
-    Session `wid` -> validate the membership still exists -> else, if the user
-    belongs to exactly one workspace, use that (the self-host path, and the
-    path every cookie minted before `wid` existed takes) -> else 409 naming
-    that a workspace must be chosen (`POST /api/auth/workspace`; the frontend
-    switcher — Phase E — is what actually presents that choice).
+    Session `wid` -> validate the membership still exists -> else, for a
+    browser session, the default (`services/identity.py::
+    pick_default_membership`: the most recently joined team workspace, else the
+    sole/first membership — the same answer `/me` gives). Only an account with
+    no membership at all gets a 409.
 
-    A `wid` that no longer names a membership (the user was removed from that
-    workspace since the cookie was minted, or the cookie is simply stale) is
-    not fatal: it falls through to the sole-membership path exactly as if no
-    `wid` were present, rather than 401ing a session that is otherwise valid.
+    A cookie `wid` that no longer names a membership (the user was removed from
+    that workspace since the cookie was minted, or the cookie is simply stale)
+    is not fatal: it falls through to the default exactly as if no `wid` were
+    present, rather than 401ing a session that is otherwise valid or leaving a
+    browser user stuck.
 
     A bearer caller (api/auth.py::current_user's other door) carries no
     session cookie at all, so `payload` is always `None` for one and it would
-    409 on this exact "more than one workspace, nothing selected" branch on
-    every request. `X-Tret-Workspace` is the bearer equivalent of `wid`: read
-    only when the session payload didn't already supply one, and validated
+    409 on the "more than one workspace, nothing selected" branch on every
+    request; API clients must be explicit. `X-Tret-Workspace` is the bearer
+    equivalent of `wid`: read only when the session payload didn't already supply one, and validated
     against this user's own memberships exactly as `wid` is below — it lets a
     caller pick among workspaces they already belong to, never grants
-    membership in one they don't. A malformed or non-member value falls
-    through to the same sole-membership/409 path a bad `wid` already does,
-    not a 500.
+    membership in one they don't. A bearer caller (or any caller whose
+    workspace came from the header) that names nothing usable is never moved
+    to a default: it gets the sole membership if it has exactly one, else the
+    409 below — a malformed or non-member value is not a 500 and not a silent
+    wrong-workspace read.
     """
     memberships = await user_memberships(db, user.id)
     payload = _session_payload(request)
-    wid = (payload.get("wid") if payload else None) or request.headers.get("X-Tret-Workspace")
+    session_wid = payload.get("wid") if payload else None
+    header_wid = request.headers.get("X-Tret-Workspace")
+    wid = session_wid or header_wid
+    # Cookie sessions fall back to the default; bearer callers and an explicit
+    # header never do (the header is the caller's own selection).
+    is_bearer = payload is None and request.headers.get("Authorization", "").lower().startswith("bearer ")
+    explicit = is_bearer or (not session_wid and bool(header_wid))
     if wid:
         try:
             workspace_id = uuid.UUID(wid)
@@ -96,10 +110,6 @@ async def current_workspace(
                 if workspace is not None:
                     return WorkspaceContext(workspace, member.role)
 
-    if len(memberships) == 1:
-        workspace = await db.get(Workspace, memberships[0].workspace_id)
-        if workspace is not None:
-            return WorkspaceContext(workspace, memberships[0].role)
     if not memberships:
         # Should not happen by construction (see module docstring), but a 409
         # naming the real problem beats a 500 or a silent wrong-workspace read.
@@ -107,12 +117,35 @@ async def current_workspace(
             409,
             "This account belongs to no workspace. Contact an administrator.",
         )
-    raise HTTPException(
-        409,
-        "Workspace selection is required: this account belongs to more than one "
-        "workspace and no active one is selected. POST /api/auth/workspace with "
-        "a workspace_id from GET /api/auth/me's `workspaces` list.",
+    if explicit:
+        if len(memberships) == 1:
+            workspace = await db.get(Workspace, memberships[0].workspace_id)
+            if workspace is not None:
+                return WorkspaceContext(workspace, memberships[0].role)
+        raise HTTPException(
+            409,
+            "Workspace selection is required: this account belongs to more than one "
+            "workspace and no active one is selected. Send X-Tret-Workspace (or POST "
+            "/api/auth/workspace) with a workspace_id from GET /api/auth/me's "
+            "`workspaces` list.",
+        )
+    # Cookie session with no usable `wid`: fall to the same default `/me`
+    # reports (most recently joined team, else the sole/first membership).
+    workspaces: dict[uuid.UUID, Workspace] = {}
+    for m in memberships:
+        workspace = await db.get(Workspace, m.workspace_id)
+        if workspace is not None:
+            workspaces[m.workspace_id] = workspace
+    picked = pick_default_membership(
+        [m for m in memberships if m.workspace_id in workspaces],
+        {wid_: w.kind for wid_, w in workspaces.items()},
     )
+    if picked is None:
+        raise HTTPException(
+            409,
+            "This account belongs to no workspace. Contact an administrator.",
+        )
+    return WorkspaceContext(workspaces[picked.workspace_id], picked.role)
 
 
 async def current_project(db: AsyncSession, workspace_id: uuid.UUID) -> Project | None:

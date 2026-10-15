@@ -558,8 +558,9 @@ def test_x_tret_workspace_header_selects_among_memberships(client, db, monkeypat
     db.add(WorkspaceMember(user_id=user.id, workspace_id=ws_b.id, role="admin"))
     token = _sign_access_token(sub="sub-alice")
 
-    # No header, no session `wid`, and more than one membership: today's
-    # unchanged 409, exactly as a cookie caller in the same spot would see.
+    # No header, no session `wid`, and more than one membership: an API
+    # client must be explicit, so this stays a 409 (only a browser session
+    # falls back to the shared default).
     response = _with_idp_mock(
         lambda: client.get("/api/_test/workspace", headers=_bearer_headers(token))
     )
@@ -597,7 +598,7 @@ def test_x_tret_workspace_header_naming_a_non_member_workspace_is_refused(client
         )
     )
     # A workspace the caller does not belong to must behave exactly as an
-    # invalid `wid` does today — falls through, and with two real
+    # invalid `wid` does — falls through, and with two real
     # memberships and nothing resolved, that is the same 409 a missing
     # header already produces. Never access to `other`.
     assert response.status_code == 409

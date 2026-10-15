@@ -29,10 +29,21 @@ export interface User {
   // False once an admin has deactivated the account.
   active: boolean
   workspaces: WorkspaceSummary[]
-  // Null when it cannot be resolved to exactly one workspace (no membership,
-  // or more than one with nothing selected) — a client must then call
-  // POST /api/auth/workspace before anything workspace-scoped will work.
+  // Null only for an account with no membership at all. With one or more the
+  // server always names a default (preferred session workspace, else the most
+  // recently joined team, else the first) — the same one workspace-scoped
+  // calls use — so a client never has to pick before anything works.
   current_workspace_id: string | null
+}
+
+/** One pending invite addressed to the current user (backend:
+ *  api/workspaces.py::PendingInviteOut, GET /api/auth/invites/pending). */
+export interface PendingInvite {
+  token: string
+  workspace_id: string
+  workspace_name: string
+  role: string
+  expires_at: string
 }
 
 /** GET /api/auth/config — public, unauthenticated: what the login screen
@@ -1169,7 +1180,14 @@ export interface Finding {
   subject: Record<string, unknown>
   payload: Record<string, unknown>
   provenance: Provenance
-  status: string // draft | approved | rejected
+  /** draft | approved | rejected, plus `noted` (an insufficient_data verdict:
+   *  nothing to decide) and `superseded` (a newer draft for the same case
+   *  replaced it). Only `draft` awaits approval. */
+  status: 'draft' | 'approved' | 'rejected' | 'noted' | 'superseded' | (string & {})
+  /** Id of the newer finding that replaced this one (status `superseded`). */
+  superseded_by?: string
+  /** Ids of the older drafts this finding replaced. */
+  supersedes?: string[]
   created_at: string | null
 }
 
@@ -1497,6 +1515,9 @@ export interface ConversationSummary {
 
 export interface ConversationDetail extends ConversationSummary {
   messages: ChatMessage[]
+  /** Newest still-live (queued/running) run on this conversation, so a
+   *  reloaded page can re-subscribe to it. Absent on a freshly created one. */
+  active_run_id?: string | null
 }
 
 export interface RouterSettings {
@@ -2833,11 +2854,15 @@ export class ApiError extends Error {
    *  that needs more than the stringified `message` can inspect this.
    *  `undefined` when the body was not JSON or had no `detail` key. */
   detail?: unknown
+  /** The whole parsed JSON error body, for refusals that carry extra fields
+   *  beside `detail` (chat's 409 sends `active_run_id`). */
+  body?: unknown
 
-  constructor(status: number, message: string, detail?: unknown) {
+  constructor(status: number, message: string, detail?: unknown, body?: unknown) {
     super(message)
     this.status = status
     this.detail = detail
+    this.body = body
     this.name = 'ApiError'
   }
 }
@@ -2877,8 +2902,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`
     let detail: unknown
+    let body: unknown
     try {
       const data: unknown = await res.json()
+      body = data
       if (data && typeof data === 'object' && 'detail' in data) {
         detail = (data as { detail: unknown }).detail
         // An extension workspace-gate refusal shapes `detail` as `{ reason,
@@ -2901,7 +2928,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     } catch {
       /* non-JSON error body */
     }
-    throw new ApiError(res.status, message, detail)
+    throw new ApiError(res.status, message, detail, body)
   }
   return (await res.json()) as T
 }
@@ -2924,6 +2951,9 @@ export const api = {
     // ::accept_invite): joins + switches to the invited workspace and
     // re-mints the cookie, returning the same UserOut shape.
     request<User>(`/auth/invites/${encodeURIComponent(token)}/accept`, { method: 'POST' }),
+  // Invites addressed to the signed-in user's own email that can still be
+  // accepted; empty unless the account's email counts as verified.
+  pendingInvites: () => request<PendingInvite[]>('/auth/invites/pending'),
   listUsers: () => request<User[]>('/auth/users'),
   createUser: (body: { email: string; display_name: string; password: string; role: string }) =>
     request<User>('/auth/users', { method: 'POST', body }),

@@ -3,6 +3,17 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { api, ApiError } from '../api/client'
 
+/** The server's own words for the cases a person can act on (403 wrong
+ *  account, 410 revoked / expired); a 404 is an unknown link, or one already
+ *  used by someone else. */
+function inviteErrorMessage(error: ApiError | null): string {
+  if (error?.status === 403 || error?.status === 410) return error.message
+  if (error?.status === 404) {
+    return 'This invite link is not valid. Check that you copied the whole link, or ask for a new one.'
+  }
+  return error?.message ?? 'Could not accept this invite. Try again, or ask for a new one.'
+}
+
 /** Landing page for an invite link, `/invite/{token}`.
  *
  *  This view only ever mounts once `me` has resolved successfully — App.tsx
@@ -24,19 +35,13 @@ export function InviteAccept() {
 
   const acceptMutation = useMutation({
     mutationFn: () => api.acceptInvite(token!),
-    onSuccess: () => {
-      // Same rigor as switching workspaces or logging out: the invite put
-      // this session in a new workspace, so nothing cached from before it
-      // may survive — cleared immediately, before the joined state ever
-      // renders, so no stale prior-workspace data shows even for an instant.
-      queryClient.clear()
-      // `clear()` above wipes `me` along with everything else, but any
-      // still-mounted observer of it (the sidebar's workspace switcher)
-      // needs telling to refetch — otherwise it just keeps showing nothing
-      // until something else happens to touch that query. Invalidating
-      // (rather than a full remount) lets it pick up the new workspace on
-      // its own.
-      queryClient.invalidateQueries({ queryKey: ['me'] })
+    onSuccess: (data) => {
+      // The invite put this session in a new workspace: adopt the returned
+      // `me` (the sidebar's switcher updates without a reload — `me` is
+      // staleTime Infinity, so it would otherwise never refetch) and reset
+      // every other query so nothing from the prior workspace survives.
+      queryClient.setQueryData(['me'], data)
+      queryClient.resetQueries({ predicate: (q) => q.queryKey[0] !== 'me' })
     },
   })
 
@@ -84,7 +89,7 @@ export function InviteAccept() {
         ) : acceptMutation.isError ? (
           <div className="stack" style={{ gap: 14 }}>
             <div className="error-text">
-              {error?.message ?? 'Could not accept this invite — it may be expired or already used.'}
+              {inviteErrorMessage(error)}
             </div>
             <Link className="btn" to="/">
               Back to tret

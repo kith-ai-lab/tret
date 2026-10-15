@@ -581,9 +581,12 @@ async def test_accepting_an_invite_creates_membership_and_switches_workspace(cli
     assert body["role"] == "approver"
     assert {w["id"] for w in body["workspaces"]} == {str(team.id), str(home.id)}
 
-    # Double-accept: the invite is no longer pending.
+    # Double-accept by the member it was redeemed for is idempotent: 200,
+    # session still on the team (it used to 404 — see
+    # test_clicking_an_already_accepted_invite_as_the_member_switches_to_it).
     again = await client.post(f"/api/auth/invites/{invite.token}/accept")
-    assert again.status_code == 404
+    assert again.status_code == 200
+    assert again.json()["current_workspace_id"] == str(team.id)
 
 
 async def test_accepting_an_invite_sent_to_a_different_email_is_refused(client, seed):
@@ -607,7 +610,10 @@ async def test_an_expired_invite_cannot_be_accepted(client, seed):
     await login(client, invitee.email)
 
     response = await client.post(f"/api/auth/invites/{invite.token}/accept")
-    assert response.status_code == 404
+    assert response.status_code == 410
+    assert response.json()["detail"] == (
+        "This invite has expired. Ask the workspace owner for a new one."
+    )
 
 
 async def test_accept_is_blocked_by_a_registered_workspace_gate(client, seed):
@@ -625,9 +631,11 @@ async def test_accept_is_blocked_by_a_registered_workspace_gate(client, seed):
         team, owner, invitee, home,
         make_member(owner, team, role="owner"),
         make_member(invitee, home, role="owner"),
-        invite,
     )
     await login(client, invitee.email)
+    # Issued after sign-in: password login now redeems pending invites itself,
+    # so an invite seeded beforehand would already be accepted by here.
+    await seed(invite)
 
     ext = ExtensionAPI(None)
 
@@ -736,8 +744,9 @@ async def test_accept_invite_uses_the_shared_seat_redemption_helper(client, seed
     owner = make_user("owner-helper@example.com")
     invitee = make_user("invitee-helper@example.com")
     invite = make_invite(team, email=invitee.email, role="approver")
-    await seed(team, owner, invitee, make_member(owner, team, role="owner"), invite)
+    await seed(team, owner, invitee, make_member(owner, team, role="owner"))
     await login(client, invitee.email)
+    await seed(invite)  # after sign-in: password login would otherwise redeem it first
 
     calls = []
     original = workspaces_api.redeem_workspace_seat
@@ -891,3 +900,240 @@ async def test_a_personal_workspaces_role_can_never_be_changed(client, seed):
         f"/api/workspaces/{personal.id}/members/{user.id}", json={"role": "admin"}
     )
     assert response.status_code == 403
+
+
+# ── default workspace selection ──────────────────────────────────────────────
+async def _two_workspace_user(seed, email: str):
+    """A personal workspace joined first, a team joined later — the shape every
+    invited tester ends up with."""
+    user = make_user(email)
+    home = make_workspace("Home", kind="personal")
+    team = make_workspace("Climate Co")
+    home_member = make_member(user, home, role="owner")
+    team_member = make_member(user, team, role="analyst")
+    home_member.created_at = datetime.now(timezone.utc) - timedelta(days=2)
+    team_member.created_at = datetime.now(timezone.utc) - timedelta(days=1)
+    await seed(home, team, user, home_member, team_member)
+    return user, home, team
+
+
+async def test_login_with_two_memberships_mints_a_wid_and_me_reports_it(client, seed):
+    user, home, team = await _two_workspace_user(seed, "twoms@example.com")
+    body = (await login(client, user.email)).json()
+    assert body["current_workspace_id"] == str(team.id)  # the team, not the personal one
+    assert body["role"] == "analyst"
+
+    me = (await client.get("/api/auth/me")).json()
+    assert me["current_workspace_id"] == str(team.id)
+    assert me["role"] == "analyst"
+
+
+async def test_login_keeps_the_workspace_from_the_existing_cookie(client, seed):
+    user, home, team = await _two_workspace_user(seed, "keepcookie@example.com")
+    await login(client, user.email)
+    switched = await client.post("/api/auth/workspace", json={"workspace_id": str(home.id)})
+    assert switched.status_code == 200
+
+    # Logging in again with the same browser cookie lands where you were.
+    again = (await login(client, user.email)).json()
+    assert again["current_workspace_id"] == str(home.id)
+
+
+async def test_current_workspace_defaults_instead_of_409(session_factory, seed):
+    """A request with two memberships and no `wid` resolves to the default
+    (the team) rather than the old 'Workspace selection is required' 409."""
+    from types import SimpleNamespace
+
+    from tret.api.workspace import current_workspace
+
+    user, home, team = await _two_workspace_user(seed, "nowid@example.com")
+    request = SimpleNamespace(cookies={}, headers={})
+    async with session_factory() as db:
+        ctx = await current_workspace(request, user=user, db=db)
+    assert ctx.id == team.id
+    assert ctx.role == "analyst"
+
+
+async def test_current_workspace_still_409s_for_an_account_with_no_membership(
+    session_factory, seed
+):
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from tret.api.workspace import current_workspace
+
+    user = make_user("orphan@example.com")
+    await seed(user)
+    async with session_factory() as db:
+        with pytest.raises(HTTPException) as excinfo:
+            await current_workspace(SimpleNamespace(cookies={}, headers={}), user=user, db=db)
+    assert excinfo.value.status_code == 409
+
+
+# ── invite states ────────────────────────────────────────────────────────────
+async def test_clicking_an_already_accepted_invite_as_the_member_switches_to_it(client, seed):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner20@example.com")
+    invitee = make_user("invitee20@example.com")
+    home = make_workspace("Home", kind="personal")
+    invite = make_invite(team, email=invitee.email, status="accepted")
+    await seed(
+        team, owner, invitee, home,
+        make_member(owner, team, role="owner"),
+        make_member(invitee, home, role="owner"),
+        make_member(invitee, team, role="analyst"),
+        invite,
+    )
+    await login(client, invitee.email)
+    await client.post("/api/auth/workspace", json={"workspace_id": str(home.id)})
+
+    response = await client.post(f"/api/auth/invites/{invite.token}/accept")
+    assert response.status_code == 200, response.text
+    assert response.json()["current_workspace_id"] == str(team.id)
+    me = await client.get("/api/auth/me")
+    assert me.json()["current_workspace_id"] == str(team.id)
+
+
+async def test_an_accepted_invite_is_a_404_for_someone_who_is_not_a_member(client, seed):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner21@example.com")
+    stranger = make_user("stranger21@example.com")
+    home = make_workspace("Stranger home")
+    invite = make_invite(team, email="someone@example.com", status="accepted")
+    await seed(
+        team, owner, stranger, home,
+        make_member(owner, team, role="owner"),
+        make_member(stranger, home, role="owner"),
+        invite,
+    )
+    await login(client, stranger.email)
+
+    response = await client.post(f"/api/auth/invites/{invite.token}/accept")
+    assert response.status_code == 404
+
+
+async def test_a_revoked_invite_is_a_410_naming_the_revocation(client, seed):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner22@example.com")
+    invitee = make_user("invitee22@example.com")
+    invite = make_invite(team, email=invitee.email, status="revoked")
+    await seed(team, owner, invitee, make_member(owner, team, role="owner"), invite)
+    await login(client, invitee.email)
+
+    response = await client.post(f"/api/auth/invites/{invite.token}/accept")
+    assert response.status_code == 410
+    assert response.json()["detail"] == (
+        "This invite was revoked. Ask the workspace owner for a new one."
+    )
+
+
+# ── pending invites for me ───────────────────────────────────────────────────
+async def test_pending_invites_lists_only_my_live_pending_invites(client, seed):
+    team_a = make_workspace("Team A")
+    team_b = make_workspace("Team B")
+    team_c = make_workspace("Team C")
+    team_d = make_workspace("Team D")
+    team_e = make_workspace("Team E")
+    me = make_user("me23@example.com")
+    other = make_user("other23@example.com")
+    home = make_workspace("Home", kind="personal")
+    mine = make_invite(team_a, email="ME23@example.com", role="approver")
+    expired = make_invite(team_b, email=me.email, hours=-1)
+    revoked = make_invite(team_c, email=me.email, status="revoked")
+    someone_elses = make_invite(team_d, email=other.email)
+    already_member = make_invite(team_e, email=me.email)
+    await seed(
+        team_a, team_b, team_c, team_d, team_e, me, other, home,
+        make_member(me, home, role="owner"),
+        make_member(me, team_e, role="analyst"),
+    )
+    await login(client, me.email)
+    # Issued after sign-in: password login redeems invites that already exist.
+    await seed(mine, expired, revoked, someone_elses, already_member)
+
+    response = await client.get("/api/auth/invites/pending")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["token"] == mine.token
+    assert body[0]["workspace_id"] == str(team_a.id)
+    assert body[0]["workspace_name"] == "Team A"
+    assert body[0]["role"] == "approver"
+    assert "expires_at" in body[0]
+
+
+async def test_pending_invites_is_empty_for_an_account_with_no_password(client, session_factory, seed):
+    """No password hash means an OIDC-only account whose email may never have
+    been verified: it must not be handed redemption tokens."""
+    from tret.api.auth import current_user
+
+    team = make_workspace("Team A")
+    sso = make_user("sso24@example.com")
+    sso.password_hash = None
+    invite = make_invite(team, email=sso.email)
+    await seed(team, sso, invite)
+
+    app = client._transport.app
+    app.dependency_overrides[current_user] = lambda: sso
+    response = await client.get("/api/auth/invites/pending")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+# ── duplicate team names ─────────────────────────────────────────────────────
+async def test_creating_a_team_with_a_name_you_already_own_is_a_409(client, seed):
+    home = make_workspace("Solo", kind="personal")
+    user = make_user("dupe@example.com")
+    await seed(home, user, make_member(user, home, role="owner"))
+    await login(client, user.email)
+
+    first = await client.post("/api/workspaces", json={"name": "Climate Co"})
+    assert first.status_code == 200, first.text
+
+    again = await client.post("/api/workspaces", json={"name": "  climate co "})
+    assert again.status_code == 409
+    assert again.json()["detail"] == "You already own a team called 'climate co'"
+
+    me = (await client.get("/api/auth/me")).json()
+    assert len([w for w in me["workspaces"] if w["kind"] == "team"]) == 1
+
+
+async def test_a_team_name_owned_by_someone_else_is_not_a_conflict(client, seed):
+    other_team = make_workspace("Climate Co")
+    other_owner = make_user("dupeowner@example.com")
+    home = make_workspace("Solo", kind="personal")
+    user = make_user("dupe2@example.com")
+    await seed(
+        other_team, other_owner, home, user,
+        make_member(other_owner, other_team, role="owner"),
+        make_member(user, home, role="owner"),
+    )
+    await login(client, user.email)
+
+    response = await client.post("/api/workspaces", json={"name": "Climate Co"})
+    assert response.status_code == 200, response.text
+
+
+# ── password login redeems invites ───────────────────────────────────────────
+async def test_password_login_redeems_a_pending_invite(client, seed, session_factory):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner25@example.com")
+    invitee = make_user("invitee25@example.com")
+    home = make_workspace("Home", kind="personal")
+    invite = make_invite(team, email="Invitee25@Example.com", role="approver")
+    await seed(
+        team, owner, invitee, home,
+        make_member(owner, team, role="owner"),
+        make_member(invitee, home, role="owner"),
+        invite,
+    )
+
+    body = (await login(client, invitee.email)).json()
+    assert body["current_workspace_id"] == str(team.id)
+    assert body["role"] == "approver"
+    assert {w["id"] for w in body["workspaces"]} == {str(team.id), str(home.id)}
+
+    async with session_factory() as db:
+        stored = (await db.execute(select(Invite).where(Invite.token == invite.token))).scalar_one()
+        assert stored.status == "accepted"

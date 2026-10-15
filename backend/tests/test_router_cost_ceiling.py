@@ -426,3 +426,64 @@ def test_within_cost_tier_places_local_below_every_cap():
     local = _local()
     for tier in TIER_ORDER:
         assert within_cost_tier(local, tier), tier
+
+
+# ── the "no candidate models" error says why ─────────────────────────────────
+async def test_no_candidates_error_breaks_down_missing_provider_keys(no_llm_router, caplog):
+    """The bare "check provider API keys" sentence sent testers hunting. The
+    message keeps that sentence as its prefix (run-outcome mapping and the
+    preview API match on it) and appends the per-provider count."""
+    catalog = ModelCatalog()
+    router = ModelRouter(catalog, _Registry(set()))
+    n = len([m for m in catalog.all() if m.supports_tools])
+
+    with caplog.at_level("WARNING", logger=router_module.logger.name):
+        with pytest.raises(RoutingUnavailable) as exc:
+            await router.route(model_policy={"mode": "auto"}, **ROUTE_ARGS)
+
+    msg = str(exc.value)
+    assert msg.startswith(
+        "No candidate models: check provider API keys and the harness model policy."
+    )
+    assert f"{len(catalog.all())} catalog models considered:" in msg
+    assert f"{n} lacked a provider key (" in msg
+    assert "openrouter " in msg and "anthropic " in msg
+    assert "cost tier" not in msg
+    # Same breakdown goes to the log, with the policy mode and tier.
+    logged = [r.getMessage() for r in caplog.records if "no candidate models" in r.getMessage()]
+    assert logged and "lacked a provider key" in logged[0]
+    assert "mode=auto" in logged[0] and "max_cost_tier=" in logged[0]
+
+
+async def test_no_candidates_error_names_the_cost_tier_that_excluded_models(no_llm_router):
+    catalog = ModelCatalog()
+    router = ModelRouter(catalog, _Registry({"openrouter", "anthropic", "kimi"}))
+
+    with pytest.raises(RoutingUnavailable) as exc:
+        await router.route(
+            model_policy={"mode": "auto", "max_cost_tier": "local"}, **ROUTE_ARGS
+        )
+
+    msg = str(exc.value)
+    assert msg.startswith(
+        "No candidate models: check provider API keys and the harness model policy."
+    )
+    assert "above the policy's local cost tier" in msg
+    assert "lacked a provider key" not in msg
+
+
+async def test_no_candidates_error_mixes_tier_and_key_reasons(no_llm_router):
+    """Only some providers keyed, ceiling excludes everything keyed: both
+    clauses appear and the counts add up to the catalog size."""
+    catalog = ModelCatalog()
+    router = ModelRouter(catalog, _Registry({"openrouter"}))
+
+    with pytest.raises(RoutingUnavailable) as exc:
+        await router.route(
+            model_policy={"mode": "auto", "max_cost_tier": "local"}, **ROUTE_ARGS
+        )
+
+    msg = str(exc.value)
+    assert "above the policy's local cost tier" in msg
+    assert "lacked a provider key (" in msg
+    assert "openrouter" not in msg.split("lacked a provider key (")[1]

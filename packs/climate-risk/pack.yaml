@@ -133,7 +133,7 @@ methods:
       portfolio rather than a single site.
     entrypoint: methods/portfolio_divergence_rate.py
     params_schema:
-      status: { type: string, enum: [all, approved, draft], description: "Which verdicts to include (default all)" }
+      status: { type: string, enum: [all, approved, draft, noted], description: "Which verdicts to include (default all; superseded drafts are never counted). noted = insufficient_data verdicts" }
       peril: { type: string, enum: [flood, heat, wind, drought], description: "Optional single-peril filter" }
     inputs: ["findings:divergence_verdict"]
 

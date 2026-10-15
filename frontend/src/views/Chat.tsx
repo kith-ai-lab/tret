@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router-dom'
 
 import {
   api,
+  ApiError,
   type ChatMessage,
   type Harness,
   type ModelInfo,
@@ -67,6 +68,13 @@ const EXAMPLE_PROMPTS = [
     prompt: 'Draft the risk management section of the TCFD assessment',
   },
 ]
+
+/** `active_run_id` from a 409 "reply still in progress" refusal, else null. */
+function activeRunIdOf409(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null
+  const body = error.body as { active_run_id?: unknown } | undefined
+  return typeof body?.active_run_id === 'string' ? body.active_run_id : null
+}
 
 interface PendingTurn {
   conversationId: string
@@ -189,6 +197,24 @@ export function Chat() {
     }
   }, [conversationQuery.data, pending, queryClient])
 
+  // Resume after a reload (or after returning to a conversation whose reply is
+  // still being generated): the server reports its live run, so re-subscribe.
+  // The event stream replays its backlog on connect, which rebuilds the
+  // partial reply, and the poll above picks the final message up as usual.
+  const serverActiveRunId =
+    selectedId && conversationQuery.data?.id === selectedId
+      ? (conversationQuery.data.active_run_id ?? null)
+      : null
+  const serverRunAlreadyLanded =
+    !!serverActiveRunId &&
+    !!conversationQuery.data?.messages.some(
+      (m) => m.role === 'assistant' && m.run_id === serverActiveRunId,
+    )
+  useEffect(() => {
+    if (pending || !selectedId || !serverActiveRunId || serverRunAlreadyLanded) return
+    setPending({ conversationId: selectedId, runId: serverActiveRunId })
+  }, [pending, selectedId, serverActiveRunId, serverRunAlreadyLanded])
+
   const startNewChat = useCallback(() => {
     setPending(null)
     setDraft('')
@@ -206,7 +232,35 @@ export function Chat() {
       queryClient.invalidateQueries({ queryKey: ['conversation', data.conversation_id] })
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
     },
+    onError: (error, { conversationId, text }) => {
+      // 409: a reply is already being generated (another tab, or a send that
+      // raced a reload). Nothing was sent, so follow the live run instead of
+      // erroring and hand the unsent text back to the composer.
+      const activeRunId = activeRunIdOf409(error)
+      if (activeRunId) {
+        setPending({ conversationId, runId: activeRunId })
+        setDraft((d) => d || text)
+        queryClient.invalidateQueries({ queryKey: ['conversation', conversationId] })
+      }
+    },
   })
+
+  // Stop the in-flight reply. The run is cancelled server-side and still
+  // appends its assistant message ("(run cancelled: …)"), so the existing poll
+  // closes the turn out; the button stays disabled until that happens.
+  const cancelMutation = useMutation({ mutationFn: (runId: string) => api.cancelRun(runId) })
+  const { reset: resetCancel } = cancelMutation
+  const pendingRunId = pending?.runId ?? null
+  useEffect(() => {
+    resetCancel()
+  }, [pendingRunId, resetCancel])
+  const stopping = cancelMutation.isPending || cancelMutation.isSuccess
+  const sendError =
+    sendMutation.isError && !activeRunIdOf409(sendMutation.error)
+      ? (sendMutation.error as Error).message
+      : cancelMutation.isError
+        ? `Could not stop the reply — ${(cancelMutation.error as Error).message}`
+        : null
 
   const inFlight = pending !== null || sendMutation.isPending
 
@@ -326,7 +380,9 @@ export function Chat() {
                   onChange={setDraft}
                   onSend={() => void send(draft)}
                   disabled={inFlight}
-                  error={sendMutation.isError ? (sendMutation.error as Error).message : null}
+                  error={sendError}
+                  onStop={pendingRunId ? () => cancelMutation.mutate(pendingRunId) : undefined}
+                  stopping={stopping}
                   models={modelsQuery.data ?? []}
                   objective={objective}
                   onObjectiveChange={setObjective}
@@ -797,7 +853,7 @@ function LiveTurn({ runId, stream }: { runId: string; stream: ReturnType<typeof 
             {reconnecting
               ? 'reconnecting'
               : disconnected
-                ? 'stream disconnected — the run continues'
+                ? 'Connection dropped. The reply is still being generated and will appear here.'
                 : finalizing
                   ? 'finalizing'
                   : 'streaming'}
@@ -832,6 +888,8 @@ function Composer({
   onSend,
   disabled,
   error,
+  onStop,
+  stopping,
   autoFocus,
   models,
   objective,
@@ -849,6 +907,10 @@ function Composer({
   onSend: () => void
   disabled: boolean
   error: string | null
+  /** Set while a reply with a known run id is in flight: the send button
+   *  becomes a Stop button. Absent (no run id yet) keeps the inert dot. */
+  onStop?: () => void
+  stopping?: boolean
   autoFocus?: boolean
   models: ModelInfo[]
   objective: string
@@ -909,15 +971,27 @@ function Composer({
           onKeyDown={onKeyDown}
           autoFocus={autoFocus}
         />
-        <button
-          className="chat-send"
-          onClick={onSend}
-          disabled={disabled || !value.trim()}
-          aria-label="Send message"
-          title="Send (Enter)"
-        >
-          {disabled ? <span className="chat-send-dot pulse" /> : <SendIcon />}
-        </button>
+        {disabled && onStop ? (
+          <button
+            className="chat-send"
+            onClick={onStop}
+            disabled={stopping}
+            aria-label="Stop reply"
+            title="Stops this reply. You are charged only for work done so far."
+          >
+            <StopIcon />
+          </button>
+        ) : (
+          <button
+            className="chat-send"
+            onClick={onSend}
+            disabled={disabled || !value.trim()}
+            aria-label="Send message"
+            title="Send (Enter)"
+          >
+            {disabled ? <span className="chat-send-dot pulse" /> : <SendIcon />}
+          </button>
+        )}
       </div>
     </div>
   )
@@ -1026,6 +1100,14 @@ function SendIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 19V5M5 12l7-7 7 7" />
+    </svg>
+  )
+}
+
+function StopIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <rect x="5" y="5" width="14" height="14" rx="2" />
     </svg>
   )
 }

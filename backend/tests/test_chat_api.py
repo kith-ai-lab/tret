@@ -15,6 +15,7 @@ same harness as test_harnesses_api.py — because what is under test there is
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 
 import httpx
@@ -849,3 +850,142 @@ def test_assistant_message_carries_a_slim_method_v3_and_a_clean_routing():
     assert "segments" not in v3 and "values" not in v3 and "factors" not in v3["band"]
     # a run that predates v3
     assert _assistant_message(_run(routing=ROUTING))["method_v3"] is None
+
+
+# ── active_run_id + one live reply per conversation ──
+
+
+async def _seed_chat(client, seed, session_factory) -> str:
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    user = make_user("analyst@example.com")
+    await seed(team, project, user, make_member(user, team, role="analyst"))
+    async with session_factory() as db:
+        db.add(
+            Harness(
+                workspace_id=team.id,
+                name="Chat Assistant",
+                task_profile="chat",
+                model_policy={"mode": "auto"},
+                tool_names=[],
+            )
+        )
+        await db.commit()
+    await login_(client, user.email)
+    created = await client.post("/api/chat", json={})
+    assert created.status_code == 200, created.text
+    return created.json()["id"]
+
+
+async def test_active_run_id_is_null_without_a_live_run(client, seed, session_factory):
+    conversation_id = await _seed_chat(client, seed, session_factory)
+    got = await client.get(f"/api/chat/{conversation_id}")
+    assert got.status_code == 200, got.text
+    assert got.json()["active_run_id"] is None
+
+
+async def test_active_run_id_tracks_a_live_run_until_it_completes(client, seed, session_factory):
+    conversation_id = await _seed_chat(client, seed, session_factory)
+    sent = await client.post(f"/api/chat/{conversation_id}/messages", json={"text": "Hello"})
+    assert sent.status_code == 200, sent.text
+    run_id = sent.json()["run_id"]
+
+    # The stub engine never runs, so the run stays queued.
+    queued = await client.get(f"/api/chat/{conversation_id}")
+    assert queued.json()["active_run_id"] == run_id
+
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(run_id))
+        run.status = "running"
+        await db.commit()
+    running = await client.get(f"/api/chat/{conversation_id}")
+    assert running.json()["active_run_id"] == run_id
+
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(run_id))
+        run.status = "completed"
+        await db.commit()
+    done = await client.get(f"/api/chat/{conversation_id}")
+    assert done.json()["active_run_id"] is None
+
+
+async def test_a_second_send_during_a_live_run_is_refused_with_409(client, seed, session_factory):
+    conversation_id = await _seed_chat(client, seed, session_factory)
+    first = await client.post(f"/api/chat/{conversation_id}/messages", json={"text": "One"})
+    assert first.status_code == 200, first.text
+
+    second = await client.post(f"/api/chat/{conversation_id}/messages", json={"text": "Two"})
+    assert second.status_code == 409, second.text
+    body = second.json()
+    assert body["detail"] == "A reply is still in progress for this conversation"
+    assert body["active_run_id"] == first.json()["run_id"]
+
+    # Refused sends leave no trace: one run, one user message.
+    async with session_factory() as db:
+        from sqlalchemy import func, select
+
+        runs = (await db.execute(select(func.count()).select_from(Run))).scalar_one()
+    assert runs == 1
+    got = await client.get(f"/api/chat/{conversation_id}")
+    assert [m["content"] for m in got.json()["messages"]] == ["One"]
+
+    # Once the run is terminal a new send goes through.
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(first.json()["run_id"]))
+        run.status = "cancelled"
+        await db.commit()
+    third = await client.post(f"/api/chat/{conversation_id}/messages", json={"text": "Three"})
+    assert third.status_code == 200, third.text
+
+
+async def test_a_live_child_run_does_not_count_as_the_active_run(client, seed, session_factory):
+    """Sub-agent runs share the parent's conversation_id; the page must track
+    (and Stop must cancel) the top-level run, never a child."""
+    conversation_id = await _seed_chat(client, seed, session_factory)
+    sent = await client.post(f"/api/chat/{conversation_id}/messages", json={"text": "Hello"})
+    parent_id = uuid.UUID(sent.json()["run_id"])
+
+    async with session_factory() as db:
+        parent = await db.get(Run, parent_id)
+        child = Run(
+            project_id=parent.project_id,
+            harness_id=parent.harness_id,
+            conversation_id=parent.conversation_id,
+            parent_run_id=parent.id,
+            task_type="freeform",
+            task_input={},
+            status="running",
+        )
+        db.add(child)
+        await db.commit()
+
+    got = await client.get(f"/api/chat/{conversation_id}")
+    assert got.json()["active_run_id"] == str(parent_id)
+
+    # With the parent finished, a still-running child alone does not lock the chat.
+    async with session_factory() as db:
+        parent = await db.get(Run, parent_id)
+        parent.status = "completed"
+        await db.commit()
+    got = await client.get(f"/api/chat/{conversation_id}")
+    assert got.json()["active_run_id"] is None
+
+
+async def test_a_live_run_older_than_the_cutoff_does_not_count(client, seed, session_factory):
+    from datetime import datetime, timezone
+
+    conversation_id = await _seed_chat(client, seed, session_factory)
+    sent = await client.post(f"/api/chat/{conversation_id}/messages", json={"text": "One"})
+    run_id = uuid.UUID(sent.json()["run_id"])
+
+    async with session_factory() as db:
+        run = await db.get(Run, run_id)
+        run.status = "running"
+        run.created_at = datetime.now(timezone.utc) - chat_api.ACTIVE_RUN_MAX_AGE - timedelta(minutes=1)
+        await db.commit()
+
+    got = await client.get(f"/api/chat/{conversation_id}")
+    assert got.json()["active_run_id"] is None
+    # ...and the 409 clears too, so a wedged run cannot lock the conversation.
+    again = await client.post(f"/api/chat/{conversation_id}/messages", json={"text": "Two"})
+    assert again.status_code == 200, again.text

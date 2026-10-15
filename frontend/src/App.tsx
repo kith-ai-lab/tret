@@ -218,11 +218,12 @@ function MarketplaceReviewNavItem() {
 // ── Workspace switcher ───────────────────────────────────────────────────
 // Sits above the nav: the current workspace (with a personal/team hint),
 // opening onto every workspace this user belongs to plus a "create team"
-// action. Switching re-mints the session cookie server-side, so the cache is
-// dropped wholesale afterward — every workspace-scoped query in the app
-// (runs, findings, documents, …) is stale the instant the active workspace
-// changes, and a full drop is the only way to guarantee none of it survives
-// into the new context. Matches the rigor `onLogout` already uses.
+// action. Switching re-mints the session cookie server-side, and the endpoint
+// returns the fresh `me`: that goes straight into the ['me'] cache (so the
+// sidebar and every `me` reader update with no reload — `me` is staleTime
+// Infinity, so a plain clear would leave it stale), and every *other* query is
+// reset, since all workspace-scoped data (runs, findings, documents, …) is
+// stale the instant the active workspace changes.
 
 function WorkspaceSwitcher({ user }: { user: User }) {
   const queryClient = useQueryClient()
@@ -245,14 +246,19 @@ function WorkspaceSwitcher({ user }: { user: User }) {
     }
   }, [open])
 
+  const adopt = (data: User) => {
+    queryClient.setQueryData(['me'], data)
+    queryClient.resetQueries({ predicate: (q) => q.queryKey[0] !== 'me' })
+  }
+
   const switchMutation = useMutation({
     mutationFn: (workspaceId: string) => api.switchWorkspace(workspaceId),
-    onSuccess: () => queryClient.clear(),
+    onSuccess: adopt,
   })
 
   const createMutation = useMutation({
     mutationFn: (name: string) => api.createWorkspace(name),
-    onSuccess: () => queryClient.clear(),
+    onSuccess: adopt,
   })
 
   const current = user.workspaces.find((w) => w.id === user.current_workspace_id)

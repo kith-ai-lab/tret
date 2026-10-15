@@ -27,6 +27,7 @@ Three invariants hold across every path through `route()`:
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 from dataclasses import asdict, dataclass, field
@@ -109,6 +110,9 @@ def _clamp_new_model_slots(slots: int) -> int:
 # support, and an unproven model has by definition not earned that trust yet.
 EXPLORATION_OBJECTIVE = "balanced"
 EXPLORATION_TASK_SHAPE = "extraction"
+
+
+logger = logging.getLogger(__name__)
 
 
 def _max_cost_tier(model_policy: dict) -> str:
@@ -559,6 +563,73 @@ class ModelRouter:
     ) -> list[ModelInfo]:
         return self._candidates_with_fit(model_policy, priors, min_context_window)[0]
 
+    def _exclusion_reason(
+        self, m: ModelInfo, allowed: set | list | None, max_tier: str
+    ) -> str | None:
+        """Why the policy filter drops `m`, or None if it survives.
+
+        One predicate shared by `_candidates_with_fit` and the empty-result
+        diagnosis (`_no_candidates_detail`), so the explanation can never drift
+        from the filter. Reasons: `no_tools`, `no_key:<provider>`,
+        `not_allowed`, `tier:<tier>`; the first failing check wins.
+        """
+        if not m.supports_tools:
+            return "no_tools"
+        if not self._registry.has_key(m.provider):
+            return f"no_key:{m.provider}"
+        if allowed and m.id not in allowed:
+            return "not_allowed"
+        if not within_cost_tier(m, max_tier):
+            return f"tier:{m.cost_tier}"
+        return None
+
+    def _no_candidates_detail(self, model_policy: dict) -> str:
+        """One clause saying why the catalog yielded no candidates.
+
+        Appended to `RoutingUnavailable` so a tester (or support) can tell a
+        missing provider key from a too-tight cost ceiling without reading logs.
+        """
+        allowed = model_policy.get("allowed") or None
+        max_tier = _max_cost_tier(model_policy)
+        considered = 0
+        no_tools = 0
+        not_allowed = 0
+        by_provider: dict[str, int] = {}
+        by_tier: dict[str, int] = {}
+        for m in self._catalog.all():
+            considered += 1
+            reason = self._exclusion_reason(m, allowed, max_tier)
+            if reason is None:
+                continue
+            kind, _, detail = reason.partition(":")
+            if kind == "no_tools":
+                no_tools += 1
+            elif kind == "no_key":
+                by_provider[detail] = by_provider.get(detail, 0) + 1
+            elif kind == "not_allowed":
+                not_allowed += 1
+            elif kind == "tier":
+                by_tier[detail] = by_tier.get(detail, 0) + 1
+        parts: list[tuple[int, str]] = []
+        n_tier = sum(by_tier.values())
+        if n_tier:
+            parts.append((n_tier, f"{n_tier} above the policy's {max_tier} cost tier"))
+        n_key = sum(by_provider.values())
+        if n_key:
+            providers = ", ".join(
+                f"{p} {c}" for p, c in sorted(by_provider.items(), key=lambda kv: (-kv[1], kv[0]))
+            )
+            parts.append((n_key, f"{n_key} lacked a provider key ({providers})"))
+        if not_allowed:
+            parts.append((not_allowed, f"{not_allowed} outside the policy's allowed list"))
+        if no_tools:
+            parts.append((no_tools, f"{no_tools} lacked tool support"))
+        parts.sort(key=lambda p: -p[0])  # stable: ties keep the order above
+        noun = "model" if considered == 1 else "models"
+        if not parts:
+            return f"{considered} catalog {noun} considered."
+        return f"{considered} catalog {noun} considered: " + ", ".join(t for _, t in parts) + "."
+
     def _candidates_with_fit(
         self,
         model_policy: dict,
@@ -576,15 +647,8 @@ class ModelRouter:
         objective = objective_of(model_policy)
         out = []
         for m in self._catalog.all():
-            if not m.supports_tools:
-                continue
-            if not self._registry.has_key(m.provider):
-                continue
-            if allowed and m.id not in allowed:
-                continue
-            if not within_cost_tier(m, max_tier):
-                continue
-            out.append(m)
+            if self._exclusion_reason(m, allowed, max_tier) is None:
+                out.append(m)
         # Ordered by the harness objective, with any recorded evidence leading;
         # cap the list the router sees. Note the order of operations: the
         # `allowed` list, the provider-key check and the cost ceiling have all
@@ -908,8 +972,16 @@ class ModelRouter:
             model_policy, priors, min_context_window
         )
         if not candidates:
+            detail = self._no_candidates_detail(model_policy)
+            logger.warning(
+                "routing: no candidate models (policy mode=%s, max_cost_tier=%s): %s",
+                model_policy.get("mode"),
+                _max_cost_tier(model_policy),
+                detail,
+            )
             raise RoutingUnavailable(
-                "No candidate models: check provider API keys and the harness model policy."
+                "No candidate models: check provider API keys and the harness model policy. "
+                + detail
             )
 
         # 1.4. Model-level circuit breaker: a model whose endpoint has just

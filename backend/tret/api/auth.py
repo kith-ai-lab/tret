@@ -64,6 +64,11 @@ from tret.api.oidc_bearer import authenticate_bearer, bearer_auth_enabled
 from tret.config import Settings, get_settings
 from tret.db.engine import get_db
 from tret.db.models import User, Workspace, WorkspaceMember
+from tret.services.identity import (
+    account_email_is_verified,
+    pick_default_membership,
+    redeem_pending_invites,
+)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -375,10 +380,11 @@ class UserOut(BaseModel):
     # `POST /users/{id}/password`.
     active: bool = True
     workspaces: list[WorkspaceSummary] = []
-    # Null when it cannot be resolved to exactly one workspace (no membership
-    # at all, or more than one with nothing selected) — this endpoint always
-    # succeeds regardless; a null here is what tells a client it must call
-    # `POST /api/auth/workspace` before anything workspace-scoped will work.
+    # Null only when the account has no membership at all — with one or more,
+    # `_resolve_workspaces` always names a default (see
+    # `services/identity.py::pick_default_membership`), the same one
+    # `api/workspace.py::current_workspace` uses, so what this reports is what
+    # workspace-scoped calls actually operate on.
     current_workspace_id: uuid.UUID | None = None
 
 
@@ -391,16 +397,21 @@ async def _resolve_workspaces(
     wins outright — this is `/me` reading the session's `wid`, and login /
     `POST /api/auth/workspace` reflecting the workspace a fresh cookie was
     just minted against. Absent a preference (or an unresolvable one — the
-    membership was removed since the cookie was minted), a sole membership is
-    used unambiguously; with zero or more than one membership there is no
-    single answer, so `role` falls back to the user's global role and
-    `current_workspace_id` is null. This must always produce *something* —
-    unlike `api.workspace.current_workspace`, it never 409s, because `/me` is
-    exactly the endpoint a client needs a clean answer from before it can
-    even offer a workspace picker.
+    membership was removed since the cookie was minted), the shared default
+    applies (`pick_default_membership`: the most recently joined team, else
+    the sole/first membership), so a user with several memberships is never
+    left without a current workspace. Only an account with no membership at
+    all gets `role` = the global role and a null `current_workspace_id`. This
+    must always produce *something* — unlike
+    `api.workspace.current_workspace` it never 409s, because `/me` is the
+    endpoint a client needs a clean answer from.
     """
     memberships = (
-        await db.execute(select(WorkspaceMember).where(WorkspaceMember.user_id == user.id))
+        await db.execute(
+            select(WorkspaceMember)
+            .where(WorkspaceMember.user_id == user.id)
+            .order_by(WorkspaceMember.created_at, WorkspaceMember.workspace_id)
+        )
     ).scalars().all()
     workspaces: list[WorkspaceSummary] = []
     for member in memberships:
@@ -411,13 +422,11 @@ async def _resolve_workspaces(
             WorkspaceSummary(id=workspace.id, name=workspace.name, kind=workspace.kind, role=member.role)
         )
 
-    if preferred_wid is not None:
-        match = next((m for m in memberships if m.workspace_id == preferred_wid), None)
-        if match is not None:
-            return workspaces, match.role, preferred_wid
-    if len(memberships) == 1:
-        member = memberships[0]
-        return workspaces, member.role, member.workspace_id
+    picked = pick_default_membership(
+        memberships, {w.id: w.kind for w in workspaces}, preferred_wid
+    )
+    if picked is not None:
+        return workspaces, picked.role, picked.workspace_id
     return workspaces, user.role, None
 
 
@@ -478,18 +487,19 @@ async def login(
         raise _reject()
     for key, _limit in buckets:  # a success clears the window for this account
         login_limiter.reset(key)
-    workspaces, role, current_workspace_id = await _resolve_workspaces(db, user)
-    _issue_session(response, user, wid=current_workspace_id)
-    return UserOut(
-        id=user.id,
-        email=user.email,
-        display_name=user.display_name,
-        role=role,
-        global_role=user.role,
-        active=True,
-        workspaces=workspaces,
-        current_workspace_id=current_workspace_id,
+    # Invites addressed to this account's email are redeemed at password login
+    # exactly as they are at OIDC login (same helper), under the same
+    # verified-email rule; a fresh redemption wins the landing workspace.
+    # Otherwise a still-valid `wid` from the cookie this browser already holds
+    # is honoured (so re-logging-in does not bounce you off the workspace you
+    # were in), and failing that the shared default applies.
+    redeemed = await redeem_pending_invites(
+        db, user, user.email, account_email_is_verified(user)
     )
+    preferred_wid = redeemed or _wid_from_cookie(request)
+    user_out = await _user_out(user, db, preferred_wid=preferred_wid)
+    _issue_session(response, user, wid=user_out.current_workspace_id)
+    return user_out
 
 
 @router.post("/logout")
@@ -502,17 +512,22 @@ async def logout(request: Request, response: Response):
     return result
 
 
-@router.get("/me", response_model=UserOut)
-async def me(request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+def _wid_from_cookie(request: Request) -> uuid.UUID | None:
+    """The `wid` in the request's session cookie, if it has a well-formed one
+    (not yet checked against any membership — `_resolve_workspaces` does that)."""
     payload = _session_payload(request)
     wid = payload.get("wid") if payload else None
-    preferred_wid = None
-    if wid:
-        try:
-            preferred_wid = uuid.UUID(wid)
-        except ValueError:
-            preferred_wid = None
-    return await _user_out(user, db, preferred_wid=preferred_wid)
+    if not wid:
+        return None
+    try:
+        return uuid.UUID(wid)
+    except ValueError:
+        return None
+
+
+@router.get("/me", response_model=UserOut)
+async def me(request: Request, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+    return await _user_out(user, db, preferred_wid=_wid_from_cookie(request))
 
 
 class SwitchWorkspaceBody(BaseModel):

@@ -1,19 +1,48 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 
 import { api, ApiError, type ConnectedWritePayload, type FindingDetail } from '../api/client'
+import { VerdictCard } from '../components/findings/VerdictCard'
 import { ApproveAllSections } from '../components/shared/ApproveAllSections'
 import { formatDateTime } from '../components/shared/format'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { ProvenanceCard } from '../components/shared/ProvenanceCard'
 import { StatusBadge } from '../components/shared/StatusBadge'
 
-const TABS = ['draft', 'approved', 'rejected'] as const
+// `noted` holds findings with nothing to decide (an insufficient_data verdict —
+// the data request filed beside it is the actionable item). `superseded` is
+// read-only history (a newer draft replaced it) and sits last so deep links to
+// one — `?finding=<id>`, "Superseded by" chains — always resolve to a tab.
+const TABS = ['draft', 'approved', 'rejected', 'noted', 'superseded'] as const
+const TAB_LABEL: Record<(typeof TABS)[number], string> = {
+  draft: 'draft',
+  approved: 'approved',
+  rejected: 'rejected',
+  noted: 'Noted (no decision needed)',
+  superseded: 'Superseded',
+}
 
 export function Approvals() {
   const [tab, setTab] = useState<(typeof TABS)[number]>('draft')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+
+  // `?finding=<id>` deep-links one finding (run page, "Superseded by" links):
+  // open the tab its status lives in and select it, once.
+  const [params] = useSearchParams()
+  const focusId = params.get('finding')
+  const focusApplied = useRef<string | null>(null)
+  const focusQuery = useQuery({
+    queryKey: ['finding', focusId],
+    queryFn: () => api.getFinding(focusId as string),
+    enabled: focusId !== null,
+  })
+  const focusStatus = focusQuery.data?.status
+  useEffect(() => {
+    if (focusId === null || focusApplied.current === focusId || !focusStatus) return
+    const target = TABS.find((t) => t === focusStatus)
+    if (target) setTab(target)
+  }, [focusId, focusStatus])
 
   const findingsQuery = useQuery({
     queryKey: ['findings', tab],
@@ -26,10 +55,17 @@ export function Approvals() {
   useEffect(() => {
     if (findings.length === 0) {
       setSelectedId(null)
+    } else if (
+      focusId !== null &&
+      focusApplied.current !== focusId &&
+      findings.some((f) => f.id === focusId)
+    ) {
+      focusApplied.current = focusId
+      setSelectedId(focusId)
     } else if (!findings.some((f) => f.id === selectedId)) {
       setSelectedId(findings[0].id)
     }
-  }, [findings, selectedId])
+  }, [findings, selectedId, focusId])
 
   return (
     <div>
@@ -41,7 +77,7 @@ export function Approvals() {
       <div className="tabs">
         {TABS.map((t) => (
           <button key={t} className={`tab${tab === t ? ' active' : ''}`} onClick={() => setTab(t)}>
-            {t}
+            {TAB_LABEL[t]}
           </button>
         ))}
       </div>
@@ -52,7 +88,9 @@ export function Approvals() {
         <div className="empty">
           {tab === 'draft'
             ? 'No draft findings awaiting review — run a task from the Workbench.'
-            : `No ${tab} findings yet.`}
+            : tab === 'noted'
+              ? 'No noted findings — insufficient_data verdicts land here, with a data request filed.'
+              : `No ${tab} findings yet.`}
         </div>
       ) : (
         <ListDetail
@@ -124,11 +162,9 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
       ) : (
         <div>
           <div className="mono-label" style={{ marginBottom: 6 }}>
-            Payload
+            {f.schema_slug === 'divergence_verdict' ? 'Verdict' : 'Payload'}
           </div>
-          <pre className="code-block" style={{ maxHeight: 320 }}>
-            {JSON.stringify(f.payload, null, 2)}
-          </pre>
+          <VerdictCard finding={f} />
         </div>
       )}
 
@@ -140,11 +176,11 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
       />
 
       {retrieved.length > 0 && (
-        <div>
-          <div className="mono-label" style={{ marginBottom: 6 }}>
-            Retrieved values ({retrieved.length})
-          </div>
-          <div style={{ maxHeight: 240, overflowY: 'auto' }}>
+        <details>
+          <summary className="mono-label" style={{ cursor: 'pointer' }}>
+            All retrieved values ({retrieved.length})
+          </summary>
+          <div style={{ maxHeight: 240, overflowY: 'auto', marginTop: 6 }}>
             <table className="mono-table">
               <thead>
                 <tr>
@@ -166,7 +202,7 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
               </tbody>
             </table>
           </div>
-        </div>
+        </details>
       )}
 
       {/* Approval history */}

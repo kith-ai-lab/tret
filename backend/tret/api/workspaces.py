@@ -31,6 +31,7 @@ from tret.config import get_settings
 from tret.db.engine import get_db
 from tret.db.models import WORKSPACE_ROLES, Invite, User, Workspace, WorkspaceMember
 from tret.engine.extensions import get_extension_registry
+from tret.services.identity import _as_utc, account_email_is_verified
 from tret.services.mailer import send_invite_email
 from tret.services.workspace import (
     create_workspace,
@@ -167,23 +168,28 @@ async def create_team_workspace(
     name = body.name.strip()
     if not name:
         raise HTTPException(422, "name is required")
+    owned_names = (
+        await db.execute(
+            select(Workspace.name)
+            .join(WorkspaceMember, Workspace.id == WorkspaceMember.workspace_id)
+            .where(
+                WorkspaceMember.user_id == user.id,
+                WorkspaceMember.role == "owner",
+                Workspace.kind == "team",
+            )
+        )
+    ).scalars().all()
+    # A double-click or a retried prompt otherwise mints a second identical
+    # team, and there is no delete to undo it. Scoped to teams this caller
+    # owns: someone else's team of the same name is no conflict.
+    if any(existing.strip().lower() == name.lower() for existing in owned_names):
+        raise HTTPException(409, f"You already own a team called '{name}'")
     cap = get_settings().max_team_workspaces_per_user
     if cap > 0:
-        owned = (
-            await db.execute(
-                select(WorkspaceMember)
-                .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
-                .where(
-                    WorkspaceMember.user_id == user.id,
-                    WorkspaceMember.role == "owner",
-                    Workspace.kind == "team",
-                )
-            )
-        ).scalars().all()
-        if len(owned) >= cap:
+        if len(owned_names) >= cap:
             raise HTTPException(
                 403,
-                f"You already own {len(owned)} team workspace(s), the limit for this "
+                f"You already own {len(owned_names)} team workspace(s), the limit for this "
                 "deployment. Ask an existing team's owner to add you instead of "
                 "creating a new one.",
             )
@@ -358,6 +364,58 @@ async def revoke_invite(
     return {"ok": True}
 
 
+class PendingInviteOut(BaseModel):
+    token: str
+    workspace_id: uuid.UUID
+    workspace_name: str
+    role: str
+    expires_at: datetime
+
+
+@invite_accept_router.get("/invites/pending", response_model=list[PendingInviteOut])
+async def my_pending_invites(
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Invites addressed to the caller's own email that are still pending and
+    unexpired — what a first-run screen needs to steer someone stranded in a
+    personal workspace toward the team they were invited to (the other invite
+    routes are all workspace-admin ones, keyed by a workspace the caller may
+    not belong to yet).
+
+    Hands out redemption tokens, so it is empty unless the account's email
+    counts as verified (`services/identity.py::account_email_is_verified`, the
+    same rule redemption uses); a workspace the caller already belongs to is
+    skipped (nothing left to accept there).
+    """
+    if not account_email_is_verified(user):
+        return []
+    now = datetime.now(timezone.utc)
+    email = user.email.strip().lower()
+    pending = (
+        await db.execute(select(Invite).where(Invite.status == "pending").order_by(Invite.created_at))
+    ).scalars().all()
+    out: list[PendingInviteOut] = []
+    for invite in pending:
+        if invite.email.strip().lower() != email or _as_utc(invite.expires_at) <= now:
+            continue
+        if await db.get(WorkspaceMember, (user.id, invite.workspace_id)) is not None:
+            continue
+        workspace = await db.get(Workspace, invite.workspace_id)
+        if workspace is None:
+            continue
+        out.append(
+            PendingInviteOut(
+                token=invite.token,
+                workspace_id=workspace.id,
+                workspace_name=workspace.name,
+                role=invite.role,
+                expires_at=invite.expires_at,
+            )
+        )
+    return out
+
+
 @invite_accept_router.post("/invites/{token}/accept", response_model=UserOut)
 async def accept_invite(
     token: str,
@@ -367,29 +425,33 @@ async def accept_invite(
 ):
     """Redeem an invite link as the logged-in user it was sent to.
 
-    404 for anything that is not a live, pending invite — unknown, revoked,
-    expired, already accepted — rather than distinguishing those, the same
-    "existence itself must not leak" reasoning `api/workspace.py` gives for
-    cross-workspace reads: a used-up invite link should not tell whoever is
-    holding it *why* it stopped working. Email mismatch is a 403 instead,
-    because the invite plainly does exist and the signed-in account is simply
-    not who it was sent to — a different, nameable problem.
+    An unknown token is a 404, and so is an already-used invite the caller is
+    not a member of — the link's holder learns nothing about a workspace they
+    have no part in. States the holder *can* act on are named: an invite that
+    was already redeemed by this very user (auto-redeemed at sign-in, or the
+    link clicked twice) is an idempotent 200 that just switches the session to
+    that workspace; a revoked or time-expired invite is a 410 saying so and
+    what to do; an email mismatch is a 403, because the invite plainly exists
+    and the signed-in account is simply not who it was sent to.
     """
+    invalid = HTTPException(404, "This invite link is not valid.")
     invite = (await db.execute(select(Invite).where(Invite.token == token))).scalar_one_or_none()
-    if invite is None or invite.status != "pending":
-        raise HTTPException(404, "This invite link is invalid or has expired.")
-    # Postgres always returns a tz-aware TIMESTAMPTZ; a naive value only shows
-    # up under sqlite (dev/test), which drops tzinfo on the round trip — the
-    # same normalisation a hosting extension's cursor decode applies for the
-    # same reason. Treated as UTC either way, since that's what every
-    # `expires_at` this codebase writes always is.
-    expires_at = invite.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at <= datetime.now(timezone.utc):
-        raise HTTPException(404, "This invite link is invalid or has expired.")
+    if invite is None:
+        raise invalid
+    if invite.status == "accepted":
+        member = await db.get(WorkspaceMember, (user.id, invite.workspace_id))
+        if member is None:
+            raise invalid
+        _issue_session(response, user, wid=invite.workspace_id)
+        return await _user_out(user, db, preferred_wid=invite.workspace_id)
+    if invite.status not in ("pending", "revoked", "expired"):
+        raise invalid
     if invite.email.strip().lower() != user.email.strip().lower():
         raise HTTPException(403, "This invite was sent to a different email address.")
+    if invite.status == "revoked":
+        raise HTTPException(410, "This invite was revoked. Ask the workspace owner for a new one.")
+    if invite.status == "expired" or _as_utc(invite.expires_at) <= datetime.now(timezone.utc):
+        raise HTTPException(410, "This invite has expired. Ask the workspace owner for a new one.")
 
     member = await db.get(WorkspaceMember, (user.id, invite.workspace_id))
     if member is None:

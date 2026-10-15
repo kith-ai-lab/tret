@@ -386,7 +386,9 @@ async def test_a_data_request_and_the_verdict_in_one_turn_agree_with_the_run_sta
 
     finding = result.finding
     assert finding.payload["verdict"] == "insufficient_data"
-    assert finding.status == "draft"
+    # Not a claim to bless: an insufficient_data verdict is `noted`, off the
+    # approval queue (the data request filed above is the actionable item).
+    assert finding.status == "noted"
     assert str(finding.id) in turn_results[1]["result"]
     assert_citations_grounded(finding, world.output_schema("divergence_verdict"))
     assert_auditable(result)

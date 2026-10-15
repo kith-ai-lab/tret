@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,12 +29,19 @@ from tret.router_llm.objectives import OBJECTIVES
 from tret.services import lifecycle
 from tret.services.emissions import emission_summary_fields, energy_wh_field
 from tret.services.emissions_v3_wiring import method_v3_of, public_routing
+from tret.services.reconcile import NON_TERMINAL_STATUSES
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 _background_tasks: set[asyncio.Task] = set()
 
 MAX_HISTORY_TURNS = 30
+
+# A queued/running run older than this no longer counts as "live" for the chat
+# page or the one-reply-at-a-time 409, so a single wedged run (orphaned on
+# another machine, stuck in a provider call) cannot lock a conversation forever.
+# Far beyond any real chat turn; the run itself is left alone.
+ACTIVE_RUN_MAX_AGE = timedelta(hours=1)
 
 
 def _conversation_out(c: Conversation, full: bool = False) -> dict:
@@ -47,6 +55,34 @@ def _conversation_out(c: Conversation, full: bool = False) -> dict:
     if full:
         out["messages"] = c.messages
     return out
+
+
+async def _active_run_id(db: AsyncSession, conversation_id: uuid.UUID) -> str | None:
+    """Id of the newest still-live top-level run (queued/running) on this
+    conversation, or None. The chat page uses it to resume after a reload, and
+    `send_message` uses it to refuse a second paid run while a reply is still
+    being generated. Statuses come from `reconcile.NON_TERMINAL_STATUSES`.
+
+    Sub-agent runs share the parent's conversation_id, so children are skipped
+    (`parent_run_id IS NULL`): the page waits for an assistant message tagged
+    with the top-level run's id and Stop must cancel that run. Runs older than
+    `ACTIVE_RUN_MAX_AGE` are ignored so a wedged run cannot lock the
+    conversation."""
+    cutoff = datetime.now(timezone.utc) - ACTIVE_RUN_MAX_AGE
+    run_id = (
+        await db.execute(
+            select(Run.id)
+            .where(
+                Run.conversation_id == conversation_id,
+                Run.parent_run_id.is_(None),
+                Run.status.in_(NON_TERMINAL_STATUSES),
+                Run.created_at >= cutoff,
+            )
+            .order_by(Run.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return str(run_id) if run_id is not None else None
 
 
 async def _capability_catalog(db: AsyncSession, workspace_id, project_id) -> str:
@@ -269,7 +305,9 @@ async def get_conversation(
     conv = await db.get(Conversation, conversation_id)
     if conv is None or await project_in_workspace(db, conv.project_id, ctx.id) is None:
         raise HTTPException(404, "Conversation not found")
-    return _conversation_out(conv, full=True)
+    out = _conversation_out(conv, full=True)
+    out["active_run_id"] = await _active_run_id(db, conv.id)
+    return out
 
 
 @router.post("/{conversation_id}/messages")
@@ -289,6 +327,22 @@ async def send_message(
     if not text:
         raise HTTPException(422, "Empty message")
     _validate_objective(body.objective)
+
+    # One reply at a time: a second send while a run is live would create a
+    # second paid run (the client resumes the live one from `active_run_id`).
+    # The conversation row is locked first (a no-op on sqlite) so two
+    # concurrent sends serialise here instead of both passing the check; the
+    # lock is released by the commit below.
+    await db.execute(select(Conversation).where(Conversation.id == conv.id).with_for_update())
+    active_run_id = await _active_run_id(db, conv.id)
+    if active_run_id is not None:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "A reply is still in progress for this conversation",
+                "active_run_id": active_run_id,
+            },
+        )
 
     # Engine history: prior user/assistant turns, lean (no tool detail).
     history = [

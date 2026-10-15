@@ -699,6 +699,41 @@
         "title": "PatchDraftBody",
         "type": "object"
       },
+      "PendingInviteOut": {
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          },
+          "workspace_name": {
+            "title": "Workspace Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "workspace_id",
+          "workspace_name",
+          "role",
+          "expires_at"
+        ],
+        "title": "PendingInviteOut",
+        "type": "object"
+      },
       "PublishDeliverableBody": {
         "additionalProperties": false,
         "properties": {
@@ -1784,9 +1819,35 @@
         ]
       }
     },
+    "/api/auth/invites/pending": {
+      "get": {
+        "description": "Invites addressed to the caller's own email that are still pending and\nunexpired — what a first-run screen needs to steer someone stranded in a\npersonal workspace toward the team they were invited to (the other invite\nroutes are all workspace-admin ones, keyed by a workspace the caller may\nnot belong to yet).\n\nHands out redemption tokens, so it is empty unless the account's email\ncounts as verified (`services/identity.py::account_email_is_verified`, the\nsame rule redemption uses); a workspace the caller already belongs to is\nskipped (nothing left to accept there).",
+        "operationId": "my_pending_invites_api_auth_invites_pending_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PendingInviteOut"
+                  },
+                  "title": "Response My Pending Invites Api Auth Invites Pending Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "My Pending Invites",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/api/auth/invites/{token}/accept": {
       "post": {
-        "description": "Redeem an invite link as the logged-in user it was sent to.\n\n404 for anything that is not a live, pending invite — unknown, revoked,\nexpired, already accepted — rather than distinguishing those, the same\n\"existence itself must not leak\" reasoning `api/workspace.py` gives for\ncross-workspace reads: a used-up invite link should not tell whoever is\nholding it *why* it stopped working. Email mismatch is a 403 instead,\nbecause the invite plainly does exist and the signed-in account is simply\nnot who it was sent to — a different, nameable problem.",
+        "description": "Redeem an invite link as the logged-in user it was sent to.\n\nAn unknown token is a 404, and so is an already-used invite the caller is\nnot a member of — the link's holder learns nothing about a workspace they\nhave no part in. States the holder *can* act on are named: an invite that\nwas already redeemed by this very user (auto-redeemed at sign-in, or the\nlink clicked twice) is an idempotent 200 that just switches the session to\nthat workspace; a revoked or time-expired invite is a 410 saying so and\nwhat to do; an email mismatch is a 403, because the invite plainly exists\nand the signed-in account is simply not who it was sent to.",
         "operationId": "accept_invite_api_auth_invites__token__accept_post",
         "parameters": [
           {

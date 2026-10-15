@@ -628,9 +628,12 @@ def test_switching_workspace_re_mints_the_cookies_wid(client, db):
         ]
     )
     login(client, user, ADMIN_PASSWORD)
-    # Two memberships: /me cannot pick one on its own.
+    # Two memberships and nothing selected: /me reports the shared default
+    # (both are teams with no join time here, so the tie breaks on the larger
+    # workspace id, never on list order) rather than null — see
+    # services/identity.py::pick_default_membership.
     before = client.get("/api/auth/me").json()
-    assert before["current_workspace_id"] is None
+    assert before["current_workspace_id"] == max(str(ws_a.id), str(ws_b.id))
     assert {w["id"] for w in before["workspaces"]} == {str(ws_a.id), str(ws_b.id)}
 
     response = client.post("/api/auth/workspace", json={"workspace_id": str(ws_b.id)})
@@ -668,3 +671,18 @@ def test_login_mints_the_wid_of_a_sole_membership(client, db):
     body = login(client, user, ADMIN_PASSWORD).json()
     assert body["current_workspace_id"] == str(workspace.id)
     assert body["role"] == "owner"
+
+
+def test_pick_default_membership_ties_break_on_workspace_id_not_list_order():
+    from tret.services.identity import pick_default_membership
+
+    user_id = uuid.uuid4()
+    ids = sorted(uuid.uuid4() for _ in range(3))
+    members = [WorkspaceMember(user_id=user_id, workspace_id=i, role="analyst") for i in ids]
+    # Teams with no join time: the largest id wins, whichever way the list runs.
+    for ordering in (members, list(reversed(members))):
+        assert pick_default_membership(ordering, {}).workspace_id == ids[-1]
+    # Personal-only fallback: the smallest id wins on a tie, again order-free.
+    personal = {i: "personal" for i in ids}
+    for ordering in (members, list(reversed(members))):
+        assert pick_default_membership(ordering, personal).workspace_id == ids[0]

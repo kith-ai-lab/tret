@@ -213,6 +213,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/invites/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * My Pending Invites
+         * @description Invites addressed to the caller's own email that are still pending and
+         *     unexpired — what a first-run screen needs to steer someone stranded in a
+         *     personal workspace toward the team they were invited to (the other invite
+         *     routes are all workspace-admin ones, keyed by a workspace the caller may
+         *     not belong to yet).
+         *
+         *     Hands out redemption tokens, so it is empty unless the account's email
+         *     counts as verified (`services/identity.py::account_email_is_verified`, the
+         *     same rule redemption uses); a workspace the caller already belongs to is
+         *     skipped (nothing left to accept there).
+         */
+        get: operations["my_pending_invites_api_auth_invites_pending_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/invites/{token}/accept": {
         parameters: {
             query?: never;
@@ -226,13 +255,14 @@ export interface paths {
          * Accept Invite
          * @description Redeem an invite link as the logged-in user it was sent to.
          *
-         *     404 for anything that is not a live, pending invite — unknown, revoked,
-         *     expired, already accepted — rather than distinguishing those, the same
-         *     "existence itself must not leak" reasoning `api/workspace.py` gives for
-         *     cross-workspace reads: a used-up invite link should not tell whoever is
-         *     holding it *why* it stopped working. Email mismatch is a 403 instead,
-         *     because the invite plainly does exist and the signed-in account is simply
-         *     not who it was sent to — a different, nameable problem.
+         *     An unknown token is a 404, and so is an already-used invite the caller is
+         *     not a member of — the link's holder learns nothing about a workspace they
+         *     have no part in. States the holder *can* act on are named: an invite that
+         *     was already redeemed by this very user (auto-redeemed at sign-in, or the
+         *     link clicked twice) is an idempotent 200 that just switches the session to
+         *     that workspace; a revoked or time-expired invite is a 410 saying so and
+         *     what to do; an email mismatch is a 403, because the invite plainly exists
+         *     and the signed-in account is simply not who it was sent to.
          */
         post: operations["accept_invite_api_auth_invites__token__accept_post"];
         delete?: never;
@@ -2467,6 +2497,25 @@ export interface components {
                 [key: string]: unknown;
             } | null;
         };
+        /** PendingInviteOut */
+        PendingInviteOut: {
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Role */
+            role: string;
+            /** Token */
+            token: string;
+            /**
+             * Workspace Id
+             * Format: uuid
+             */
+            workspace_id: string;
+            /** Workspace Name */
+            workspace_name: string;
+        };
         /** PublishDeliverableBody */
         PublishDeliverableBody: {
             /** Filename */
@@ -2957,6 +3006,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuthConfigOut"];
+                };
+            };
+        };
+    };
+    my_pending_invites_api_auth_invites_pending_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PendingInviteOut"][];
                 };
             };
         };

@@ -27,6 +27,8 @@ from tret.db.models import (
     Document,
     Finding,
     Harness,
+    MethodRun,
+    Pack,
     Project,
     Run,
     User,
@@ -52,9 +54,21 @@ PASSWORD = "correct-horse-battery-1"
 class Tenant:
     """Everything seeded for one workspace, so tests can say `a.harness.id`."""
 
-    __slots__ = ("workspace", "user", "project", "harness", "run", "finding", "document")
+    __slots__ = (
+        "workspace",
+        "user",
+        "project",
+        "harness",
+        "run",
+        "finding",
+        "document",
+        "method_run",
+        "deliverable_slug",
+    )
 
-    def __init__(self, workspace, user, project, harness, run, finding, document):
+    def __init__(
+        self, workspace, user, project, harness, run, finding, document, method_run, deliverable_slug
+    ):
         self.workspace = workspace
         self.user = user
         self.project = project
@@ -62,6 +76,12 @@ class Tenant:
         self.run = run
         self.finding = finding
         self.document = document
+        self.method_run = method_run
+        # A deliverable with one *approved* section, named after the tenant so
+        # it is unique per workspace: the plain `draft_section` finding above
+        # is a draft (never exported) and shares its slug across tenants, so
+        # it could not show a leak either way.
+        self.deliverable_slug = deliverable_slug
 
 
 async def _seed_tenant(db, *, name: str, email: str) -> Tenant:
@@ -112,6 +132,16 @@ async def _seed_tenant(db, *, name: str, email: str) -> Tenant:
         provenance={"model": "anthropic/test"},
         status="draft",
     )
+    deliverable_slug = f"{name.lower()}-report"
+    approved = Finding(
+        run_id=run.id,
+        project_id=project.id,
+        schema_slug="draft_section",
+        subject={"deliverable": deliverable_slug, "section": "summary"},
+        payload={"markdown": f"{name} approved body"},
+        provenance={"model": "anthropic/test"},
+        status="approved",
+    )
     document = Document(
         project_id=project.id,
         filename="notes.txt",
@@ -121,10 +151,31 @@ async def _seed_tenant(db, *, name: str, email: str) -> Tenant:
         sha256=uuid.uuid4().hex,
         extraction_status="done",
     )
-    db.add_all([finding, document])
+    pack = Pack(
+        workspace_id=workspace.id,
+        slug=f"{name.lower()}-pack",
+        version="0.0.1",
+        doctrine_sha="0" * 64,
+        manifest={},
+        source_path=f"/tmp/{uuid.uuid4()}",
+    )
+    db.add_all([finding, approved, document, pack])
+    await db.flush()
+    method_run = MethodRun(
+        project_id=project.id,
+        pack_id=pack.id,
+        run_id=run.id,
+        method_slug="noop",
+        code_sha="0" * 64,
+        output=[{"row": 1}],
+        row_count=1,
+    )
+    db.add(method_run)
     await db.commit()
 
-    return Tenant(workspace, user, project, harness, run, finding, document)
+    return Tenant(
+        workspace, user, project, harness, run, finding, document, method_run, deliverable_slug
+    )
 
 
 @pytest.fixture
@@ -221,6 +272,36 @@ async def test_a_foreign_run_is_a_404(client, tenants):
     assert client.post(f"/api/runs/{b.run.id}/cancel").status_code == 404
 
 
+async def test_a_foreign_run_has_no_children_endpoint(client, tenants):
+    """`/children` resolves the run by id alone before the workspace check, so
+    it is its own surface: a foreign id is a 404, never an empty list (which
+    would confirm the run exists)."""
+    a, b = tenants
+    login_as(client, a.user)
+    assert client.get(f"/api/runs/{b.run.id}/children").status_code == 404
+    # Control: the same call on our own run is a 200, so the 404 above is the
+    # workspace check and not a broken route.
+    own = client.get(f"/api/runs/{a.run.id}/children")
+    assert own.status_code == 200
+    assert own.json() == []
+
+
+async def test_a_foreign_run_event_stream_is_a_404(client, tenants):
+    """Refused before the SSE response starts, so nothing hangs open."""
+    a, b = tenants
+    login_as(client, a.user)
+    assert client.get(f"/api/runs/{b.run.id}/events").status_code == 404
+
+
+async def test_a_foreign_method_run_is_a_404(client, tenants):
+    a, b = tenants
+    login_as(client, a.user)
+    assert client.get(f"/api/runs/method-runs/{b.method_run.id}").status_code == 404
+    own = client.get(f"/api/runs/method-runs/{a.method_run.id}")
+    assert own.status_code == 200
+    assert own.json()["id"] == str(a.method_run.id)
+
+
 async def test_a_run_cannot_be_created_against_a_foreign_project(client, tenants):
     a, b = tenants
     login_as(client, a.user)
@@ -270,6 +351,31 @@ async def test_a_foreign_finding_cannot_be_approved(client, tenants):
     login_as(client, a.user)
     response = client.post(f"/api/findings/{b.finding.id}/approval", json={"action": "approve"})
     assert response.status_code == 404
+
+
+# ── deliverables ───────────────────────────────────────────────────────────
+async def test_deliverable_list_is_scoped_to_the_current_workspace(client, tenants):
+    a, b = tenants
+    login_as(client, a.user)
+    slugs = {d["slug"] for d in client.get("/api/deliverables").json()}
+    assert a.deliverable_slug in slugs
+    assert b.deliverable_slug not in slugs
+
+
+async def test_a_foreign_deliverable_cannot_be_exported(client, tenants):
+    a, b = tenants
+    login_as(client, a.user)
+    for fmt in ("markdown", "json", "html"):
+        response = client.get(
+            f"/api/deliverables/{b.deliverable_slug}/export",
+            params={"format": fmt, "include_draft": "true"},
+        )
+        assert response.status_code == 404, fmt
+    # Control: our own approved deliverable does export, so the 404s above are
+    # the workspace scoping and not an export that never works in this setup.
+    own = client.get(f"/api/deliverables/{a.deliverable_slug}/export", params={"format": "json"})
+    assert own.status_code == 200
+    assert "Bravo" not in own.text
 
 
 # ── documents ──────────────────────────────────────────────────────────────

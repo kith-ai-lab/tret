@@ -52,7 +52,7 @@ from decimal import Decimal
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.config import get_settings
@@ -1523,6 +1523,10 @@ async def _record(ctx: RunContext, schema_slug: str, subject: dict, payload: dic
             f"Validation failed (attempt {attempts}/{ctx.max_repair_attempts}). "
             "Fix these issues and call the tool again: " + "; ".join(errors)
         )
+    # An insufficient_data verdict is an honest "I could not assess this", not a
+    # claim a human can bless: it leaves the approval queue as `noted`, and the
+    # data request filed alongside it is the actionable item.
+    noted = payload.get("verdict") == "insufficient_data"
     finding = Finding(
         run_id=ctx.run_id,
         project_id=ctx.project_id,
@@ -1536,12 +1540,88 @@ async def _record(ctx: RunContext, schema_slug: str, subject: dict, payload: dic
             "retrieved_values": ctx.retrieved_values,
             "document_ids": [str(d) for d in ctx.document_ids],
         },
-        status="draft",
+        status="noted" if noted else "draft",
     )
     ctx.db.add(finding)
     await ctx.db.flush()
     ctx.findings_created.append(finding.id)
+    if not noted:
+        await _supersede_duplicate_drafts(ctx, finding)
     return finding
+
+
+def _site_peril_key(subject: object) -> tuple[str, str] | None:
+    """Normalised (site_id, peril) of a finding subject, or None when it has no
+    such pair — only subjects carrying both are deduplicated."""
+    if not isinstance(subject, dict):
+        return None
+    site, peril = subject.get("site_id"), subject.get("peril")
+    if site is None or peril is None:
+        return None
+    key = (str(site).strip().casefold(), str(peril).strip().casefold())
+    return key if all(key) else None
+
+
+async def _supersede_duplicate_drafts(ctx: RunContext, finding: Finding) -> None:
+    """Mark earlier *draft* findings for the same site/peril as superseded.
+
+    The same case can be assessed twice (a Workbench run, then a chat question
+    that delegates to the analyst again); only the newest draft should wait in
+    the approval queue. Approved/rejected findings are never touched. Runs in
+    the caller's session, so the new row and the supersession commit together.
+    """
+    key = _site_peril_key(finding.subject)
+    if key is None:
+        return
+    rows = (
+        (
+            await ctx.db.execute(
+                select(Finding).where(
+                    Finding.project_id == finding.project_id,
+                    Finding.schema_slug == finding.schema_slug,
+                    Finding.status == "draft",
+                    Finding.id != finding.id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    older = [f for f in rows if f.id != finding.id and _site_peril_key(f.subject) == key]
+    if not older:
+        return
+    # Each flip is a conditional UPDATE on `status == "draft"`, not a write by
+    # id of what was read: the approval endpoint locks the finding row and may
+    # commit a decision between our read and our write, and that decision must
+    # win. Only the rows the UPDATE actually changed are cross-linked.
+    changed: list[uuid.UUID] = []
+    for f in older:
+        flipped = (
+            await ctx.db.execute(
+                update(Finding)
+                .where(Finding.id == f.id, Finding.status == "draft")
+                .values(
+                    status="superseded",
+                    provenance={**(f.provenance or {}), "superseded_by": str(finding.id)},
+                )
+                .returning(Finding.id)
+            )
+        ).scalar_one_or_none()
+        if flipped is not None:
+            changed.append(flipped)
+    if changed:
+        finding.provenance = {**finding.provenance, "supersedes": [str(fid) for fid in changed]}
+    await ctx.db.flush()
+
+
+def _verdict_headline(payload: dict) -> str:
+    parts = [str(payload.get("verdict", "?"))]
+    if payload.get("reason_code"):
+        parts.append(str(payload["reason_code"]))
+    out = ", ".join(parts)
+    if payload.get("confidence") is not None:
+        out += f" (confidence {payload['confidence']})"
+    return out
 
 
 @builtin(
@@ -1560,7 +1640,17 @@ async def _record(ctx: RunContext, schema_slug: str, subject: dict, payload: dic
 )
 async def record_verdict(ctx: RunContext, schema_slug: str, subject: dict, payload: dict) -> str:
     finding = await _record(ctx, schema_slug, subject, payload)
-    return f"Verdict recorded as draft finding {finding.id}. It now awaits human approval."
+    if finding.status == "noted":
+        return (
+            f"Verdict recorded as a noted finding {finding.id} (insufficient_data); no approval "
+            "is needed. In your final answer, say what data was missing and that a data "
+            "request was filed."
+        )
+    return (
+        f"Verdict recorded as draft finding {finding.id}: {_verdict_headline(payload)}. "
+        "It awaits human approval. In your final answer, state the verdict, the reason and "
+        "the two or three cited values that drove it."
+    )
 
 
 @builtin(
@@ -1578,7 +1668,15 @@ async def record_verdict(ctx: RunContext, schema_slug: str, subject: dict, paylo
 )
 async def record_finding(ctx: RunContext, schema_slug: str, subject: dict, payload: dict) -> str:
     finding = await _record(ctx, schema_slug, subject, payload)
-    return f"Finding recorded as draft {finding.id}."
+    if finding.status == "noted":
+        return (
+            f"Finding recorded as a noted finding {finding.id}; no approval is needed. In your "
+            "final answer, summarise what it says."
+        )
+    return (
+        f"Finding recorded as draft {finding.id}. It awaits human approval. In your final "
+        "answer, summarise what it says and the key values behind it."
+    )
 
 
 @builtin(

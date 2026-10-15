@@ -265,6 +265,9 @@ async def _materialize_inputs(
                         .where(
                             Finding.project_id == project_id,
                             Finding.schema_slug == schema_slug,
+                            # A superseded draft and its replacement are the
+                            # same case; counting both double-counts it.
+                            Finding.status != "superseded",
                         )
                         .order_by(Finding.created_at)
                     )

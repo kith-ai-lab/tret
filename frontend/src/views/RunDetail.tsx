@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 
 import { api, type Msg, type RunDetail } from '../api/client'
 import { type StreamConnection, type StreamItem, useRunStream } from '../api/useRunStream'
+import { VerdictCard, findingHref } from '../components/findings/VerdictCard'
 import { ContextComposition } from '../components/shared/ContextComposition'
 import {
   CompactionLog,
@@ -250,16 +251,26 @@ export function RunDetailView() {
           {findings.length > 0 ? (
             <div className="stack" style={{ gap: 6 }}>
               {findings.map((f) => (
-                <div key={f.id} className="row">
-                  <StatusBadge status={f.status} />
-                  <span className="mono-body">{f.schema_slug}</span>
-                  <span className="mono-body" style={{ color: 'var(--text-muted)' }}>
-                    {JSON.stringify(f.subject)}
-                  </span>
-                  <Link to="/approvals" className="mono-body">
-                    review →
-                  </Link>
-                </div>
+                <details key={f.id} open={findings.length === 1}>
+                  <summary className="row" style={{ cursor: 'pointer' }}>
+                    <StatusBadge status={f.status} />
+                    <span className="mono-body">{f.schema_slug}</span>
+                    <span className="mono-body" style={{ color: 'var(--text-muted)' }}>
+                      {JSON.stringify(f.subject)}
+                    </span>
+                  </summary>
+                  <div className="stack" style={{ gap: 10, marginTop: 10, paddingLeft: 4 }}>
+                    <VerdictCard finding={f} />
+                    {/* A superseded finding has no Approvals tab; its card links to the newer one. */}
+                    {f.status !== 'superseded' && (
+                      <div>
+                        <Link to={findingHref(f.id)} className="mono-body">
+                          {f.status === 'draft' ? 'review →' : 'open in Approvals →'}
+                        </Link>
+                      </div>
+                    )}
+                  </div>
+                </details>
               ))}
             </div>
           ) : (

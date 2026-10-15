@@ -348,9 +348,13 @@ function WorkspaceMembersSection() {
   })
   const createWorkspaceMutation = useMutation({
     mutationFn: (name: string) => api.createWorkspace(name),
-    // A brand-new workspace means the whole active context changed — same
-    // full-drop rigor as switching workspaces or logging out.
-    onSuccess: () => queryClient.clear(),
+    // A brand-new workspace means the whole active context changed: adopt the
+    // returned `me` (so the sidebar and this section update without a reload)
+    // and reset every other, workspace-scoped query.
+    onSuccess: (data) => {
+      queryClient.setQueryData(['me'], data)
+      queryClient.resetQueries({ predicate: (q) => q.queryKey[0] !== 'me' })
+    },
   })
 
   if (!me || !currentWorkspace) return null

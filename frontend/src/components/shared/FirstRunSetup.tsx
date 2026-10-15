@@ -1,8 +1,8 @@
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api, ApiError, type CheckoutKind } from '../../api/client'
+import { api, ApiError, type CheckoutKind, type PendingInvite, type User } from '../../api/client'
 import { Modal } from './Modal'
 import { ProviderKeyForm } from './ProviderKeyForm'
 
@@ -30,7 +30,36 @@ import { ProviderKeyForm } from './ProviderKeyForm'
  *  Cloud. Self-host keeps today's paste-a-key dialog byte-for-byte; Tret Cloud
  *  replaces the dialog's primary content with "buy credits" (the purchase
  *  auto-provisions the key — nobody pastes anything), with BYOK still reachable
- *  behind a secondary toggle for anyone who wants to bring their own key anyway. */
+ *  behind a secondary toggle for anyone who wants to bring their own key anyway.
+ *
+ *  Tret Cloud only, and only while the current workspace is a personal one:
+ *  someone who was invited to a team (a pending invite) or already belongs to
+ *  one is stranded in the empty personal workspace every account is born with,
+ *  and selling them credits there is the wrong first screen. They get a card
+ *  steering them to the team instead; the credits flow below only shows when
+ *  neither applies (or once they are in a team workspace, which has its own
+ *  billing). The card carries a "Use my personal workspace instead" escape for
+ *  someone who really does want to fund the personal workspace: it dismisses
+ *  the steering for this browser session (per workspace id) and falls through
+ *  to the credits flow. */
+const STEER_DISMISS_PREFIX = 'tret.steerDismissed.'
+
+function readSteerDismissed(workspaceId: string): boolean {
+  try {
+    return window.sessionStorage.getItem(STEER_DISMISS_PREFIX + workspaceId) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeSteerDismissed(workspaceId: string) {
+  try {
+    window.sessionStorage.setItem(STEER_DISMISS_PREFIX + workspaceId, '1')
+  } catch {
+    // sessionStorage unavailable — the in-memory state still covers this page load.
+  }
+}
+
 export function FirstRunSetup() {
   const providersQuery = useQuery({ queryKey: ['providers'], queryFn: api.providerStatus })
   const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
@@ -39,6 +68,17 @@ export function FirstRunSetup() {
     queryFn: api.billingStatus,
     retry: false,
   })
+  const me = meQuery.data
+  const currentWorkspace = me?.workspaces.find((w) => w.id === me.current_workspace_id)
+  const inPersonal = currentWorkspace?.kind === 'personal'
+  // Only asked on Tret Cloud from a personal workspace — everywhere else the
+  // answer cannot change what is shown, so self-host never makes the call.
+  const pendingInvitesQuery = useQuery({
+    queryKey: ['pending-invites'],
+    queryFn: api.pendingInvites,
+    retry: false,
+    enabled: billingQuery.isSuccess && inPersonal,
+  })
   // Opens on the first unconfigured render; dismissing leaves the banner, whose
   // button reopens it. The state survives navigation because this component
   // lives in the app shell, not inside any view.
@@ -46,6 +86,17 @@ export function FirstRunSetup() {
   // BYOK stays reachable on Tret Cloud, just tucked behind this toggle so the
   // credit-purchase path is what a new workspace sees first.
   const [showByok, setShowByok] = useState(false)
+  // Workspaces whose team-steering card the person waved off ("use my personal
+  // workspace instead"); mirrored into sessionStorage so it survives a reload.
+  const [steerDismissedIds, setSteerDismissedIds] = useState<ReadonlySet<string>>(new Set())
+  const workspaceId = me?.current_workspace_id ?? null
+  const steerDismissed =
+    workspaceId !== null && (steerDismissedIds.has(workspaceId) || readSteerDismissed(workspaceId))
+  const dismissSteer = () => {
+    if (workspaceId === null) return
+    writeSteerDismissed(workspaceId)
+    setSteerDismissedIds((prev) => new Set(prev).add(workspaceId))
+  }
 
   if (!providersQuery.isSuccess) return null
   if (providersQuery.data.some((p) => p.configured)) return null
@@ -53,6 +104,23 @@ export function FirstRunSetup() {
   const isAdmin = ['owner', 'admin'].includes(meQuery.data?.role ?? '')
   const closeWelcome = () => setWelcomeOpen(false)
   const cloudBilling = billingQuery.isSuccess ? billingQuery.data : null
+
+  if (cloudBilling && inPersonal && !steerDismissed) {
+    // Hold the credits screen back until we know whether there is a team to
+    // steer toward (a failed lookup just means "no invite known").
+    if (pendingInvitesQuery.isLoading) return null
+    const invite = pendingInvitesQuery.data?.[0] ?? null
+    const team = me?.workspaces.find((w) => w.kind === 'team') ?? null
+    if (invite || team) {
+      return (
+        <TeamSteer
+          invite={invite}
+          team={team ? { id: team.id, name: team.name } : null}
+          onUsePersonal={dismissSteer}
+        />
+      )
+    }
+  }
 
   return (
     <>
@@ -98,6 +166,98 @@ export function FirstRunSetup() {
         ) : (
           <SelfHostWelcome isAdmin={isAdmin} closeWelcome={closeWelcome} />
         )}
+      </Modal>
+    </>
+  )
+}
+
+/** Card shown instead of the credits prompt when this person is in their own
+ *  personal workspace but has a team waiting: a pending invite (accept it) or
+ *  a team they already belong to (switch to it). Both endpoints return the
+ *  fresh `me`, which goes straight into the ['me'] cache, and every other
+ *  query is reset — the same update App.tsx's workspace switcher applies — so
+ *  the shell follows without a reload and this component unmounts itself once
+ *  the current workspace is no longer personal. */
+function TeamSteer({
+  invite,
+  team,
+  onUsePersonal,
+}: {
+  invite: PendingInvite | null
+  team: { id: string; name: string } | null
+  onUsePersonal: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [open, setOpen] = useState(true)
+  const adopt = (data: User) => {
+    queryClient.setQueryData(['me'], data)
+    queryClient.resetQueries({ predicate: (q) => q.queryKey[0] !== 'me' })
+  }
+  const acceptMutation = useMutation({
+    mutationFn: (token: string) => api.acceptInvite(token),
+    onSuccess: adopt,
+  })
+  const switchMutation = useMutation({
+    mutationFn: (workspaceId: string) => api.switchWorkspace(workspaceId),
+    onSuccess: adopt,
+  })
+  const pending = acceptMutation.isPending || switchMutation.isPending
+  const error = (acceptMutation.error ?? switchMutation.error) as ApiError | null
+
+  const title = invite
+    ? `You've been invited to ${invite.workspace_name} as ${invite.role}`
+    : `Your team ${team?.name ?? ''} is ready`
+  const action = invite ? (
+    <button
+      type="button"
+      className="btn btn-primary"
+      disabled={pending}
+      onClick={() => acceptMutation.mutate(invite.token)}
+    >
+      {acceptMutation.isPending ? 'Joining…' : 'Accept'}
+    </button>
+  ) : (
+    <button
+      type="button"
+      className="btn btn-primary"
+      disabled={pending}
+      onClick={() => team && switchMutation.mutate(team.id)}
+    >
+      {switchMutation.isPending ? 'Switching…' : 'Switch'}
+    </button>
+  )
+
+  return (
+    <>
+      <div className="first-run-banner" role="status">
+        <span>{title}</span>
+        <span style={{ flex: 1 }} />
+        <button className="btn btn-sm btn-primary" onClick={() => setOpen(true)}>
+          Open
+        </button>
+      </div>
+      <Modal
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Welcome to tret"
+        subtitle="Your team is waiting"
+        width={520}
+      >
+        <div className="panel stack" style={{ gap: 12 }}>
+          <div style={{ fontSize: 'var(--fs-md)', lineHeight: 1.6 }}>{title}</div>
+          <div className="mono-body">
+            {invite
+              ? 'This workspace is your own personal one. Accept the invite to work in the team workspace, which has its own credits and shared work.'
+              : 'You are in your personal workspace. Switch to your team to work with its credits and shared work.'}
+          </div>
+          <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+            {action}
+            <button type="button" className="btn btn-sm" disabled={pending} onClick={onUsePersonal}>
+              Use my personal workspace instead
+            </button>
+          </div>
+          {error && <div className="error-text">{error.message}</div>}
+        </div>
       </Modal>
     </>
   )
