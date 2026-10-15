@@ -25,6 +25,7 @@ from sqlalchemy import (
     SmallInteger,
     Text,
     UniqueConstraint,
+    false,
 )
 from sqlalchemy import TIMESTAMP
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
@@ -71,6 +72,14 @@ class User(Base):
     # None" as the deactivation signal (see api/auth.py) — an OIDC user can be
     # disabled without ever having had a password to clear.
     disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Whether the account's email address is known to belong to its holder:
+    # tracked from the IdP's `email_verified` claim on every OIDC login, and
+    # true for an administrator-created password account (the administrator
+    # vouched for the address). Gates handing out the invites addressed to the
+    # email (`services/identity.py::account_email_is_verified`).
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     created_at: Mapped[datetime] = created_at_col()
 
 
@@ -97,6 +106,11 @@ class Workspace(Base):
         ForeignKey("users.id"), unique=True
     )
     settings: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Soft delete (`POST /api/workspaces/{id}/archive`). An archived workspace
+    # is invisible to membership resolution — it is not listed, cannot be
+    # switched to or invited to, and its name may be reused — but every row in
+    # it is kept. Null while live.
+    archived_at: Mapped[datetime | None] = mapped_column()
     created_at: Mapped[datetime] = created_at_col()
 
 

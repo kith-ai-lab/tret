@@ -32,6 +32,19 @@
         "title": "ApprovalBody",
         "type": "object"
       },
+      "ArchiveWorkspaceBody": {
+        "properties": {
+          "confirm_name": {
+            "title": "Confirm Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "confirm_name"
+        ],
+        "title": "ArchiveWorkspaceBody",
+        "type": "object"
+      },
       "AuthConfigOut": {
         "properties": {
           "auth_mode": {
@@ -5563,6 +5576,60 @@
           }
         },
         "summary": "Create Team Workspace",
+        "tags": [
+          "workspaces"
+        ]
+      }
+    },
+    "/api/workspaces/{workspace_id}/archive": {
+      "post": {
+        "description": "Soft-delete a team workspace: set `archived_at` and revoke its pending\ninvites. Nothing else is touched — rows, members and history stay — but\nthe workspace drops out of every membership resolution (`/me`, the\nswitcher, `current_workspace`, invite acceptance) and its name becomes\nreusable.\n\nOwner only, team workspaces only (a personal workspace is permanent), and\nthe caller must type the workspace's name. Not built on `_workspace_member`\nbecause that dependency treats an archived workspace as missing, and this\nendpoint wants to answer 409 \"already archived\" instead. Returns `UserOut`\nlike the other session-affecting endpoints: when the caller was *in* the\narchived workspace the session is re-issued on their default one.",
+        "operationId": "archive_workspace_api_workspaces__workspace_id__archive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchiveWorkspaceBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive Workspace",
         "tags": [
           "workspaces"
         ]

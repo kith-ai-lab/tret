@@ -108,10 +108,27 @@ def pick_default_membership(
     return min(memberships, key=_join_order)
 
 
+async def live_workspaces(
+    db: AsyncSession, memberships: Sequence[WorkspaceMember]
+) -> dict[uuid.UUID, Workspace]:
+    """The workspaces behind `memberships`, keyed by id, leaving out any that
+    no longer exist or have been archived (`Workspace.archived_at`). The one
+    place membership resolution drops archived workspaces — `_resolve_workspaces`,
+    `current_workspace`, `default_workspace_id` and the switch endpoint all go
+    through it, so an archived workspace is never anyone's current workspace."""
+    out: dict[uuid.UUID, Workspace] = {}
+    for m in memberships:
+        workspace = await db.get(Workspace, m.workspace_id)
+        if workspace is not None and workspace.archived_at is None:
+            out[m.workspace_id] = workspace
+    return out
+
+
 async def default_workspace_id(
     db: AsyncSession, user_id: uuid.UUID, preferred: uuid.UUID | None = None
 ) -> uuid.UUID | None:
-    """`pick_default_membership` over this user's stored memberships."""
+    """`pick_default_membership` over this user's stored memberships (archived
+    workspaces excluded)."""
     memberships = (
         await db.execute(
             select(WorkspaceMember)
@@ -119,11 +136,9 @@ async def default_workspace_id(
             .order_by(WorkspaceMember.created_at, WorkspaceMember.workspace_id)
         )
     ).scalars().all()
-    kinds: dict[uuid.UUID, str] = {}
-    for m in memberships:
-        workspace = await db.get(Workspace, m.workspace_id)
-        if workspace is not None:
-            kinds[m.workspace_id] = workspace.kind
+    live = await live_workspaces(db, memberships)
+    memberships = [m for m in memberships if m.workspace_id in live]
+    kinds = {wid: w.kind for wid, w in live.items()}
     picked = pick_default_membership(memberships, kinds, preferred)
     return picked.workspace_id if picked is not None else None
 
@@ -133,19 +148,14 @@ def account_email_is_verified(user: User) -> bool:
     purpose of handing it the invites addressed to that address (password
     login's redemption and `GET /api/auth/invites/pending`).
 
-    The User model carries no `email_verified` column, and the OIDC claim is
-    not stored, so this is a judgement from what *is* known: an account with a
-    password hash was provisioned by an administrator (`api/auth.py::
-    create_user`, or the bootstrap admin) — the only way a password account
-    comes to exist in core, with no self-service signup — so the address was
-    vouched for by whoever created it. An OIDC-only account (no password
-    hash) may have been JIT-provisioned from an *unverified* IdP claim, and
-    that is not recoverable here, so it is not trusted; it still gets
-    redemption at OIDC login, where the live `email_verified` claim is in
-    hand. A deployment that adds self-service password signup must verify the
-    address before it relies on this.
+    Reads `User.email_verified`: set from the IdP's `email_verified` claim on
+    every OIDC login (`match_or_provision`), and true for an
+    administrator-created password account (`api/auth.py::create_user`, the
+    bootstrap admin) because the administrator vouched for the address. A
+    deployment that adds self-service password signup must verify the address
+    before it sets the column.
     """
-    return bool(user.password_hash)
+    return bool(user.email_verified)
 
 
 async def redeem_pending_invites(
@@ -185,6 +195,9 @@ async def redeem_pending_invites(
             if inv.email.strip().lower() == email and _as_utc(inv.expires_at) > now
         ]
         for invite in matching:
+            invited_to = await db.get(Workspace, invite.workspace_id)
+            if invited_to is None or invited_to.archived_at is not None:
+                continue  # archiving revokes pending invites; this is the backstop
             member = await db.get(WorkspaceMember, (user.id, invite.workspace_id))
             if member is None:
                 # a hosting extension's team-plan seat limit hooks in at exactly this
@@ -254,7 +267,11 @@ async def _join_sole_workspace(db: AsyncSession, user: User) -> uuid.UUID:
     prefer a newer one over the original.
     """
     workspace = (
-        await db.execute(select(Workspace).order_by(Workspace.created_at))
+        await db.execute(
+            select(Workspace)
+            .where(Workspace.archived_at.is_(None))
+            .order_by(Workspace.created_at)
+        )
     ).scalars().first()
     if workspace is None:
         raise HTTPException(
@@ -263,6 +280,27 @@ async def _join_sole_workspace(db: AsyncSession, user: User) -> uuid.UUID:
     db.add(WorkspaceMember(user_id=user.id, workspace_id=workspace.id, role=user.role))
     await db.commit()
     return workspace.id
+
+
+async def _track_email_verified(
+    db: AsyncSession, user: User, email_verified: bool, claim_email: str
+) -> None:
+    """Make `User.email_verified` follow the IdP's claim on every login, in
+    both directions: an IdP that revokes verification stops the account being
+    handed invites.
+
+    The claim only vouches for the address it was issued for. An account whose
+    stored email differs from the claim's (its holder changed their address at
+    the IdP, same `sub`) is not verified for the stored one, so the column
+    goes false rather than inheriting the claim's `true`; otherwise a user who
+    provisioned with someone else's unverified address could re-verify a
+    different address of their own and be handed the first one's invites.
+    """
+    matches = user.email.strip().lower() == claim_email.strip().lower()
+    verified = bool(email_verified and matches)
+    if user.email_verified != verified:
+        user.email_verified = verified
+        await db.commit()
 
 
 async def match_or_provision(
@@ -287,6 +325,7 @@ async def match_or_provision(
     existing = (await db.execute(select(User).where(User.oidc_sub == sub))).scalar_one_or_none()
     if existing is not None:
         _disabled_check(existing)
+        await _track_email_verified(db, existing, email_verified, email)
         workspace_id = await _redeem_invites_and_resolve_workspace(
             db, existing, email, email_verified, fallback_workspace_id=None
         )
@@ -307,6 +346,7 @@ async def match_or_provision(
                 409, "This email is already linked to a different single sign-on identity."
             )
         by_email.oidc_sub = sub
+        by_email.email_verified = True  # linking requires a verified claim (above)
         await db.commit()
         workspace_id = await _redeem_invites_and_resolve_workspace(
             db, by_email, email, email_verified, fallback_workspace_id=None
@@ -356,6 +396,7 @@ async def match_or_provision(
         role="analyst",
         oidc_sub=sub,
         disabled=False,
+        email_verified=email_verified,
     )
     db.add(user)
     await db.flush()

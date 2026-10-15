@@ -2115,6 +2115,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{workspace_id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Archive Workspace
+         * @description Soft-delete a team workspace: set `archived_at` and revoke its pending
+         *     invites. Nothing else is touched — rows, members and history stay — but
+         *     the workspace drops out of every membership resolution (`/me`, the
+         *     switcher, `current_workspace`, invite acceptance) and its name becomes
+         *     reusable.
+         *
+         *     Owner only, team workspaces only (a personal workspace is permanent), and
+         *     the caller must type the workspace's name. Not built on `_workspace_member`
+         *     because that dependency treats an archived workspace as missing, and this
+         *     endpoint wants to answer 409 "already archived" instead. Returns `UserOut`
+         *     like the other session-affecting endpoints: when the caller was *in* the
+         *     archived workspace the session is re-issued on their default one.
+         */
+        post: operations["archive_workspace_api_workspaces__workspace_id__archive_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces/{workspace_id}/invites": {
         parameters: {
             query?: never;
@@ -2208,6 +2239,11 @@ export interface components {
              * @description Optional reviewer comment
              */
             note?: string | null;
+        };
+        /** ArchiveWorkspaceBody */
+        ArchiveWorkspaceBody: {
+            /** Confirm Name */
+            confirm_name: string;
         };
         /** AuthConfigOut */
         AuthConfigOut: {
@@ -5797,6 +5833,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["CreateWorkspaceBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    archive_workspace_api_workspaces__workspace_id__archive_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArchiveWorkspaceBody"];
             };
         };
         responses: {

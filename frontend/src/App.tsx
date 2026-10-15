@@ -5,6 +5,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 
 import { api, ApiError, type User } from './api/client'
 import { LIGHT_ONLY } from './brand'
+import { ErrorBoundary } from './components/shared/ErrorBoundary'
 import { FirstRunSetup } from './components/shared/FirstRunSetup'
 import { AppRoutes } from './router'
 import { Login } from './views/Login'
@@ -109,7 +110,11 @@ function Main() {
   const isChat = location.pathname === '/'
   return (
     <main className={`main${isChat ? ' main--chat' : ''}`}>
-      <AppRoutes />
+      {/* Keyed on the path so a crashed view resets when the user navigates
+          away; the sidebar and workspace switcher sit outside it and stay usable. */}
+      <ErrorBoundary key={location.pathname}>
+        <AppRoutes />
+      </ErrorBoundary>
     </main>
   )
 }

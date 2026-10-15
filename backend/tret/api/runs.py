@@ -4,13 +4,13 @@ import asyncio
 import base64
 import binascii
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
@@ -18,16 +18,25 @@ from tret.api.workspace import WorkspaceContext, current_project, current_worksp
 from tret.db.engine import get_db
 from tret.db.models import Document, Harness, Project, Run, User
 from tret.engine.delegation import COST_CAP_KEY, DELEGATION_DEPTH_KEY, LABEL_KEY
-from tret.engine.events import get_event_bus
+from tret.engine.events import RunEvent, get_event_bus
+from tret.engine.extensions import get_extension_registry
 from tret.engine.harness import get_harness_engine
 from tret.packs.links import packs_for_harness, resolve_pack_for_task
 from tret.services import lifecycle
+from tret.services.reconcile import NON_TERMINAL_STATUSES, _as_aware_utc
 from tret.services.emissions import emission_summary_fields, energy_wh_field
 from tret.services.emissions_v3_wiring import method_v3_of, public_routing
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 _background_tasks: set[asyncio.Task] = set()
+
+# `POST /{id}/cancel` only force-closes a non-live run older than this; see the
+# multi-machine trade-off comment in `cancel_run`.
+WEDGED_RUN_GRACE = timedelta(seconds=30)
+# Same status ("failed") as `reconcile.sweep_orphaned_runs`, with an error
+# string in the same "<reason>: <detail>" shape as its `ORPHAN_ERROR`.
+CANCEL_ORPHAN_ERROR = "cancelled: no live process for this run"
 
 
 class CreateRunBody(BaseModel):
@@ -453,5 +462,47 @@ async def cancel_run(
     run = await db.get(Run, run_id)
     if run is None or await project_in_workspace(db, run.project_id, ctx.id) is None:
         raise HTTPException(404, "Run not found")
-    get_harness_engine().cancel(run_id)
-    return {"ok": True}
+    if run.status not in NON_TERMINAL_STATUSES:
+        return {"ok": True, "live": False, "marked": False}
+    live = get_harness_engine().cancel(run_id)
+    if live:
+        return {"ok": True, "live": True, "marked": False}
+    # Nothing in this process is executing the run, yet the row says it is in
+    # flight: a crashed task, or a run a prior process left behind that the
+    # startup sweep missed. Stop would otherwise do nothing and chat's
+    # `active_run_id` would block the conversation until its age cutoff, so
+    # close the row out the way `sweep_orphaned_runs` does.
+    #
+    # Trade-off: a run executing on *another* machine/worker is also "not live"
+    # from here and cannot be told apart. The only guard is age: a run created
+    # in the last `WEDGED_RUN_GRACE` is left alone (it may be a request another
+    # worker has just accepted, or a task here that has not entered `execute()`
+    # yet; the `_cancelled` mark `cancel()` just set still stops that one). A
+    # run on another machine that is older than the grace period and still
+    # healthy will be marked failed by this Stop; its own loop is not
+    # interrupted by this and will overwrite the row when it finishes.
+    now = datetime.now(timezone.utc)
+    if now - _as_aware_utc(run.created_at) < WEDGED_RUN_GRACE:
+        return {"ok": True, "live": False, "marked": False}
+    # Conditional update, not read-then-commit: the run may have finished
+    # between the load above and here, and a completed row must not be
+    # overwritten with `failed` (nor its hooks fired a second time). Only the
+    # caller that actually flips a non-terminal row publishes and fires hooks.
+    # The engine's cancel flag is deliberately left in place: if this run is
+    # in fact queued behind a concurrency slot or about to start, the flag is
+    # what stops it, and `execute()` releases it itself.
+    result = await db.execute(
+        update(Run)
+        .where(Run.id == run_id, Run.status.in_(NON_TERMINAL_STATUSES))
+        .values(status="failed", error=CANCEL_ORPHAN_ERROR, finished_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    if result.rowcount != 1:
+        return {"ok": True, "live": False, "marked": False}
+    await db.refresh(run)
+    await get_event_bus().publish(run_id, RunEvent("error", {"message": CANCEL_ORPHAN_ERROR}))
+    # Same as the sweep: this is the run's only terminal path, so post-run
+    # hooks (billing, holds) must fire here or never.
+    await get_extension_registry().run_post_run_hooks(db, run, ctx.id)
+    return {"ok": True, "live": False, "marked": True}

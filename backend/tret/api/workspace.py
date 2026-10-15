@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.api.auth import _session_payload, current_user
 from tret.db.engine import get_db
 from tret.db.models import Project, User, Workspace, WorkspaceMember
-from tret.services.identity import pick_default_membership
+from tret.services.identity import live_workspaces, pick_default_membership
 
 # Weakest to strongest. A workspace's `owner` role belongs to whoever created
 # it (or, for a personal workspace, the person it is for) and is otherwise
@@ -90,6 +90,10 @@ async def current_workspace(
     wrong-workspace read.
     """
     memberships = await user_memberships(db, user.id)
+    # An archived workspace is not a membership: a cookie or header naming one
+    # falls through exactly like a stale `wid`.
+    live = await live_workspaces(db, memberships)
+    memberships = [m for m in memberships if m.workspace_id in live]
     payload = _session_payload(request)
     session_wid = payload.get("wid") if payload else None
     header_wid = request.headers.get("X-Tret-Workspace")
@@ -131,21 +135,15 @@ async def current_workspace(
         )
     # Cookie session with no usable `wid`: fall to the same default `/me`
     # reports (most recently joined team, else the sole/first membership).
-    workspaces: dict[uuid.UUID, Workspace] = {}
-    for m in memberships:
-        workspace = await db.get(Workspace, m.workspace_id)
-        if workspace is not None:
-            workspaces[m.workspace_id] = workspace
     picked = pick_default_membership(
-        [m for m in memberships if m.workspace_id in workspaces],
-        {wid_: w.kind for wid_, w in workspaces.items()},
+        memberships, {wid_: w.kind for wid_, w in live.items()}
     )
     if picked is None:
         raise HTTPException(
             409,
             "This account belongs to no workspace. Contact an administrator.",
         )
-    return WorkspaceContext(workspaces[picked.workspace_id], picked.role)
+    return WorkspaceContext(live[picked.workspace_id], picked.role)
 
 
 async def current_project(db: AsyncSession, workspace_id: uuid.UUID) -> Project | None:

@@ -30,7 +30,7 @@ this workspace-scoped action happen at all" (Phase C's motivating case is
 a hosting extension's team-plan seat limit — "may this workspace gain one more member,
 via an invite or its redemption"). It takes `(db, workspace_id, action)`
 rather than `(db, run, workspace_id)` — there is no `Run` in play — and
-`action` is a short machine string (`"invite"`, `"invite_redeem"`) the gate
+`action` is a short machine string (`"invite"`, `"invite_redeem"`, `"archive"`) the gate
 switches on, the same way `GateResult.reason` is a short machine string a
 caller switches on.
 
@@ -140,7 +140,8 @@ PostRunHook = Callable[[AsyncSession, Run, uuid.UUID], Awaitable[None]]
 StartupTask = Callable[[], Awaitable[None]]
 # (db, workspace_id, action) -> GateResult. `action` is a short machine string
 # naming what is being asked, e.g. "invite" (workspaces.py creating one) or
-# "invite_redeem" (services/identity.py accepting one during OIDC login).
+# "invite_redeem" (services/identity.py accepting one during OIDC login), or
+# "archive" (workspaces.py soft-deleting a team).
 WorkspaceGate = Callable[[AsyncSession, uuid.UUID, str], Awaitable[GateResult]]
 # (provider: "gdrive" | "m365") -> OAuthClientConfig | None. Deliberately
 # synchronous, unlike the gates/hooks above: this is a pure config lookup (an

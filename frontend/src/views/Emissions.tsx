@@ -418,14 +418,14 @@ export function TotalsStrip({ totals }: { totals: EmissionsTotals }) {
         }
       />
       <Stat
-        label="Energy used for carbon"
+        label="Energy"
         value={orDash(formatEnergyScaled(totals.energy_wh))}
-        title="Sum of recorded energy after each run's applicable overhead treatment. Coverage may be incomplete; inspect individual runs."
+        title="Facility energy: each run's IT energy × PUE, the basis for the carbon figure. Coverage may be incomplete; inspect individual runs."
       />
       <Stat
-        label="Recorded energy"
+        label="IT energy (before PUE)"
         value={orDash(formatEnergyScaled(totals.energy_wh_compute))}
-        title="Sum of energy within each run's recorded boundary, before any additional PUE. GPU, node and facility coverage may differ."
+        title="Sum of energy within each run's recorded boundary, before PUE. GPU, node and facility coverage may differ."
       />
       <Stat
         label="Runs with an estimate"

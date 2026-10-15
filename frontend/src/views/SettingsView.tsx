@@ -356,6 +356,16 @@ function WorkspaceMembersSection() {
       queryClient.resetQueries({ predicate: (q) => q.queryKey[0] !== 'me' })
     },
   })
+  const archiveMutation = useMutation({
+    mutationFn: ({ id, confirmName }: { id: string; confirmName: string }) =>
+      api.archiveWorkspace(id, confirmName),
+    // The session moves to the caller's default workspace, so the same
+    // whole-context swap as creating one applies.
+    onSuccess: (data) => {
+      queryClient.setQueryData(['me'], data)
+      queryClient.resetQueries({ predicate: (q) => q.queryKey[0] !== 'me' })
+    },
+  })
 
   if (!me || !currentWorkspace) return null
 
@@ -626,6 +636,38 @@ function WorkspaceMembersSection() {
               )
             })()}
         </form>
+      )}
+
+      {me.role === 'owner' && (
+        <div className="panel" style={{ marginTop: 14 }}>
+          <div className="mono-label" style={{ marginBottom: 6 }}>
+            Archive this team
+          </div>
+          <div className="mono-body" style={{ marginBottom: 10 }}>
+            Hides {currentWorkspace.name} from everyone, revokes its pending invites and frees up
+            the name. Its data is kept.
+          </div>
+          <button
+            type="button"
+            className="btn btn-danger"
+            disabled={archiveMutation.isPending}
+            onClick={() => {
+              const typed = window.prompt(
+                `Archive "${currentWorkspace.name}"? Type the team name to confirm.`,
+              )
+              if (typed && typed.trim()) {
+                archiveMutation.mutate({ id: currentWorkspace.id, confirmName: typed.trim() })
+              }
+            }}
+          >
+            {archiveMutation.isPending ? 'Archiving…' : 'Archive this team'}
+          </button>
+          {archiveMutation.isError && (
+            <div className="error-text" style={{ marginTop: 10 }}>
+              {(archiveMutation.error as Error).message}
+            </div>
+          )}
+        </div>
       )}
     </div>
   )

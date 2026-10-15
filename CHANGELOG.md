@@ -8,7 +8,42 @@ one that needs action on an existing install.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Archive a team.** `POST /api/workspaces/{id}/archive` (owner only, team
+  workspaces only, the workspace name typed back as confirmation) soft-deletes
+  a workspace: `workspaces.archived_at` is set, pending invites are revoked,
+  the workspace drops out of every membership list, switch and invite links
+  to it refuse, and its name may be reused. Every row in it is kept.
+  Settings gains an "Archive this team" panel for owners. Extensions may
+  refuse through the workspace gate with action `"archive"`.
+- **`users.email_verified`.** A real column replaces the "has a password
+  hash" stopgap that gated pending-invite listing and invite redemption. It
+  follows the IdP's `email_verified` claim on every OIDC login, is true for
+  administrator-created password accounts, and the migration backfills true
+  for existing password accounts.
+- **Stop works on a wedged run.** The engine now knows which runs this
+  process is executing. Cancelling a run that is queued or running with no
+  live task behind it (crashed task, missed by the startup sweep) marks it
+  failed after a 30-second grace period, ends any open event stream, and
+  frees the conversation it was blocking. The cancel response reports
+  `{ok, live, marked}`.
+- **Error boundary.** A render error in one view shows "This page hit an
+  error" with Try again and Reload, leaving the sidebar and workspace
+  switcher usable, instead of blanking the whole app.
+
+### Changed
+
+- Energy figures are labelled by what they are: the headline **Energy** is
+  facility energy (IT energy × PUE, the basis for the carbon figure); **IT
+  energy (before PUE)** is shown as the secondary figure; a run still
+  streaming shows **live estimate**, a finished run **final**. The Emissions
+  dashboard uses the same labels. No computation or stored value changed.
+
+### Fixed
+
+- The OAuth connection callback refuses a workspace that was archived after
+  the authorize step.
 
 ## [0.2.0] — 2026-10-15
 

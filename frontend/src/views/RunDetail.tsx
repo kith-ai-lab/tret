@@ -136,7 +136,7 @@ export function RunDetailView() {
           numeric widths so an update never reflows what is below it. */}
       {isLive && (
         <div className="panel" style={{ padding: '10px 14px' }}>
-          <LiveFootprint usage={stream.usage} label="live footprint (est., cumulative)" />
+          <LiveFootprint usage={stream.usage} label="live estimate (cumulative)" />
         </div>
       )}
 
@@ -317,9 +317,11 @@ export function RunDetailView() {
         co2eGHigh={co2eGHigh}
         avoidedUsd={live?.avoided_usd ?? run.avoided_usd}
         avoidedUsdPct={live?.avoided_usd_pct ?? run.avoided_usd_pct}
+        live={isLive}
+        energyBoundary={run.energy?.energy_boundary}
       />
 
-      {run.energy && <EnergyDetail energy={run.energy} />}
+      {run.energy && <EnergyDetail energy={run.energy} live={isLive} />}
       {run.energy && <WaterPanel energy={run.energy} />}
       <MethodV3Line method={run.method_v3} />
 
@@ -336,7 +338,11 @@ export function RunDetailView() {
         <span>cost {formatCost(costUsd)}</span>
         {footprint && (
           <span
-            title={`Estimated from token counts and the model's calibrated energy class — not a measurement. ${
+            title={`${isLive ? 'Live estimate' : 'Final estimate'}, from token counts and the model's calibrated energy class — not a measurement. ${
+              run.energy?.energy_boundary === 'facility'
+                ? 'The Wh is a facility reading (overhead already included); no additional PUE was applied.'
+                : 'The Wh is IT energy before PUE; the carbon is computed from facility energy (IT × PUE).'
+            } ${
               footprintBand ? BAND_SHORT : ''
             }`}
           >

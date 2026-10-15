@@ -37,8 +37,14 @@ log = logging.getLogger("tret.bootstrap")
 async def bootstrap(db: AsyncSession) -> None:
     await bootstrap_admin(db)
 
+    # Live workspaces only: an archived team is not the bootstrap workspace and
+    # not a place to seed into or re-home anyone.
     workspace = (
-        await db.execute(select(Workspace).order_by(Workspace.created_at))
+        await db.execute(
+            select(Workspace)
+            .where(Workspace.archived_at.is_(None))
+            .order_by(Workspace.created_at)
+        )
     ).scalars().first()
     if workspace is None:
         # First boot ever: create_workspace seeds the project, packs and
@@ -122,6 +128,50 @@ async def bootstrap(db: AsyncSession) -> None:
     # correct there.
     if not get_settings().multi_tenant:
         await _ensure_every_user_has_a_membership(db, workspace.id)
+    else:
+        await _rehome_users_stranded_by_archive(db)
+
+
+def _live_membership_user_ids():
+    """User ids holding at least one membership in a non-archived workspace."""
+    return (
+        select(WorkspaceMember.user_id)
+        .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+        .where(Workspace.archived_at.is_(None))
+    )
+
+
+async def _rehome_users_stranded_by_archive(db: AsyncSession) -> None:
+    """Multi-tenant counterpart of the backstop below, narrowed on purpose.
+
+    A user with *no* membership at all is a deliberate offboarding and stays
+    that way (see the call site). A user whose memberships all point at
+    archived workspaces is different: nobody chose that outcome for them, and
+    `current_workspace` would answer 409 "belongs to no workspace" forever. Give
+    each a personal workspace, the way first sign-in does, unless they already
+    own one (it would have been a live membership, so this is only reachable
+    for a user whose personal row went missing).
+    """
+    stranded = (
+        await db.execute(
+            select(User).where(
+                User.id.in_(select(WorkspaceMember.user_id)),
+                ~User.id.in_(_live_membership_user_ids()),
+            )
+        )
+    ).scalars().all()
+    for user in stranded:
+        # `create_workspace` commits on its own, so no savepoint here: a
+        # failure rolls back whatever it left pending and moves on.
+        try:
+            first_name = (user.display_name or user.email.split("@")[0]).split(" ")[0]
+            await create_workspace(
+                db, f"{first_name}'s workspace", kind="personal", owner=user,
+                seed_demo_content=False,
+            )
+        except Exception:  # noqa: BLE001 - one user's failure must not abort boot
+            await db.rollback()
+            log.exception("could not re-home user %s after their workspace was archived", user.id)
 
 
 async def _ensure_every_user_has_a_membership(db: AsyncSession, fallback_workspace_id) -> None:
@@ -132,14 +182,16 @@ async def _ensure_every_user_has_a_membership(db: AsyncSession, fallback_workspa
     user row inserted directly, or a database that predates the
     backfill migration and was never re-migrated through it.
 
+    Only live memberships count: a user whose sole workspace was archived is
+    re-homed to `fallback_workspace_id` (the oldest live workspace) rather than
+    left to 409 against `current_workspace` on every request.
+
     Self-host only — the caller gates this on `not multi_tenant`. See the
     call site for why it must never run in multi-tenant mode.
     """
     users_without_membership = (
         await db.execute(
-            select(User).where(
-                ~User.id.in_(select(WorkspaceMember.user_id))
-            )
+            select(User).where(~User.id.in_(_live_membership_user_ids()))
         )
     ).scalars().all()
     if not users_without_membership:

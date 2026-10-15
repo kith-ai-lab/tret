@@ -35,7 +35,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.sql.elements import False_, Null, True_
 
-from tret.api import auth, oidc
+from tret.api import auth, oidc, workspaces as workspaces_api
 from tret.api.auth import login_limiter
 from tret.config import get_settings
 from tret.db.engine import get_db
@@ -304,6 +304,7 @@ def client(db, monkeypatch):
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(oidc.router)
+    app.include_router(workspaces_api.invite_accept_router)
     app.dependency_overrides[get_db] = lambda: db
     with TestClient(app) as c:
         yield c
@@ -920,6 +921,66 @@ def test_invite_redemption_lands_the_session_on_the_team_workspace(client, db):
     # Landed on the redeemed team workspace, not the sole/default one.
     assert body["current_workspace_id"] == str(team.id)
     assert body["role"] == "approver"
+
+
+def test_unverified_login_does_not_redeem_and_a_later_verified_login_does(client, db):
+    """`User.email_verified` follows the IdP claim on every login: while it is
+    false the account neither auto-redeems nor is shown redemption tokens."""
+    sole = _workspace("Default", kind="team")
+    team = _workspace("Climate Co", kind="team")
+    invite = _invite(workspace_id=team.id, email="lena@example.com", role="approver")
+    db.add(sole)
+    db.add(team)
+    db.add(invite)
+
+    _round_trip(
+        client, claims={"sub": "sub-lena", "email": "lena@example.com", "email_verified": False}
+    )
+    (lena,) = [u for u in db.store["User"] if u.oidc_sub == "sub-lena"]
+    assert lena.email_verified is False
+    assert invite.status == "pending"
+    assert client.get("/api/auth/invites/pending").json() == []
+
+    _round_trip(
+        client, claims={"sub": "sub-lena", "email": "lena@example.com", "email_verified": True}
+    )
+    assert lena.email_verified is True
+    assert invite.status == "accepted"
+    assert client.get("/api/auth/me").json()["current_workspace_id"] == str(team.id)
+
+    # ...and it tracks the IdP back down again.
+    _round_trip(
+        client, claims={"sub": "sub-lena", "email": "lena@example.com", "email_verified": "false"}
+    )
+    assert lena.email_verified is False
+
+
+def test_verified_claim_for_a_different_email_is_not_trusted_for_the_stored_one(client, db):
+    """Provision with someone else's address unverified, then change the IdP
+    email to one the attacker owns and verifies (same `sub`): the verified
+    claim vouches for the new address, not for `User.email`, so the victim's
+    pending invite must stay out of reach."""
+    sole = _workspace("Default", kind="team")
+    team = _workspace("Climate Co", kind="team")
+    invite = _invite(workspace_id=team.id, email="victim@example.com", role="approver")
+    db.add(sole)
+    db.add(team)
+    db.add(invite)
+
+    _round_trip(
+        client, claims={"sub": "sub-att", "email": "victim@example.com", "email_verified": False}
+    )
+    (att,) = [u for u in db.store["User"] if u.oidc_sub == "sub-att"]
+    assert att.email == "victim@example.com"
+    assert att.email_verified is False
+
+    _round_trip(
+        client, claims={"sub": "sub-att", "email": "attacker@example.com", "email_verified": True}
+    )
+    assert att.email == "victim@example.com"
+    assert att.email_verified is False
+    assert invite.status == "pending"
+    assert client.get("/api/auth/invites/pending").json() == []
 
 
 def test_expired_invite_is_not_redeemed(client, db):

@@ -94,13 +94,18 @@ async def client(session_factory):
 
 
 # ── fixture builders ─────────────────────────────────────────────────────────
-def make_user(email: str, *, password: str = PASSWORD, role: str = "analyst") -> User:
+def make_user(
+    email: str, *, password: str = PASSWORD, role: str = "analyst", verified: bool = True
+) -> User:
+    # `verified` defaults true: these are administrator-created password
+    # accounts, which the migration backfill and `create_user` mark verified.
     return User(
         id=uuid.uuid4(),
         email=email,
         display_name=email.split("@")[0].title(),
         password_hash=HASHER.hash(password),
         role=role,
+        email_verified=verified,
     )
 
 
@@ -1063,14 +1068,15 @@ async def test_pending_invites_lists_only_my_live_pending_invites(client, seed):
     assert "expires_at" in body[0]
 
 
-async def test_pending_invites_is_empty_for_an_account_with_no_password(client, session_factory, seed):
-    """No password hash means an OIDC-only account whose email may never have
-    been verified: it must not be handed redemption tokens."""
+async def test_pending_invites_is_empty_for_an_account_with_an_unverified_email(
+    client, session_factory, seed
+):
+    """An OIDC account whose IdP never verified the email must not be handed
+    redemption tokens, even if it also has a password (the column decides)."""
     from tret.api.auth import current_user
 
     team = make_workspace("Team A")
-    sso = make_user("sso24@example.com")
-    sso.password_hash = None
+    sso = make_user("sso24@example.com", verified=False)
     invite = make_invite(team, email=sso.email)
     await seed(team, sso, invite)
 
@@ -1137,3 +1143,269 @@ async def test_password_login_redeems_a_pending_invite(client, seed, session_fac
     async with session_factory() as db:
         stored = (await db.execute(select(Invite).where(Invite.token == invite.token))).scalar_one()
         assert stored.status == "accepted"
+
+
+async def test_password_login_does_not_redeem_for_an_unverified_email(client, seed, session_factory):
+    team = make_workspace("Climate Co")
+    owner = make_user("owner26@example.com")
+    invitee = make_user("invitee26@example.com", verified=False)
+    home = make_workspace("Home", kind="personal")
+    invite = make_invite(team, email=invitee.email)
+    await seed(
+        team, owner, invitee, home,
+        make_member(owner, team, role="owner"),
+        make_member(invitee, home, role="owner"),
+        invite,
+    )
+
+    body = (await login(client, invitee.email)).json()
+    assert body["current_workspace_id"] == str(home.id)
+    assert (await client.get("/api/auth/invites/pending")).json() == []
+
+
+# ── archiving a team ─────────────────────────────────────────────────────────
+async def _owner_in_team(client, seed, *, email="boss@example.com", team_name="Doomed Co"):
+    home = make_workspace("Solo", kind="personal")
+    team = make_workspace(team_name)
+    user = make_user(email)
+    await seed(
+        home, team, user,
+        make_member(user, home, role="owner"),
+        make_member(user, team, role="owner"),
+    )
+    await login(client, user.email)
+    return user, home, team
+
+
+async def test_owner_archives_a_team_and_the_session_moves(client, seed, session_factory):
+    user, home, team = await _owner_in_team(client, seed)
+    switched = await client.post("/api/auth/workspace", json={"workspace_id": str(team.id)})
+    assert switched.json()["current_workspace_id"] == str(team.id)
+    pending = make_invite(team, email="newbie@example.com")
+    await seed(pending)
+
+    response = await client.post(
+        f"/api/workspaces/{team.id}/archive", json={"confirm_name": "  doomed CO "}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["current_workspace_id"] == str(home.id)
+    assert {w["id"] for w in body["workspaces"]} == {str(home.id)}
+    # the cookie was re-issued: /me reads it and lands on the personal workspace
+    me = (await client.get("/api/auth/me")).json()
+    assert me["current_workspace_id"] == str(home.id)
+
+    async with session_factory() as db:
+        stored = await db.get(Workspace, team.id)
+        assert stored.archived_at is not None
+        invite = (await db.execute(select(Invite).where(Invite.token == pending.token))).scalar_one()
+        assert invite.status == "revoked"
+        # rows are kept
+        assert await db.get(WorkspaceMember, (user.id, team.id)) is not None
+
+
+async def test_archiving_another_workspace_keeps_the_current_session(client, seed):
+    _user, home, team = await _owner_in_team(client, seed)
+    # create a second team through the API, then go back to home and archive it
+    created = await client.post("/api/workspaces", json={"name": "Side Co"})
+    side_id = created.json()["current_workspace_id"]
+    assert side_id != str(team.id)
+    await client.post("/api/auth/workspace", json={"workspace_id": str(home.id)})
+
+    response = await client.post(f"/api/workspaces/{side_id}/archive", json={"confirm_name": "side co"})
+    assert response.status_code == 200, response.text
+    assert response.json()["current_workspace_id"] == str(home.id)
+    assert {w["id"] for w in response.json()["workspaces"]} == {str(home.id), str(team.id)}
+
+
+async def test_non_owner_cannot_archive(client, seed):
+    team = make_workspace("Doomed Co")
+    owner = make_user("o@example.com")
+    admin = make_user("a@example.com")
+    await seed(
+        team, owner, admin,
+        make_member(owner, team, role="owner"),
+        make_member(admin, team, role="admin"),
+    )
+    await login(client, admin.email)
+    response = await client.post(f"/api/workspaces/{team.id}/archive", json={"confirm_name": "Doomed Co"})
+    assert response.status_code == 403
+
+
+async def test_personal_workspace_cannot_be_archived(client, seed):
+    user, home, _team = await _owner_in_team(client, seed)
+    response = await client.post(f"/api/workspaces/{home.id}/archive", json={"confirm_name": "Solo"})
+    assert response.status_code == 409
+
+
+async def test_archive_requires_the_exact_name(client, seed):
+    _user, _home, team = await _owner_in_team(client, seed)
+    response = await client.post(f"/api/workspaces/{team.id}/archive", json={"confirm_name": "Doomed"})
+    assert response.status_code == 422
+
+
+async def test_archiving_twice_is_a_409(client, seed):
+    _user, _home, team = await _owner_in_team(client, seed)
+    ok = await client.post(f"/api/workspaces/{team.id}/archive", json={"confirm_name": "Doomed Co"})
+    assert ok.status_code == 200
+    again = await client.post(f"/api/workspaces/{team.id}/archive", json={"confirm_name": "Doomed Co"})
+    assert again.status_code == 409
+
+
+async def test_archived_workspace_disappears_and_cannot_be_switched_to(client, seed):
+    _user, home, team = await _owner_in_team(client, seed)
+    await client.post(f"/api/workspaces/{team.id}/archive", json={"confirm_name": "Doomed Co"})
+
+    me = (await client.get("/api/auth/me")).json()
+    assert [w["id"] for w in me["workspaces"]] == [str(home.id)]
+    switch = await client.post("/api/auth/workspace", json={"workspace_id": str(team.id)})
+    assert switch.status_code == 404
+    members = await client.get(f"/api/workspaces/{team.id}/members")
+    assert members.status_code == 404
+
+
+async def test_a_stale_cookie_for_an_archived_workspace_falls_back(client, seed):
+    """`current_workspace` treats an archived `wid` as not a membership."""
+    from fastapi import Depends
+
+    from tret.api.workspace import WorkspaceContext, current_workspace
+
+    _user, home, team = await _owner_in_team(client, seed)
+    await client.post("/api/auth/workspace", json={"workspace_id": str(team.id)})  # cookie -> team
+    app = client._transport.app
+
+    @app.get("/api/_probe_workspace")
+    async def _probe(ctx: WorkspaceContext = Depends(current_workspace)):
+        return {"id": str(ctx.id)}
+
+    assert (await client.get("/api/_probe_workspace")).json() == {"id": str(team.id)}
+    # Archive from the other side so the cookie keeps naming the team: switch
+    # to home, archive, then replay the old team cookie.
+    stale = client.cookies.get("tret_session")
+    await client.post("/api/auth/workspace", json={"workspace_id": str(home.id)})
+    await client.post(f"/api/workspaces/{team.id}/archive", json={"confirm_name": "Doomed Co"})
+    client.cookies.set("tret_session", stale)
+    assert (await client.get("/api/_probe_workspace")).json() == {"id": str(home.id)}
+
+
+async def test_invite_to_an_archived_workspace_is_a_410(client, seed):
+    team = make_workspace("Doomed Co")
+    owner = make_user("owner27@example.com")
+    invitee = make_user("invitee27@example.com")
+    home = make_workspace("Home", kind="personal")
+    invite = make_invite(team, email=invitee.email)
+    await seed(
+        team, owner, invitee, home,
+        make_member(owner, team, role="owner"),
+        make_member(invitee, home, role="owner"),
+    )
+    await login(client, owner.email)
+    await seed(invite)
+    archived = await client.post(f"/api/workspaces/{team.id}/archive", json={"confirm_name": "Doomed Co"})
+    assert archived.status_code == 200, archived.text
+
+    await login(client, invitee.email)
+    response = await client.post(f"/api/auth/invites/{invite.token}/accept")
+    assert response.status_code == 410
+    assert response.json()["detail"] == "This workspace has been archived"
+    assert (await client.get("/api/auth/invites/pending")).json() == []
+
+
+async def test_an_archived_team_name_can_be_reused(client, seed):
+    _user, _home, team = await _owner_in_team(client, seed)
+    blocked = await client.post("/api/workspaces", json={"name": "Doomed Co"})
+    assert blocked.status_code == 409
+    await client.post(f"/api/workspaces/{team.id}/archive", json={"confirm_name": "Doomed Co"})
+    again = await client.post("/api/workspaces", json={"name": "Doomed Co"})
+    assert again.status_code == 200, again.text
+
+
+async def test_a_workspace_gate_can_refuse_an_archive(client, seed):
+    _user, _home, team = await _owner_in_team(client, seed)
+
+    ext = ExtensionAPI(None)
+
+    async def refuse(_db, _workspace_id, action):
+        assert action == "archive"
+        return GateResult(allowed=False, reason="balance", detail="settle up")
+
+    ext.add_workspace_gate(refuse)
+    extensions_module._registry = ext
+    response = await client.post(f"/api/workspaces/{team.id}/archive", json={"confirm_name": "Doomed Co"})
+    assert response.status_code == 403
+    assert response.json()["detail"]["reason"] == "balance"
+
+
+async def test_admin_created_password_accounts_are_marked_email_verified(client, seed, session_factory):
+    team = make_workspace("Only Team")
+    admin = make_user("root@example.com", role="admin")
+    await seed(team, admin, make_member(admin, team, role="owner"))
+    await login(client, admin.email)
+
+    created = await client.post(
+        "/api/auth/users",
+        json={"email": "new@example.com", "display_name": "New", "password": "a-long-enough-password-1"},
+    )
+    assert created.status_code == 200, created.text
+    async with session_factory() as db:
+        row = (await db.execute(select(User).where(User.email == "new@example.com"))).scalar_one()
+        assert row.email_verified is True
+
+
+async def test_the_team_cap_counts_archived_teams(client, seed, monkeypatch):
+    """Create-and-archive in a loop must not dodge the cap, though the archived
+    team's name stays reusable (test above)."""
+    from tret.config import get_settings
+
+    home = make_workspace("Solo", kind="personal")
+    user = make_user("looper@example.com")
+    await seed(home, user, make_member(user, home, role="owner"))
+    await login(client, user.email)
+
+    monkeypatch.setenv("TRET_MAX_TEAM_WORKSPACES_PER_USER", "1")
+    get_settings.cache_clear()
+    try:
+        first = await client.post("/api/workspaces", json={"name": "Loop Co"})
+        assert first.status_code == 200, first.text
+        wid = first.json()["current_workspace_id"]
+        archived = await client.post(f"/api/workspaces/{wid}/archive", json={"confirm_name": "Loop Co"})
+        assert archived.status_code == 200, archived.text
+
+        again = await client.post("/api/workspaces", json={"name": "Loop Co Two"})
+        assert again.status_code == 403
+    finally:
+        monkeypatch.delenv("TRET_MAX_TEAM_WORKSPACES_PER_USER", raising=False)
+        get_settings.cache_clear()
+
+
+async def test_admin_cannot_create_a_user_into_an_archived_workspace(client, seed, session_factory):
+    home = make_workspace("Solo")
+    gone = make_workspace("Gone Co")
+    admin = make_user("root@example.com", role="admin")
+    await seed(home, gone, admin, make_member(admin, home, role="owner"))
+    async with session_factory() as db:
+        stored = await db.get(Workspace, gone.id)
+        stored.archived_at = datetime.now(timezone.utc)
+        await db.commit()
+    await login(client, admin.email)
+
+    body = {
+        "email": "newhire@example.com",
+        "display_name": "New Hire",
+        "password": PASSWORD,
+        "role": "analyst",
+    }
+    explicit = await client.post("/api/auth/users", json={**body, "workspace_id": str(gone.id)})
+    assert explicit.status_code == 409, explicit.text
+
+    # With the archived one ignored, "Solo" is the sole live workspace and is inferred.
+    inferred = await client.post("/api/auth/users", json=body)
+    assert inferred.status_code == 200, inferred.text
+    async with session_factory() as db:
+        member = (
+            await db.execute(
+                select(WorkspaceMember).join(User, User.id == WorkspaceMember.user_id)
+                .where(User.email == "newhire@example.com")
+            )
+        ).scalars().all()
+    assert [m.workspace_id for m in member] == [home.id]

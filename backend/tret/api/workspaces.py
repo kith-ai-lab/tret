@@ -20,12 +20,12 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tret.api.auth import UserOut, _issue_session, _user_out, current_user
+from tret.api.auth import UserOut, _issue_session, _user_out, _wid_from_cookie, current_user
 from tret.api.workspace import ROLE_RANK, WorkspaceContext
 from tret.config import get_settings
 from tret.db.engine import get_db
@@ -61,7 +61,7 @@ async def _workspace_member(
     if member is None:
         raise HTTPException(404, "Not a member of that workspace")
     workspace = await db.get(Workspace, workspace_id)
-    if workspace is None:
+    if workspace is None or workspace.archived_at is not None:
         raise HTTPException(404, "Workspace not found")
     return WorkspaceContext(workspace, member.role)
 
@@ -168,9 +168,9 @@ async def create_team_workspace(
     name = body.name.strip()
     if not name:
         raise HTTPException(422, "name is required")
-    owned_names = (
+    owned = (
         await db.execute(
-            select(Workspace.name)
+            select(Workspace.name, Workspace.archived_at)
             .join(WorkspaceMember, Workspace.id == WorkspaceMember.workspace_id)
             .where(
                 WorkspaceMember.user_id == user.id,
@@ -178,24 +178,95 @@ async def create_team_workspace(
                 Workspace.kind == "team",
             )
         )
-    ).scalars().all()
+    ).all()
+    # An archived team's name may be reused, so the duplicate-name check only
+    # looks at live teams...
+    owned_names = [n for n, archived_at in owned if archived_at is None]
     # A double-click or a retried prompt otherwise mints a second identical
     # team, and there is no delete to undo it. Scoped to teams this caller
     # owns: someone else's team of the same name is no conflict.
     if any(existing.strip().lower() == name.lower() for existing in owned_names):
         raise HTTPException(409, f"You already own a team called '{name}'")
+    # ...but the cap counts archived ones too, so create-and-archive in a loop
+    # cannot mint unlimited workspace rows.
     cap = get_settings().max_team_workspaces_per_user
     if cap > 0:
-        if len(owned_names) >= cap:
+        if len(owned) >= cap:
             raise HTTPException(
                 403,
-                f"You already own {len(owned_names)} team workspace(s), the limit for this "
+                f"You already own {len(owned)} team workspace(s), the limit for this "
                 "deployment. Ask an existing team's owner to add you instead of "
                 "creating a new one.",
             )
     workspace = await create_workspace(db, name, kind="team", owner=user, seed_demo_content=False)
     _issue_session(response, user, wid=workspace.id)
     return await _user_out(user, db, preferred_wid=workspace.id)
+
+
+# ── archive a team ───────────────────────────────────────────────────────
+class ArchiveWorkspaceBody(BaseModel):
+    confirm_name: str
+
+
+@router.post("/{workspace_id}/archive", response_model=UserOut)
+async def archive_workspace(
+    workspace_id: uuid.UUID,
+    body: ArchiveWorkspaceBody,
+    request: Request,
+    response: Response,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Soft-delete a team workspace: set `archived_at` and revoke its pending
+    invites. Nothing else is touched — rows, members and history stay — but
+    the workspace drops out of every membership resolution (`/me`, the
+    switcher, `current_workspace`, invite acceptance) and its name becomes
+    reusable.
+
+    Owner only, team workspaces only (a personal workspace is permanent), and
+    the caller must type the workspace's name. Not built on `_workspace_member`
+    because that dependency treats an archived workspace as missing, and this
+    endpoint wants to answer 409 "already archived" instead. Returns `UserOut`
+    like the other session-affecting endpoints: when the caller was *in* the
+    archived workspace the session is re-issued on their default one.
+    """
+    member = await db.get(WorkspaceMember, (user.id, workspace_id))
+    workspace = await db.get(Workspace, workspace_id) if member is not None else None
+    if member is None or workspace is None:
+        raise HTTPException(404, "Not a member of that workspace")
+    if member.role != "owner":
+        raise HTTPException(403, "Only an owner can archive a workspace.")
+    if workspace.kind == "personal":
+        raise HTTPException(409, "A personal workspace cannot be archived.")
+    if workspace.archived_at is not None:
+        raise HTTPException(409, "This workspace is already archived.")
+    if body.confirm_name.strip().lower() != workspace.name.strip().lower():
+        raise HTTPException(422, "confirm_name must match the workspace name.")
+
+    # tret_cloud could refuse here (e.g. an outstanding credit balance) through
+    # the workspace gate seam, the same one invites use.
+    gate = await get_extension_registry().check_workspace_gate(db, workspace.id, "archive")
+    if not gate.allowed:
+        raise HTTPException(403, detail={"reason": gate.reason, "detail": gate.detail})
+
+    workspace.archived_at = datetime.now(timezone.utc)
+    pending = (
+        await db.execute(
+            select(Invite).where(Invite.workspace_id == workspace.id, Invite.status == "pending")
+        )
+    ).scalars().all()
+    for invite in pending:
+        invite.status = "revoked"
+    await db.commit()
+
+    current_wid = _wid_from_cookie(request)
+    if current_wid is None or current_wid == workspace.id:
+        # The caller's current workspace (or no explicit one) was the archived
+        # team: land them on their default, the way login would.
+        user_out = await _user_out(user, db)
+        _issue_session(response, user, wid=user_out.current_workspace_id)
+        return user_out
+    return await _user_out(user, db, preferred_wid=current_wid)
 
 
 # ── members ───────────────────────────────────────────────────────────────
@@ -402,7 +473,7 @@ async def my_pending_invites(
         if await db.get(WorkspaceMember, (user.id, invite.workspace_id)) is not None:
             continue
         workspace = await db.get(Workspace, invite.workspace_id)
-        if workspace is None:
+        if workspace is None or workspace.archived_at is not None:
             continue
         out.append(
             PendingInviteOut(
@@ -438,16 +509,24 @@ async def accept_invite(
     invite = (await db.execute(select(Invite).where(Invite.token == token))).scalar_one_or_none()
     if invite is None:
         raise invalid
+    archived = HTTPException(410, "This workspace has been archived")
+    invited_to = await db.get(Workspace, invite.workspace_id)
     if invite.status == "accepted":
         member = await db.get(WorkspaceMember, (user.id, invite.workspace_id))
         if member is None:
             raise invalid
+        if invited_to is None or invited_to.archived_at is not None:
+            raise archived
         _issue_session(response, user, wid=invite.workspace_id)
         return await _user_out(user, db, preferred_wid=invite.workspace_id)
     if invite.status not in ("pending", "revoked", "expired"):
         raise invalid
     if invite.email.strip().lower() != user.email.strip().lower():
         raise HTTPException(403, "This invite was sent to a different email address.")
+    # Before the revoked check: archiving revokes the workspace's pending
+    # invites, and "archived" is the more useful thing to tell the holder.
+    if invited_to is None or invited_to.archived_at is not None:
+        raise archived
     if invite.status == "revoked":
         raise HTTPException(410, "This invite was revoked. Ask the workspace owner for a new one.")
     if invite.status == "expired" or _as_utc(invite.expires_at) <= datetime.now(timezone.utc):

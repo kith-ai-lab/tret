@@ -73,8 +73,11 @@ export function LiveFootprint({
         </span>
       </span>
 
-      <span className="t-item" title="Cumulative energy within the reported coverage. See the completed run for measurement and boundary details.">
-        <span className="t-key">energy</span>
+      <span
+        className="t-item"
+        title="Cumulative IT (compute) energy so far, before PUE. The final Energy figure on the completed run is facility energy (IT × PUE), the basis for its carbon, so it reads higher. See the completed run for measurement and boundary details."
+      >
+        <span className="t-key">IT energy</span>
         <span className="t-val" style={{ minWidth: '9ch' }}>
           {orDash(formatWh(usage?.energy_wh))}
         </span>

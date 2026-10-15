@@ -464,7 +464,9 @@ async def oidc_callback(
     email = claims.get("email")
     if not sub or not email:
         raise HTTPException(401, "The identity provider's token is missing sub or email")
-    email_verified = bool(claims.get("email_verified", False))
+    # Some IdPs send the claim as the string "true"/"false"; bool("false") would
+    # be True, and this value is now persisted as `User.email_verified`.
+    email_verified = claims.get("email_verified") in (True, "true")
     display_name = claims.get("name") or ""
 
     user, wid = await match_or_provision(

@@ -128,6 +128,8 @@ from tret.engine.grounding import (
 
 log = logging.getLogger("tret.harness")
 
+# Run statuses `execute()` refuses to start from (see `_execute_registered`).
+TERMINAL_RUN_STATUSES = ("completed", "failed", "cancelled")
 DEFAULT_MAX_ITERATIONS = 24
 DEFAULT_MAX_OUTPUT_TOKENS = 8192
 DEFAULT_TEMPERATURE = 0.2
@@ -884,6 +886,13 @@ class HarnessEngine:
         self.router = ModelRouter(self.catalog, self.registry, self.priors)
         self.bus = get_event_bus()
         self._cancelled: set[uuid.UUID] = set()
+        # Ids of every run (top-level or delegated child) this process is
+        # executing right now: added when `execute()` is entered, dropped when
+        # it exits by any path. It is the only record of "something in this
+        # process is working on this run"; `cancel()` reports against it and
+        # `POST /api/runs/{id}/cancel` uses that to tell a live run from a
+        # wedged one that has no task behind it (see `is_live`).
+        self._live: set[uuid.UUID] = set()
         # In-process delegation lineage: child run id -> parent run id. A child
         # run's `parent_run_id` column (db/models.py) is the persisted record of
         # this, but cancellation needs to walk the chain in-process without a
@@ -1159,8 +1168,40 @@ class HarnessEngine:
             descendants |= self._descendants_of(child)
         return descendants
 
-    def cancel(self, run_id: uuid.UUID) -> None:
+    def is_live(self, run_id: uuid.UUID) -> bool:
+        """True while `execute()` is running for `run_id` in *this* process.
+
+        Says nothing about a run executing in another process or on another
+        machine; callers that act on a `False` must account for that.
+        """
+        if run_id in self._live:
+            return True
+        # A delegated child queued for a concurrency slot (`run_harness_task`)
+        # is registered in `_parent_of` before it waits, but `execute()` has
+        # not been entered for it, so it is not in `_live`. It is still this
+        # process's work: its own task is parked on the slot and will start
+        # the moment one frees up. Same for a child whose ancestor is live.
+        if run_id in self._parent_of:
+            return True
+        return self._ancestor_is_live(run_id)
+
+    def _ancestor_is_live(self, run_id: uuid.UUID) -> bool:
+        current = self._parent_of.get(run_id)
+        seen: set[uuid.UUID] = {run_id}
+        while current is not None and current not in seen:
+            if current in self._live:
+                return True
+            seen.add(current)
+            current = self._parent_of.get(current)
+        return False
+
+    def cancel(self, run_id: uuid.UUID) -> bool:
         """Cancel `run_id` and every run currently delegated from it.
+
+        Returns True if the run, or any run delegated from it, is being
+        executed by this process (so the cancel will be observed by a loop
+        that is actually running); False if nothing here is working on it,
+        in which case the caller is looking at a wedged or foreign run.
 
         Delegation runs a child's whole agent loop inline, inside the parent's
         own tool-call step (`run_harness_task`), so a parent a user cancels
@@ -1171,8 +1212,10 @@ class HarnessEngine:
         half of the contract; `_is_cancelled` above is the half that still
         catches a descendant registered a moment later.
         """
+        descendants = self._descendants_of(run_id)
         self._cancelled.add(run_id)
-        self._cancelled |= self._descendants_of(run_id)
+        self._cancelled |= descendants
+        return any(self.is_live(rid) for rid in {run_id} | descendants)
 
     def forget_cancelled(self, run_id: uuid.UUID) -> None:
         """Drop `run_id` from the cancelled set. `execute()` does this for every
@@ -1183,6 +1226,18 @@ class HarnessEngine:
         self._cancelled.discard(run_id)
 
     async def execute(
+        self, run_id: uuid.UUID, *, _emissions_test_hook=None
+    ) -> None:
+        """Run `run_id` to a terminal state, registering it as live in this
+        process for exactly as long as that takes (`is_live` / `cancel`).
+        See `_execute_registered` for the body."""
+        self._live.add(run_id)
+        try:
+            await self._execute_registered(run_id, _emissions_test_hook=_emissions_test_hook)
+        finally:
+            self._live.discard(run_id)
+
+    async def _execute_registered(
         self, run_id: uuid.UUID, *, _emissions_test_hook=None
     ) -> None:
         """`_emissions_test_hook`, if given, is awaited once per call, right
@@ -1197,6 +1252,15 @@ class HarnessEngine:
         async with get_session_factory()() as db:
             run = await db.get(Run, run_id)
             if run is None:
+                return
+            # Re-read at entry: a run that is already terminal must never run.
+            # A delegated child queued for a slot can be closed out (stopped
+            # by a user, timed out by its parent) while it waits; when the slot
+            # finally frees up, running it anyway would spend money and
+            # overwrite the terminal status. Its cancel flag, if any, is
+            # released here since the loop that normally does that is skipped.
+            if run.status in TERMINAL_RUN_STATUSES:
+                self._cancelled.discard(run_id)
                 return
             # Fetched early so DB-key loading below can scope to this run's own
             # workspace, and so the crash handler has it without a second round

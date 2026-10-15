@@ -66,6 +66,7 @@ from tret.db.engine import get_db
 from tret.db.models import User, Workspace, WorkspaceMember
 from tret.services.identity import (
     account_email_is_verified,
+    live_workspaces,
     pick_default_membership,
     redeem_pending_invites,
 )
@@ -413,14 +414,19 @@ async def _resolve_workspaces(
             .order_by(WorkspaceMember.created_at, WorkspaceMember.workspace_id)
         )
     ).scalars().all()
-    workspaces: list[WorkspaceSummary] = []
-    for member in memberships:
-        workspace = await db.get(Workspace, member.workspace_id)
-        if workspace is None:  # a dangling FK should not happen, but skip rather than 500
-            continue
-        workspaces.append(
-            WorkspaceSummary(id=workspace.id, name=workspace.name, kind=workspace.kind, role=member.role)
+    # Archived workspaces are not memberships for any purpose here; a dangling
+    # FK should not happen, but is skipped the same way rather than 500ing.
+    live = await live_workspaces(db, memberships)
+    memberships = [m for m in memberships if m.workspace_id in live]
+    workspaces = [
+        WorkspaceSummary(
+            id=live[m.workspace_id].id,
+            name=live[m.workspace_id].name,
+            kind=live[m.workspace_id].kind,
+            role=m.role,
         )
+        for m in memberships
+    ]
 
     picked = pick_default_membership(
         memberships, {w.id: w.kind for w in workspaces}, preferred_wid
@@ -551,7 +557,8 @@ async def switch_workspace(
             )
         )
     ).scalar_one_or_none()
-    if member is None:
+    target = await db.get(Workspace, body.workspace_id) if member is not None else None
+    if member is None or target is None or target.archived_at is not None:
         raise HTTPException(404, "Not a member of that workspace")
     _issue_session(response, user, wid=body.workspace_id)
     return await _user_out(user, db, preferred_wid=body.workspace_id)
@@ -590,12 +597,17 @@ async def create_user(
         raise HTTPException(409, f"A user with email '{body.email}' already exists")
 
     workspaces = (await db.execute(select(Workspace))).scalars().all()
+    # Inference only ever considers live workspaces: an archived one is not a
+    # place to put a new account.
+    live_workspaces = [w for w in workspaces if w.archived_at is None]
     if body.workspace_id is not None:
         target = next((w for w in workspaces if w.id == body.workspace_id), None)
         if target is None:
             raise HTTPException(422, f"workspace '{body.workspace_id}' not found")
-    elif len(workspaces) == 1:
-        target = workspaces[0]
+        if target.archived_at is not None:
+            raise HTTPException(409, f"workspace '{body.workspace_id}' is archived")
+    elif len(live_workspaces) == 1:
+        target = live_workspaces[0]
     else:
         raise HTTPException(
             422,
@@ -608,6 +620,9 @@ async def create_user(
         display_name=body.display_name,
         password_hash=_hasher.hash(body.password),
         role=body.role,
+        # The administrator vouches for the address (see
+        # `services/identity.py::account_email_is_verified`).
+        email_verified=True,
     )
     db.add(user)
     await db.flush()
@@ -820,6 +835,7 @@ async def bootstrap_admin(db: AsyncSession) -> None:
                 display_name="Admin",
                 password_hash=_hasher.hash(settings.admin_password),
                 role="admin",
+                email_verified=True,
             )
         )
         await db.commit()

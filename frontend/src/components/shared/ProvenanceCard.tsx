@@ -24,6 +24,8 @@ export function ProvenanceCard({
   co2eGHigh,
   avoidedUsd,
   avoidedUsdPct,
+  live,
+  energyBoundary,
 }: {
   model: string | null | undefined
   doctrineSha: string | null | undefined
@@ -44,8 +46,17 @@ export function ProvenanceCard({
   /** Share of frontier spend avoided, one decimal place. null when there is no
    *  baseline spend to compare against — never rendered as 0%. */
   avoidedUsdPct?: number | null
+  /** The run is still streaming: the footprint is a running estimate. */
+  live?: boolean
+  /** The run's `energy_boundary`. A facility reading already includes
+   *  overhead, so the Wh is not "IT energy before PUE" there. */
+  energyBoundary?: string | null
 }) {
   const footprint = footprintText(energyWh, co2eG)
+  const whNote =
+    energyBoundary === 'facility'
+      ? 'The Wh shown is a facility reading (overhead already included); no additional PUE was applied.'
+      : 'The Wh shown is IT energy before PUE; the carbon is computed from facility energy (IT × PUE), shown as Energy in the Carbon footprint panel.'
   const band = formatCo2eBand(co2eGLow, co2eGHigh)
   const money = avoidedMoneyFraming(avoidedUsd)
   const showCache = cacheReadTokens !== undefined || cacheWriteTokens !== undefined
@@ -78,11 +89,11 @@ export function ProvenanceCard({
         )}
         {footprint && (
           <Stat
-            label="Footprint (est.)"
+            label={live ? 'Footprint (live estimate)' : 'Footprint (est., final)'}
             value={footprint}
             sub={band}
             subTitle={BAND_SHORT}
-            title="Estimated from token counts and the model's calibrated energy class — not a measurement."
+            title={`Estimated from token counts and the model's calibrated energy class — not a measurement. ${whNote}`}
           />
         )}
         {avoidedUsd !== null && avoidedUsd !== undefined && (

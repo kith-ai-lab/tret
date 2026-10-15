@@ -2964,6 +2964,14 @@ export const api = {
     // ::create_team_workspace): creates the team workspace, makes this user
     // its owner, switches the session to it, and returns UserOut.
     request<User>('/workspaces', { method: 'POST', body: { name } }),
+  // Soft-deletes a team workspace (owner only; `confirm_name` must match its
+  // name). Returns UserOut with the session moved to the caller's default
+  // workspace when they were inside the archived one.
+  archiveWorkspace: (workspaceId: string, confirmName: string) =>
+    request<User>(`/workspaces/${workspaceId}/archive`, {
+      method: 'POST',
+      body: { confirm_name: confirmName },
+    }),
   workspaceMembers: (workspaceId: string) =>
     request<WorkspaceMember[]>(`/workspaces/${workspaceId}/members`),
   createInvite: (workspaceId: string, email: string, role: string) =>

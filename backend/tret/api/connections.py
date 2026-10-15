@@ -67,7 +67,7 @@ from tret.api.auth import current_user
 from tret.api.workspace import ROLE_RANK, WorkspaceContext, current_workspace, require_workspace_admin
 from tret.config import get_settings
 from tret.db.engine import get_db
-from tret.db.models import User, WorkspaceConnection, WorkspaceMember
+from tret.db.models import User, Workspace, WorkspaceConnection, WorkspaceMember
 from tret.engine.extensions import get_extension_registry
 from tret.db.models import ConnectionActivity
 from tret.services.connections import (
@@ -363,9 +363,12 @@ async def callback(
     # connection to that workspace.
     member = (
         await db.execute(
-            select(WorkspaceMember).where(
+            select(WorkspaceMember)
+            .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+            .where(
                 WorkspaceMember.user_id == user_id,
                 WorkspaceMember.workspace_id == workspace_id,
+                Workspace.archived_at.is_(None),
             )
         )
     ).scalars().first()

@@ -35,7 +35,11 @@ import {
   orDash,
 } from './format'
 
-export function EnergyDetail({ energy }: { energy: EnergyAccounting }) {
+/** `live` is passed by a surface that knows the run is still streaming: the
+ *  persisted figures are then a snapshot that the final accounting replaces, so
+ *  the energy labels say "live estimate". Omitted, the figures are the run's
+ *  recorded ones and read "final". */
+export function EnergyDetail({ energy, live }: { energy: EnergyAccounting; live?: boolean }) {
   const scopes = energy.scopes
   const baseline = energy.baseline
   const band = energy.uncertainty
@@ -45,6 +49,12 @@ export function EnergyDetail({ energy }: { energy: EnergyAccounting }) {
   const avoidedUsdPct = energy.cost?.avoided_pct ?? baseline?.avoided_usd_pct
   const money = avoidedMoneyFraming(avoidedUsd)
   const totalWh = energy.energy_wh_total ?? energy.energy_wh
+  const stage = live ? 'live estimate' : 'final'
+  // `energy_wh` is the compute (IT-load) figure within the recorded boundary;
+  // `energy_wh_total` is that times PUE, and is what the carbon is computed from.
+  // A facility-boundary reading already includes overhead, so it is not "IT".
+  const recordedLabel =
+    energy.energy_boundary === 'facility' ? 'Recorded energy (facility reading)' : 'IT energy (before PUE)'
 
   return (
     <div className="panel">
@@ -73,21 +83,21 @@ export function EnergyDetail({ energy }: { energy: EnergyAccounting }) {
           title="The run total, equal to the sum of its three GHG Protocol scopes."
         />
         <Stat
-          label="Energy used for carbon"
+          label={`Energy (${stage})`}
           value={orDash(formatWh(totalWh))}
           sub={formatWhBand(band?.energy_wh_total_low, band?.energy_wh_total_high)}
           subTitle={BAND_SHORT}
           title={
             energy.pue_applied === false
-              ? 'No additional PUE was applied. Facility readings already include overhead; partial or unknown readings lack a safe conversion boundary.'
-              : `Recorded energy with PUE ${energy.pue ?? 'unknown'}. Missing host components remain outside its coverage.`
+              ? 'Facility energy; the basis for the carbon figure. No additional PUE was applied: facility readings already include overhead, and partial or unknown readings lack a safe conversion boundary.'
+              : `Facility energy: IT energy × PUE; the basis for the carbon figure. Recorded energy with PUE ${energy.pue ?? 'unknown'}. Missing host components remain outside its coverage.`
           }
         />
         <Stat
-          label={`Energy (${energy.energy_source ?? 'legacy'})`}
+          label={`${recordedLabel} (${stage})`}
           value={orDash(formatWh(energy.energy_wh))}
-          sub={`Coverage: ${(energy.energy_boundary ?? 'unknown').replace(/_/g, ' ')}`}
-          title="Energy within the recorded boundary. GPU readings exclude CPU, memory and other host components."
+          sub={`${energy.energy_source ?? 'legacy'} · coverage: ${(energy.energy_boundary ?? 'unknown').replace(/_/g, ' ')}`}
+          title="Energy within the recorded boundary, before PUE. It is the input to the headline Energy figure, which is why the two differ. GPU readings exclude CPU, memory and other host components."
         />
         <Stat
           label="Energy class"

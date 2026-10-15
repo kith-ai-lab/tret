@@ -34,12 +34,13 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from tests.evals.golden_world import install_sqlite_type_shims
 from tret.config import get_settings
-from tret.db.models import Base, Harness, Pack, Project, User, Workspace
+from tret.db.models import Base, Harness, Pack, Project, User, Workspace, WorkspaceMember
 from tret.packs.links import packs_for_harness
 from tret.services import bootstrap as bootstrap_module
 
@@ -85,6 +86,12 @@ class FakeSession:
         if name == "User":
             # `_ensure_every_user_has_a_membership`'s only query: users with
             # no row in WorkspaceMember at all.
+            if "users.id IN" in str(stmt):
+                # `_rehome_users_stranded_by_archive` (multi-tenant): users
+                # with a membership but none live. This fake has no archived
+                # workspaces, so there are none; the real-database tests below
+                # cover that path.
+                return _Result([])
             membered = {m.user_id for m in self.store["WorkspaceMember"]}
             return _Result([u for u in self.store["User"] if u.id not in membered])
         raise AssertionError(f"unexpected query against {name}")
@@ -321,3 +328,73 @@ async def test_chat_harness_backfill_failure_in_one_workspace_does_not_abort_boo
     monkeypatch.setattr(bootstrap_module, "seed_chat_harness", _boom)
 
     await bootstrap_module.bootstrap(db)  # must not raise
+
+
+# ── archived workspaces are not a home ───────────────────────────────────────
+async def test_self_host_backstop_rehomes_a_user_whose_only_membership_is_archived(
+    db, monkeypatch
+):
+    monkeypatch.setenv("TRET_MULTI_TENANT", "false")
+    get_settings.cache_clear()
+    now = datetime.now(timezone.utc)
+    live = Workspace(id=uuid.uuid4(), name="Live", kind="team", created_at=now - timedelta(seconds=50))
+    # Older than `live`, so only the archived filter keeps it from being picked.
+    gone = Workspace(
+        id=uuid.uuid4(), name="Gone", kind="team", created_at=now - timedelta(seconds=100),
+        archived_at=now,
+    )
+    db.add_all([live, gone])
+    await db.flush()
+    db.add(Project(id=uuid.uuid4(), workspace_id=live.id, name="Sample"))
+    stranded = _user("stranded@example.com")
+    db.add(stranded)
+    await db.flush()
+    db.add(WorkspaceMember(user_id=stranded.id, workspace_id=gone.id, role="owner"))
+    await db.flush()
+
+    await bootstrap_module.bootstrap(db)
+
+    homes = {
+        m.workspace_id
+        for m in (
+            await db.execute(select(WorkspaceMember).where(WorkspaceMember.user_id == stranded.id))
+        ).scalars()
+    }
+    assert live.id in homes
+
+
+async def test_multi_tenant_gives_a_user_stranded_by_archive_a_personal_workspace(
+    db, monkeypatch
+):
+    monkeypatch.setenv("TRET_MULTI_TENANT", "true")
+    get_settings.cache_clear()
+    now = datetime.now(timezone.utc)
+    live = Workspace(id=uuid.uuid4(), name="Tenant", kind="team", created_at=now - timedelta(seconds=50))
+    gone = Workspace(
+        id=uuid.uuid4(), name="Gone", kind="team", created_at=now - timedelta(seconds=100),
+        archived_at=now,
+    )
+    db.add_all([live, gone])
+    await db.flush()
+    db.add(Project(id=uuid.uuid4(), workspace_id=live.id, name="Sample"))
+    stranded = _user("stranded@example.com")
+    removed = _user("removed@example.com")  # no membership at all: left alone
+    db.add_all([stranded, removed])
+    await db.flush()
+    db.add(WorkspaceMember(user_id=stranded.id, workspace_id=gone.id, role="owner"))
+    await db.flush()
+
+    await bootstrap_module.bootstrap(db)
+
+    mine = (
+        await db.execute(
+            select(Workspace)
+            .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
+            .where(WorkspaceMember.user_id == stranded.id, Workspace.archived_at.is_(None))
+        )
+    ).scalars().all()
+    assert [w.kind for w in mine] == ["personal"]
+    left_alone = (
+        await db.execute(select(WorkspaceMember).where(WorkspaceMember.user_id == removed.id))
+    ).scalars().all()
+    assert left_alone == []
