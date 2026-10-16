@@ -134,6 +134,16 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
     },
   })
 
+  // The run carries the energy boundary the provenance tooltip needs. Until it
+  // resolves (or if it fails) the card gets undefined and stays neutral.
+  const runId = findingQuery.data?.run_id
+  const runQuery = useQuery({
+    queryKey: ['run', runId],
+    queryFn: () => api.getRun(runId as string),
+    enabled: !!runId,
+    staleTime: 5 * 60_000,
+  })
+
   if (findingQuery.isLoading) return <div className="empty pulse">Loading finding…</div>
   if (findingQuery.isError)
     return <div className="error-text">{(findingQuery.error as Error).message}</div>
@@ -173,6 +183,7 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
         doctrineSha={f.provenance.doctrine_sha}
         documentCount={(f.provenance.document_ids ?? []).length}
         retrievedCount={retrieved.length}
+        energyBoundary={runQuery.data?.energy?.energy_boundary}
       />
 
       {retrieved.length > 0 && (

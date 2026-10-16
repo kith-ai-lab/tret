@@ -95,6 +95,12 @@ RUN chmod +x /entrypoint.sh
 # docs/hardening.md). A container built from this file therefore refuses to start
 # until TRET_SECRET_KEY and TRET_ADMIN_PASSWORD are supplied — which is the
 # point. fly.toml restates both values so they are visible where deploys are read.
+#
+# TRET_GIT_SHA is what GET /api/version reports as git_sha. The build context
+# carries no .git, so the deploy passes it in: --build-arg TRET_GIT_SHA=<sha>.
+# Empty (the default) means "unknown" and the endpoint reports null.
+ARG TRET_GIT_SHA=""
+ENV TRET_GIT_SHA=$TRET_GIT_SHA
 ENV TRET_PACKS_DIR=/packs \
     TRET_STORAGE_DIR=/data/storage \
     TRET_SERVE_FRONTEND_DIR=/app/frontend-dist \

@@ -49,14 +49,18 @@ export function ProvenanceCard({
   /** The run is still streaming: the footprint is a running estimate. */
   live?: boolean
   /** The run's `energy_boundary`. A facility reading already includes
-   *  overhead, so the Wh is not "IT energy before PUE" there. */
+   *  overhead, so the Wh is not "IT energy before PUE" there. Undefined/null
+   *  means the boundary is not known (yet): the card then makes no claim about
+   *  PUE rather than guessing. */
   energyBoundary?: string | null
 }) {
   const footprint = footprintText(energyWh, co2eG)
   const whNote =
     energyBoundary === 'facility'
       ? 'The Wh shown is a facility reading (overhead already included); no additional PUE was applied.'
-      : 'The Wh shown is IT energy before PUE; the carbon is computed from facility energy (IT × PUE), shown as Energy in the Carbon footprint panel.'
+      : energyBoundary === undefined || energyBoundary === null
+        ? 'Energy as recorded for this run.'
+        : 'The Wh shown is IT energy before PUE; the carbon is computed from facility energy (IT × PUE), shown as Energy in the Carbon footprint panel.'
   const band = formatCo2eBand(co2eGLow, co2eGHigh)
   const money = avoidedMoneyFraming(avoidedUsd)
   const showCache = cacheReadTokens !== undefined || cacheWriteTokens !== undefined

@@ -71,6 +71,9 @@ keys afterwards. Full checklist: [hardening.md](hardening.md).
 fly deploy --remote-only
 ```
 
+To have `GET /api/version` report the commit (the image has no `.git` to ask), pass
+it at build time: `fly deploy --remote-only --build-arg TRET_GIT_SHA=$(git rev-parse HEAD)`.
+
 On boot tret migrates its own schema to the current Alembic head, then runs the
 idempotent seed (admin user, sample project, packs). Subsequent deploys keep all
 data — including deploys that add columns, and an upgrade from a v0.1 database
