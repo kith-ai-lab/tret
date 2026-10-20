@@ -32,6 +32,7 @@
     "@cloudflare/vitest-pool-workers": {
       "wrangler": "$wrangler",
       "miniflare": "5.20260926.0-alpha"
-    }
+    },
+    "undici": "^7.29.1"
   }
 }
