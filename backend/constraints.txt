@@ -78,7 +78,7 @@ pydantic-settings==2.14.2
 pydantic_core==2.46.4
 pydyf==0.12.1
 Pygments==2.20.0
-pypdf==6.16.1
+pypdf==6.19.0
 pyphen==0.17.2
 pytest==9.1.1
 pytest-asyncio==1.4.0
@@ -100,7 +100,7 @@ typing_extensions==4.16.0
 uvicorn==0.51.0
 uvloop==0.22.1
 watchfiles==1.2.0
-weasyprint==69.0
+weasyprint==70.0
 webencodings==0.5.1
 websockets==16.1.1
 xlsxwriter==3.2.9

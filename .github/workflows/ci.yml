@@ -240,3 +240,48 @@ jobs:
       - name: Dump logs on failure
         if: failure()
         run: docker compose logs
+
+  # SOC 2 CC4.3 vulnerability-scanning gate: pip-audit over the pinned backend
+  # install, and npm audit (high and above) over every committed npm lockfile.
+  # Intentionally NOT yet a required status check, so a newly published advisory
+  # shows up as a red job to triage without blocking unrelated merges. Promote it
+  # to required once the findings have been quiet for a while.
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install backend
+        working-directory: backend
+        # The same constraints-pinned install the backend job runs, so the audit
+        # sees exactly the versions that get tested and shipped.
+        run: pip install -e ".[dev]" -c constraints.txt
+      - name: pip-audit
+        if: ${{ !cancelled() }}
+        working-directory: backend
+        run: |
+          pip install pip-audit
+          pip-audit --progress-spinner off
+      - name: npm audit (frontend)
+        if: ${{ !cancelled() }}
+        working-directory: frontend
+        run: |
+          npm ci
+          npm audit --audit-level=high
+      - name: npm audit (sdk/typescript)
+        if: ${{ !cancelled() }}
+        working-directory: sdk/typescript
+        run: |
+          npm ci
+          npm audit --audit-level=high
+      - name: npm audit (telemetry-ingest)
+        if: ${{ !cancelled() }}
+        working-directory: telemetry-ingest
+        run: |
+          npm ci
+          npm audit --audit-level=high
