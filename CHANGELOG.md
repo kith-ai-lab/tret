@@ -39,6 +39,14 @@ one that needs action on an existing install.
   energy (before PUE)** is shown as the secondary figure; a run still
   streaming shows **live estimate**, a finished run **final**. The Emissions
   dashboard uses the same labels. No computation or stored value changed.
+- **OpenRouter requests are zero-data-retention by default.** With
+  `TRET_OPENROUTER_PROVIDER_PREFS` unset or blank, every OpenRouter call now
+  sends `provider: {"zdr": true, "data_collection": "deny", "ignore":
+  ["moonshotai"]}`, and the deterministic fallback table no longer lists
+  `openrouter/moonshotai/kimi-k3`. An explicit value replaces the default
+  (`{}` sends nothing). Direct `kimi/*` models still run, on your own
+  `TRET_MOONSHOT_API_KEY`. See [docs/hardening.md](docs/hardening.md) §10 and
+  [docs/upgrading.md](docs/upgrading.md).
 
 ### Fixed
 
