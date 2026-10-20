@@ -145,6 +145,24 @@ SECURITY_HEADERS: dict[str, str] = {
     "Content-Security-Policy": CONTENT_SECURITY_POLICY,
 }
 
+# Strict-Transport-Security is the fifth header, but only on a response that
+# actually travelled over TLS: a browser ignores HSTS received over plain HTTP
+# anyway, and a self-hosted tret on http://localhost or behind a docker-compose
+# nginx must never be told to pin a hostname to HTTPS for a year. "Over TLS"
+# means the ASGI scheme is https, or the TLS-terminating proxy in front says so
+# (Fly sets X-Forwarded-Proto). Deliberately no `preload`, and NOT mirrored in
+# frontend/nginx.conf — that path has no TLS of its own to vouch for.
+HSTS_HEADER = ("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+
+def _served_over_tls(scope) -> bool:
+    if scope.get("scheme") == "https":
+        return True
+    for name, value in scope.get("headers", ()):
+        if name == b"x-forwarded-proto":
+            return value.split(b",", 1)[0].strip().lower() == b"https"
+    return False
+
 
 class SecurityHeadersMiddleware:
     """Adds the headers above to every response that doesn't already set them.
@@ -171,12 +189,16 @@ class SecurityHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
+        over_tls = _served_over_tls(scope)
+
         async def send_with_headers(message):
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
                 for name, value in SECURITY_HEADERS.items():
                     if name not in headers:
                         headers[name] = value
+                if over_tls and HSTS_HEADER[0] not in headers:
+                    headers[HSTS_HEADER[0]] = HSTS_HEADER[1]
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
