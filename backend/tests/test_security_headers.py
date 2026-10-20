@@ -63,6 +63,37 @@ def test_api_json_response_carries_all_four_headers():
         assert response.headers[name] == value
 
 
+# ── HSTS: only on a response that travelled over TLS ─────────────────────────
+HSTS_VALUE = "max-age=31536000; includeSubDomains"
+
+
+def test_hsts_is_sent_when_the_tls_proxy_says_https():
+    """The Fly deploy: TLS terminates at Fly's edge, which forwards plain HTTP
+    to uvicorn with X-Forwarded-Proto set. That is the signal."""
+    client = TestClient(create_app())
+    response = client.get("/api/healthz", headers={"X-Forwarded-Proto": "https"})
+    assert response.status_code == 200
+    assert response.headers["strict-transport-security"] == HSTS_VALUE
+
+
+def test_hsts_is_sent_on_a_direct_https_scheme():
+    client = TestClient(create_app(), base_url="https://testserver")
+    response = client.get("/api/healthz")
+    assert response.headers["strict-transport-security"] == HSTS_VALUE
+
+
+def test_hsts_is_not_sent_over_plain_http():
+    """A self-hosted tret on http://localhost, or behind the docker-compose
+    nginx, must never pin its hostname to HTTPS for a year."""
+    client = TestClient(create_app())
+    response = client.get("/api/healthz")
+    assert response.status_code == 200
+    assert "strict-transport-security" not in response.headers
+    # The other four are unconditional.
+    for name, value in EXPECTED_HEADERS.items():
+        assert response.headers[name] == value
+
+
 def test_csp_allows_only_the_documented_inline_script_hash():
     """script-src must not fall back to 'unsafe-inline' — that would defeat the
     one thing this header exists to stop (an injected script running)."""
