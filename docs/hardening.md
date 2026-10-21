@@ -422,6 +422,43 @@ grouped by reason. Rising `host_not_allowed` is usually a misconfigured
 allowlist. Rising `private_address` is something steering an agent at your own
 network, and is worth reading the run transcript over.
 
+## 10. Model-provider data terms
+
+Vendor review of 2026-10-19 (terms retrieved that day). Tret's shipped default
+must not silently send user data to a provider that has not passed review, so
+with `TRET_OPENROUTER_PROVIDER_PREFS` unset every OpenRouter call carries
+`provider: {"zdr": true, "data_collection": "deny", "ignore": ["moonshotai"]}`
+(`OPENROUTER_DEFAULT_PROVIDER_PREFS` in `tret/config.py`; the router's per-call
+`ignore` evidence is unioned in). OpenRouter does not train, but forwards
+prompts to downstream providers unless routing is restricted; Moonshot's own
+terms allow it; Google's unpaid Gemini endpoint retains prompts, which ZDR
+routing drops, leaving Google Vertex. Any explicit value replaces the default.
+
+| Vendor | Position on training with API content | Source |
+| --- | --- | --- |
+| Anthropic | Commercial Terms §B: "Anthropic may not train models on Customer Content from Services". | [commercial-terms](https://www.anthropic.com/legal/commercial-terms) |
+| OpenAI | Services Agreement §4.2: will not use Customer Content "to develop or improve the Services" unless agreed. | [services-agreement](https://openai.com/policies/services-agreement/) |
+| OpenRouter | Does not train; downstream providers may unless the request restricts them (the default above). | [privacy](https://openrouter.ai/privacy) |
+| Moonshot AI | Standard terms permit using Customer Content to improve its models unless agreed in writing. | [modeluse](https://platform.kimi.ai/docs/agreement/modeluse) |
+| Google Gemini | Paid tier does not use prompts to improve products; unpaid tier does and allows human review. | [gemini-api/terms](https://ai.google.dev/gemini-api/terms) |
+
+`kimi/*` models call Moonshot directly and run only with the operator's own
+`TRET_MOONSHOT_API_KEY`, under Moonshot's terms. Tret ships no Moonshot key and
+no `openrouter/moonshotai/*` fallback.
+
+ZDR routing also changes *which host* serves a model. On OpenRouter's ZDR
+endpoint list as of 2026-10-19 (`GET /api/v1/endpoints/zdr`), OpenAI models were
+ZDR-eligible only through Azure endpoints and Anthropic models only through
+Google Vertex and Amazon Bedrock; the first-party OpenAI and Anthropic endpoints
+retain prompts for abuse monitoring and are skipped. Kimi models stay reachable
+through third-party ZDR hosts (not Moonshot's own). Re-check the list when it
+matters: it is OpenRouter's self-reported data, not a contractual guarantee.
+
+ZDR routing can leave an OpenRouter model with no eligible endpoint, which fails
+with "no eligible provider". To opt out knowingly, set
+`TRET_OPENROUTER_PROVIDER_PREFS={}` (send nothing) or `{"zdr":false}`; see
+[upgrading.md](upgrading.md).
+
 ## Minimum production checklist
 
 - [ ] `TRET_ENVIRONMENT=production`

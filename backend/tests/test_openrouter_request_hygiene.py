@@ -37,7 +37,7 @@ import anthropic
 import httpx
 import pytest
 
-from tret.config import Settings
+from tret.config import OPENROUTER_DEFAULT_PROVIDER_PREFS, Settings
 from tret.providers import openai_compat
 from tret.providers import anthropic as anthropic_provider_module
 from tret.providers.anthropic import AnthropicProvider
@@ -385,7 +385,8 @@ async def test_require_parameters_is_never_sent_by_default(monkeypatch):
     whenever tools were present made OpenRouter drop every endpoint for the
     OpenAI models ("No endpoints found that can handle the requested
     parameters"), so no tool-calling run on them could start. Tools present
-    and no prefs means no `provider` object at all."""
+    and no prefs means no `provider` object at all. (Provider-class level: the
+    shipped ZDR default lives in `Settings`, not in `OpenRouterProvider`.)"""
     lines = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
     _, body = await _run_stream(monkeypatch, OpenRouterProvider("k"), lines, tools=[_tool()])
     assert "provider" not in body
@@ -511,18 +512,17 @@ async def test_kimi_never_sends_provider_ignore(monkeypatch):
 
 
 # ── 3. TRET_OPENROUTER_PROVIDER_PREFS parsing ──────────────────────────────────
-def test_invalid_provider_prefs_json_is_ignored_with_a_warning(caplog):
+def test_invalid_provider_prefs_json_falls_back_to_the_default_with_a_warning(caplog):
     with caplog.at_level(logging.WARNING, logger="tret"):
         settings = Settings(openrouter_provider_prefs="{not valid json")
-    assert settings.openrouter_provider_prefs is None
-    assert "TRET_OPENROUTER_PROVIDER_PREFS" in caplog.text
+    assert settings.openrouter_provider_prefs == OPENROUTER_DEFAULT_PROVIDER_PREFS
     assert "not valid JSON" in caplog.text
 
 
-def test_non_object_provider_prefs_json_is_ignored_with_a_warning(caplog):
+def test_non_object_provider_prefs_json_falls_back_to_the_default_with_a_warning(caplog):
     with caplog.at_level(logging.WARNING, logger="tret"):
         settings = Settings(openrouter_provider_prefs='["not", "an", "object"]')
-    assert settings.openrouter_provider_prefs is None
+    assert settings.openrouter_provider_prefs == OPENROUTER_DEFAULT_PROVIDER_PREFS
     assert "must be a JSON object" in caplog.text
 
 
@@ -532,14 +532,91 @@ def test_valid_provider_prefs_json_is_applied():
 
 
 def test_blank_provider_prefs_means_unset():
-    assert Settings(openrouter_provider_prefs="").openrouter_provider_prefs is None
+    assert Settings(openrouter_provider_prefs="").openrouter_provider_prefs == (
+        OPENROUTER_DEFAULT_PROVIDER_PREFS
+    )
 
 
-def test_unset_provider_prefs_defaults_to_none():
-    assert Settings().openrouter_provider_prefs is None
+def test_unset_provider_prefs_defaults_to_the_zdr_policy(monkeypatch):
+    """SOC 2 vendor review 2026-10-19: with nothing configured, every OpenRouter
+    call asks for ZDR endpoints, denies data collection and ignores Moonshot."""
+    monkeypatch.delenv("TRET_OPENROUTER_PROVIDER_PREFS", raising=False)
+    assert Settings(_env_file=None).openrouter_provider_prefs == {
+        "zdr": True,
+        "data_collection": "deny",
+        "ignore": ["moonshotai"],
+    }
 
 
-# ── 3b. TRET_OPENROUTER_PROVIDER_PREFS.ignore coercion ──────────────────────
+def test_blank_env_var_defaults_to_the_zdr_policy(monkeypatch):
+    # docker-compose passes `${TRET_OPENROUTER_PROVIDER_PREFS:-}`, i.e. "".
+    monkeypatch.setenv("TRET_OPENROUTER_PROVIDER_PREFS", "")
+    assert Settings(_env_file=None).openrouter_provider_prefs == OPENROUTER_DEFAULT_PROVIDER_PREFS
+
+
+def test_env_var_object_replaces_the_default_verbatim(monkeypatch):
+    monkeypatch.setenv("TRET_OPENROUTER_PROVIDER_PREFS", '{"zdr": false}')
+    assert Settings(_env_file=None).openrouter_provider_prefs == {"zdr": False}
+
+
+def test_malformed_env_var_falls_back_to_the_default(monkeypatch, caplog):
+    monkeypatch.setenv("TRET_OPENROUTER_PROVIDER_PREFS", "{oops")
+    with caplog.at_level(logging.WARNING, logger="tret"):
+        prefs = Settings(_env_file=None).openrouter_provider_prefs
+    assert prefs == OPENROUTER_DEFAULT_PROVIDER_PREFS
+    assert "not valid JSON" in caplog.text
+
+
+def test_empty_object_means_send_no_provider_preferences():
+    assert Settings(openrouter_provider_prefs="{}").openrouter_provider_prefs == {}
+
+
+def test_explicit_opt_out_is_exactly_what_the_operator_wrote():
+    settings = Settings(openrouter_provider_prefs='{"zdr": false}')
+    assert settings.openrouter_provider_prefs == {"zdr": False}
+
+
+def test_each_settings_gets_its_own_copy_of_the_default():
+    a = Settings(_env_file=None).openrouter_provider_prefs
+    a["ignore"].append("mutated")
+    a["zdr"] = False
+    b = Settings(_env_file=None).openrouter_provider_prefs
+    assert b == {"zdr": True, "data_collection": "deny", "ignore": ["moonshotai"]}
+    assert OPENROUTER_DEFAULT_PROVIDER_PREFS["ignore"] == ["moonshotai"]
+
+
+async def test_default_prefs_reach_the_wire_and_union_with_router_ignore(monkeypatch):
+    """Settings default -> provider: `moonshotai` and the router's evidence-driven
+    slug both land in `ignore`, sorted and deduped."""
+    monkeypatch.delenv("TRET_OPENROUTER_PROVIDER_PREFS", raising=False)
+    prefs = Settings(_env_file=None).openrouter_provider_prefs
+    lines = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+    _, body = await _run_stream(
+        monkeypatch,
+        OpenRouterProvider("k", provider_prefs=prefs),
+        lines,
+        provider_ignore=["quantized-endpoint", "moonshotai"],
+    )
+    assert body["provider"] == {
+        "zdr": True,
+        "data_collection": "deny",
+        "ignore": ["moonshotai", "quantized-endpoint"],
+    }
+
+
+async def test_empty_prefs_object_sends_no_provider_object(monkeypatch):
+    prefs = Settings(openrouter_provider_prefs="{}").openrouter_provider_prefs
+    lines = _sse({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+    _, body = await _run_stream(
+        monkeypatch, OpenRouterProvider("k", provider_prefs=prefs), lines, tools=[_tool()]
+    )
+    assert "provider" not in body
+    _, json_body = await _run_complete_json(
+        monkeypatch, OpenRouterProvider("k", provider_prefs=prefs), _completion_json()
+    )
+    assert "provider" not in json_body
+
+
 def test_bare_string_ignore_becomes_a_one_element_list():
     """`{"ignore": "deepinfra"}` used to reach `_provider_body`'s
     `set(... or [])` as a string, iterating its characters into a denylist of

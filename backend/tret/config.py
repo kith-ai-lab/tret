@@ -5,13 +5,14 @@ admin opts in (docs/telemetry.md).
 defaults into hard startup errors — see `production_config_problems` and
 docs/hardening.md.
 """
+import copy
 import json
 import logging
 import math
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 log = logging.getLogger("tret")
@@ -64,6 +65,36 @@ GRID_FACTOR_PROVIDERS = ("local", "anthropic", "kimi", "openrouter")
 # `_coerce_provider_prefs_lists` (a `@classmethod`, called from a
 # `@field_validator` before any instance is built) cannot iterate.
 _PROVIDER_PREFS_LIST_FIELDS = ("ignore", "only", "order")
+
+# Shipped default for `Settings.openrouter_provider_prefs` (the OpenRouter
+# `provider` request object). Policy from the 2026-10-19 SOC 2 vendor review:
+# OpenRouter itself does not train on prompts, but it forwards them to
+# downstream providers that may unless the request restricts routing, so every
+# call asks for zero-data-retention endpoints (`zdr`) and refuses providers that
+# collect data (`data_collection: "deny"`). Moonshot AI's own API terms permit
+# using Customer Content to improve its models unless an enterprise agreement
+# says otherwise, so `moonshotai` is also ignored: Moonshot models are reachable
+# only through the direct `kimi/*` provider, i.e. with the operator's own
+# `TRET_MOONSHOT_API_KEY`. Google's unpaid Gemini endpoint ("Google AI Studio")
+# retains prompts; ZDR routing drops it and leaves Google Vertex.
+# An explicit `TRET_OPENROUTER_PROVIDER_PREFS` object replaces this verbatim
+# (`{}` sends no preferences; `{"zdr": false}` is an explicit opt-out).
+# Sources: https://openrouter.ai/docs/guides/routing/provider-selection,
+# https://openrouter.ai/docs/guides/features/zdr,
+# https://platform.kimi.ai/docs/agreement/modeluse (section 4).
+# Read it through `default_openrouter_provider_prefs()` so no caller shares the
+# mutable dict.
+OPENROUTER_DEFAULT_PROVIDER_PREFS: dict = {
+    "zdr": True,
+    "data_collection": "deny",
+    "ignore": ["moonshotai"],
+}
+
+
+def default_openrouter_provider_prefs() -> dict:
+    """A fresh deep copy of `OPENROUTER_DEFAULT_PROVIDER_PREFS`."""
+    return copy.deepcopy(OPENROUTER_DEFAULT_PROVIDER_PREFS)
+
 
 # An operator's label is a note next to a number, not a description. Long enough
 # for "Ontario grid, IESO 2024" and short enough to render in a table cell.
@@ -752,16 +783,21 @@ class Settings(BaseSettings):
     openrouter_catalog: bool = True
     openrouter_referer: str = "https://github.com/kith-ai-lab/tret"
     openrouter_title: str = "tret"
-    # Optional provider-selection preferences (see
-    # `OpenRouterProvider._provider_body`) — a raw JSON object accepting
-    # OpenRouter's `provider` fields: order, ignore, only, quantizations,
-    # data_collection, zdr, sort, require_parameters. None (unset) sends no
-    # `provider` object beyond the router's evidence-driven `ignore` list.
+    # Provider-selection preferences (see `OpenRouterProvider._provider_body`) —
+    # a raw JSON object accepting OpenRouter's `provider` fields: order, ignore,
+    # only, quantizations, data_collection, zdr, sort, require_parameters.
+    # Unset or blank resolves to `OPENROUTER_DEFAULT_PROVIDER_PREFS` (ZDR-only
+    # routing, no data collection, Moonshot ignored — see that constant for the
+    # reason); any explicit JSON object replaces the default verbatim, so `{}`
+    # sends no `provider` object beyond the router's evidence-driven `ignore`
+    # list. `validate_default=True` is what makes the unset case run the
+    # validator below (pydantic otherwise skips validators on defaults).
     # `require_parameters` is opt-in since 2026-09-11: sent by default it made
     # OpenRouter reject every tool-calling run on the OpenAI models. Gates
     # every OpenRouter call this deployment makes, so malformed JSON is
-    # warned about and treated as unset rather than refusing to boot.
-    openrouter_provider_prefs: dict | None = None
+    # warned about and treated as unset (the safe default) rather than refusing
+    # to boot.
+    openrouter_provider_prefs: dict | None = Field(default=None, validate_default=True)
 
     # Local model server (Ollama, LM Studio, vLLM, llama.cpp server — anything
     # exposing an OpenAI-compat /v1). Enabled iff local_base_url is set; no API
@@ -862,34 +898,40 @@ class Settings(BaseSettings):
     @field_validator("openrouter_provider_prefs", mode="before")
     @classmethod
     def _parse_openrouter_provider_prefs(cls, value):
-        """Blank means "not set"; malformed JSON is warned about and ignored.
+        """Blank means "not set" and resolves to the shipped default.
 
-        Deliberately softer than `_parse_grid_factors`: that field is read once
-        at startup and a typo there is worth refusing to boot over, but this one
-        gates every OpenRouter call the deployment ever makes — failing to boot
-        because an operator fat-fingered a provider-routing hint would be a
-        worse outage than the hint just not applying.
+        Malformed JSON is warned about and also falls back to the default —
+        the safe behaviour is the default now, so a typo must not silently
+        widen routing. Deliberately softer than `_parse_grid_factors`: that
+        field is read once at startup and a typo there is worth refusing to
+        boot over, but this one gates every OpenRouter call the deployment
+        ever makes — failing to boot because an operator fat-fingered a
+        provider-routing hint would be a worse outage than the default
+        applying. An explicit object (including `{}`) replaces the default
+        verbatim. Always returns a fresh dict.
         """
         if value is None:
-            return None
+            return cls._coerce_provider_prefs_lists(default_openrouter_provider_prefs())
         if isinstance(value, str):
             text = value.strip()
             if not text:
-                return None
+                return cls._coerce_provider_prefs_lists(default_openrouter_provider_prefs())
             try:
                 value = json.loads(text)
             except ValueError:
                 log.warning(
-                    "TRET_OPENROUTER_PROVIDER_PREFS is not valid JSON; ignoring it. "
+                    "TRET_OPENROUTER_PROVIDER_PREFS is not valid JSON; using the default "
+                    "provider preferences. "
                     'Expected a JSON object, e.g. \'{"order": ["anthropic"]}\'.'
                 )
-                return None
+                return cls._coerce_provider_prefs_lists(default_openrouter_provider_prefs())
         if not isinstance(value, dict):
             log.warning(
-                "TRET_OPENROUTER_PROVIDER_PREFS must be a JSON object, got %s; ignoring it.",
+                "TRET_OPENROUTER_PROVIDER_PREFS must be a JSON object, got %s; "
+                "using the default provider preferences.",
                 type(value).__name__,
             )
-            return None
+            return cls._coerce_provider_prefs_lists(default_openrouter_provider_prefs())
         return cls._coerce_provider_prefs_lists(value)
 
     @classmethod
