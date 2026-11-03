@@ -16,6 +16,7 @@ needing the real service module to have landed its side of the contract yet.
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
 
@@ -25,9 +26,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
-from tret.db.models import Base, Finding, Project, Workspace
+from tret.db.models import Base, Document, Finding, Project, Workspace
 from tret.engine import tools as tools_module
 from tret.engine.tools import (
+    CONNECTED_WRITE_DOCUMENT_MAX_BYTES,
     MAX_CONNECTED_WRITE_CONTENT_BYTES,
     RunContext,
     ToolError,
@@ -195,14 +197,13 @@ async def test_propose_with_inline_content_creates_the_exact_payload_shape(
         "target_label": "Finance",
         "target_path": "/Documents/tret",
         "filename": "notes.md",
+        "relative_dir": "",
         "content_type": "text/markdown",
         "source": {"kind": "inline", "content": "hello world"},
         "size": len(b"hello world"),
         "content_sha256": finding.payload["content_sha256"],  # checked below
         "upload": None,
     }
-    import hashlib
-
     assert finding.payload["content_sha256"] == hashlib.sha256(b"hello world").hexdigest()
     assert finding.id in ctx.findings_created
 
@@ -472,3 +473,213 @@ async def test_execute_tool_wraps_an_unavailable_write_target_lookup(ctx, no_gra
     )
     assert is_error is True
     assert "not included in this workspace's plan" in result
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# the `document` source: a stored Document uploaded as-is
+# ══════════════════════════════════════════════════════════════════════════
+PDF_BYTES = b"%PDF-1.7\n" + bytes(range(256)) * 8  # not valid UTF-8 on purpose
+
+
+async def _stored_document(
+    db, project_id, tmp_path, *, data: bytes = PDF_BYTES, filename="siemens-2025.pdf",
+    content_type="application/pdf", provenance="web_capture", source_kind="web",
+    write_file: bool = True, byte_size: int | None = None,
+) -> Document:
+    path = tmp_path / f"{hashlib.sha256(data).hexdigest()}-{filename}"
+    if write_file:
+        path.write_bytes(data)
+    doc = Document(
+        project_id=project_id,
+        filename=filename,
+        content_type=content_type,
+        byte_size=len(data) if byte_size is None else byte_size,
+        storage_path=str(path),
+        extraction_status="done",
+        sha256=hashlib.sha256(data).hexdigest(),
+        source_kind=source_kind,
+        meta={"provenance": provenance} if provenance else {},
+    )
+    db.add(doc)
+    await db.flush()
+    return doc
+
+
+async def test_propose_with_document_id_records_the_document_source(
+    ctx, targets, no_graph_calls, tmp_path
+):
+    doc = await _stored_document(ctx.db, ctx.project_id, tmp_path)
+    ctx.document_ids.append(doc.id)
+
+    result = await propose_connected_write(
+        ctx,
+        target="site-finance",
+        filename="runs/2026-11-stage-i/packages/siemens/siemens.pdf",
+        document_id=str(doc.id),
+    )
+
+    finding = (await ctx.db.execute(select(Finding))).scalars().one()
+    assert finding.schema_slug == "connected_write"
+    assert finding.status == "draft"
+    assert finding.subject == {
+        "target": "site-finance",
+        "filename": "runs/2026-11-stage-i/packages/siemens/siemens.pdf",
+    }
+    assert finding.payload == {
+        "target_slug": "site-finance",
+        "target_label": "Finance",
+        "target_path": "/Documents/tret",
+        "filename": "runs/2026-11-stage-i/packages/siemens/siemens.pdf",
+        "relative_dir": "runs/2026-11-stage-i/packages/siemens",
+        "content_type": "application/pdf",
+        "source": {
+            "kind": "document",
+            "document_id": str(doc.id),
+            "filename": "siemens-2025.pdf",
+            "content_type": "application/pdf",
+            "byte_size": len(PDF_BYTES),
+            "sha256": hashlib.sha256(PDF_BYTES).hexdigest(),
+            "source_kind": "web",
+            "provenance": "web_capture",
+        },
+        "size": len(PDF_BYTES),
+        "content_sha256": hashlib.sha256(PDF_BYTES).hexdigest(),
+        "upload": None,
+    }
+    assert str(doc.id) in finding.provenance["document_ids"]
+    assert "awaiting approval" in result
+    assert "Nothing has been written to SharePoint." in result
+
+
+async def test_document_source_defaults_the_filename_to_the_documents_own(
+    ctx, targets, no_graph_calls, tmp_path
+):
+    doc = await _stored_document(ctx.db, ctx.project_id, tmp_path, provenance=None)
+    ctx.document_ids.append(doc.id)
+    await propose_connected_write(ctx, target="site-finance", document_id=str(doc.id))
+    finding = (await ctx.db.execute(select(Finding))).scalars().one()
+    assert finding.payload["filename"] == "siemens-2025.pdf"
+    assert finding.payload["relative_dir"] == ""
+    assert finding.payload["source"]["provenance"] is None
+
+
+async def test_document_source_not_attached_to_the_run_is_refused(
+    ctx, targets, no_graph_calls, tmp_path
+):
+    doc = await _stored_document(ctx.db, ctx.project_id, tmp_path)  # NOT added to ctx.document_ids
+    with pytest.raises(ToolError) as excinfo:
+        await propose_connected_write(ctx, target="site-finance", document_id=str(doc.id))
+    assert "not attached" in str(excinfo.value).lower()
+    assert not (await ctx.db.execute(select(Finding))).scalars().all()
+
+
+async def test_document_source_with_a_bad_id_is_refused(ctx, targets, no_graph_calls):
+    with pytest.raises(ToolError) as excinfo:
+        await propose_connected_write(ctx, target="site-finance", document_id="nope")
+    assert "not a valid document id" in str(excinfo.value)
+
+
+async def test_document_source_with_a_missing_file_is_refused(ctx, targets, no_graph_calls, tmp_path):
+    doc = await _stored_document(ctx.db, ctx.project_id, tmp_path, write_file=False)
+    ctx.document_ids.append(doc.id)
+    with pytest.raises(ToolError) as excinfo:
+        await propose_connected_write(ctx, target="site-finance", document_id=str(doc.id))
+    assert "missing" in str(excinfo.value).lower()
+    assert not (await ctx.db.execute(select(Finding))).scalars().all()
+
+
+async def test_document_source_over_the_size_cap_is_refused(ctx, targets, no_graph_calls, tmp_path):
+    # The row claims a size over the cap; no 25 MiB file needs to exist.
+    doc = await _stored_document(
+        ctx.db, ctx.project_id, tmp_path, byte_size=CONNECTED_WRITE_DOCUMENT_MAX_BYTES + 1
+    )
+    ctx.document_ids.append(doc.id)
+    with pytest.raises(ToolError) as excinfo:
+        await propose_connected_write(ctx, target="site-finance", document_id=str(doc.id))
+    assert str(CONNECTED_WRITE_DOCUMENT_MAX_BYTES) in str(excinfo.value)
+    assert not (await ctx.db.execute(select(Finding))).scalars().all()
+
+
+async def test_document_source_whose_file_no_longer_matches_its_hash_is_refused(
+    ctx, targets, no_graph_calls, tmp_path
+):
+    doc = await _stored_document(ctx.db, ctx.project_id, tmp_path)
+    ctx.document_ids.append(doc.id)
+    (tmp_path / f"{doc.sha256}-siemens-2025.pdf").write_bytes(b"swapped")
+    with pytest.raises(ToolError) as excinfo:
+        await propose_connected_write(ctx, target="site-finance", document_id=str(doc.id))
+    assert "sha-256" in str(excinfo.value).lower()
+
+
+async def test_document_id_is_mutually_exclusive_with_content_and_deliverable(
+    ctx, targets, no_graph_calls, tmp_path
+):
+    doc = await _stored_document(ctx.db, ctx.project_id, tmp_path)
+    ctx.document_ids.append(doc.id)
+    for extra in ({"content": "hi"}, {"deliverable": "tcfd-report"}):
+        with pytest.raises(ToolError) as excinfo:
+            await propose_connected_write(
+                ctx, target="site-finance", filename="x.pdf", document_id=str(doc.id), **extra
+            )
+        assert "exactly one" in str(excinfo.value).lower()
+    assert not (await ctx.db.execute(select(Finding))).scalars().all()
+
+
+async def test_content_without_a_filename_is_refused(ctx, targets, no_graph_calls):
+    with pytest.raises(ToolError) as excinfo:
+        await propose_connected_write(ctx, target="site-finance", content="hi")
+    assert "filename" in str(excinfo.value).lower()
+
+
+# ── sub-folder paths in `filename` ────────────────────────────────────────────
+async def test_a_relative_path_is_accepted_and_split_into_relative_dir(
+    ctx, targets, no_graph_calls
+):
+    await propose_connected_write(
+        ctx, target="site-finance", filename="runs/r1/packages/acme/notes.md", content="hi"
+    )
+    finding = (await ctx.db.execute(select(Finding))).scalars().one()
+    assert finding.payload["filename"] == "runs/r1/packages/acme/notes.md"
+    assert finding.payload["relative_dir"] == "runs/r1/packages/acme"
+    assert finding.payload["content_type"] == "text/markdown"
+
+
+async def test_a_deliverable_extension_is_forced_on_the_last_segment_only(
+    ctx, targets, no_graph_calls
+):
+    await _draft_section(ctx.db, ctx.project_id, ctx.run_id, "tcfd-report")
+    await ctx.db.commit()
+    await propose_connected_write(
+        ctx, target="site-finance", filename="v1.2/report.txt", deliverable="tcfd-report", format="html"
+    )
+    finding = (
+        await ctx.db.execute(select(Finding).where(Finding.schema_slug == "connected_write"))
+    ).scalars().one()
+    assert finding.payload["filename"] == "v1.2/report.html"
+    assert finding.payload["relative_dir"] == "v1.2"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "runs/../escape/x.md",
+        "../x.md",
+        "a/./x.md",
+        "a/b/c/d/e/f/g.md",  # 7 segments
+        "/runs/x.md",  # leading slash
+        "runs//x.md",  # empty segment
+        "runs/x.md/",  # trailing slash
+        "runs\\x.md",
+        ("d" * 79 + "/") * 5 + "x.md",  # 404 chars in total
+    ],
+)
+async def test_unsafe_relative_paths_are_refused(ctx, targets, no_graph_calls, bad):
+    with pytest.raises(ToolError):
+        await propose_connected_write(ctx, target="site-finance", filename=bad, content="hi")
+    assert not (await ctx.db.execute(select(Finding))).scalars().all()
+
+
+async def test_six_segments_is_the_maximum(ctx, targets, no_graph_calls):
+    await propose_connected_write(ctx, target="site-finance", filename="a/b/c/d/e/f.md", content="hi")
+    finding = (await ctx.db.execute(select(Finding))).scalars().one()
+    assert finding.payload["relative_dir"] == "a/b/c/d/e"

@@ -408,7 +408,7 @@ async def _guardrails_response(
             **egress,
             **egress_status(),
             "scope": (
-                "research-class calls only (web_search, fetch_url). Provider and "
+                "research-class calls only (web_search, fetch_url, capture_source). Provider and "
                 "catalog calls are counted in-process, not recorded per row — see "
                 "tret/net/audit.py. Query strings are never stored."
             ),

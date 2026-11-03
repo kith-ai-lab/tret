@@ -353,8 +353,8 @@ which thresholds have already fired for the current window is tracked in
 
 Everything that leaves the process goes through `tret/net/`, tagged with a
 destination **class** — `provider` (cloud model calls), `catalog` (the OpenRouter
-model list), `local` (a self-hosted model server), `research` (`web_search` and
-`fetch_url`). Each class is independently switchable, every switch narrows and
+model list), `local` (a self-hosted model server), `research` (`web_search`,
+`fetch_url` and `capture_source`). Each class is independently switchable, every switch narrows and
 none widens, and `research` ships off. `tests/test_egress_chokepoint.py` fails
 the build if anything outside `tret/net/` imports a connection-opening module or
 constructs an HTTP client, so the boundary cannot erode one convenient import at

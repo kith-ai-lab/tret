@@ -44,6 +44,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -1960,9 +1961,12 @@ async def materialize_connected_file(
 # change what's in a connected account, so it is opt-in, per-folder, always.
 _TRET_SUBFOLDER_NAME = "tret"
 # <=4MB: a single PUT .../content call. Above that Graph requires (and this
-# module uses) an upload session with 5MiB chunks — 4MiB is Graph's own
-# documented ceiling for the simple PUT path, not a number this module chose.
-_UPLOAD_SIMPLE_MAX_BYTES = 4 * 1024 * 1024
+# module uses) an upload session with 5MiB chunks — Graph documents "4 MB"
+# as the simple PUT ceiling, and the decimal reading (4,000,000 bytes) is the
+# safe one, so a body between 4,000,000 and 4MiB goes through a session too.
+# The chunk size must be a multiple of 320 KiB (327,680 bytes); 5MiB is 16 of
+# them and keeps a 25MB body to five requests.
+_UPLOAD_SIMPLE_MAX_BYTES = 4_000_000
 _UPLOAD_CHUNK_BYTES = 5 * 1024 * 1024
 
 
@@ -2004,6 +2008,22 @@ class ConnectionWriteError(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class UploadConflictError(ConnectionWriteError):
+    """`upload_connected_file(..., conflict="fail")` found a file already at
+    the destination path. Nothing was written; `.reason` names the path."""
+
+
+class GraphNetworkError(ConnectionWriteError):
+    """A transport-level failure talking to Graph (timeout, reset) — the
+    retryable kind, unlike an egress refusal, which is plain
+    `ConnectionWriteError`."""
+
+
+class _UploadOutcomeUnknown(ConnectionWriteError):
+    """The final chunk of an upload session failed in a way that leaves it
+    unknown whether Graph completed the item (see `_upload_chunks`)."""
 
 
 @dataclass(frozen=True)
@@ -2094,6 +2114,81 @@ def safe_upload_filename(name: str) -> str:
     return cleaned
 
 
+# A write-back filename may be a relative path under the target's `tret/`
+# folder (`runs/2026-11-stage-i/packages/siemens/siemens.pdf`), so a package of
+# documents lands in a folder per run and company. Bounded so a model cannot
+# propose an absurdly deep tree.
+UPLOAD_PATH_MAX_SEGMENTS = 6
+UPLOAD_PATH_MAX_CHARS = 400
+
+
+# Characters refused in a write-back *path* segment on top of
+# `safe_upload_filename`'s own list: `%` (the segment is percent-encoded into
+# the Graph URL, so `%2e%2e` would become `%252e%252e` — and any hop that
+# decodes twice would turn it back into `..`) and `#` (a URL fragment marker
+# that SharePoint has historically refused in names too).
+_UPLOAD_PATH_FORBIDDEN_RE = re.compile(r"[%#]")
+
+
+def _check_upload_path_segment(segment: str) -> str:
+    cleaned = safe_upload_filename(segment)
+    if _UPLOAD_PATH_FORBIDDEN_RE.search(cleaned):
+        raise ValueError("filename path segments must not contain % or #")
+    if any(unicodedata.category(ch) == "Cf" for ch in cleaned):
+        raise ValueError("filename path segments must not contain invisible formatting characters")
+    # Compatibility-normalised form: fullwidth dots/slashes, the two-dot
+    # leader and the like fold to ASCII under NFKC, so judge the segment by
+    # what it becomes as well as by what it looks like.
+    folded = unicodedata.normalize("NFKC", cleaned)
+    if folded in (".", ".."):
+        raise ValueError(f"filename path must not contain {segment!r} segments")
+    if folded != cleaned:
+        safe_upload_filename(folded)  # raises for a folded '/', ':', '\\', etc.
+        if _UPLOAD_PATH_FORBIDDEN_RE.search(folded):
+            raise ValueError("filename path segments must not contain % or #")
+    return cleaned
+
+
+def safe_upload_path(path: str) -> str:
+    """`safe_upload_filename`, extended to a forward-slash relative path.
+
+    Every segment must pass `safe_upload_filename` (so a single-segment path
+    is exactly a plain filename). On top of that: no leading or trailing
+    slash and no empty segment (`a//b`), no `.` / `..` segment — judged on
+    the NFKC-normalised form too, so `．．` is refused as well — at most
+    `UPLOAD_PATH_MAX_SEGMENTS` segments and `UPLOAD_PATH_MAX_CHARS`
+    characters in all, and no `%`, `#`, or Unicode format (category Cf, e.g.
+    U+202E) characters in any segment. Trailing dots/spaces are refused by
+    `safe_upload_filename` (and re-checked after normalisation). Refused with
+    `ValueError`, never silently rewritten; returns the cleaned path
+    (control characters stripped per segment).
+    """
+    raw = path or ""
+    if raw.startswith("/"):
+        raise ValueError("filename must be a relative path: no leading slash")
+    segments = raw.split("/")
+    if len(segments) > UPLOAD_PATH_MAX_SEGMENTS:
+        raise ValueError(f"filename path must not exceed {UPLOAD_PATH_MAX_SEGMENTS} segments")
+    cleaned: list[str] = []
+    for segment in segments:
+        if segment == "" and len(segments) > 1:
+            raise ValueError("filename path must not contain empty segments (// or a trailing /)")
+        if segment in (".", ".."):
+            raise ValueError(f"filename path must not contain {segment!r} segments")
+        cleaned.append(_check_upload_path_segment(segment))
+    result = "/".join(cleaned)
+    if len(result) > UPLOAD_PATH_MAX_CHARS:
+        raise ValueError(f"filename path must not exceed {UPLOAD_PATH_MAX_CHARS} characters")
+    return result
+
+
+def split_upload_path(path: str) -> tuple[str, str]:
+    """`(relative_dir, basename)` of an already-validated upload path;
+    `relative_dir` is `""` for a bare filename."""
+    directory, _, base = path.rpartition("/")
+    return directory, base
+
+
 def _graph_write_error_reason(response: httpx.Response) -> str:
     """A short, safe-to-show reason for a Graph 4xx/5xx encountered while
     writing back: the status code, plus Graph's own machine `error.code`
@@ -2137,7 +2232,7 @@ async def _graph_write_call(
     except EgressDenied as exc:
         raise ConnectionWriteError(f"connections egress is unavailable: {exc}") from exc
     except httpx.HTTPError as exc:
-        raise ConnectionWriteError(f"could not reach Microsoft Graph: {exc}") from exc
+        raise GraphNetworkError(f"could not reach Microsoft Graph: {exc}") from exc
 
 
 def _raise_for_graph_write_status(response: httpx.Response) -> None:
@@ -2224,31 +2319,194 @@ async def _ensure_tret_subfolder(token: str, *, drive_id: str, parent_item_id: s
     return folder_id
 
 
-async def _upload_small(
-    token: str, *, drive_id: str, folder_item_id: str, name: str, data: bytes, content_type: str
-) -> dict:
-    """<=4MB path: a single `PUT .../content`, `conflictBehavior=rename` so
-    an existing same-named file is never overwritten (see module note) —
-    Graph renames the *new* upload instead, and the returned `driveItem`
-    carries whatever name it actually landed under."""
-    url = (
+def _graph_path_url(drive_id: str, folder_item_id: str, relative_path: str, operation: str) -> str:
+    """Path-addressed Graph URL under a folder item:
+    `.../items/{folder}:/{a/b/c.pdf}:/{operation}`. Each segment is
+    percent-encoded but the `/` separators are kept — Graph resolves the
+    path relative to the folder and creates any missing intermediate folders
+    as part of the upload, so no per-folder create calls are needed."""
+    return (
         f"{GRAPH_API_BASE}/drives/{quote(drive_id, safe='')}/items/"
-        f"{quote(folder_item_id, safe='')}:/{quote(name, safe='')}:/content"
+        f"{quote(folder_item_id, safe='')}:/{quote(relative_path, safe='/')}:/{operation}"
     )
+
+
+def _check_conflict_status(response: httpx.Response, *, conflict: str, existing_path: str) -> None:
+    """With `conflict="fail"` Graph answers 409 when the name is taken; say
+    which path, instead of the generic status line."""
+    if conflict == "fail" and response.status_code == 409:
+        raise UploadConflictError(
+            f"A file already exists at {existing_path}; it was not overwritten and nothing was uploaded."
+        )
+
+
+async def _upload_small(
+    token: str, *, drive_id: str, folder_item_id: str, name: str, data: bytes, content_type: str,
+    conflict: str = "rename", existing_path: str = "",
+) -> dict:
+    """<=4MB path: a single `PUT .../content` with `conflictBehavior=
+    {conflict}` — `rename` (the default) leaves an existing same-named file
+    alone and Graph renames the *new* upload instead (see module note), the
+    returned `driveItem` carrying whatever name it landed under; `fail` makes
+    Graph answer 409 instead, surfaced as `UploadConflictError`. Either way
+    nothing is ever overwritten. `name` may be a relative path (see
+    `_graph_path_url`)."""
+    url = _graph_path_url(drive_id, folder_item_id, name, "content")
     response = await _graph_write_call(
         "PUT", url, policy=_policy(url),
         headers={"Authorization": f"Bearer {token}", "Content-Type": content_type},
         content=data,
-        params={"@microsoft.graph.conflictBehavior": "rename"},
+        params={"@microsoft.graph.conflictBehavior": conflict},
     )
+    _check_conflict_status(response, conflict=conflict, existing_path=existing_path)
     _raise_for_graph_write_status(response)
     return response.json()
 
 
-async def _upload_large(token: str, *, drive_id: str, folder_item_id: str, name: str, data: bytes) -> dict:
-    """>4MB path: `createUploadSession` (also `conflictBehavior=rename` —
-    same never-overwrite policy as the simple path), then the bytes in
-    `_UPLOAD_CHUNK_BYTES`-sized `PUT`s to the session's own `uploadUrl`.
+_UPLOAD_RETRY_AFTER_CAP_SECONDS = 30.0
+
+
+def _retry_after_seconds(response: httpx.Response) -> float:
+    """Graph's `Retry-After` (delta-seconds), capped; 1s when absent or not a
+    number (an HTTP-date form is not worth parsing for a one-shot wait)."""
+    try:
+        wait = float(response.headers.get("Retry-After", ""))
+    except ValueError:
+        wait = 1.0
+    return max(0.0, min(wait, _UPLOAD_RETRY_AFTER_CAP_SECONDS))
+
+
+async def _try_put_chunk(
+    upload_url: str, policy: ClassPolicy, data: bytes, start: int, end: int, total: int
+) -> tuple[httpx.Response | None, GraphNetworkError | None]:
+    """One chunk PUT. A transport failure comes back as the second element
+    (the retryable kind); any other `ConnectionWriteError` (egress refused)
+    propagates."""
+    try:
+        response = await _graph_write_call(
+            "PUT", upload_url, policy=policy,
+            headers={"Content-Range": f"bytes {start}-{end}/{total}"},
+            content=data[start : end + 1],
+        )
+    except GraphNetworkError as exc:
+        return None, exc
+    return response, None
+
+
+async def _upload_session_next_start(upload_url: str, policy: ClassPolicy) -> int | None:
+    """Ask the session where it wants the next byte (`GET uploadUrl` ->
+    `nextExpectedRanges`, e.g. `["5242880-"]`). `None` when the session
+    reports nothing outstanding or no longer exists (404) — for a finished
+    upload that is what Graph says, but it says the same for an expired one,
+    so callers must not read it as proof of completion."""
+    response = await _graph_write_call("GET", upload_url, policy=policy, headers={})
+    if response.status_code == 404:
+        return None
+    _raise_for_graph_write_status(response)
+    try:
+        ranges = response.json().get("nextExpectedRanges") or []
+        return int(str(ranges[0]).split("-", 1)[0]) if ranges else None
+    except (ValueError, TypeError, IndexError, AttributeError):
+        raise ConnectionWriteError("Microsoft Graph returned an unreadable upload session status") from None
+
+
+async def _abandon_upload_session(upload_url: str, policy: ClassPolicy) -> None:
+    """Best-effort `DELETE uploadUrl` so a half-sent session does not linger.
+    Never raises: the caller is already failing with the real reason."""
+    try:
+        await _graph_write_call("DELETE", upload_url, policy=policy, headers={})
+    except ConnectionWriteError:
+        pass
+
+
+async def _upload_chunks(
+    upload_url: str, policy: ClassPolicy, data: bytes, *, conflict: str, existing_path: str
+) -> dict:
+    """Send `data` to an upload session in `_UPLOAD_CHUNK_BYTES` pieces.
+
+    Each chunk gets at most ONE recovery, so the extra requests are bounded
+    (per failed chunk: one GET, one re-PUT):
+
+    - 5xx or a transport error: `GET uploadUrl` for `nextExpectedRanges`
+      rather than re-sending blindly. If the session already holds the whole
+      chunk, move on; if it still expects this chunk's start, re-PUT it once;
+      anything else is not recoverable and aborts.
+    - 429: wait `Retry-After` (capped at 30s) and re-PUT once.
+    - 416 on a chunk means Graph already has that range: move on.
+
+    Known limitation: if the FINAL chunk fails and the session can no longer
+    say how far it got (404 / nothing outstanding) or the re-PUT answers 416,
+    Graph may well have completed the item, but the response carrying the
+    `driveItem` is lost and the session cannot be asked for it (under
+    `rename` the final name is unknowable, so searching the folder cannot
+    tell our file from a pre-existing one). That raises
+    `_UploadOutcomeUnknown` telling the caller to check the folder before
+    retrying, rather than guessing at success or uploading a duplicate.
+    """
+    total = len(data)
+    offset = 0
+    item: dict | None = None
+    while offset < total:
+        start = offset
+        end = min(start + _UPLOAD_CHUNK_BYTES, total) - 1
+        final = end == total - 1
+        response, failure = await _try_put_chunk(upload_url, policy, data, start, end, total)
+        accepted = False
+        if response is not None and response.status_code == 429:
+            await asyncio.sleep(_retry_after_seconds(response))
+            response, failure = await _try_put_chunk(upload_url, policy, data, start, end, total)
+        elif response is None or response.status_code >= 500:
+            first_problem = (
+                str(failure) if failure is not None else _graph_write_error_reason(response)
+            )
+            next_start = await _upload_session_next_start(upload_url, policy)
+            if next_start is None:
+                if final:
+                    raise _UploadOutcomeUnknown(
+                        f"{first_problem} on the final chunk, and the upload session can no longer "
+                        "report its state, so it is unknown whether the file was created. Check the "
+                        "target folder before retrying."
+                    )
+                raise ConnectionWriteError(f"{first_problem}; the upload session is no longer available")
+            if next_start == end + 1 and not final:
+                accepted = True
+            elif next_start == start:
+                response, failure = await _try_put_chunk(upload_url, policy, data, start, end, total)
+            else:
+                raise ConnectionWriteError(
+                    f"{first_problem}; Microsoft Graph expects byte {next_start} next, "
+                    f"which this chunk ({start}-{end}) cannot resume from"
+                )
+        if not accepted:
+            if response is None:
+                assert failure is not None
+                raise failure
+            if response.status_code == 416:
+                if final:
+                    raise _UploadOutcomeUnknown(
+                        "Microsoft Graph reports it already has the final range, so the file may have "
+                        "been created, but its details were not received. Check the target folder "
+                        "before retrying."
+                    )
+                # Graph already holds this range; carry on with the next one.
+            else:
+                _check_conflict_status(response, conflict=conflict, existing_path=existing_path)
+                _raise_for_graph_write_status(response)
+                if response.status_code in (200, 201):
+                    item = response.json()
+        offset = end + 1
+    if item is None:
+        raise ConnectionWriteError("Microsoft Graph did not confirm the upload's final chunk")
+    return item
+
+
+async def _upload_large(
+    token: str, *, drive_id: str, folder_item_id: str, name: str, data: bytes,
+    conflict: str = "rename", existing_path: str = "",
+) -> dict:
+    """>4MB path: `createUploadSession` (same `conflictBehavior` policy as
+    the simple path), then the bytes in `_UPLOAD_CHUNK_BYTES`-sized `PUT`s to
+    the session's own `uploadUrl` (see `_upload_chunks` for retry/resume).
 
     The upload URL's host is chosen by Microsoft's response, not this
     module's own config — the same shape `download_m365_file`'s redirect
@@ -2260,42 +2518,35 @@ async def _upload_large(token: str, *, drive_id: str, folder_item_id: str, name:
     False` on that same policy (see `_policy`'s own default) is what
     refuses a non-https upload URL — not a special case here, just what
     building the policy the normal way already gets. No `Authorization`
-    header is sent to the chunk PUTs: the session URL is itself the
+    header is sent to the session-URL calls: the session URL is itself the
     credential (it is pre-signed and short-lived), and Microsoft's own docs
     say sending a bearer token to it is at best redundant and at worst
-    rejected.
+    rejected. If the upload is abandoned after the bounded retries the
+    session is `DELETE`d.
     """
-    session_url = (
-        f"{GRAPH_API_BASE}/drives/{quote(drive_id, safe='')}/items/"
-        f"{quote(folder_item_id, safe='')}:/{quote(name, safe='')}:/createUploadSession"
-    )
+    session_url = _graph_path_url(drive_id, folder_item_id, name, "createUploadSession")
     session_response = await _graph_write_call(
         "POST", session_url, policy=_policy(session_url),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json_body={"item": {"@microsoft.graph.conflictBehavior": "rename", "name": name}},
+        # The item name is the final path segment; any directories are in the URL.
+        json_body={"item": {"@microsoft.graph.conflictBehavior": conflict, "name": split_upload_path(name)[1]}},
     )
+    _check_conflict_status(session_response, conflict=conflict, existing_path=existing_path)
     _raise_for_graph_write_status(session_response)
     upload_url = session_response.json().get("uploadUrl")
     if not upload_url:
         raise ConnectionWriteError("Microsoft Graph did not return an upload session URL")
 
-    total = len(data)
     upload_policy = _policy(upload_url, verify_addresses=VERIFY_PUBLIC)
-    item: dict | None = None
-    for start in range(0, total, _UPLOAD_CHUNK_BYTES):
-        chunk = data[start : start + _UPLOAD_CHUNK_BYTES]
-        end = start + len(chunk) - 1
-        chunk_response = await _graph_write_call(
-            "PUT", upload_url, policy=upload_policy,
-            headers={"Content-Range": f"bytes {start}-{end}/{total}"},
-            content=chunk,
+    try:
+        return await _upload_chunks(
+            upload_url, upload_policy, data, conflict=conflict, existing_path=existing_path
         )
-        _raise_for_graph_write_status(chunk_response)
-        if chunk_response.status_code in (200, 201):
-            item = chunk_response.json()
-    if item is None:
-        raise ConnectionWriteError("Microsoft Graph did not confirm the upload's final chunk")
-    return item
+    except _UploadOutcomeUnknown:
+        raise  # the session is already gone; nothing to delete
+    except ConnectionWriteError:
+        await _abandon_upload_session(upload_url, upload_policy)
+        raise
 
 
 async def _refuse_upload(
@@ -2338,6 +2589,7 @@ async def upload_connected_file(
     content_type: str,
     actor_user_id: uuid.UUID | None = None,
     actor_run_id: uuid.UUID | None = None,
+    conflict: str = "rename",
 ) -> UploadResult:
     """Write `data` into workspace `workspace_id`'s m365 write target
     `target_slug`, under a `tret/` subfolder created on first use and reused
@@ -2348,6 +2600,18 @@ async def upload_connected_file(
     instead. Never deletes, moves, or shares anything — the only Graph
     write calls this module ever makes are the `tret` folder's own
     create-if-absent and the upload itself.
+
+    `filename` may be a relative path (`runs/<run>/packages/<co>/x.pdf`):
+    the upload is path-addressed under the `tret` folder, which makes Graph
+    create the missing intermediate folders itself (simple PUT and upload
+    session alike). The never-overwrite rule applies to the final file only;
+    existing folders on the path are simply reused.
+
+    `conflict` is Graph's `@microsoft.graph.conflictBehavior` for the final
+    file: `"rename"` (default) lets Graph pick a new name when one is taken;
+    `"fail"` refuses instead, raising `UploadConflictError` (a
+    `ConnectionWriteError`) naming the existing path. Anything else is a
+    `ValueError`. `replace` is deliberately not offered.
 
     Refusal order — every one of these raises `ConnectionWriteError` (never
     `ConnectionUnavailable`, which only `ensure_connection_usable`'s own
@@ -2364,7 +2628,8 @@ async def upload_connected_file(
        under the plain "read" scope set (or before write-back existed).
     4. `target_slug` not found in `list_write_targets` — an unknown, or no
        longer allowed, output folder.
-    5. `filename` fails `safe_upload_filename`.
+    5. `filename` fails `safe_upload_path` (a bare filename or a relative
+       sub-folder path; see that function).
     6. `data` exceeds `IMPORT_MAX_BYTES` (the same 25MB cap the import path
        enforces — reused, not reinvented, for write-back's own cap).
 
@@ -2378,6 +2643,8 @@ async def upload_connected_file(
     actually used, `bytes_count=len(data)`) and returns an `UploadResult`
     built from the final `driveItem` Graph reported.
     """
+    if conflict not in ("rename", "fail"):
+        raise ValueError(f"conflict must be 'rename' or 'fail', not {conflict!r}")
     conn = await ensure_connection_usable(db, workspace_id, M365)
 
     gate = await get_extension_registry().check_workspace_gate(db, workspace_id, WRITE_ACTION)
@@ -2407,7 +2674,7 @@ async def upload_connected_file(
         )
 
     try:
-        name = safe_upload_filename(filename)
+        name = safe_upload_path(filename)
     except ValueError as exc:
         raise await _refuse_upload(
             db, workspace_id=workspace_id, target=target.slug, bytes_count=len(data),
@@ -2426,16 +2693,19 @@ async def upload_connected_file(
 
     token = await get_access_token(db, workspace_id, M365)
     activity_target = f"{target.slug}/{_TRET_SUBFOLDER_NAME}/{name}"
+    existing_path = f"{target.path}/{_TRET_SUBFOLDER_NAME}/{name}".strip("/")
     try:
         folder_id = await _ensure_tret_subfolder(token, drive_id=target.drive_id, parent_item_id=target.item_id)
         if len(data) <= _UPLOAD_SIMPLE_MAX_BYTES:
             item = await _upload_small(
                 token, drive_id=target.drive_id, folder_item_id=folder_id,
                 name=name, data=data, content_type=content_type,
+                conflict=conflict, existing_path=existing_path,
             )
         else:
             item = await _upload_large(
-                token, drive_id=target.drive_id, folder_item_id=folder_id, name=name, data=data
+                token, drive_id=target.drive_id, folder_item_id=folder_id, name=name, data=data,
+                conflict=conflict, existing_path=existing_path,
             )
     except ConnectionWriteError as exc:
         await record_connection_activity(
@@ -2445,9 +2715,11 @@ async def upload_connected_file(
         )
         raise
 
-    result_name = item.get("name") or name
+    relative_dir, base_name = split_upload_path(name)
+    result_name = item.get("name") or base_name
     result_size = item.get("size") if isinstance(item.get("size"), int) else len(data)
-    result_path = f"{target.path}/{_TRET_SUBFOLDER_NAME}/{result_name}".strip("/")
+    shown_name = f"{relative_dir}/{result_name}" if relative_dir else result_name
+    result_path = f"{target.path}/{_TRET_SUBFOLDER_NAME}/{shown_name}".strip("/")
     result = UploadResult(
         item_id=item.get("id"),
         web_url=item.get("webUrl"),
@@ -2458,7 +2730,7 @@ async def upload_connected_file(
     )
     await record_connection_activity(
         db, workspace_id=workspace_id, provider=M365, action="upload",
-        target=f"{target.slug}/{_TRET_SUBFOLDER_NAME}/{result_name}", bytes_count=len(data),
+        target=f"{target.slug}/{_TRET_SUBFOLDER_NAME}/{shown_name}", bytes_count=len(data),
         actor_user_id=actor_user_id, actor_run_id=actor_run_id,
     )
     return result

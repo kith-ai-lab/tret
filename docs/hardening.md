@@ -289,7 +289,7 @@ a grep.
 | `provider` | cloud model calls (Anthropic, Kimi, OpenRouter) | on |
 | `catalog` | the OpenRouter model list, provider key validation | on |
 | `local` | a self-hosted model server at `TRET_LOCAL_BASE_URL` | on |
-| `research` | `web_search` and `fetch_url` | **off** |
+| `research` | `web_search`, `fetch_url` and `capture_source` | **off** |
 | `search` | the web search backend itself (`TRET_SEARXNG_BASE_URL` or Brave) | follows research |
 | `telemetry` | anonymous, aggregate usage reports to `telemetry.kithailab.com` | **off** (opt-in; see [telemetry.md](telemetry.md)) |
 
@@ -311,11 +311,11 @@ TRET_EGRESS_RESEARCH=off
 ```
 
 The agent's internet is gone; everything else works. Harnesses that list
-`web_search` or `fetch_url` still run — the tools stay in the registry, the
+`web_search`, `fetch_url` or `capture_source` still run — the tools stay in the registry, the
 engine withholds them, and the run emits a `tools_withheld` event naming this
 variable. A harness is not broken by a deployment being offline.
 
-`replay` is the third mode: `fetch_url` serves pages an earlier run already
+`replay` is the third mode: `fetch_url` and `capture_source` serve pages an earlier run already
 snapshotted and refuses anything else, which is how a benchmark arm or an audit
 re-runs without touching the network.
 
@@ -336,7 +336,7 @@ local models instead of picking a model it cannot reach and failing the run.
 
 ### The search class: trusting the backend, not the model
 
-`research` covers `web_search` and `fetch_url` as tools, but the search
+`research` covers `web_search`, `fetch_url` and `capture_source` as tools, but the search
 *backend* those calls hit — a self-hosted SearXNG instance, or Brave's API —
 has its own class, `search`, with different rules:
 
@@ -381,7 +381,13 @@ uploaded third-party documents — the prompt-injection surface. So:
 - redirects are followed by hand, three hops maximum, each re-checked from
   scratch, because a redirect is a second destination chosen by the first;
 - the body is capped *while* it streams (`TRET_EGRESS_RESEARCH_MAX_BYTES`), and
-  each run has a fetch budget (`..._MAX_FETCHES_PER_RUN`).
+  each run has a fetch budget (`..._MAX_FETCHES_PER_RUN`);
+- `capture_source` takes the same checks but is for collecting originals, so it
+  has its own ceiling (`TRET_EGRESS_CAPTURE_MAX_BYTES`, default 25 MiB) and its own
+  per-run count (`TRET_EGRESS_CAPTURE_MAX_PER_RUN`, default 40). A file over the
+  ceiling is refused outright, never stored truncated. Report-only subagents are
+  not granted `capture_source` by design (`SUBAGENT_ALLOWED_TOOLS` in
+  `engine/delegation.py`): collecting an original is the main run's act.
 
 **An empty allowlist means the public web.** A general web search cannot run
 against an allowlist, and an allowlist covering everything would be a comforting

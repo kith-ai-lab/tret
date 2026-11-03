@@ -60,6 +60,9 @@ ELIDABLE_TOOLS = frozenset(
         # still re-read the page in full via `read_document`.
         "web_search",
         "fetch_url",
+        # Same shape as `fetch_url`: a short preview and a document id, with the
+        # complete original (hash included) in the Document row.
+        "capture_source",
         # Same reasoning as the web tools, for the same shape of tool:
         # `list_connected_sources` and `search_connected_files` are short
         # listings/navigation, cheap to re-call. `read_connected_file`
@@ -100,6 +103,10 @@ PROTECTED_TOOLS = frozenset(
         # may need to see again — an elided proposal is one the model could
         # accidentally re-propose or contradict.
         "propose_connected_write",
+        # Same again for `propose_package_map`: it creates a `package_map` Finding,
+        # and a map the run can no longer see is one it might re-propose with
+        # different ranges while the first still waits for review.
+        "propose_package_map",
         # Same reasoning again: a proposed lesson a later turn can no longer
         # see is one it might propose a second time or contradict.
         "propose_pack_lesson",

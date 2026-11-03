@@ -1210,15 +1210,38 @@ export interface ConnectedWriteUpload {
   approver_id: string | null
 }
 
+/** A stored Document uploaded byte-for-byte (a captured PDF, a workbook).
+ *  `sha256` is re-checked against the file at approval time; a mismatch fails
+ *  the upload instead of shipping different bytes than were approved.
+ *  `filename` here is the Document's own name; the destination path is the
+ *  payload's `filename`. `provenance` is e.g. `web_capture` for a collected
+ *  original, null when the Document row records none. */
+export interface ConnectedWriteDocumentSource {
+  kind: 'document'
+  document_id: string
+  filename: string
+  content_type: string
+  byte_size: number
+  sha256: string
+  source_kind: string
+  provenance: string | null
+}
+
 export type ConnectedWriteSource =
   | { kind: 'inline'; content: string }
   | { kind: 'deliverable'; slug: string; format: string }
+  | ConnectedWriteDocumentSource
 
 export interface ConnectedWritePayload {
   target_slug: string
   target_label: string
   target_path: string
+  /** Relative path under the target's `tret/` folder; may include sub-folders
+   *  (`runs/<run-id>/packages/<company>/<file>`). */
   filename: string
+  /** The sub-folder part of `filename` ("" for a bare filename). Absent on
+   *  proposals recorded before sub-folder paths existed. */
+  relative_dir?: string
   content_type: string
   source: ConnectedWriteSource
   // Both null for a deliverable-sourced proposal — its bytes are rendered
@@ -1228,6 +1251,84 @@ export interface ConnectedWritePayload {
   size: number | null
   content_sha256: string | null
   upload: ConnectedWriteUpload | null
+}
+
+/** `Finding.payload` for `schema_slug: "package_map"` — a proposed page
+ *  selection over one captured source PDF, awaiting approval. `Finding.subject`
+ *  on the same finding is `{ source_document_id, stem, title }`. `package` is
+ *  null until a decision is made; approving triggers the packaging and the
+ *  result is stored here (a failed one can be retried without re-approving). */
+export interface PackageMapSource {
+  document_id: string
+  filename: string
+  sha256: string
+  byte_size: number
+  page_count: number | null
+  source_kind: string
+  provenance: string | null
+  url: string | null
+}
+
+export interface PackageMapIncorporation {
+  originating_page: number
+  cited_component: string
+  /** Inclusive [first, last] page range the citation resolved to, or null. */
+  resolved_range: [number, number] | null
+  status: string
+  note?: string | null
+}
+
+export interface PackageMapExclusion {
+  range: [number, number]
+  reason: string
+}
+
+export interface PackageMap {
+  title: string
+  role: string
+  scope: 'standalone' | 'embedded' | (string & {})
+  /** Inclusive 1-based [first, last] page ranges to keep; null = whole original. */
+  keep_ranges: [number, number][] | null
+  review_note: string | null
+  incorporations: PackageMapIncorporation[]
+  exclusions: PackageMapExclusion[]
+}
+
+export interface PackageResultDocument {
+  role: string
+  document_id: string
+  filename: string
+  sha256: string
+  byte_size: number
+  content_type: string
+}
+
+export interface PackageResult {
+  /** `running` carries only `started_at`; every other field is absent until it ends. */
+  status: 'packaged' | 'failed' | 'running'
+  started_at?: string
+  packaged_at: string | null
+  approver_id: string | null
+  error: string | null
+  documents: PackageResultDocument[]
+  retained_sha256: string | null
+  retained_page_count: number | null
+  source_page_count: number | null
+  /** pdftotext | pypdf */
+  text_mode: string | null
+  poppler_version: string | null
+  wall_seconds: number | null
+  parser_warning_count: number | null
+  limitations: string[]
+}
+
+export interface PackageMapPayload {
+  source: PackageMapSource
+  map: PackageMap
+  stem: string
+  selected_page_count: number
+  full_original: boolean
+  package: PackageResult | null
 }
 
 export interface DataRequest {
@@ -3056,6 +3157,11 @@ export const api = {
   // button, matching decideFinding's pattern.
   retryFindingUpload: (id: string) =>
     request<Finding>(`/findings/${id}/upload-retry`, { method: 'POST' }),
+  // Re-attempts a failed package_map packaging (payload.package.status ===
+  // 'failed') without re-approving. Only valid on an approved finding; same
+  // approver-role rule as retryFindingUpload.
+  retryFindingPackage: (id: string) =>
+    request<Finding>(`/findings/${id}/package-retry`, { method: 'POST' }),
   listDataRequests: (status?: string) =>
     request<DataRequest[]>(`/data-requests${status ? `?status=${status}` : ''}`),
   updateDataRequest: (id: string, status: 'open' | 'fulfilled' | 'dismissed') =>

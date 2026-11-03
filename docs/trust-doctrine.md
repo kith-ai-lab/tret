@@ -70,7 +70,7 @@ rlimits, a wall clock, output caps, no DB handle, and — on Linux where
 network, subprocess, FFI, and dynamic-code use.
 
 **The web is not a third door.** tret can search and read the public web
-(`web_search`, `fetch_url` — off by default, see hardening.md §9), and that
+(`web_search`, `fetch_url`, `capture_source` — off by default, see hardening.md §9), and that
 capability deliberately changes nothing above. A fetched page is not returned as
 prose: it is stored byte-for-byte, hashed, and recorded as a `Document` with
 `source_kind='web'`, its URL and its fetch time, which the model then reads with
@@ -79,7 +79,7 @@ audit trail, and a reviewer can see the page *as it was when the run read it*
 rather than as it is today.
 
 What a web page may never do is put a number into a verdict. Nothing `fetch_url`
-retrieves is registered in `ctx.retrieved_values`, so the cited-values
+or `capture_source` retrieves is registered in `ctx.retrieved_values`, so the cited-values
 cross-check refuses a figure that came from one — without having been taught
 anything about the web. The check did not change, and that is the point. Web
 material can be described and attributed; it cannot be cited as a value.
@@ -87,6 +87,14 @@ Promoting a snapshot into a dataset is an operator's reviewed act, after which
 the number enters through door one like any other. The engine labels the tier on
 every read, because by iteration nine the tool result that said where the text
 came from is far up the transcript.
+
+Every `Document` carries its tier in `source_kind`: `upload` (a person put it
+there), `web` (an agent fetched or captured it), `connected` (read live from a
+workspace's SharePoint/OneDrive), and `package` (a page subset a person approved,
+produced by the deterministic packager from another document; see
+[disclosure-collection.md](disclosure-collection.md)). Only `upload` is
+human-supplied. No document of any tier, uploads included, can put a number into a
+verdict: a figure is citable only if `lookup_dataset` or `run_method` returned it.
 
 **What it does not guarantee.** That scan is a deterrent, not a sandbox, and the
 subprocess has no filesystem isolation: pack methods are operator-trusted code,

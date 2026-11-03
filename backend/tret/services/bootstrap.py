@@ -26,6 +26,7 @@ from tret.config import get_settings
 from tret.db.models import Project, User, Workspace, WorkspaceMember
 from tret.services.workspace import (
     create_workspace,
+    ensure_collection_harness,
     seed_chat_harness,
     seed_subagent_harness,
     seed_workspace_content,
@@ -108,6 +109,7 @@ async def bootstrap(db: AsyncSession) -> None:
                 # (once added) resolves against, not something a workspace
                 # can be usably retrofitted without.
                 await seed_subagent_harness(db, other.id)
+                await ensure_collection_harness(db, other.id)
         except Exception:  # noqa: BLE001 - one workspace's failure must not abort boot
             log.exception(
                 "chat/subagent-harness backfill failed for workspace %s and was skipped",

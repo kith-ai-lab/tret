@@ -44,6 +44,12 @@ log = logging.getLogger("tret.net")
 SOURCE_KIND_WEB = "web"
 SOURCE_KIND_UPLOAD = "upload"
 
+# `meta.provenance` values: how the bytes came to be a Document. `web` is a page
+# read for research; `web_capture` is an original collected on purpose, whose meta
+# also carries the collection record (hash, headers, retrieval time).
+PROVENANCE_WEB = "web"
+PROVENANCE_WEB_CAPTURE = "web_capture"
+
 # Matches the upload path's ceiling (`services/documents.py::MAX_EXTRACTED_CHARS`), for
 # the same reason: extracted text lands in a column and then in a prompt.
 MAX_EXTRACTED_CHARS = 2_000_000
@@ -68,7 +74,16 @@ def snapshot_filename(url: str, extension: str) -> str:
 
 async def _extract(page: FetchedPage, filename: str) -> tuple[str, dict, str]:
     """(text, meta, status), bounded in wall time exactly as uploads are."""
-    if page.extension == ".html":
+    if page.extension == ".zip":
+        # An archive is kept as the original and not opened: unpacking one from the
+        # open web is a zip-bomb and path-traversal surface that collecting a file
+        # does not need, and its members would be unreviewed documents.
+        return "", {"error": "archive stored as original; not extracted"}, "skipped"
+    if page.extension == ".xls":
+        # No reader for the legacy binary format ships (and none is added for it);
+        # saying "skipped" is truer than a "failed" that reads like a bug.
+        return "", {"error": "legacy .xls workbook stored as original; not extracted"}, "skipped"
+    if page.extension in (".html", ".xhtml"):
         html = page.body.decode("utf-8", errors="replace")
         text, title = await asyncio.to_thread(html_to_text, html)
         return text, {"title": title}, "done"
@@ -85,9 +100,19 @@ async def _extract(page: FetchedPage, filename: str) -> tuple[str, dict, str]:
 
 
 async def store_snapshot(
-    db: AsyncSession, page: FetchedPage, project_id: uuid.UUID, run_id: uuid.UUID | None
+    db: AsyncSession,
+    page: FetchedPage,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID | None,
+    *,
+    provenance: str = PROVENANCE_WEB,
+    extra_meta: dict | None = None,
 ) -> Document:
-    """Write the bytes, extract the text, and add the Document row. Caller commits."""
+    """Write the bytes, extract the text, and add the Document row. Caller commits.
+
+    `extra_meta` is merged last: a caller collecting an original adds its record
+    (hash check, headers, operator note) to the row without a second write.
+    """
     storage_dir = Path(get_settings().storage_dir).resolve()
     storage_dir.mkdir(parents=True, exist_ok=True)
     filename = snapshot_filename(page.url, page.extension)
@@ -124,6 +149,8 @@ async def store_snapshot(
             "fetched_by_run": str(run_id) if run_id else None,
             "body_truncated": page.truncated,
             "text_truncated": truncated_text,
+            "provenance": provenance,
+            **(extra_meta or {}),
         },
         uploaded_by=None,  # no human put this here; that is the point of source_kind
     )
@@ -139,12 +166,18 @@ async def store_snapshot(
 REPLAY_SCAN_LIMIT = 2000
 
 
-async def find_snapshot(db: AsyncSession, project_id: uuid.UUID, url: str) -> Document | None:
+async def find_snapshot(
+    db: AsyncSession, project_id: uuid.UUID, url: str, *, provenance: str | None = None
+) -> Document | None:
     """The most recent snapshot of `url` in this project, if one was ever taken.
 
     Matches the URL that was *requested* as well as the one finally fetched, so a
     replay of a run that followed a redirect finds the page under the name the
     model asked for.
+
+    `provenance` narrows to one kind of snapshot. `capture_source` replays only its
+    own captures: a newer `fetch_url` copy of the same URL may be a 2 MB truncation,
+    and handing that back would present its hash as the collected file's.
     """
     rows = (
         await db.execute(
@@ -156,6 +189,8 @@ async def find_snapshot(db: AsyncSession, project_id: uuid.UUID, url: str) -> Do
     ).scalars().all()
     for doc in rows:
         meta = doc.meta or {}
+        if provenance is not None and meta.get("provenance") != provenance:
+            continue
         if url in (meta.get("url"), meta.get("requested_url")):
             return doc
     return None

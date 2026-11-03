@@ -36,7 +36,7 @@ from fastapi.testclient import TestClient
 from tret.api import auth, findings as findings_api
 from tret.api.auth import login_limiter
 from tret.db.engine import get_db
-from tret.db.models import Finding, Project, User, Workspace, WorkspaceMember
+from tret.db.models import Document, Finding, Project, User, Workspace, WorkspaceMember
 from tret.services import connections as connections_service
 
 PASSWORD = "correct-horse-battery"
@@ -243,7 +243,7 @@ def upload_ok(monkeypatch):
 
     async def _upload(
         db, *, workspace_id, target_slug, filename, data, content_type, actor_user_id=None,
-        actor_run_id=None,
+        actor_run_id=None, **extra,
     ):
         calls.append(
             {
@@ -254,6 +254,9 @@ def upload_ok(monkeypatch):
                 "content_type": content_type,
                 "actor_user_id": actor_user_id,
                 "actor_run_id": actor_run_id,
+                # Any keyword beyond the usual ones, so a test can tell "not passed"
+                # from "passed as the default".
+                "extra": extra,
             }
         )
         return FakeUploadResult(
@@ -660,6 +663,152 @@ def test_a_deliverable_sourced_payload_skips_hash_verification(
     assert response.status_code == 200
     assert finding.payload["upload"]["status"] == "uploaded"
     assert len(upload_ok) == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# the `document` source: a stored file uploaded byte-for-byte
+# ══════════════════════════════════════════════════════════════════════════
+_PDF_BYTES = b"%PDF-1.7\n" + bytes(range(256)) * 16  # binary, not valid UTF-8
+
+
+def _document_write_finding(db, tmp_path, *, data=_PDF_BYTES, write_file=True, project_id=PROJECT_ID):
+    sha = hashlib.sha256(data).hexdigest()
+    path = tmp_path / f"{sha}-siemens.pdf"
+    if write_file:
+        path.write_bytes(data)
+    doc = Document(
+        id=uuid.uuid4(), project_id=project_id, filename="siemens.pdf",
+        content_type="application/pdf", byte_size=len(data), storage_path=str(path),
+        sha256=sha, source_kind="web", meta={"provenance": "web_capture"},
+    )
+    db.store["Document"] = {doc.id: doc}
+    finding = _connected_write_finding(
+        source={
+            "kind": "document", "document_id": str(doc.id), "filename": "siemens.pdf",
+            "content_type": "application/pdf", "byte_size": len(data), "sha256": sha,
+            "source_kind": "web", "provenance": "web_capture",
+        },
+    )
+    finding.payload.update(
+        filename="runs/r1/packages/siemens/siemens.pdf",
+        relative_dir="runs/r1/packages/siemens",
+        content_type="application/pdf",
+        size=len(data),
+        content_sha256=sha,
+    )
+    db.store["Finding"][finding.id] = finding
+    return finding, path
+
+
+def test_approving_a_document_source_uploads_the_exact_stored_bytes(
+    client, db, people, upload_ok, tmp_path
+):
+    finding, _ = _document_write_finding(db, tmp_path)
+    login_as(client, people["approver"])
+    response = decide(client, finding.id, action="approve")
+
+    assert response.status_code == 200
+    assert finding.payload["upload"]["status"] == "uploaded"
+    assert len(upload_ok) == 1
+    call = upload_ok[0]
+    assert call["data"] == _PDF_BYTES
+    assert call["content_type"] == "application/pdf"
+    assert call["filename"] == "runs/r1/packages/siemens/siemens.pdf"
+
+
+def test_a_document_source_asks_the_upload_to_fail_on_a_taken_name(
+    client, db, people, upload_ok, tmp_path
+):
+    finding, _ = _document_write_finding(db, tmp_path)
+    login_as(client, people["approver"])
+    decide(client, finding.id, action="approve")
+    assert upload_ok[0]["extra"] == {"conflict": "fail"}
+
+
+def test_inline_and_deliverable_sources_keep_the_default_conflict_behaviour(
+    client, db, connected_write, people, upload_ok, fake_render_bytes
+):
+    login_as(client, people["approver"])
+    decide(client, connected_write.id, action="approve")  # inline source
+
+    deliverable = _connected_write_finding(source={"kind": "deliverable", "slug": "d", "format": "markdown"})
+    db.store["Finding"][deliverable.id] = deliverable
+    decide(client, deliverable.id, action="approve")
+
+    assert [c["extra"] for c in upload_ok] == [{}, {}]
+
+
+def test_a_taken_name_on_a_document_upload_is_recorded_as_a_failure(
+    client, db, people, tmp_path, monkeypatch
+):
+    finding, _ = _document_write_finding(db, tmp_path)
+
+    async def _taken(db_, **kwargs):
+        assert kwargs["conflict"] == "fail"
+        raise FakeConnectionWriteError("A file named siemens.pdf already exists; nothing was uploaded.")
+
+    monkeypatch.setattr(findings_api.connections_service, "upload_connected_file", _taken, raising=False)
+    monkeypatch.setattr(
+        findings_api.connections_service, "ConnectionWriteError", FakeConnectionWriteError, raising=False
+    )
+    monkeypatch.setattr(
+        findings_api.connections_service, "ConnectionUnavailable", FakeConnectionUnavailable, raising=False
+    )
+    login_as(client, people["approver"])
+    response = decide(client, finding.id, action="approve")
+
+    assert response.status_code == 200
+    assert finding.payload["upload"]["status"] == "failed"
+    assert "already exists" in finding.payload["upload"]["error"]
+
+
+def test_a_changed_stored_file_fails_the_upload_and_uploads_nothing(
+    client, db, people, upload_ok, tmp_path
+):
+    finding, path = _document_write_finding(db, tmp_path)
+    path.write_bytes(_PDF_BYTES + b"tampered after approval was requested")
+
+    login_as(client, people["approver"])
+    response = decide(client, finding.id, action="approve")
+
+    assert response.status_code == 200  # the approval itself still stands
+    assert finding.status == "approved"
+    assert finding.payload["upload"]["status"] == "failed"
+    assert "no longer matches the SHA-256" in finding.payload["upload"]["error"]
+    assert upload_ok == []
+
+
+def test_a_missing_stored_file_fails_the_upload(client, db, people, upload_ok, tmp_path):
+    finding, _ = _document_write_finding(db, tmp_path, write_file=False)
+    login_as(client, people["approver"])
+    decide(client, finding.id, action="approve")
+    assert finding.payload["upload"]["status"] == "failed"
+    assert "missing" in finding.payload["upload"]["error"]
+    assert upload_ok == []
+
+
+def test_a_document_from_another_project_is_never_uploaded(client, db, people, upload_ok, tmp_path):
+    finding, _ = _document_write_finding(db, tmp_path, project_id=uuid.uuid4())
+    login_as(client, people["approver"])
+    decide(client, finding.id, action="approve")
+    assert finding.payload["upload"]["status"] == "failed"
+    assert upload_ok == []
+
+
+def test_retry_after_the_file_is_restored_uploads_the_approved_bytes(
+    client, db, people, upload_ok, tmp_path
+):
+    finding, path = _document_write_finding(db, tmp_path)
+    path.write_bytes(b"corrupted")
+    login_as(client, people["approver"])
+    decide(client, finding.id, action="approve")
+    assert finding.payload["upload"]["status"] == "failed"
+
+    path.write_bytes(_PDF_BYTES)  # restored
+    response = client.post(f"/api/findings/{finding.id}/upload-retry")
+    assert response.status_code == 200
+    assert finding.payload["upload"]["status"] == "uploaded"
+    assert upload_ok[0]["data"] == _PDF_BYTES
 
 
 # ══════════════════════════════════════════════════════════════════════════
