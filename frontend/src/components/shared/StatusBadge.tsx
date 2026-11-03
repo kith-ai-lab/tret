@@ -12,6 +12,8 @@ const STATUS_COLOR: Record<string, string> = {
   draft: 'badge-amber',
   approved: 'badge-green',
   rejected: 'badge-red',
+  // package_map packaging result (`failed` is shared with runs above)
+  packaged: 'badge-green',
   // documents
   pending: 'badge-gray',
   done: 'badge-green',

@@ -10,6 +10,28 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Disclosure collection.** A run can now collect a public sustainability
+  disclosure and keep a verified page subset of it, with a person approving every
+  page decision. See [docs/disclosure-collection.md](docs/disclosure-collection.md).
+  - `capture_source` stores the complete original of a public file (an issuer PDF,
+    a workbook) as a `source_kind='web'` Document with its SHA-256, retrieval time,
+    redirects, headers and a changed-source warning when `expected_sha256` does not
+    match. A file over `TRET_EGRESS_CAPTURE_MAX_BYTES` (25 MiB) is refused rather
+    than truncated, and `TRET_EGRESS_CAPTURE_MAX_PER_RUN` bounds attempts per run.
+  - `propose_package_map` records a draft `package_map` finding: which physical
+    pages of a captured PDF form the disclosure, with explicit ranges for embedded
+    statements, incorporated sections recorded and retained in full, and exclusions
+    with reasons. It packages nothing.
+  - Approving a `package_map` runs the deterministic packager (Poppler `pdftotext`,
+    with a `pypdf` fallback recorded as such): the retained PDF, a page map, a link
+    audit, layout and raw page-referenced text, extraction stats and a package
+    record, each registered as a `source_kind='package'` Document. The source is
+    re-hashed first, output is verified before it is published, a failure leaves
+    nothing behind, and `POST /api/findings/{id}/package-retry` reruns a failed
+    package. `poppler-utils` is now in the Docker images.
+  - `propose_connected_write` accepts a `document_id`, uploading a stored Document
+    unchanged (up to 25 MB) to a relative path under the target's `tret/` folder,
+    pinned to the SHA-256 the approver saw.
 - **Archive a team.** `POST /api/workspaces/{id}/archive` (owner only, team
   workspaces only, the workspace name typed back as confirmation) soft-deletes
   a workspace: `workspaces.archived_at` is set, pending invites are revoked,

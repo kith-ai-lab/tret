@@ -88,6 +88,14 @@ the number enters through door one like any other. The engine labels the tier on
 every read, because by iteration nine the tool result that said where the text
 came from is far up the transcript.
 
+Every `Document` carries its tier in `source_kind`: `upload` (a person put it
+there), `web` (an agent fetched or captured it), `connected` (read live from a
+workspace's SharePoint/OneDrive), and `package` (a page subset a person approved,
+produced by the deterministic packager from another document; see
+[disclosure-collection.md](disclosure-collection.md)). Only `upload` is
+human-supplied. No document of any tier, uploads included, can put a number into a
+verdict: a figure is citable only if `lookup_dataset` or `run_method` returned it.
+
 **What it does not guarantee.** That scan is a deterrent, not a sandbox, and the
 subprocess has no filesystem isolation: pack methods are operator-trusted code,
 and installing a pack is deploying code you reviewed. The trust claim here is

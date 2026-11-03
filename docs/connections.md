@@ -243,6 +243,43 @@ under whatever name Graph assigns it. tret never deletes, moves, or
 shares anything through this path; the only writes it ever makes are
 the `tret` folder's own create-if-absent and the file upload itself.
 
+### What a run can propose, and where it lands
+
+A run proposes a write with `propose_connected_write`, which records a
+draft finding and uploads nothing until a person approves it. There are
+three sources; exactly one per proposal:
+
+| Source | What is uploaded | Limit |
+|---|---|---|
+| `content` | the inline text the run supplied | 4MB |
+| `deliverable` | a deliverable with drafted sections, rendered to markdown/html/pdf **at approval time** | none fixed |
+| `document_id` | a stored Document (a captured issuer PDF, a workbook) **as-is** | 25MB |
+
+The `document_id` source must be a document attached to the run (the same
+rule `read_document` uses) whose stored file still exists. `filename`
+defaults to the document's own name. The approval card shows the original
+file name, content type, size, the SHA-256 the upload is pinned to, and its
+provenance (for example "web capture"). **The bytes uploaded are exactly the
+bytes approved:** at approval Tret re-reads the stored file and compares its
+SHA-256 with the one recorded in the proposal; on a mismatch (or a missing
+file) nothing is uploaded and the finding's upload is recorded as `failed`
+with the reason. The 25MB ceiling is the same as the web-capture and import
+caps.
+
+`filename` may be a relative path with forward-slash segments, for example
+`runs/2026-11-stage-i/packages/siemens/siemens.pdf`, so a package of files
+lands in a folder per run and company under the target's `tret/` folder.
+Each segment follows the usual filename rules; there can be at most 6
+segments and 400 characters in all, and no leading slash, empty segment, or
+`.` / `..`. Missing folders are created automatically as part of the upload
+(Graph path addressing); existing ones are reused. The create-only rule
+above applies to the final file.
+
+Size handling: up to 4,000,000 bytes goes up as one request; anything larger
+goes through a Graph upload session in 5MiB chunks (a multiple of the 320KiB
+Graph requires), retrying a chunk once on a 5xx. Write-back is Microsoft 365
+only; Google Drive has no write path, so none of this applies to it.
+
 ### The write gate
 
 Every write-back call is checked against the workspace's

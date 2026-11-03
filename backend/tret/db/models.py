@@ -337,8 +337,10 @@ class Document(Base):
     extraction_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     sha256: Mapped[str] = mapped_column(Text, nullable=False)
-    # Where these bytes came from: 'upload' (a human put them here) or 'web' (an
-    # agent fetched them). A column rather than a key in `meta` because it is a
+    # Where these bytes came from: 'upload' (a human put them here), 'web' (an
+    # agent fetched them), 'connected' (read live from a workspace's connected
+    # SharePoint/OneDrive) or 'package' (a page subset written by the approval-time
+    # packager from another document). A column rather than a key in `meta` because it is a
     # trust tier, and a tier that only exists inside a JSON blob is a tier nobody
     # can filter on, index, or notice. Web documents are third-party text nobody
     # vetted: readable and quotable with attribution, never a source of numbers

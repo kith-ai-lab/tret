@@ -13,9 +13,13 @@ FROM python:3.12-slim
 # util-linux — a required-priority package already present in this base image,
 # so there is nothing to apt-get here. `command -v setpriv` after this RUN is
 # what actually guarantees that rather than assuming it.
+# poppler-utils: pdftotext gives page-referenced layout text for disclosure packaging
+# (tret/services/packaging.py); the pypdf fallback works but is lower fidelity.
+# poppler-data: CJK and other non-Latin glyph maps for pdftotext; Recommends, so
+# --no-install-recommends would skip it and that text would extract as nothing.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 \
-    libcairo2 libffi8 shared-mime-info fonts-dejavu-core \
+    libcairo2 libffi8 shared-mime-info fonts-dejavu-core poppler-utils poppler-data \
     && rm -rf /var/lib/apt/lists/* \
     && command -v setpriv
 

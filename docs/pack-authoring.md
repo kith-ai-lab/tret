@@ -401,11 +401,17 @@ deliberately not part of the trio above: it goes through the blessing gate
 instead of a per-run budget. Calling it never touches Microsoft Graph — it
 resolves a `target` slug (from the connection's configured write targets),
 validates the `filename`, and records a `connected_write` Finding with status
-`draft`, exactly like `record_finding`/`draft_section`. Give it either inline
-`content` (up to 4MB) or a `deliverable` slug that already has at least one
-drafted section — never both, never neither — and for a deliverable an
-optional `format` (`markdown`/`html`/`pdf`, default `markdown`) says how it
-will be rendered. The actual upload happens only when a human approves that
+`draft`, exactly like `record_finding`/`draft_section`. Give it exactly one
+source: inline `content` (up to 4MB), a `deliverable` slug that already has at
+least one drafted section (with an optional `format` of `markdown`/`html`/
+`pdf`, default `markdown`, saying how it will be rendered), or a `document_id`
+for a stored document attached to the run, uploaded as-is up to 25MB — a
+captured PDF or a workbook; the bytes uploaded are exactly the bytes approved
+(approval re-checks the file's SHA-256). `filename` may be a relative
+sub-folder path such as `runs/<run-id>/packages/<company>/<file>` (at most 6
+segments; missing folders are created) and defaults to the document's own
+name for a `document_id`. See
+[Connections](connections.md#what-a-run-can-propose-and-where-it-lands). The actual upload happens only when a human approves that
 finding (`POST /api/findings/{id}/approval`), and a failed upload is recorded
 on the finding rather than blocking the approval — retry it with `POST
 /api/findings/{id}/upload-retry`. Offering the tool at all additionally

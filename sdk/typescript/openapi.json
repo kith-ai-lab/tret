@@ -3549,6 +3549,48 @@
         ]
       }
     },
+    "/api/findings/{finding_id}/package-retry": {
+      "post": {
+        "description": "Re-run the packager for an approved `package_map` finding whose first\nattempt failed (source bytes changed and were restored, a timeout, a missing\nPoppler binary mid-deploy). Only a failed package is retried: a packaged one\nalready has Documents, and packages are evidence that is never overwritten.\nA \"running\" record blocks a retry until it is older than the packaging\ndeadline plus a minute (a crashed worker).",
+        "operationId": "retry_finding_package_api_findings__finding_id__package_retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "finding_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Finding Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Finding Package",
+        "tags": [
+          "findings"
+        ]
+      }
+    },
     "/api/findings/{finding_id}/upload-retry": {
       "post": {
         "description": "Re-run the upload behind an approved `connected_write` finding whose\nfirst attempt failed (a transient Graph error, a connection that has\nsince been reconnected) — or whose outcome was never recorded at all:\n`payload[\"upload\"]` is `None`/missing when the process died between the\napproval's status commit and `_upload_connected_write`'s own commit, and\nthat finding would otherwise be stuck forever, since nothing else ever\nretries it. Retry accepts either. Only a finding whose upload is known\nto have succeeded (`status == \"uploaded\"`) has nothing to retry.\n\nBecause `upload_connected_file` never overwrites (Graph's own `rename`\nconflict behaviour is create-only — see that module), retrying an\nupload that actually went through but was never recorded creates a\n*second*, renamed file rather than overwriting or deduplicating the\nfirst. There is no way to tell \"never ran\" apart from \"ran and the\nrecord was lost\" from here, so that duplicate is an accepted cost of\nrecovering an unobserved outcome, not a bug in this endpoint.",

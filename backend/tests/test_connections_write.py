@@ -1,7 +1,7 @@
 """Write-back to SharePoint/OneDrive (`services/connections.py`): the
 write-scope check (`connection_has_write_scopes`), the write-target
 allowlist (`list_write_targets`), filename validation
-(`safe_upload_filename`), and `upload_connected_file` itself — the
+(`safe_upload_filename`, `safe_upload_path`), and `upload_connected_file` itself — the
 tret-subfolder create-once/reuse behaviour, the small (`<=4MB`, single PUT)
 and large (`>4MB`, upload-session + chunked PUT) paths, every refusal, and
 the `ConnectionActivity` row each of those writes.
@@ -36,11 +36,13 @@ from tret.services.connections import (
     M365_WRITE_SCOPES,
     ConnectionUnavailable,
     ConnectionWriteError,
+    UploadConflictError,
     WriteTarget,
     clear_access_token_cache,
     connection_has_write_scopes,
     list_write_targets,
     safe_upload_filename,
+    safe_upload_path,
     upload_connected_file,
 )
 from tret.services.credentials import get_fernet
@@ -766,4 +768,531 @@ async def test_upload_never_overwrites_uses_rename_on_both_paths(configured_m365
     above; this test instead pins the *policy itself* so a future edit
     cannot flip either constant without a red test."""
     assert connections_module._UPLOAD_CHUNK_BYTES == 5 * 1024 * 1024
-    assert connections_module._UPLOAD_SIMPLE_MAX_BYTES == 4 * 1024 * 1024
+    assert connections_module._UPLOAD_SIMPLE_MAX_BYTES == 4_000_000
+    assert connections_module._UPLOAD_CHUNK_BYTES % (320 * 1024) == 0  # Graph's requirement
+
+
+# ── safe_upload_path: relative sub-folder paths ──────────────────────────────
+@pytest.mark.parametrize(
+    "path",
+    [
+        "report.csv",
+        "runs/2026-11-stage-i/packages/siemens/siemens.pdf",
+        "a/b/c/d/e/f.pdf",  # exactly 6 segments
+        "dir with spaces/file name.pdf",
+    ],
+)
+def test_safe_upload_path_accepts(path):
+    assert safe_upload_path(path) == path
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "",
+        "/runs/x.pdf",  # leading slash
+        "runs/x.pdf/",  # trailing slash
+        "runs//x.pdf",  # empty segment
+        "runs/../x.pdf",
+        "../x.pdf",
+        "runs/./x.pdf",
+        "a/b/c/d/e/f/g.pdf",  # 7 segments
+        "runs\\x.pdf",
+        "runs/ bad.pdf",  # per-segment rule: leading space
+        "runs/" + "a" * 201,  # per-segment rule: > 200 chars
+        ("d" * 79 + "/") * 5 + "x.pdf",  # 405 chars in total
+        "runs/100%.pdf",  # % (would double-encode)
+        "runs/%2e%2e/x.pdf",  # encoded traversal
+        "runs/file#1.pdf",  # # (fragment marker)
+        "\uff0e\uff0e/x.pdf",  # fullwidth '..' -> '..' under NFKC
+        "runs/\u2025/x.pdf",  # two-dot leader -> '..' under NFKC
+        "runs/\uff0e/x.pdf",  # fullwidth '.' -> '.' under NFKC
+        "runs/na\u202eme.pdf",  # U+202E right-to-left override (Cf)
+        "runs/zero\u200bwidth.pdf",  # U+200B (Cf)
+        "runs/x\uff0f..\uff0fy.pdf",  # fullwidth solidus -> '/' under NFKC
+        "runs/trailing\u3000",  # ideographic space -> trailing space under NFKC
+        "runs/trailing-dot.pdf.",
+    ],
+)
+def test_safe_upload_path_refuses(path):
+    with pytest.raises(ValueError):
+        safe_upload_path(path)
+
+
+def test_safe_upload_path_strips_control_characters_per_segment():
+    assert safe_upload_path("ru\x00ns/na\x01me.pdf") == "runs/name.pdf"
+
+
+# ── upload_connected_file: sub-folder paths ──────────────────────────────────
+TRET_FOLDER_LISTING = {"value": [{"id": "tret-folder-id", "name": "tret", "folder": {}}]}
+
+
+async def test_upload_small_multi_segment_path_uses_path_addressing(
+    configured_m365, session_factory, seed
+):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+
+    data = b"%PDF-1.7 small"
+    rel = "runs/2026-11-stage-i/packages/siemens ag/siemens (1).pdf"
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/folder-item-1/children").mock(
+            return_value=httpx.Response(200, json=TRET_FOLDER_LISTING)
+        )
+        put_route = mock.put(
+            f"{GRAPH}/drives/drive-1/items/tret-folder-id:/"
+            "runs/2026-11-stage-i/packages/siemens%20ag/siemens%20%281%29.pdf:/content"
+        ).mock(
+            return_value=httpx.Response(
+                201, json={"id": "item-5", "name": "siemens (1).pdf", "size": len(data)}
+            )
+        )
+        async with session_factory() as db:
+            result = await upload_connected_file(
+                db, workspace_id=workspace.id, target_slug="budget-folder",
+                filename=rel, data=data, content_type="application/pdf",
+            )
+            await db.commit()
+
+    request = put_route.calls[0].request
+    assert request.content == data
+    assert request.headers["content-type"] == "application/pdf"
+    # The never-overwrite rule still applies to the final file.
+    assert request.url.params["@microsoft.graph.conflictBehavior"] == "rename"
+    assert result.path == f"Finance/Budget/tret/{rel}"
+    assert result.name == "siemens (1).pdf"
+
+    rows = await _activity_rows(session_factory, workspace.id)
+    uploads = [r for r in rows if r.action == "upload"]
+    assert [r.target for r in uploads] == [f"budget-folder/tret/{rel}"]
+
+
+async def test_upload_refuses_an_unsafe_path_before_any_graph_call(
+    configured_m365, session_factory, seed
+):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+    with respx.mock(assert_all_called=False):  # no routes: any HTTP call fails
+        async with session_factory() as db:
+            with pytest.raises(ConnectionWriteError):
+                await upload_connected_file(
+                    db, workspace_id=workspace.id, target_slug="budget-folder",
+                    filename="runs/../../x.pdf", data=b"x", content_type="application/pdf",
+                )
+
+
+# ── upload_connected_file: the 4 MB boundary and chunked sessions ────────────
+async def test_exactly_the_simple_limit_uses_a_single_put(configured_m365, session_factory, seed):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+    data = b"x" * connections_module._UPLOAD_SIMPLE_MAX_BYTES  # 4,000,000
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/folder-item-1/children").mock(
+            return_value=httpx.Response(200, json=TRET_FOLDER_LISTING)
+        )
+        put_route = mock.put(f"{GRAPH}/drives/drive-1/items/tret-folder-id:/edge.bin:/content").mock(
+            return_value=httpx.Response(201, json={"id": "i1", "name": "edge.bin", "size": len(data)})
+        )
+        # no createUploadSession route: calling it would fail the test
+        async with session_factory() as db:
+            await upload_connected_file(
+                db, workspace_id=workspace.id, target_slug="budget-folder",
+                filename="edge.bin", data=data, content_type="application/octet-stream",
+            )
+            await db.commit()
+    assert put_route.call_count == 1
+
+
+async def test_one_byte_over_the_simple_limit_uses_an_upload_session_with_a_nested_path(
+    configured_m365, resolves_public, session_factory, seed
+):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+    total = connections_module._UPLOAD_SIMPLE_MAX_BYTES + 1
+    data = b"y" * total
+    upload_url = "https://contoso-uploads.example.test/session-nested"
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/folder-item-1/children").mock(
+            return_value=httpx.Response(200, json=TRET_FOLDER_LISTING)
+        )
+        session_route = mock.post(
+            f"{GRAPH}/drives/drive-1/items/tret-folder-id:/runs/r1/packages/acme/annual.xlsx:/createUploadSession"
+        ).mock(return_value=httpx.Response(200, json={"uploadUrl": upload_url}))
+        chunk_route = mock.put(upload_url).mock(
+            return_value=httpx.Response(201, json={"id": "i2", "name": "annual.xlsx", "size": total})
+        )
+        async with session_factory() as db:
+            result = await upload_connected_file(
+                db, workspace_id=workspace.id, target_slug="budget-folder",
+                filename="runs/r1/packages/acme/annual.xlsx", data=data,
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            await db.commit()
+    assert json.loads(session_route.calls[0].request.content) == {
+        "item": {"@microsoft.graph.conflictBehavior": "rename", "name": "annual.xlsx"}
+    }
+    assert chunk_route.call_count == 1  # 4,000,001 < one 5 MiB chunk
+    assert chunk_route.calls[0].request.headers["content-range"] == f"bytes 0-{total - 1}/{total}"
+    assert result.path == "Finance/Budget/tret/runs/r1/packages/acme/annual.xlsx"
+
+
+# ── upload_connected_file: rename reports the Graph-assigned name ────────────
+async def test_rename_on_a_nested_path_reports_the_name_graph_assigned(
+    configured_m365, session_factory, seed
+):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/folder-item-1/children").mock(
+            return_value=httpx.Response(200, json=TRET_FOLDER_LISTING)
+        )
+        mock.put(f"{GRAPH}/drives/drive-1/items/tret-folder-id:/runs/r1/siemens.pdf:/content").mock(
+            return_value=httpx.Response(
+                201, json={"id": "i9", "name": "siemens 1.pdf", "size": 3}
+            )
+        )
+        async with session_factory() as db:
+            result = await upload_connected_file(
+                db, workspace_id=workspace.id, target_slug="budget-folder",
+                filename="runs/r1/siemens.pdf", data=b"pdf", content_type="application/pdf",
+            )
+            await db.commit()
+    assert result.name == "siemens 1.pdf"
+    assert result.name != "siemens.pdf"  # not the requested basename
+    assert result.path == "Finance/Budget/tret/runs/r1/siemens 1.pdf"
+    rows = await _activity_rows(session_factory, workspace.id)
+    assert [r.target for r in rows if r.action == "upload"] == [
+        "budget-folder/tret/runs/r1/siemens 1.pdf"
+    ]
+
+
+# ── upload_connected_file: conflict="fail" ───────────────────────────────────
+async def test_conflict_fail_sends_fail_and_a_409_names_the_existing_path(
+    configured_m365, session_factory, seed
+):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/folder-item-1/children").mock(
+            return_value=httpx.Response(200, json=TRET_FOLDER_LISTING)
+        )
+        put_route = mock.put(f"{GRAPH}/drives/drive-1/items/tret-folder-id:/runs/r1/x.pdf:/content").mock(
+            return_value=httpx.Response(409, json={"error": {"code": "nameAlreadyExists"}})
+        )
+        async with session_factory() as db:
+            with pytest.raises(UploadConflictError) as excinfo:
+                await upload_connected_file(
+                    db, workspace_id=workspace.id, target_slug="budget-folder",
+                    filename="runs/r1/x.pdf", data=b"pdf", content_type="application/pdf",
+                    conflict="fail",
+                )
+            await db.commit()
+    assert put_route.calls[0].request.url.params["@microsoft.graph.conflictBehavior"] == "fail"
+    assert isinstance(excinfo.value, ConnectionWriteError)
+    assert "Finance/Budget/tret/runs/r1/x.pdf" in excinfo.value.reason
+    assert "already exists" in excinfo.value.reason
+    failed = [r for r in await _activity_rows(session_factory, workspace.id) if r.action == "upload_failed"]
+    assert len(failed) == 1 and failed[0].detail == excinfo.value.reason
+
+
+async def test_conflict_fail_success_path_returns_normally(configured_m365, session_factory, seed):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/folder-item-1/children").mock(
+            return_value=httpx.Response(200, json=TRET_FOLDER_LISTING)
+        )
+        mock.put(f"{GRAPH}/drives/drive-1/items/tret-folder-id:/x.pdf:/content").mock(
+            return_value=httpx.Response(201, json={"id": "i", "name": "x.pdf", "size": 3})
+        )
+        async with session_factory() as db:
+            result = await upload_connected_file(
+                db, workspace_id=workspace.id, target_slug="budget-folder",
+                filename="x.pdf", data=b"pdf", content_type="application/pdf", conflict="fail",
+            )
+            await db.commit()
+    assert result.name == "x.pdf"
+
+
+async def test_conflict_fail_on_the_large_path_sends_fail_in_the_session_and_409s(
+    configured_m365, session_factory, seed
+):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+    data = b"x" * (connections_module._UPLOAD_SIMPLE_MAX_BYTES + 1)
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/folder-item-1/children").mock(
+            return_value=httpx.Response(200, json=TRET_FOLDER_LISTING)
+        )
+        session_route = mock.post(
+            f"{GRAPH}/drives/drive-1/items/tret-folder-id:/runs/r1/big.pdf:/createUploadSession"
+        ).mock(return_value=httpx.Response(409, json={"error": {"code": "nameAlreadyExists"}}))
+        async with session_factory() as db:
+            with pytest.raises(UploadConflictError) as excinfo:
+                await upload_connected_file(
+                    db, workspace_id=workspace.id, target_slug="budget-folder",
+                    filename="runs/r1/big.pdf", data=data, content_type="application/pdf",
+                    conflict="fail",
+                )
+            await db.commit()
+    assert json.loads(session_route.calls[0].request.content)["item"][
+        "@microsoft.graph.conflictBehavior"
+    ] == "fail"
+    assert "Finance/Budget/tret/runs/r1/big.pdf" in excinfo.value.reason
+
+
+async def test_an_unknown_conflict_value_is_a_value_error(configured_m365, session_factory, seed):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+    async with session_factory() as db:
+        with pytest.raises(ValueError):
+            await upload_connected_file(
+                db, workspace_id=workspace.id, target_slug="budget-folder",
+                filename="x.pdf", data=b"x", content_type="application/pdf", conflict="replace",
+            )
+
+
+# ── large uploads: resume, backoff, abandon ──────────────────────────────────
+UPLOAD_URL = "https://contoso-uploads.example.test/session-resume"
+CHUNK = connections_module._UPLOAD_CHUNK_BYTES
+
+
+def _large_session(mock, filename="big.bin"):
+    mock_m365_refresh(mock)
+    mock.get(f"{GRAPH}/drives/drive-1/items/folder-item-1/children").mock(
+        return_value=httpx.Response(200, json=TRET_FOLDER_LISTING)
+    )
+    mock.post(f"{GRAPH}/drives/drive-1/items/tret-folder-id:/{filename}:/createUploadSession").mock(
+        return_value=httpx.Response(200, json={"uploadUrl": UPLOAD_URL})
+    )
+
+
+async def _upload_big(session_factory, workspace, total, filename="big.bin"):
+    async with session_factory() as db:
+        try:
+            return await upload_connected_file(
+                db, workspace_id=workspace.id, target_slug="budget-folder",
+                filename=filename, data=b"z" * total, content_type="application/octet-stream",
+            )
+        finally:
+            await db.commit()
+
+
+async def _large_workspace(seed):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+    return workspace
+
+
+def _item(total):
+    return httpx.Response(201, json={"id": "big-item", "name": "big.bin", "size": total})
+
+
+async def test_a_chunk_5xx_asks_the_session_where_it_is_and_resumes_from_there(
+    configured_m365, resolves_public, session_factory, seed
+):
+    workspace = await _large_workspace(seed)
+    total = 2 * CHUNK + 1024
+    with respx.mock(assert_all_called=True) as mock:
+        _large_session(mock)
+        route = mock.route(url=UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(202, json={}),  # chunk 1 ok
+                httpx.Response(503, json={"error": {"code": "serviceNotAvailable"}}),  # chunk 2
+                httpx.Response(200, json={"nextExpectedRanges": [f"{CHUNK}-"]}),  # GET status
+                httpx.Response(202, json={}),  # chunk 2 re-sent
+                _item(total),  # chunk 3
+            ]
+        )
+        result = await _upload_big(session_factory, workspace, total)
+    calls = [(c.request.method, c.request.headers.get("content-range")) for c in route.calls]
+    assert calls == [
+        ("PUT", f"bytes 0-{CHUNK - 1}/{total}"),
+        ("PUT", f"bytes {CHUNK}-{2 * CHUNK - 1}/{total}"),
+        ("GET", None),
+        ("PUT", f"bytes {CHUNK}-{2 * CHUNK - 1}/{total}"),
+        ("PUT", f"bytes {2 * CHUNK}-{total - 1}/{total}"),
+    ]
+    assert "authorization" not in {h.lower() for h in route.calls[2].request.headers}
+    assert result.item_id == "big-item"
+
+
+async def test_a_chunk_the_session_already_holds_is_not_resent(
+    configured_m365, resolves_public, session_factory, seed
+):
+    workspace = await _large_workspace(seed)
+    total = CHUNK + 1024
+    with respx.mock(assert_all_called=True) as mock:
+        _large_session(mock)
+        route = mock.route(url=UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(504),  # chunk 1: server got it, the reply was lost
+                httpx.Response(200, json={"nextExpectedRanges": [f"{CHUNK}-"]}),
+                _item(total),  # chunk 2 (final)
+            ]
+        )
+        result = await _upload_big(session_factory, workspace, total)
+    assert [c.request.method for c in route.calls] == ["PUT", "GET", "PUT"]
+    assert route.calls[2].request.headers["content-range"] == f"bytes {CHUNK}-{total - 1}/{total}"
+    assert result.item_id == "big-item"
+
+
+async def test_a_transport_error_on_a_chunk_also_resumes_via_the_session(
+    configured_m365, resolves_public, session_factory, seed
+):
+    workspace = await _large_workspace(seed)
+    total = CHUNK + 1024
+    with respx.mock(assert_all_called=True) as mock:
+        _large_session(mock)
+        route = mock.route(url=UPLOAD_URL).mock(
+            side_effect=[
+                httpx.ConnectError("reset"),
+                httpx.Response(200, json={"nextExpectedRanges": ["0-"]}),
+                httpx.Response(202, json={}),
+                _item(total),
+            ]
+        )
+        result = await _upload_big(session_factory, workspace, total)
+    assert [c.request.method for c in route.calls] == ["PUT", "GET", "PUT", "PUT"]
+    assert result.item_id == "big-item"
+
+
+async def test_a_416_on_a_non_final_chunk_means_graph_has_the_range(
+    configured_m365, resolves_public, session_factory, seed
+):
+    workspace = await _large_workspace(seed)
+    total = CHUNK + 1024
+    with respx.mock(assert_all_called=True) as mock:
+        _large_session(mock)
+        route = mock.route(url=UPLOAD_URL).mock(
+            side_effect=[httpx.Response(416, json={"error": {"code": "invalidRange"}}), _item(total)]
+        )
+        result = await _upload_big(session_factory, workspace, total)
+    assert route.call_count == 2
+    assert result.item_id == "big-item"
+
+
+async def test_429_honours_retry_after_once_capped_at_30_seconds(
+    configured_m365, resolves_public, session_factory, seed, monkeypatch
+):
+    slept: list[float] = []
+
+    async def _sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(connections_module.asyncio, "sleep", _sleep)
+    workspace = await _large_workspace(seed)
+    total = CHUNK + 1024
+    with respx.mock(assert_all_called=True) as mock:
+        _large_session(mock)
+        route = mock.route(url=UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(429, headers={"Retry-After": "120"}),
+                httpx.Response(202, json={}),
+                _item(total),
+            ]
+        )
+        result = await _upload_big(session_factory, workspace, total)
+    assert slept == [30.0]
+    assert [c.request.method for c in route.calls] == ["PUT", "PUT", "PUT"]  # no GET for a 429
+    assert result.item_id == "big-item"
+
+
+async def test_an_abandoned_upload_deletes_the_session(
+    configured_m365, resolves_public, session_factory, seed
+):
+    workspace = await _large_workspace(seed)
+    total = CHUNK + 1024
+    with respx.mock(assert_all_called=True) as mock:
+        _large_session(mock)
+        route = mock.route(url=UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(502, json={"error": {"code": "badGateway"}}),
+                httpx.Response(200, json={"nextExpectedRanges": ["0-"]}),
+                httpx.Response(502, json={"error": {"code": "badGateway"}}),  # the one retry
+                httpx.Response(204),  # DELETE
+            ]
+        )
+        with pytest.raises(ConnectionWriteError) as excinfo:
+            await _upload_big(session_factory, workspace, total)
+    assert [c.request.method for c in route.calls] == ["PUT", "GET", "PUT", "DELETE"]
+    assert "502" in excinfo.value.reason
+
+
+async def test_a_hard_4xx_on_a_chunk_also_deletes_the_session_without_retrying(
+    configured_m365, resolves_public, session_factory, seed
+):
+    workspace = await _large_workspace(seed)
+    with respx.mock(assert_all_called=True) as mock:
+        _large_session(mock)
+        route = mock.route(url=UPLOAD_URL).mock(
+            side_effect=[httpx.Response(400, json={"error": {"code": "invalidRequest"}}), httpx.Response(204)]
+        )
+        with pytest.raises(ConnectionWriteError):
+            await _upload_big(session_factory, workspace, CHUNK + 1024)
+    assert [c.request.method for c in route.calls] == ["PUT", "DELETE"]
+
+
+async def test_a_failed_delete_does_not_mask_the_real_error(
+    configured_m365, resolves_public, session_factory, seed
+):
+    workspace = await _large_workspace(seed)
+    with respx.mock(assert_all_called=True) as mock:
+        _large_session(mock)
+        mock.route(url=UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(400, json={"error": {"code": "invalidRequest"}}),
+                httpx.ConnectError("gone"),
+            ]
+        )
+        with pytest.raises(ConnectionWriteError) as excinfo:
+            await _upload_big(session_factory, workspace, CHUNK + 1024)
+    assert "400" in excinfo.value.reason
+
+
+async def test_final_chunk_504_with_a_vanished_session_is_reported_as_unknown_not_success(
+    configured_m365, resolves_public, session_factory, seed
+):
+    """Known limitation: after a final-chunk failure the session answering 404
+    is ambiguous (completed vs expired) and cannot return the driveItem, and
+    under `rename` the item's final name is unknowable — so this is neither
+    claimed as success nor retried into a duplicate. No DELETE is sent."""
+    workspace = await _large_workspace(seed)
+    total = CHUNK + 1024
+    with respx.mock(assert_all_called=True) as mock:
+        _large_session(mock)
+        route = mock.route(url=UPLOAD_URL).mock(
+            side_effect=[httpx.Response(202, json={}), httpx.Response(504), httpx.Response(404)]
+        )
+        with pytest.raises(ConnectionWriteError) as excinfo:
+            await _upload_big(session_factory, workspace, total)
+    assert [c.request.method for c in route.calls] == ["PUT", "PUT", "GET"]
+    assert "unknown whether the file was created" in excinfo.value.reason
+
+
+async def test_final_chunk_416_after_a_5xx_is_reported_as_unknown_not_success(
+    configured_m365, resolves_public, session_factory, seed
+):
+    workspace = await _large_workspace(seed)
+    total = CHUNK + 1024
+    with respx.mock(assert_all_called=True) as mock:
+        _large_session(mock)
+        route = mock.route(url=UPLOAD_URL).mock(
+            side_effect=[
+                httpx.Response(202, json={}),
+                httpx.Response(504),
+                httpx.Response(200, json={"nextExpectedRanges": [f"{CHUNK}-"]}),
+                httpx.Response(416),
+            ]
+        )
+        with pytest.raises(ConnectionWriteError) as excinfo:
+            await _upload_big(session_factory, workspace, total)
+    assert [c.request.method for c in route.calls] == ["PUT", "PUT", "GET", "PUT"]
+    assert "Check the target folder" in excinfo.value.reason

@@ -2,7 +2,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 
-import { api, ApiError, type ConnectedWritePayload, type FindingDetail } from '../api/client'
+import {
+  api,
+  ApiError,
+  type ConnectedWriteDocumentSource,
+  type ConnectedWritePayload,
+  type Finding,
+  type FindingDetail,
+  type PackageMapPayload,
+  type PackageResult,
+} from '../api/client'
 import { VerdictCard } from '../components/findings/VerdictCard'
 import { ApproveAllSections } from '../components/shared/ApproveAllSections'
 import { formatDateTime } from '../components/shared/format'
@@ -100,7 +109,7 @@ export function Approvals() {
               key={f.id}
               active={f.id === selectedId}
               onClick={() => setSelectedId(f.id)}
-              title={f.schema_slug}
+              title={listTitle(f)}
               sub={`${subjectLine(f.subject)} · ${f.created_at ? formatDateTime(f.created_at) : ''}`}
             />
           ))}
@@ -109,6 +118,15 @@ export function Approvals() {
       )}
     </div>
   )
+}
+
+/** The list row's title: the schema slug, except a package_map, which reads
+ *  better as "Package map · <document title>". */
+function listTitle(f: Finding): string {
+  if (f.schema_slug === 'package_map' && typeof f.subject.title === 'string' && f.subject.title) {
+    return `Package map · ${f.subject.title}`
+  }
+  return f.schema_slug
 }
 
 function subjectLine(subject: Record<string, unknown>): string {
@@ -169,6 +187,8 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
 
       {f.schema_slug === 'connected_write' ? (
         <ConnectedWriteBlock finding={f} />
+      ) : f.schema_slug === 'package_map' ? (
+        <PackageMapBlock finding={f} />
       ) : (
         <div>
           <div className="mono-label" style={{ marginBottom: 6 }}>
@@ -305,6 +325,78 @@ function formatBytes(bytes: number): string {
 
 const PREVIEW_CHAR_LIMIT = 4000
 
+const PROVENANCE_LABELS: Record<string, string> = {
+  web_capture: 'web capture',
+  web: 'web fetch',
+}
+
+/** The `document` write source: the stored file uploaded exactly as it is, so
+ *  what an approver needs is identity, not a text preview — original name,
+ *  type, size, the SHA-256 the upload is pinned to, and where the bytes came
+ *  from. The hash is shown short; clicking copies the full value. */
+function DocumentSourceDetails({
+  source,
+  destinationPath,
+}: {
+  source: ConnectedWriteDocumentSource
+  destinationPath: string
+}) {
+  const [copied, setCopied] = useState(false)
+  const copyHash = () => {
+    navigator.clipboard
+      ?.writeText(source.sha256)
+      .then(() => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1500)
+      })
+      .catch(() => undefined)
+  }
+  const provenance = source.provenance
+    ? (PROVENANCE_LABELS[source.provenance] ?? source.provenance)
+    : null
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="mono-body">Stored document uploaded as-is (the bytes approved are the bytes written)</div>
+      <div className="row" style={{ gap: 24, flexWrap: 'wrap' }}>
+        <div>
+          <div className="mono-label">Original file</div>
+          <div className="mono-body">{source.filename}</div>
+        </div>
+        <div>
+          <div className="mono-label">Type</div>
+          <div className="mono-body">{source.content_type}</div>
+        </div>
+        <div>
+          <div className="mono-label">Size</div>
+          <div className="mono-body">{formatBytes(source.byte_size)}</div>
+        </div>
+        <div>
+          <div className="mono-label">SHA-256</div>
+          <button
+            type="button"
+            className="mono-body"
+            title={`${source.sha256} — click to copy`}
+            onClick={copyHash}
+            style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', color: 'inherit' }}
+          >
+            {source.sha256.slice(0, 12)}…{copied ? ' copied' : ''}
+          </button>
+        </div>
+        {provenance && (
+          <div>
+            <div className="mono-label">Provenance</div>
+            <div className="mono-body">{provenance}</div>
+          </div>
+        )}
+      </div>
+      <div>
+        <div className="mono-label">Path under tret/</div>
+        <div className="mono-body">{destinationPath}</div>
+      </div>
+    </div>
+  )
+}
+
 /** Dedicated payload rendering for `schema_slug: "connected_write"` findings
  *  — destination, content type/size, a source preview (inline content or a
  *  deliverable reference), and — once a decision has been made — the upload
@@ -345,21 +437,24 @@ function ConnectedWriteBlock({ finding }: { finding: FindingDetail }) {
         </div>
       </div>
 
-      <div className="row" style={{ gap: 24, flexWrap: 'wrap' }}>
-        <div>
-          <div className="mono-label">Content type</div>
-          <div className="mono-body">{payload.content_type}</div>
-        </div>
-        {/* null for a deliverable-sourced proposal — rendered fresh at
-            approval, so there is nothing fixed to size yet. Omit the row
-            rather than print "null B". */}
-        {payload.size !== null && (
+      {/* A document source shows its own type/size in the Source block. */}
+      {payload.source.kind !== 'document' && (
+        <div className="row" style={{ gap: 24, flexWrap: 'wrap' }}>
           <div>
-            <div className="mono-label">Size</div>
-            <div className="mono-body">{formatBytes(payload.size)}</div>
+            <div className="mono-label">Content type</div>
+            <div className="mono-body">{payload.content_type}</div>
           </div>
-        )}
-      </div>
+          {/* null for a deliverable-sourced proposal — rendered fresh at
+              approval, so there is nothing fixed to size yet. Omit the row
+              rather than print "null B". */}
+          {payload.size !== null && (
+            <div>
+              <div className="mono-label">Size</div>
+              <div className="mono-body">{formatBytes(payload.size)}</div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div>
         <div className="mono-label" style={{ marginBottom: 6 }}>
@@ -369,6 +464,8 @@ function ConnectedWriteBlock({ finding }: { finding: FindingDetail }) {
           <div className="mono-body">
             Deliverable {payload.source.slug} exported as {payload.source.format}
           </div>
+        ) : payload.source.kind === 'document' ? (
+          <DocumentSourceDetails source={payload.source} destinationPath={payload.filename} />
         ) : (
           <>
             <pre className="code-block" style={{ maxHeight: 240 }}>
@@ -420,6 +517,386 @@ function ConnectedWriteBlock({ finding }: { finding: FindingDetail }) {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      <div>
+        <button type="button" className="btn btn-sm" onClick={() => setShowRaw((s) => !s)}>
+          {showRaw ? 'Hide raw' : 'Raw'}
+        </button>
+        {showRaw && (
+          <pre className="code-block" style={{ maxHeight: 320, marginTop: 8 }}>
+            {JSON.stringify(finding.payload, null, 2)}
+          </pre>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** A SHA-256 shown short; clicking copies the full value. */
+function CopyHash({ sha256 }: { sha256: string }) {
+  const [copied, setCopied] = useState(false)
+  const copyHash = () => {
+    navigator.clipboard
+      ?.writeText(sha256)
+      .then(() => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1500)
+      })
+      .catch(() => undefined)
+  }
+  return (
+    <button
+      type="button"
+      className="mono-body"
+      title={`${sha256} — click to copy`}
+      onClick={copyHash}
+      style={{ background: 'none', border: 0, padding: 0, cursor: 'pointer', color: 'inherit' }}
+    >
+      {sha256.slice(0, 12)}…{copied ? ' copied' : ''}
+    </button>
+  )
+}
+
+/** "28–143" for a range, "5" for a one-page range (inclusive, 1-based). */
+function rangeText([first, last]: [number, number]): string {
+  return first === last ? `${first}` : `${first}–${last}`
+}
+
+function pageCount(n: number): string {
+  return `${n} ${n === 1 ? 'page' : 'pages'}`
+}
+
+/** The page selection as one human sentence, e.g. "Pages 28–143, 314–315 ·
+ *  118 of 339 physical pages" or "Whole original · 66 pages". */
+function selectionText(payload: PackageMapPayload): string {
+  const total = payload.source.page_count
+  if (payload.full_original || !payload.map.keep_ranges) {
+    const n = total ?? payload.selected_page_count
+    return `Whole original · ${pageCount(n)}`
+  }
+  const ranges = payload.map.keep_ranges
+  const label = ranges.length === 1 && ranges[0][0] === ranges[0][1] ? 'Page' : 'Pages'
+  const kept =
+    total !== null && total !== undefined
+      ? `${payload.selected_page_count} of ${total} physical pages`
+      : pageCount(payload.selected_page_count)
+  return `${label} ${ranges.map(rangeText).join(', ')} · ${kept}`
+}
+
+/** What the packaging step produced, shown once a package_map is approved:
+ *  status, retained pages, how text was extracted, the documents written, and
+ *  — on failure — the error with a retry. */
+function PackageResultBlock({
+  findingId,
+  result,
+}: {
+  findingId: string
+  /** null: the finding is approved but no packaging outcome was ever recorded. */
+  result: PackageResult | null
+}) {
+  const queryClient = useQueryClient()
+  const retryMutation = useMutation({
+    mutationFn: () => api.retryFindingPackage(findingId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['finding', findingId] })
+      queryClient.invalidateQueries({ queryKey: ['findings'] })
+    },
+  })
+  const retryError = retryMutation.error as ApiError | null
+
+  if (result === null) {
+    return (
+      <div className="stack" style={{ gap: 8 }}>
+        <div className="error-text">Packaging not recorded</div>
+        <div className="fine-print">
+          This map was approved, but no packaging result was saved (the server may have restarted).
+        </div>
+        <div>
+          <button
+            type="button"
+            className="btn btn-sm"
+            disabled={retryMutation.isPending}
+            onClick={() => retryMutation.mutate()}
+          >
+            {retryMutation.isPending ? 'Retrying…' : 'Retry packaging'}
+          </button>
+        </div>
+        {retryError && (
+          <div className="error-text">
+            {retryError.status === 403 ? 'Requires approver role.' : retryError.message}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  if (result.status === 'running') {
+    return (
+      <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+        <StatusBadge status="running" />
+        {result.started_at && (
+          <span className="fine-print">Started {formatDateTime(result.started_at)}</span>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+        <StatusBadge status={result.status} />
+        {result.packaged_at && (
+          <span className="fine-print">{formatDateTime(result.packaged_at)}</span>
+        )}
+      </div>
+
+      {result.status === 'failed' && (
+        <div className="stack" style={{ gap: 8 }}>
+          <div className="error-text">{result.error ?? 'Packaging failed.'}</div>
+          <div>
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={retryMutation.isPending}
+              onClick={() => retryMutation.mutate()}
+            >
+              {retryMutation.isPending ? 'Retrying…' : 'Retry packaging'}
+            </button>
+          </div>
+          {retryError && (
+            <div className="error-text">
+              {retryError.status === 403 ? 'Requires approver role.' : retryError.message}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="row" style={{ gap: 24, flexWrap: 'wrap' }}>
+        {result.retained_page_count !== null && (
+          <div>
+            <div className="mono-label">Retained pages</div>
+            <div className="mono-body">
+              {result.retained_page_count}
+              {result.source_page_count !== null && ` of ${result.source_page_count}`}
+            </div>
+          </div>
+        )}
+        {result.text_mode && (
+          <div>
+            <div className="mono-label">Text extraction</div>
+            <div className="mono-body">
+              {result.text_mode}
+              {result.text_mode === 'pdftotext' && result.poppler_version
+                ? ` (Poppler ${result.poppler_version})`
+                : ''}
+            </div>
+          </div>
+        )}
+        {result.wall_seconds !== null && (
+          <div>
+            <div className="mono-label">Wall time</div>
+            <div className="mono-body">{result.wall_seconds.toFixed(1)} s</div>
+          </div>
+        )}
+        {result.parser_warning_count !== null && (
+          <div>
+            <div className="mono-label">Parser warnings</div>
+            <div className="mono-body">{result.parser_warning_count}</div>
+          </div>
+        )}
+        {result.retained_sha256 && (
+          <div>
+            <div className="mono-label">Retained SHA-256</div>
+            <CopyHash sha256={result.retained_sha256} />
+          </div>
+        )}
+      </div>
+
+      {result.documents.length > 0 && (
+        <div>
+          <div className="mono-label" style={{ marginBottom: 4 }}>
+            Produced documents
+          </div>
+          <table className="mono-table">
+            <thead>
+              <tr>
+                <th>Role</th>
+                <th>File</th>
+                <th>SHA-256</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.documents.map((d) => (
+                <tr key={d.document_id}>
+                  <td>{d.role}</td>
+                  <td title={d.document_id}>{d.filename}</td>
+                  <td>
+                    <CopyHash sha256={d.sha256} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {result.limitations.length > 0 && (
+        <div>
+          <div className="mono-label" style={{ marginBottom: 4 }}>
+            Limitations
+          </div>
+          <ul className="fine-print" style={{ margin: 0, paddingLeft: 18 }}>
+            {result.limitations.map((l, i) => (
+              <li key={i}>{l}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Dedicated payload rendering for `schema_slug: "package_map"` findings: the
+ *  proposed page selection over one captured source PDF — what is kept, what
+ *  was pulled in from cited components, what was dropped and why — for a human
+ *  to approve, then the packaging result after approval. The raw payload stays
+ *  behind a toggle. */
+function PackageMapBlock({ finding }: { finding: FindingDetail }) {
+  const [showRaw, setShowRaw] = useState(false)
+  const payload = finding.payload as unknown as PackageMapPayload
+  const { source, map } = payload
+  const incorporations = map.incorporations ?? []
+  const exclusions = map.exclusions ?? []
+  const provenance = source.provenance
+    ? (PROVENANCE_LABELS[source.provenance] ?? source.provenance)
+    : null
+
+  return (
+    <div className="stack" style={{ gap: 14 }}>
+      <div>
+        <div className="mono-label" style={{ marginBottom: 4 }}>
+          Proposed package
+        </div>
+        <div className="mono-body">{map.title}</div>
+        <div className="row" style={{ gap: 24, flexWrap: 'wrap', marginTop: 6 }}>
+          <div>
+            <div className="mono-label">Role</div>
+            <div className="mono-body">{map.role}</div>
+          </div>
+          <div>
+            <div className="mono-label">Scope</div>
+            <div className="mono-body">{map.scope}</div>
+          </div>
+          <div>
+            <div className="mono-label">Selection</div>
+            <div className="mono-body">{selectionText(payload)}</div>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div className="mono-label" style={{ marginBottom: 6 }}>
+          Source document
+        </div>
+        <div className="row" style={{ gap: 24, flexWrap: 'wrap' }}>
+          <div>
+            <div className="mono-label">Original file</div>
+            <div className="mono-body">{source.filename}</div>
+          </div>
+          {source.page_count !== null && (
+            <div>
+              <div className="mono-label">Pages</div>
+              <div className="mono-body">{source.page_count}</div>
+            </div>
+          )}
+          <div>
+            <div className="mono-label">SHA-256</div>
+            <CopyHash sha256={source.sha256} />
+          </div>
+          {provenance && (
+            <div>
+              <div className="mono-label">Provenance</div>
+              <div className="mono-body">{provenance}</div>
+            </div>
+          )}
+        </div>
+        {source.url && (
+          <div className="fine-print" style={{ marginTop: 4, overflowWrap: 'anywhere' }}>
+            {/^https?:\/\//i.test(source.url) ? (
+              <a href={source.url} target="_blank" rel="noopener noreferrer">
+                {source.url}
+              </a>
+            ) : (
+              source.url
+            )}
+          </div>
+        )}
+      </div>
+
+      {incorporations.length > 0 && (
+        <div>
+          <div className="mono-label" style={{ marginBottom: 4 }}>
+            Incorporated by reference ({incorporations.length})
+          </div>
+          <table className="mono-table">
+            <thead>
+              <tr>
+                <th>Cited on page</th>
+                <th>Component</th>
+                <th>Resolved pages</th>
+                <th>Status</th>
+                <th>Note</th>
+              </tr>
+            </thead>
+            <tbody>
+              {incorporations.map((inc, i) => (
+                <tr key={i}>
+                  <td>{inc.originating_page}</td>
+                  <td>{inc.cited_component}</td>
+                  <td>{inc.resolved_range ? rangeText(inc.resolved_range) : '—'}</td>
+                  <td>{inc.status}</td>
+                  <td>{inc.note ?? '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {exclusions.length > 0 && (
+        <div>
+          <div className="mono-label" style={{ marginBottom: 4 }}>
+            Excluded ({exclusions.length})
+          </div>
+          <ul className="mono-body" style={{ margin: 0, paddingLeft: 18 }}>
+            {exclusions.map((x, i) => (
+              <li key={i}>
+                Pages {rangeText(x.range)} — {x.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {map.review_note && (
+        <div>
+          <div className="mono-label" style={{ marginBottom: 4 }}>
+            Review note
+          </div>
+          <div className="mono-body" style={{ whiteSpace: 'pre-wrap' }}>
+            {map.review_note}
+          </div>
+        </div>
+      )}
+
+      {(payload.package || finding.status === 'approved') && (
+        <div>
+          <div className="mono-label" style={{ marginBottom: 6 }}>
+            Package result
+          </div>
+          <PackageResultBlock findingId={finding.id} result={payload.package} />
         </div>
       )}
 

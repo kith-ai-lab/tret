@@ -35,6 +35,7 @@ from tret.config import get_settings
 from tret.db.models import Harness, Project, User, Workspace, WorkspaceMember
 from tret.engine.delegation import SUBAGENT_ALLOWED_TOOLS, SUBAGENT_TASK_PROFILE
 from tret.engine.extensions import GateResult, get_extension_registry
+from tret.net.policy import CLASS_RESEARCH, MODE_OFF, effective_mode
 from tret.packs.links import link_all_workspace_packs
 from tret.packs.loader import PackValidationError, install_pack
 from tret.services.budgets import BudgetSettings
@@ -177,6 +178,7 @@ async def seed_workspace_content(db: AsyncSession, workspace_id, project_id) -> 
     await seed_chat_harness(db, workspace_id)
     await _seed_default_harnesses(db, workspace_id)
     await seed_subagent_harness(db, workspace_id)
+    await ensure_collection_harness(db, workspace_id)
 
 
 async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) -> None:
@@ -327,6 +329,88 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
     await db.flush()  # populate new_chat_harness.id for the pack links below
     await link_all_workspace_packs(db, new_chat_harness)
     new_chat_harness.packs_linked_at = datetime.now(timezone.utc)
+
+
+COLLECTION_HARNESS_NAME = "Disclosure Collector"
+
+# The Disclosure Collector's full tool list, in the order they are seeded.
+# It is the one seeded harness that lists the web tools: the chat front door
+# deliberately never does (it answers from what is already in the workspace),
+# so collecting public disclosures lives on a harness of its own.
+COLLECTION_HARNESS_TOOLS = [
+    "web_search",
+    "fetch_url",
+    "capture_source",
+    "read_document",
+    "search_documents",
+    "propose_package_map",
+    "list_connected_sources",
+    "search_connected_files",
+    "read_connected_file",
+    "propose_connected_write",
+    "list_prior_findings",
+    "delegate_parallel",
+    "spawn_subagent",
+    "run_harness_task",
+    "file_data_request",
+]
+
+
+async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
+    """Seed the "Disclosure Collector" harness: the web-capable, human-gated
+    harness for collecting public sustainability disclosures with provenance.
+
+    `task_profile` is "freeform", deliberately not "chat". "chat" is the
+    reserved front-door profile: `api/harnesses.py` refuses to create or
+    switch to it, and `seed_chat_harness`, `api/chat.py::create_conversation`,
+    `packs/links.py::chat_harness_for_workspace` and the Chat view's default
+    all resolve "the first non-archived `task_profile == 'chat'` harness" — a
+    second chat-profile harness would be a hazard, not a feature. It is also
+    unnecessary: the Chat view's harness dropdown lists every harness in the
+    workspace and `create_conversation` accepts any non-archived `harness_id`
+    (a chat turn is a run with `task_type == "chat"` on whichever harness the
+    conversation names), so a user converses with this one by picking
+    "harness: Disclosure Collector" on a new chat. As a freeform harness it is
+    also runnable from the Workbench / `POST /api/runs`.
+
+    Created only while the research egress class is not off at seed time: a
+    deployment with research off never gets a harness whose purpose is web
+    collection. Looked up by name (as `_seed_default_harnesses` does), so the
+    chat selection is untouched whether or not it exists. An existing harness
+    is backfilled with any listed tool it lacks, regardless of the egress
+    mode, by the same convention as `seed_chat_harness`: every missing tool
+    is re-added unconditionally (the `missing_connector_tools` pattern, one
+    membership check per tool). There is no per-tool marker, so a tool an
+    operator removed from the seeded harness reappears at the next boot;
+    archiving the harness is how to turn it off.
+    """
+    existing = (
+        await db.execute(
+            select(Harness)
+            .where(Harness.workspace_id == workspace_id, Harness.name == COLLECTION_HARNESS_NAME)
+            .order_by(Harness.created_at)
+        )
+    ).scalars().first()
+    if existing is not None:
+        missing = [n for n in COLLECTION_HARNESS_TOOLS if n not in (existing.tool_names or [])]
+        if missing:
+            existing.tool_names = [*(existing.tool_names or []), *missing]
+        return
+    if effective_mode(CLASS_RESEARCH) == MODE_OFF:
+        return
+    db.add(
+        Harness(
+            workspace_id=workspace_id,
+            name=COLLECTION_HARNESS_NAME,
+            description="Collects public sustainability disclosures with provenance: "
+            "searches, captures originals, proposes page boundaries for human review, and "
+            "writes approved packages back to connected storage.",
+            task_profile="freeform",
+            model_policy={"mode": "auto", "max_cost_tier": "standard"},
+            tool_names=list(COLLECTION_HARNESS_TOOLS),
+            loop_config={"max_iterations": 24, "max_output_tokens": 4096, "temperature": 0.3},
+        )
+    )
 
 
 async def _seed_default_harnesses(db: AsyncSession, workspace_id) -> None:
