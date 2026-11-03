@@ -12,6 +12,9 @@ formats (`.xls`/`.ppt`/`.doc`) are still unsupported.
 from __future__ import annotations
 
 import io
+import re
+import shutil
+import subprocess
 import time
 import zipfile
 
@@ -261,6 +264,174 @@ def test_pdf_pages_get_page_markers_in_document_order():
     assert text.index("First page body text") < text.index("## Page 2")
     assert text.index("## Page 2") < text.index("Second page body text")
     assert meta["pages"] == 2
+
+
+HAS_POPPLER = shutil.which("pdftotext") is not None
+needs_poppler = pytest.mark.skipif(not HAS_POPPLER, reason="pdftotext (Poppler) not installed")
+
+
+def _page_structure(text: str) -> list[tuple[str, str]]:
+    """[(heading, whitespace-normalised body)] per `## Page N` block."""
+    blocks = re.split(r"(?m)^## (Page \d+)\n", text)
+    return [(blocks[i], " ".join(blocks[i + 1].split())) for i in range(1, len(blocks), 2)]
+
+
+@needs_poppler
+def test_pdf_uses_pdftotext_when_available_and_says_so():
+    text, meta = extract_text("filing.pdf", make_two_page_pdf_bytes())
+
+    assert meta == {"pages": 2, "text_extractor": "pdftotext"}
+    assert text.startswith("## Page 1\n")
+    assert "\n\n## Page 2\n" in text
+    assert "\f" not in text
+
+
+@needs_poppler
+def test_pdftotext_and_pypdf_paths_have_the_same_page_structure(monkeypatch):
+    data = make_two_page_pdf_bytes()
+    via_poppler, poppler_meta = extract_text("filing.pdf", data)
+    monkeypatch.setattr(documents_service.shutil, "which", lambda name, *a, **k: None)
+    via_pypdf, pypdf_meta = extract_text("filing.pdf", data)
+
+    assert poppler_meta["text_extractor"] == "pdftotext" and pypdf_meta["text_extractor"] == "pypdf"
+    assert poppler_meta["pages"] == pypdf_meta["pages"] == 2
+    assert _page_structure(via_poppler) == _page_structure(via_pypdf)
+
+
+def test_pdf_falls_back_to_pypdf_without_poppler(monkeypatch):
+    monkeypatch.setattr(documents_service.shutil, "which", lambda name, *a, **k: None)
+    text, meta = extract_text("filing.pdf", make_two_page_pdf_bytes())
+
+    assert meta == {"pages": 2, "text_extractor": "pypdf"}
+    assert "First page body text about the annual filing." in text
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "oserror"])
+def test_pdf_falls_back_to_pypdf_when_pdftotext_fails(monkeypatch, failure):
+    monkeypatch.setattr(documents_service.shutil, "which", lambda name, *a, **k: "/fake/pdftotext")
+
+    def run(cmd, **kw):
+        if failure == "oserror":
+            raise OSError("exec format error")
+        return subprocess.CompletedProcess(cmd, 1, b"", b"Syntax Error")
+
+    monkeypatch.setattr(documents_service.subprocess, "run", run)
+    text, meta = extract_text("filing.pdf", make_two_page_pdf_bytes())
+
+    assert meta == {"pages": 2, "text_extractor": "pypdf"}
+    assert "Second page body text about the same filing." in text
+
+
+@needs_poppler
+def test_pdftotext_runs_with_a_path_only_environment_and_a_bounded_timeout(monkeypatch):
+    monkeypatch.setenv("SOME_API_KEY", "do-not-leak")
+    real_run = subprocess.run
+    seen: dict = {}
+
+    def spy(cmd, **kw):
+        seen.update(cmd=cmd, **kw)
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(documents_service.subprocess, "run", spy)
+    extract_text("filing.pdf", make_two_page_pdf_bytes())
+
+    assert set(seen["env"]) == {"PATH"}
+    assert seen["timeout"] == documents_service.PDFTOTEXT_TIMEOUT_SECONDS == 120.0
+    assert seen["cmd"][1:4] == ["-layout", "-enc", "UTF-8"] and seen["cmd"][-1] == "-"
+
+
+def _fake_pdftotext(monkeypatch, run):
+    monkeypatch.setattr(documents_service.shutil, "which", lambda name, *a, **k: "/fake/pdftotext")
+    monkeypatch.setattr(documents_service.subprocess, "run", run)
+
+
+def _no_pypdf_reader(monkeypatch):
+    """Any attempt to open the PDF with pypdf fails the test."""
+    import pypdf
+
+    def boom(*a, **k):
+        raise AssertionError("pypdf must not be used")
+
+    monkeypatch.setattr(pypdf, "PdfReader", boom)
+
+
+def test_a_pdftotext_timeout_is_recorded_and_pypdf_is_not_tried(monkeypatch):
+    def run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    _fake_pdftotext(monkeypatch, run)
+    _no_pypdf_reader(monkeypatch)
+    text, meta = extract_text("filing.pdf", make_two_page_pdf_bytes())
+
+    assert text == ""
+    assert meta == {"text_extractor": "pdftotext", "error": "pdftotext timed out after 120s"}
+
+
+def test_the_pdftotext_budget_never_exceeds_the_callers_bound(monkeypatch):
+    seen: list[float] = []
+
+    def run(cmd, **kw):
+        seen.append(kw["timeout"])
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    _fake_pdftotext(monkeypatch, run)
+    data = make_two_page_pdf_bytes()
+    extract_text("a.pdf", data)  # no bound: the 120 s default
+    extract_text("a.pdf", data, budget_seconds=5)
+    extract_text("a.pdf", data, budget_seconds=500)  # never longer than the default either
+    with documents_service.pdf_budget(30):
+        extract_text("a.pdf", data)
+        extract_text("a.pdf", data, budget_seconds=9)  # an explicit bound wins over the context
+
+    assert seen == [120.0, 5, 120.0, 30, 9]
+
+
+async def test_extract_bounded_passes_its_own_timeout_to_pdftotext(monkeypatch):
+    seen: list[float] = []
+
+    def run(cmd, **kw):
+        seen.append(kw["timeout"])
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    _fake_pdftotext(monkeypatch, run)
+    _no_pypdf_reader(monkeypatch)
+    monkeypatch.setattr(documents_service, "EXTRACTION_TIMEOUT_SECONDS", 7.0)
+    text, meta, status = await documents_service.extract_bounded("filing.pdf", make_two_page_pdf_bytes())
+
+    assert seen == [7.0]
+    assert (text, status) == ("", "failed")
+    assert meta["text_extractor"] == "pdftotext" and "timed out" in meta["error"]
+
+
+def test_a_stray_form_feed_cannot_shift_page_numbers(monkeypatch):
+    # Three segments for a two-page PDF: one page's text contained a form feed.
+    def run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, b"first\n\fsecond half\fsecond rest\n\f", b"")
+
+    _fake_pdftotext(monkeypatch, run)
+    text, meta = extract_text("filing.pdf", make_two_page_pdf_bytes())
+
+    assert meta == {"pages": 2, "text_extractor": "pypdf"}
+    assert "First page body text about the annual filing." in text
+    assert "second half" not in text
+
+
+def test_a_matching_segment_count_is_trusted(monkeypatch):
+    def run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, b"one\n\ftwo\n\f", b"")
+
+    _fake_pdftotext(monkeypatch, run)
+    result = extract_text("filing.pdf", make_two_page_pdf_bytes())
+
+    assert result == ("## Page 1\none\n\n## Page 2\ntwo", {"pages": 2, "text_extractor": "pdftotext"})
+
+
+@needs_poppler
+async def test_extract_bounded_still_truncates_pdf_text(monkeypatch):
+    monkeypatch.setattr(documents_service, "MAX_EXTRACTED_CHARS", 50)
+    text, meta, status = await documents_service.extract_bounded("filing.pdf", make_two_page_pdf_bytes())
+    assert status == "done" and len(text) == 50
+    assert meta["truncated"] is True and meta["text_extractor"] == "pdftotext"
 
 
 # ── zip-bomb guard ───────────────────────────────────────────────────────────

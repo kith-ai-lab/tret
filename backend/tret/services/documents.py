@@ -8,12 +8,19 @@ are on disk. Only how the bytes arrived differs between them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import csv
 import io
 import logging
+import os
 import re
+import shutil
+import subprocess
+import tempfile
 import uuid
 from pathlib import Path
+from typing import Iterator
 
 from tret.db.models import Document
 
@@ -34,6 +41,26 @@ MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 # unbounded stretch of CPU inside a request.
 MAX_EXTRACTED_CHARS = 2_000_000
 EXTRACTION_TIMEOUT_SECONDS = 30.0
+# One pdftotext run over a whole PDF. Poppler does a 117-page report in seconds
+# where pypdf takes minutes on a 1-vCPU machine, so it is the preferred reader.
+PDFTOTEXT_TIMEOUT_SECONDS = 120.0
+# The wall-clock bound of whoever is waiting on `extract_text` (`extract_bounded`,
+# the web snapshot). Poppler's own timeout is never longer than this, so a slow
+# PDF ends as a recorded timeout rather than as a thread still running pypdf
+# after the caller has given up. A ContextVar, because the call crosses
+# `asyncio.to_thread` (which copies the context) and `extract_text`'s signature
+# is shared with every other format.
+_pdf_budget: contextvars.ContextVar[float | None] = contextvars.ContextVar("pdf_budget", default=None)
+
+
+@contextlib.contextmanager
+def pdf_budget(seconds: float) -> Iterator[None]:
+    """Bound any PDF text extraction started inside this block to `seconds`."""
+    token = _pdf_budget.set(seconds)
+    try:
+        yield
+    finally:
+        _pdf_budget.reset(token)
 
 # .xlsx and .pptx are zip containers that openpyxl/python-pptx inflate while
 # parsing. A small compressed file can declare an enormous uncompressed size
@@ -65,20 +92,15 @@ def _refuse_zip_bombs(filename: str, data: bytes, max_uncompressed_bytes: int = 
         )
 
 
-def extract_text(filename: str, data: bytes) -> tuple[str, dict]:
-    """Returns (text, meta). Raises ValueError for unsupported types."""
+def extract_text(filename: str, data: bytes, *, budget_seconds: float | None = None) -> tuple[str, dict]:
+    """Returns (text, meta). Raises ValueError for unsupported types.
+
+    `budget_seconds` bounds the Poppler run for a PDF (default: the `pdf_budget`
+    in force, else PDFTOTEXT_TIMEOUT_SECONDS); it is ignored for other formats.
+    """
     lower = filename.lower()
     if lower.endswith(".pdf"):
-        from pypdf import PdfReader
-
-        reader = PdfReader(io.BytesIO(data))
-        # A `## Page N` marker ahead of every page — the same heading-marker
-        # convention `_extract_xlsx`/`_extract_pptx` already use for sheets and
-        # slides — is what gives `services/retrieval.py`'s chunker a page
-        # locator to attach to prose that otherwise has no heading structure
-        # of its own (pypdf returns flowing text, not a document tree).
-        parts = [f"## Page {i}\n{page.extract_text() or ''}" for i, page in enumerate(reader.pages, start=1)]
-        return "\n\n".join(parts), {"pages": len(reader.pages)}
+        return _extract_pdf(data, budget_seconds)
     if lower.endswith(".docx"):
         return _extract_docx(data)
     if lower.endswith(".xlsx"):
@@ -96,6 +118,92 @@ def extract_text(filename: str, data: bytes) -> tuple[str, dict]:
     raise ValueError(
         f"Unsupported file type: {filename} (supported: pdf, docx, xlsx, pptx, csv, tsv, md, txt)"
     )
+
+
+def _page_blocks(pages: list[str]) -> str:
+    # A `## Page N` marker ahead of every page — the same heading-marker
+    # convention `_extract_xlsx`/`_extract_pptx` already use for sheets and
+    # slides — is what gives `services/retrieval.py`'s chunker a page
+    # locator to attach to prose that otherwise has no heading structure
+    # of its own (both readers return flowing text, not a document tree).
+    return "\n\n".join(f"## Page {i}\n{text}" for i, text in enumerate(pages, start=1))
+
+
+class _PdftotextTimeout(Exception):
+    """Poppler ran out of its budget. Not a reason to start the slower reader."""
+
+
+def _pdftotext_pages(data: bytes, timeout: float) -> list[str] | None:
+    """Per-page text from `pdftotext -layout`, or None when Poppler is missing or
+    unusable (not found, would not start, non-zero exit) and the caller should use
+    pypdf. Raises _PdftotextTimeout when it ran past `timeout`.
+    """
+    exe = shutil.which("pdftotext")
+    if exe is None:
+        return None
+    # Poppler needs nothing from the environment but PATH; credentials in the
+    # server's env have no business reaching a PDF parser.
+    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")}
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
+            tmp.write(data)
+            tmp.flush()
+            run = subprocess.run(
+                [exe, "-layout", "-enc", "UTF-8", tmp.name, "-"],
+                capture_output=True,
+                timeout=timeout,
+                env=env,
+            )
+    except subprocess.TimeoutExpired:
+        raise _PdftotextTimeout from None
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("pdftotext could not extract; falling back to pypdf: %s", e)
+        return None
+    if run.returncode != 0:
+        log.warning("pdftotext exited %s; falling back to pypdf", run.returncode)
+        return None
+    pieces = run.stdout.decode("utf-8", errors="replace").split("\f")
+    if pieces and not pieces[-1].strip():
+        pieces.pop()
+    return [piece.rstrip() for piece in pieces]
+
+
+def _pdf_page_count(data: bytes) -> int | None:
+    """Page count from the PDF's own page tree (a cheap open, no text), or None."""
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            reader.decrypt("")
+        return len(reader.pages)
+    except Exception as e:  # damaged or password-protected: let the pypdf path say so
+        log.warning("could not count PDF pages: %s", e)
+        return None
+
+
+def _extract_pdf(data: bytes, budget_seconds: float | None = None) -> tuple[str, dict]:
+    bound = budget_seconds if budget_seconds is not None else _pdf_budget.get()
+    timeout = PDFTOTEXT_TIMEOUT_SECONDS if bound is None else min(PDFTOTEXT_TIMEOUT_SECONDS, bound)
+    try:
+        pages = _pdftotext_pages(data, timeout)
+    except _PdftotextTimeout:
+        # Recorded, not retried: pypdf is the slower reader, and the caller's own
+        # bound is about to expire.
+        return "", {"text_extractor": "pdftotext", "error": f"pdftotext timed out after {timeout:.0f}s"}
+    if pages is not None:
+        # Poppler ends every page with a form feed, so n segments is n pages, unless
+        # a stray form feed inside the text has split one. Page numbers are what
+        # retrieval cites, so a count that disagrees with the page tree is not used.
+        count = _pdf_page_count(data)
+        if count == len(pages):
+            return _page_blocks(pages), {"pages": len(pages), "text_extractor": "pdftotext"}
+        log.warning("pdftotext gave %d page segments for %s pages; using pypdf", len(pages), count)
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    pages = [page.extract_text() or "" for page in reader.pages]
+    return _page_blocks(pages), {"pages": len(reader.pages), "text_extractor": "pypdf"}
 
 
 _HEADING_STYLE_RE = re.compile(r"^Heading (\d+)$")
@@ -269,9 +377,10 @@ async def extract_bounded(filename: str, data: bytes) -> tuple[str, dict, str]:
     its caller enforced before getting here).
     """
     try:
-        text, meta = await asyncio.wait_for(
-            asyncio.to_thread(extract_text, filename, data), EXTRACTION_TIMEOUT_SECONDS
-        )
+        with pdf_budget(EXTRACTION_TIMEOUT_SECONDS):
+            text, meta = await asyncio.wait_for(
+                asyncio.to_thread(extract_text, filename, data), EXTRACTION_TIMEOUT_SECONDS
+            )
     except (asyncio.TimeoutError, TimeoutError):
         return "", {"error": f"text extraction timed out after {EXTRACTION_TIMEOUT_SECONDS:.0f}s"}, "failed"
     except ValueError as e:  # unsupported type: the message is for the user
@@ -290,7 +399,8 @@ async def extract_bounded(filename: str, data: bytes) -> tuple[str, dict, str]:
     if len(text) > MAX_EXTRACTED_CHARS:
         meta = {**meta, "truncated": True, "extracted_chars": MAX_EXTRACTED_CHARS}
         text = text[:MAX_EXTRACTED_CHARS]
-    return text, meta, "done"
+    # A recorded extractor error with no text (Poppler timed out) is a failure.
+    return text, meta, "failed" if meta.get("error") and not text else "done"
 
 
 async def ingest_document(

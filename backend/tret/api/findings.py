@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import shutil
 import time
 import uuid
@@ -31,7 +32,7 @@ from tret.api.workspace import (
     require_workspace_approver,
 )
 from tret.config import get_settings
-from tret.db.engine import get_db
+from tret.db.engine import get_db, get_session_factory
 from tret.db.models import Approval, DataRequest, Document, Finding, User
 from tret.services import connections as connections_service
 from tret.services import packaging as packaging_service
@@ -49,13 +50,37 @@ APPROVAL_ACTIONS = ("approve", "reject")
 # pypdf verification pass over a few hundred pages). `packaging.run_packaging`
 # enforces it by killing its child process; a package that cannot finish in this
 # long is recorded as failed and can be retried.
-PACKAGING_TIMEOUT_SECONDS = 300
+PACKAGING_TIMEOUT_SECONDS = 600
 
 # A "running" package record older than the deadline plus this slack belongs to a
 # worker that died (process restart, crash) rather than one still packaging, so
 # `package-retry` may take over. Anything younger is a live attempt: retrying it
 # would race the first attempt's published files.
 PACKAGING_STALE_GRACE_SECONDS = 60
+
+# Packaging runs in a background task per approval (see `_start_packaging`), and
+# each run spawns a Poppler/pypdf child process over a whole report, so how many
+# run at once is capped. Further approvals queue inside their own task and show
+# `queued: true` on the finding until they get a slot. Two at most, and only one
+# on a single-CPU machine: two CPU-bound children sharing one vCPU just race each
+# other toward the deadline (the 117-page statement that needs minutes alone).
+PACKAGING_MAX_CONCURRENT = max(1, min(2, os.cpu_count() or 1))
+
+# Written by `sweep_orphaned_packaging` over a "running" record found at boot.
+PACKAGING_ORPHAN_ERROR = "server restarted during packaging; retry"
+
+# Strong references to the in-flight packaging tasks: asyncio keeps only weak
+# ones, so an unreferenced task can be garbage-collected mid-run. This is also
+# what the shutdown drain in `tret/main.py` waits on, alongside the run and chat
+# registries.
+_packaging_tasks: set[asyncio.Task] = set()
+# Findings with a task alive in THIS process (queued or running). A "running"
+# record whose task is still here is live however old its timestamp, so
+# `package-retry` must not take it over.
+_packaging_active: set[uuid.UUID] = set()
+# (event loop, semaphore): created lazily on the loop that first needs it, so a
+# restarted loop (tests, reloads) never inherits a semaphore bound to a dead one.
+_packaging_semaphore: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
 
 
 def _finding_out(f: Finding, approvals: list[Approval] | None = None) -> dict:
@@ -200,7 +225,7 @@ async def decide_finding(
         # when an approved map shows no packaging state: `package-retry` refuses
         # while this says "running", which keeps a second attempt from racing
         # (and cleaning up after) the first.
-        f.payload = {**f.payload, "package": _package_running()}
+        f.payload = {**f.payload, "package": _package_running(queued=True)}
     await db.commit()
     # Approving a `connected_write` finding is the trigger for the actual
     # SharePoint upload — `propose_connected_write` (engine/tools.py) never
@@ -209,11 +234,13 @@ async def decide_finding(
     if body.action == "approve" and f.schema_slug == "connected_write":
         await _upload_connected_write(db, f, ctx.id, actor_user_id=user.id)
     # Approving a `package_map` finding runs the deterministic packager over the
-    # approved page map (`propose_package_map` itself packages nothing). Same
-    # shape as the upload above: after the commit, never raises, outcome recorded
-    # in `payload["package"]`, retryable via `package-retry`.
+    # approved page map (`propose_package_map` itself packages nothing). It can
+    # take minutes, so the request returns now, with the `running` record the
+    # commit above already holds, and the packager runs in a background task on
+    # its own session. Outcome recorded in `payload["package"]`, which the
+    # Approvals page polls; retryable via `package-retry`.
     if body.action == "approve" and f.schema_slug == "package_map":
-        await _package_approved_map(db, f, approver_user_id=user.id)
+        _start_packaging(f.id, approver_user_id=user.id)
     # A human just said whether this output was right, which is the strongest
     # signal tret has about the model that produced it — re-score the run behind
     # it so routing can learn from the verdict. After the commit, deliberately:
@@ -350,8 +377,149 @@ async def _upload_connected_write(
     await db.commit()
 
 
-def _package_running() -> dict:
-    return {"status": "running", "started_at": datetime.now(timezone.utc).isoformat()}
+def _package_running(*, queued: bool = False) -> dict:
+    """The in-progress record. `queued` is True until the background task gets a
+    packaging slot; `started_at` is re-stamped then, so the stale-takeover clock
+    measures packaging time and not time spent waiting in the queue."""
+    return {
+        "status": "running",
+        "queued": queued,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _get_packaging_semaphore() -> asyncio.Semaphore:
+    global _packaging_semaphore
+    loop = asyncio.get_running_loop()
+    if _packaging_semaphore is None or _packaging_semaphore[0] is not loop:
+        _packaging_semaphore = (loop, asyncio.Semaphore(PACKAGING_MAX_CONCURRENT))
+    return _packaging_semaphore[1]
+
+
+def _start_packaging(finding_id: uuid.UUID, *, approver_user_id: uuid.UUID) -> asyncio.Task:
+    """Launch the background packaging task for an approved `package_map`
+    finding whose `running` record is already committed. Registered so it is not
+    garbage-collected and so shutdown can drain it."""
+    _packaging_active.add(finding_id)
+    task = asyncio.create_task(_packaging_task(finding_id, approver_user_id))
+    _packaging_tasks.add(task)
+    task.add_done_callback(_packaging_tasks.discard)
+    return task
+
+
+async def _set_package_state(finding_id: uuid.UUID, *, queued: bool) -> bool:
+    """Flip `queued` (and re-stamp `started_at` once running) on the finding's
+    `running` record through a short-lived session. False if the finding no
+    longer carries a `running` record (taken over, or gone): the task then has
+    nothing to do."""
+    async with get_session_factory()() as db:
+        f = await db.get(Finding, finding_id)
+        package = (f.payload or {}).get("package") if f is not None else None
+        if package is None or package.get("status") != "running":
+            return False
+        updated = {**package, "queued": queued}
+        if not queued:
+            updated["started_at"] = datetime.now(timezone.utc).isoformat()
+        f.payload = {**f.payload, "package": updated}
+        await db.commit()
+        return True
+
+
+async def _packaging_task(finding_id: uuid.UUID, approver_user_id: uuid.UUID) -> None:
+    """Body of one background packaging task. Never raises: a failure is a
+    recorded fact on the finding, and a task the process kills before it finishes
+    leaves the `running` record for the stale-takeover retry."""
+    log.info("packaging queued for finding %s", finding_id)
+    try:
+        async with _get_packaging_semaphore():
+            if not await _set_package_state(finding_id, queued=False):
+                log.warning("packaging skipped for finding %s: no running record", finding_id)
+                return
+            log.info("packaging started for finding %s", finding_id)
+            # Its own session: the request's is closed the moment the response
+            # is sent, and this one may outlive it by minutes.
+            async with get_session_factory()() as db:
+                f = await db.get(Finding, finding_id)
+                if f is None:
+                    log.warning("packaging skipped for finding %s: finding is gone", finding_id)
+                    return
+                await _package_approved_map(db, f, approver_user_id=approver_user_id)
+            log.info("packaging finished for finding %s", finding_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 - a background task has no caller to raise to
+        log.exception("packaging task crashed for finding %s", finding_id)
+        await _record_task_crash(finding_id, approver_user_id, e)
+    finally:
+        _packaging_active.discard(finding_id)
+
+
+async def _record_task_crash(
+    finding_id: uuid.UUID, approver_user_id: uuid.UUID, error: BaseException
+) -> None:
+    """An exception escaped the packaging task (a DB error on the final commit, or
+    on the queued flip). `_package_approved_map` records its own failures, so this
+    is the backstop: through a fresh session, and only if the finding still says
+    "running", write a `failed` record so the UI never sits on "Packaging…" until
+    the stale window. Never raises: if the database is still down there is nothing
+    more to do, and the stale takeover covers it."""
+    try:
+        async with get_session_factory()() as db:
+            f = await db.get(Finding, finding_id)
+            package = (f.payload or {}).get("package") if f is not None else None
+            if package is None or package.get("status") != "running":
+                return
+            failed = _package_failed(
+                f"packaging task crashed: {type(error).__name__}: {error}",
+                approver_user_id=approver_user_id,
+                started=time.monotonic(),
+            )
+            f.payload = {**f.payload, "package": failed}
+            await db.commit()
+    except Exception:  # noqa: BLE001 - best effort by design
+        log.exception("could not record the packaging crash for finding %s", finding_id)
+
+
+async def sweep_orphaned_packaging(db: AsyncSession) -> int:
+    """Boot sweep: fail every `package_map` finding a prior process left at
+    `package.status == "running"` (queued or mid-packaging). On this
+    single-instance deployment nothing else could still be running them, so the
+    Approvals page should say so now rather than after the stale window. Returns
+    how many were swept; `package-retry` accepts the `failed` records.
+
+    The `running` test is done in Python, one SELECT of the `package_map`
+    findings and one commit, because the payload is JSONB on Postgres and JSON on
+    the SQLite the tests use. Must only run when this process holds the instance
+    lock (`main.py`'s lifespan), or it would fail a live instance's packaging."""
+    rows = (
+        (await db.execute(select(Finding).where(Finding.schema_slug == "package_map")))
+        .scalars()
+        .all()
+    )
+    swept = 0
+    for f in rows:
+        package = (f.payload or {}).get("package")
+        if isinstance(package, dict) and package.get("status") == "running":
+            failed = _package_failed(
+                PACKAGING_ORPHAN_ERROR, approver_user_id=None, started=time.monotonic()
+            )
+            f.payload = {**f.payload, "package": failed}
+            swept += 1
+    if swept:
+        await db.commit()
+        log.warning("boot sweep: %d package_map finding(s) left 'running' marked failed", swept)
+    return swept
+
+
+async def drain_packaging_tasks(deadline_seconds: float) -> bool:
+    """Wait up to `deadline_seconds` for every in-flight packaging task to finish.
+    True when none are left. Never cancels one: a task still running when the
+    window closes keeps its `running` record, which `package-retry` takes over
+    once the deadline plus grace has passed."""
+    pending = {t for t in _packaging_tasks if not t.done()}
+    if pending:
+        await asyncio.wait(pending, timeout=deadline_seconds)
+    return not any(not t.done() for t in _packaging_tasks)
 
 
 def _package_run_is_stale(package: dict) -> bool:
@@ -366,11 +534,11 @@ def _package_run_is_stale(package: dict) -> bool:
     return age > PACKAGING_TIMEOUT_SECONDS + PACKAGING_STALE_GRACE_SECONDS
 
 
-def _package_failed(error: str, *, approver_user_id: uuid.UUID, started: float) -> dict:
+def _package_failed(error: str, *, approver_user_id: uuid.UUID | None, started: float) -> dict:
     return {
         "status": "failed",
         "packaged_at": datetime.now(timezone.utc).isoformat(),
-        "approver_id": str(approver_user_id),
+        "approver_id": str(approver_user_id) if approver_user_id is not None else None,
         "error": error,
         "documents": [],
         "retained_sha256": None,
@@ -473,6 +641,7 @@ async def _package_approved_map(
             review_note=raw_map.get("review_note") or "",
             incorporations=tuple(raw_map.get("incorporations") or ()),
             exclusions=tuple(raw_map.get("exclusions") or ()),
+            ocr=raw_map.get("ocr") or "off",
         )
         output = await asyncio.to_thread(
             packaging_service.run_packaging,
@@ -619,8 +788,10 @@ async def retry_finding_package(
     attempt failed (source bytes changed and were restored, a timeout, a missing
     Poppler binary mid-deploy). Only a failed package is retried: a packaged one
     already has Documents, and packages are evidence that is never overwritten.
-    A "running" record blocks a retry until it is older than the packaging
-    deadline plus a minute (a crashed worker).
+    A "running" record (queued or packaging) blocks a retry until it is older
+    than the packaging deadline plus a minute (a crashed worker). Like approval,
+    this returns as soon as the `running` record is committed; packaging runs in
+    the background.
     """
     # Locked for the length of the retry, same reasoning as upload-retry: two
     # concurrent retries must not both read 'failed' and both package.
@@ -635,16 +806,16 @@ async def retry_finding_package(
     # packager's own commit) is retried too, exactly as upload-retry does.
     package = (f.payload or {}).get("package")
     if package is not None and package.get("status") == "running":
-        if not _package_run_is_stale(package):
+        if f.id in _packaging_active or not _package_run_is_stale(package):
             raise HTTPException(409, "Packaging is still running for this finding; try again when it finishes")
         # A worker that died mid-run: take over.
     elif package is not None and package.get("status") != "failed":
         raise HTTPException(409, "This finding's package has not failed; nothing to retry")
     # Claim the finding before the long part and release the row lock, so a
     # concurrent retry sees "running" and gets its 409 instead of racing us.
-    f.payload = {**f.payload, "package": _package_running()}
+    f.payload = {**f.payload, "package": _package_running(queued=True)}
     await db.commit()
-    await _package_approved_map(db, f, approver_user_id=user.id)
+    _start_packaging(f.id, approver_user_id=user.id)
     return _finding_out(f)
 
 

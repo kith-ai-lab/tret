@@ -37,7 +37,7 @@ from tret.config import get_settings
 from tret.db.models import Document
 from tret.net.fetch.extract import html_to_text
 from tret.net.fetch.fetch import FetchedPage
-from tret.services.documents import extract_text
+from tret.services.documents import extract_text, pdf_budget
 
 log = logging.getLogger("tret.net")
 
@@ -54,6 +54,12 @@ PROVENANCE_WEB_CAPTURE = "web_capture"
 # the same reason: extracted text lands in a column and then in a prompt.
 MAX_EXTRACTED_CHARS = 2_000_000
 EXTRACTION_TIMEOUT_SECONDS = 30.0
+# `fetch_url` bodies are capped at 2 MB, so a PDF larger than that can only have
+# come from `capture_source` (a deliberate collection of a whole annual report).
+# Those are reread by tret on purpose and routinely run to hundreds of pages; 30 s
+# left them with no extracted text, so they get a longer, still bounded, budget.
+CAPTURE_PDF_THRESHOLD_BYTES = 2_000_000
+CAPTURE_PDF_EXTRACTION_TIMEOUT_SECONDS = 180.0
 
 _UNSAFE = re.compile(r"[^a-z0-9._-]+")
 
@@ -87,16 +93,19 @@ async def _extract(page: FetchedPage, filename: str) -> tuple[str, dict, str]:
         html = page.body.decode("utf-8", errors="replace")
         text, title = await asyncio.to_thread(html_to_text, html)
         return text, {"title": title}, "done"
+    timeout = EXTRACTION_TIMEOUT_SECONDS
+    if page.extension == ".pdf" and len(page.body) > CAPTURE_PDF_THRESHOLD_BYTES:
+        timeout = CAPTURE_PDF_EXTRACTION_TIMEOUT_SECONDS
     try:
-        text, meta = await asyncio.wait_for(
-            asyncio.to_thread(extract_text, filename, page.body), EXTRACTION_TIMEOUT_SECONDS
-        )
+        with pdf_budget(timeout):
+            text, meta = await asyncio.wait_for(asyncio.to_thread(extract_text, filename, page.body), timeout)
     except (asyncio.TimeoutError, TimeoutError):
-        return "", {"error": f"text extraction timed out after {EXTRACTION_TIMEOUT_SECONDS:.0f}s"}, "failed"
+        return "", {"error": f"text extraction timed out after {timeout:.0f}s"}, "failed"
     except Exception as e:  # a parser blowing up on hostile bytes is not a run failure
         log.warning("web extraction failed for %r: %s", page.url, e)
         return "", {"error": f"text extraction failed: {type(e).__name__}"}, "failed"
-    return text, meta, "done"
+    # A recorded extractor error with no text (Poppler timed out) is a failure.
+    return text, meta, "failed" if meta.get("error") and not text else "done"
 
 
 async def store_snapshot(

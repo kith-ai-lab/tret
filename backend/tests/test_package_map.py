@@ -8,8 +8,14 @@ created by hand, as `test_connected_write.py` does for write-back sources.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
+import inspect
 import json
+import os
+import threading
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,7 +50,7 @@ from tret.services.packaging import ROLES, SCOPES
 
 # Pages 2-4 and 6 of the 6-page make_pdf fixture (page 2 links to 4 and to 1).
 PROJECT_ID, WORKSPACE = fw.PROJECT_ID, fw.WORKSPACE
-decide, login_as = fw.decide, fw.login_as
+login_as = fw.login_as
 # The blessing-gate fixtures, shared with test_findings_write.py as-is.
 people, members = fw.people, fw.members
 EMBEDDED = dict(
@@ -203,6 +209,7 @@ async def test_a_proposal_records_a_draft_with_the_exact_payload_shape(ctx, atta
                 },
             ],
             "exclusions": [{"range": [5, 5], "reason": "advertising"}],
+            "ocr": "off",
         },
         "stem": "Siemens-Report-2025",
         "selected_page_count": 4,
@@ -551,16 +558,47 @@ def world(people, members, tmp_path, storage):
     )
 
 
+def fake_session_factory(session):
+    """A stand-in for `get_session_factory()` whose sessions are `session`. Approval
+    packaging runs in a background task on its own session; the FakeSession
+    world has one store, so every session the task opens is that store."""
+
+    @contextlib.asynccontextmanager
+    async def _open():
+        yield session
+
+    return lambda: _open
+
+
 @pytest.fixture
-def client(world) -> TestClient:
+def client(world, monkeypatch) -> TestClient:
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(findings_api.router)
     app.dependency_overrides[get_db] = lambda: world.db
+    monkeypatch.setattr(findings_api, "get_session_factory", fake_session_factory(world.db))
     login_limiter.reset()
     with TestClient(app) as c:
         yield c
     login_limiter.reset()
+
+
+def settle(client: TestClient, timeout: float = 60) -> None:
+    """Wait for the background packaging task(s) the last request started: the
+    request itself returns as soon as the `running` record is committed."""
+    assert client.portal.call(findings_api.drain_packaging_tasks, timeout)
+
+
+def decide(client: TestClient, finding_id, **body):
+    response = fw.decide(client, finding_id, **body)
+    settle(client)
+    return response
+
+
+def retry(client: TestClient, world):
+    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    settle(client)
+    return response
 
 
 def _package_docs(world) -> list[Document]:
@@ -711,7 +749,7 @@ def test_the_packager_runs_in_a_child_process_with_the_deadline(client, world, p
     login_as(client, people["approver"])
     decide(client, world.finding.id, action="approve")
     assert world.finding.payload["package"]["status"] == "packaged"
-    assert seen["deadline_seconds"] == findings_api.PACKAGING_TIMEOUT_SECONDS == 300
+    assert seen["deadline_seconds"] == findings_api.PACKAGING_TIMEOUT_SECONDS == 600
     assert seen["stem"] == "siemens-2025"
 
 
@@ -731,7 +769,7 @@ def test_a_packager_crash_is_recorded_and_cleans_up(client, world, people, monke
 
 
 @pytest.mark.parametrize(
-    "message", ["packaging exceeded 300 s", "packaging worker died (killed by signal 9)"]
+    "message", ["packaging exceeded 600 s", "packaging worker died (killed by signal 9)"]
 )
 def test_a_deadline_or_worker_death_is_recorded_as_a_failure(
     client, world, people, monkeypatch, message
@@ -802,7 +840,7 @@ def test_an_orphan_package_directory_is_cleared_on_retry(client, world, people):
     world.finding.payload["package"] = {"status": "failed", "error": "died", "documents": []}
     login_as(client, people["approver"])
 
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
 
     assert response.status_code == 200
     assert world.finding.payload["package"]["status"] == "packaged"
@@ -825,8 +863,9 @@ def test_approval_records_running_in_the_same_commit_as_the_status(client, world
     decide(client, world.finding.id, action="approve")
     assert seen["status"] == "approved"
     assert seen["package"]["status"] == "running"
+    assert seen["package"]["queued"] is False  # the task has its slot by now
     assert seen["package"]["started_at"]
-    assert seen["commits"] == 1  # the approval commit already carried it
+    assert seen["commits"] >= 1  # the approval commit already carried "running"
     assert world.finding.payload["package"]["status"] == "packaged"
 
 
@@ -845,7 +884,7 @@ def test_retry_while_running_is_a_409_and_touches_nothing(client, world, people,
     monkeypatch.setattr(findings_api.packaging_service, "run_packaging", lambda *a, **k: called.append(1))
     _running(world, age_seconds=5)
     login_as(client, people["approver"])
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
     assert response.status_code == 409
     assert "still running" in response.json()["detail"]
     assert called == []
@@ -858,7 +897,7 @@ def test_retry_of_a_stale_running_record_is_allowed(client, world, people):
         age_seconds=findings_api.PACKAGING_TIMEOUT_SECONDS + findings_api.PACKAGING_STALE_GRACE_SECONDS + 5,
     )
     login_as(client, people["approver"])
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
     assert response.status_code == 200
     assert world.finding.payload["package"]["status"] == "packaged"
 
@@ -869,14 +908,14 @@ def test_retry_just_inside_the_grace_window_is_still_refused(client, world, peop
         age_seconds=findings_api.PACKAGING_TIMEOUT_SECONDS + findings_api.PACKAGING_STALE_GRACE_SECONDS - 30,
     )
     login_as(client, people["approver"])
-    assert client.post(f"/api/findings/{world.finding.id}/package-retry").status_code == 409
+    assert retry(client, world).status_code == 409
 
 
 def test_a_running_record_with_no_usable_start_time_counts_as_stale(client, world, people):
     world.finding.status = "approved"
     world.finding.payload["package"] = {"status": "running"}
     login_as(client, people["approver"])
-    assert client.post(f"/api/findings/{world.finding.id}/package-retry").status_code == 200
+    assert retry(client, world).status_code == 200
 
 
 def test_a_retry_marks_running_before_it_packages(client, world, people, monkeypatch):
@@ -892,9 +931,9 @@ def test_a_retry_marks_running_before_it_packages(client, world, people, monkeyp
 
     monkeypatch.setattr(findings_api, "_package_approved_map", _spy)
     login_as(client, people["approver"])
-    client.post(f"/api/findings/{world.finding.id}/package-retry")
+    retry(client, world)
     assert seen["package"]["status"] == "running"
-    assert seen["commits"] == 1  # committed (lock released) before the long part
+    assert seen["commits"] >= 1  # committed (lock released) before the long part
 
 
 def test_a_later_failing_attempt_never_deletes_a_prior_attempts_files(
@@ -916,7 +955,7 @@ def test_a_later_failing_attempt_never_deletes_a_prior_attempts_files(
 
     monkeypatch.setattr(findings_api.packaging_service, "run_packaging", _boom)
     world.finding.payload = {**world.finding.payload, "package": {"status": "failed", "error": "x"}}
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
 
     assert response.status_code == 200
     assert world.finding.payload["package"]["status"] == "failed"
@@ -936,7 +975,7 @@ def test_a_runner_failure_after_the_directory_check_does_not_delete_the_director
         # them in the meantime; this attempt then fails.
         target.mkdir(parents=True, exist_ok=True)
         (target / "other-attempt.pdf").write_bytes(b"theirs")
-        raise packaging.PackagingError("packaging exceeded 300 s")
+        raise packaging.PackagingError("packaging exceeded 600 s")
 
     monkeypatch.setattr(findings_api.packaging_service, "run_packaging", _boom)
     login_as(client, people["approver"])
@@ -953,10 +992,10 @@ def test_retry_reruns_packaging_after_the_file_is_restored(client, world, people
     assert world.finding.payload["package"]["status"] == "failed"
 
     world.source_path.write_bytes(make_pdf())  # restored
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
 
     assert response.status_code == 200
-    assert response.json()["payload"]["package"]["status"] == "packaged"
+    assert response.json()["payload"]["package"]["status"] == "running"  # returned before packaging
     assert world.finding.payload["package"]["status"] == "packaged"
     assert world.finding.payload["package"]["approver_id"] == str(people["approver"].id)
     assert len(_package_docs(world)) == 7
@@ -967,16 +1006,16 @@ def test_retry_after_a_failed_run_that_stayed_failed_is_allowed_again(client, wo
     world.source_path.write_bytes(make_pdf(8))
     login_as(client, people["approver"])
     decide(client, world.finding.id, action="approve")
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
     assert response.status_code == 200
-    assert response.json()["payload"]["package"]["status"] == "failed"
+    assert world.finding.payload["package"]["status"] == "failed"
     assert _package_docs(world) == []
 
 
 def test_retry_accepts_an_approved_finding_whose_outcome_was_never_recorded(client, world, people):
     world.finding.status = "approved"  # process died after the approval commit
     login_as(client, people["approver"])
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
     assert response.status_code == 200
     assert world.finding.payload["package"]["status"] == "packaged"
 
@@ -985,7 +1024,7 @@ def test_retry_on_a_packaged_finding_is_a_409(client, world, people):
     login_as(client, people["approver"])
     decide(client, world.finding.id, action="approve")
     assert world.finding.payload["package"]["status"] == "packaged"
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
     assert response.status_code == 409
     assert "nothing to retry" in response.json()["detail"]
     assert len(_package_docs(world)) == 7
@@ -993,7 +1032,7 @@ def test_retry_on_a_packaged_finding_is_a_409(client, world, people):
 
 def test_retry_on_a_draft_is_a_409(client, world, people):
     login_as(client, people["approver"])
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
     assert response.status_code == 409
     assert _package_docs(world) == []
 
@@ -1002,14 +1041,14 @@ def test_retry_on_another_schema_is_a_409(client, world, people):
     world.finding.schema_slug = "connected_write"
     world.finding.status = "approved"
     login_as(client, people["approver"])
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
     assert response.status_code == 409
 
 
 def test_retry_requires_the_approver_role(client, world, people):
     world.finding.status = "approved"
     login_as(client, people["analyst"])
-    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    response = retry(client, world)
     assert response.status_code in (401, 403)
     assert _package_docs(world) == []
 
@@ -1038,3 +1077,382 @@ def test_approving_a_non_package_finding_never_packages(client, world, people, m
     login_as(client, people["approver"])
     decide(client, world.finding.id, action="approve")
     assert called == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# packaging runs in a background task, not in the request
+# ══════════════════════════════════════════════════════════════════════════
+class Gate:
+    """A patched `_package_approved_map` that blocks until released, recording what
+    it saw. Blocks in a worker thread (threading.Event), so the test thread, which
+    is not on the app's event loop, can release it."""
+
+    def __init__(self, monkeypatch):
+        self.release = threading.Event()
+        self.started: list[uuid.UUID] = []
+        self.finished: list[uuid.UUID] = []
+        self.sessions: list = []
+        self.queued_at_start: list = []
+        self.active = 0
+        self.max_active = 0
+        monkeypatch.setattr(findings_api, "_package_approved_map", self._run)
+
+    async def _run(self, db, finding, **kw):
+        self.sessions.append(db)
+        self.queued_at_start.append(finding.payload["package"]["queued"])
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        self.started.append(finding.id)
+        await asyncio.to_thread(self.release.wait, 30)
+        self.active -= 1
+        finding.payload = {**finding.payload, "package": {"status": "packaged"}}
+        self.finished.append(finding.id)
+
+    def wait_started(self, n: int, timeout: float = 10) -> None:
+        end = time.monotonic() + timeout
+        while len(self.started) < n and time.monotonic() < end:
+            time.sleep(0.01)
+        assert len(self.started) >= n
+
+
+@pytest.fixture
+def gate(monkeypatch):
+    g = Gate(monkeypatch)
+    yield g
+    g.release.set()  # never leave a worker thread parked if a test fails
+
+
+def test_approval_returns_with_running_before_packaging_completes(client, world, people, gate):
+    login_as(client, people["approver"])
+    response = fw.decide(client, world.finding.id, action="approve")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
+    gate.wait_started(1)
+    assert gate.finished == []  # the packager is still working; the request is done
+    package = world.finding.payload["package"]
+    assert package["status"] == "running"
+    assert package["started_at"]
+    assert findings_api._packaging_tasks  # held by a strong reference
+
+    gate.release.set()
+    settle(client)
+    assert gate.finished == [world.finding.id]
+    assert world.finding.payload["package"]["status"] == "packaged"
+    assert not findings_api._packaging_tasks  # discarded on completion
+    assert world.finding.id not in findings_api._packaging_active
+
+
+def test_the_background_task_opens_its_own_session(client, world, people, gate, monkeypatch):
+    other = PackagingSession()
+    other.store = world.db.store  # same data, different session object
+    opened = []
+
+    def _factory():
+        opened.append(1)
+        return fake_session_factory(other)()()
+
+    monkeypatch.setattr(findings_api, "get_session_factory", lambda: _factory)
+    login_as(client, people["approver"])
+    fw.decide(client, world.finding.id, action="approve")
+    gate.wait_started(1)
+    gate.release.set()
+    settle(client)
+
+    assert gate.sessions == [other]
+    assert all(s is not world.db for s in gate.sessions)
+    assert len(opened) >= 2  # the queued flip and the packaging each use a short-lived session
+
+
+def test_retry_returns_before_packaging_completes_too(client, world, people, gate):
+    world.finding.status = "approved"
+    world.finding.payload["package"] = {"status": "failed", "error": "x", "documents": []}
+    login_as(client, people["approver"])
+    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+
+    assert response.status_code == 200
+    assert response.json()["payload"]["package"]["status"] == "running"
+    gate.wait_started(1)
+    assert gate.finished == []
+    gate.release.set()
+    settle(client)
+    assert world.finding.payload["package"]["status"] == "packaged"
+
+
+def _more_map_findings(world, n: int) -> list[Finding]:
+    extra = [_map_finding(world.source) for _ in range(n)]
+    for f in extra:
+        world.db.store["Finding"][f.id] = f
+    return extra
+
+
+def test_the_concurrency_cap_is_two_but_one_on_a_single_cpu_machine():
+    assert findings_api.PACKAGING_MAX_CONCURRENT == max(1, min(2, os.cpu_count() or 1))
+    assert 1 <= findings_api.PACKAGING_MAX_CONCURRENT <= 2
+
+
+def test_at_most_two_packagings_run_at_once_and_the_rest_queue(client, world, people, gate, monkeypatch):
+    monkeypatch.setattr(findings_api, "PACKAGING_MAX_CONCURRENT", 2)  # whatever this machine has
+    findings = [world.finding, *_more_map_findings(world, 2)]
+    login_as(client, people["approver"])
+    for f in findings:
+        assert fw.decide(client, f.id, action="approve").status_code == 200
+        assert f.payload["package"]["queued"] is True  # written by the request itself
+
+    gate.wait_started(2)
+    time.sleep(0.2)  # give a (wrongly) unlimited third task the chance to start
+    assert len(gate.started) == 2
+    running = [f for f in findings if f.id in gate.started]
+    waiting = [f for f in findings if f.id not in gate.started]
+    assert len(waiting) == 1
+    assert [f.payload["package"]["queued"] for f in running] == [False, False]
+    assert waiting[0].payload["package"]["status"] == "running"
+    assert waiting[0].payload["package"]["queued"] is True
+
+    gate.release.set()
+    settle(client)
+    assert sorted(gate.finished) == sorted(f.id for f in findings)
+    assert gate.max_active == 2
+    assert gate.queued_at_start == [False, False, False]  # flipped before each ran
+    assert all(f.payload["package"]["status"] == "packaged" for f in findings)
+
+
+def test_the_dequeue_restamps_started_at(client, world, people, gate):
+    from datetime import datetime, timedelta, timezone
+
+    long_ago = (datetime.now(timezone.utc) - timedelta(seconds=1000)).isoformat()
+    world.finding.status = "approved"
+    world.finding.payload["package"] = {"status": "running", "queued": True, "started_at": long_ago}
+    # A queued task for a record that is stale on paper: the wait in the queue
+    # must not count against the packaging deadline.
+    async def _start() -> None:  # not a lambda: the portal would await the returned task
+        findings_api._start_packaging(world.finding.id, approver_user_id=uuid.uuid4())
+
+    client.portal.call(_start)
+    gate.wait_started(1)
+    assert world.finding.payload["package"]["started_at"] != long_ago
+    assert not findings_api._package_run_is_stale(world.finding.payload["package"])
+    gate.release.set()
+    settle(client)
+
+
+def test_shutdown_drain_waits_for_a_running_task_but_is_bounded(client, world, people, gate):
+    login_as(client, people["approver"])
+    fw.decide(client, world.finding.id, action="approve")
+    gate.wait_started(1)
+
+    t0 = time.monotonic()
+    assert client.portal.call(findings_api.drain_packaging_tasks, 0.3) is False
+    assert time.monotonic() - t0 < 5  # bounded: it gave up at the window
+    # Not cancelled, and the record is left exactly as it was for stale takeover.
+    assert findings_api._packaging_tasks
+    assert world.finding.payload["package"]["status"] == "running"
+
+    threading.Timer(0.3, gate.release.set).start()
+    assert client.portal.call(findings_api.drain_packaging_tasks, 10) is True
+    assert gate.finished == [world.finding.id]
+    assert world.finding.payload["package"]["status"] == "packaged"
+
+
+def test_main_shutdown_drain_watches_the_packaging_registry(client, world, people, gate, monkeypatch):
+    from tret import main as main_module
+    from tret.services import reconcile
+
+    swept = []
+
+    async def _sweep(db):
+        swept.append(1)
+
+    monkeypatch.setattr(reconcile, "sweep_orphaned_runs", _sweep)
+    login_as(client, people["approver"])
+    fw.decide(client, world.finding.id, action="approve")
+    gate.wait_started(1)
+    threading.Timer(0.3, gate.release.set).start()
+
+    client.portal.call(main_module._drain_in_flight_runs, None, findings_api._packaging_tasks, 10)
+
+    assert gate.finished == [world.finding.id]  # it waited for the task
+    assert swept == [1]
+    # And the lifespan really hands that registry to the drain.
+    assert "findings._packaging_tasks" in inspect.getsource(main_module.lifespan)
+
+
+def test_retry_while_queued_or_running_is_a_409(client, world, people, gate):
+    login_as(client, people["approver"])
+    fw.decide(client, world.finding.id, action="approve")
+    gate.wait_started(1)
+
+    response = client.post(f"/api/findings/{world.finding.id}/package-retry")
+    assert response.status_code == 409
+    assert "still running" in response.json()["detail"]
+
+    # Even once the record looks old enough to be a dead worker's, a task alive
+    # in this process owns it: taking over would race its published files.
+    world.finding.payload["package"]["started_at"] = "2000-01-01T00:00:00+00:00"
+    assert findings_api._package_run_is_stale(world.finding.payload["package"])
+    assert client.post(f"/api/findings/{world.finding.id}/package-retry").status_code == 409
+    assert len(gate.started) == 1
+
+    gate.release.set()
+    settle(client)
+
+
+def test_retry_of_a_queued_record_is_a_409(client, world, people, gate):
+    """A third approval waiting for a slot ("queued") is as live as a running one."""
+    findings = [world.finding, *_more_map_findings(world, 2)]
+    login_as(client, people["approver"])
+    for f in findings:
+        fw.decide(client, f.id, action="approve")
+    gate.wait_started(2)
+    waiting = next(f for f in findings if f.id not in gate.started)
+    assert waiting.payload["package"]["queued"] is True
+
+    response = client.post(f"/api/findings/{waiting.id}/package-retry")
+    assert response.status_code == 409
+    gate.release.set()
+    settle(client)
+
+
+def test_a_single_slot_runs_packagings_one_at_a_time(client, world, people, gate, monkeypatch):
+    monkeypatch.setattr(findings_api, "PACKAGING_MAX_CONCURRENT", 1)
+    findings = [world.finding, *_more_map_findings(world, 1)]
+    login_as(client, people["approver"])
+    for f in findings:
+        fw.decide(client, f.id, action="approve")
+    gate.wait_started(1)
+    time.sleep(0.2)
+    assert len(gate.started) == 1
+    waiting = next(f for f in findings if f.id not in gate.started)
+    assert waiting.payload["package"]["queued"] is True
+    gate.release.set()
+    settle(client)
+    assert gate.max_active == 1
+    assert all(f.payload["package"]["status"] == "packaged" for f in findings)
+
+
+# ── a crashed task must not leave "Packaging…" on screen (M1) ─────────────────
+def test_a_crash_escaping_the_packager_is_recorded_as_failed(client, world, people, monkeypatch):
+    real = findings_api._package_approved_map
+
+    async def _boom(db, finding, **kw):
+        raise RuntimeError("final commit failed")
+
+    monkeypatch.setattr(findings_api, "_package_approved_map", _boom)
+    login_as(client, people["approver"])
+    response = decide(client, world.finding.id, action="approve")
+
+    assert response.status_code == 200
+    package = world.finding.payload["package"]
+    assert package["status"] == "failed"
+    assert package["error"] == "packaging task crashed: RuntimeError: final commit failed"
+    assert package["approver_id"] == str(people["approver"].id)
+    assert world.finding.id not in findings_api._packaging_active
+    # ... and it is retryable straight away (a failed record, not a running one).
+    monkeypatch.setattr(findings_api, "_package_approved_map", real)
+    assert retry(client, world).status_code == 200
+    assert world.finding.payload["package"]["status"] == "packaged"
+
+
+def test_a_crash_while_taking_the_slot_is_recorded_too(client, world, people, monkeypatch):
+    async def _boom(finding_id, *, queued):
+        raise RuntimeError("db went away")
+
+    monkeypatch.setattr(findings_api, "_set_package_state", _boom)
+    login_as(client, people["approver"])
+    decide(client, world.finding.id, action="approve")
+    package = world.finding.payload["package"]
+    assert package["status"] == "failed"
+    assert "packaging task crashed: RuntimeError: db went away" == package["error"]
+
+
+def test_a_crash_never_overwrites_a_record_that_already_settled(client, world, people, monkeypatch):
+    async def _settle_then_crash(db, finding, **kw):
+        finding.payload = {**finding.payload, "package": {"status": "packaged", "documents": []}}
+        raise RuntimeError("late failure")
+
+    monkeypatch.setattr(findings_api, "_package_approved_map", _settle_then_crash)
+    login_as(client, people["approver"])
+    decide(client, world.finding.id, action="approve")
+    assert world.finding.payload["package"]["status"] == "packaged"
+
+
+def test_a_crash_with_the_database_still_down_does_not_raise(client, world, people, monkeypatch):
+    async def _boom(db, finding, **kw):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(findings_api, "_package_approved_map", _boom)
+    calls = []
+    real = findings_api._record_task_crash
+
+    async def _failing_recorder(*a, **kw):
+        calls.append(1)
+        monkeypatch.setattr(findings_api, "get_session_factory", lambda: (_ for _ in ()).throw(OSError("down")))
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(findings_api, "_record_task_crash", _failing_recorder)
+    login_as(client, people["approver"])
+    decide(client, world.finding.id, action="approve")  # settle() would fail if the task raised
+    assert calls == [1]
+    assert world.finding.payload["package"]["status"] == "running"  # stale takeover covers it
+
+
+# ── boot sweep (M2) ───────────────────────────────────────────────────────────
+async def test_the_boot_sweep_fails_running_package_records_only(world):
+    running = world.finding
+    running.status = "approved"
+    running.payload["package"] = {"status": "running", "queued": False, "started_at": "2026-01-01T00:00:00+00:00"}
+    queued = _map_finding(world.source)
+    queued.status = "approved"
+    queued.payload["package"] = {"status": "running", "queued": True, "started_at": "2026-01-01T00:00:00+00:00"}
+    done = _map_finding(world.source)
+    done.status = "approved"
+    done.payload["package"] = {"status": "packaged", "documents": [{"role": "retained_pdf"}]}
+    failed = _map_finding(world.source)
+    failed.payload["package"] = {"status": "failed", "error": "earlier"}
+    unrecorded = _map_finding(world.source)  # package: None
+    other = _map_finding(world.source)
+    other.schema_slug = "draft_section"  # not a package_map, even with a lookalike record
+    other.payload = {"markdown": "x", "package": {"status": "running"}}
+    for f in (queued, done, failed, unrecorded, other):
+        world.db.store["Finding"][f.id] = f
+    commits = world.db.commits
+
+    swept = await findings_api.sweep_orphaned_packaging(world.db)
+
+    assert swept == 2
+    assert world.db.commits == commits + 1
+    for f in (running, queued):
+        package = f.payload["package"]
+        assert package["status"] == "failed"
+        assert package["error"] == "server restarted during packaging; retry"
+        assert package["approver_id"] is None
+        assert package["documents"] == []
+    assert done.payload["package"]["status"] == "packaged"
+    assert failed.payload["package"]["error"] == "earlier"
+    assert unrecorded.payload["package"] is None
+    assert other.payload["package"] == {"status": "running"}
+    # Nothing left to sweep, and no commit for an empty sweep.
+    commits = world.db.commits
+    assert await findings_api.sweep_orphaned_packaging(world.db) == 0
+    assert world.db.commits == commits
+
+
+def test_a_swept_record_can_be_retried(client, world, people):
+    world.finding.status = "approved"
+    world.finding.payload["package"] = {"status": "running", "queued": False, "started_at": "2999-01-01T00:00:00+00:00"}
+    login_as(client, people["approver"])
+    assert client.post(f"/api/findings/{world.finding.id}/package-retry").status_code == 409
+    asyncio.run(findings_api.sweep_orphaned_packaging(world.db))
+    assert retry(client, world).status_code == 200
+    assert world.finding.payload["package"]["status"] == "packaged"
+
+
+def test_the_lifespan_runs_the_packaging_sweep_inside_the_instance_lock_branch():
+    from tret import main as main_module
+
+    source = inspect.getsource(main_module.lifespan)
+    runs_sweep = source.index("await sweep_orphaned_runs(db)")
+    packaging_sweep = source.index("await findings.sweep_orphaned_packaging(db)")
+    startup_tasks = source.index("run_startup_tasks()")
+    assert runs_sweep < packaging_sweep < startup_tasks  # in the same `else:` as the run sweep, before serving
+    assert source[:packaging_sweep].rindex("else:") > source.index('instance_lock.state == "lost"')

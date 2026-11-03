@@ -3551,7 +3551,7 @@
     },
     "/api/findings/{finding_id}/package-retry": {
       "post": {
-        "description": "Re-run the packager for an approved `package_map` finding whose first\nattempt failed (source bytes changed and were restored, a timeout, a missing\nPoppler binary mid-deploy). Only a failed package is retried: a packaged one\nalready has Documents, and packages are evidence that is never overwritten.\nA \"running\" record blocks a retry until it is older than the packaging\ndeadline plus a minute (a crashed worker).",
+        "description": "Re-run the packager for an approved `package_map` finding whose first\nattempt failed (source bytes changed and were restored, a timeout, a missing\nPoppler binary mid-deploy). Only a failed package is retried: a packaged one\nalready has Documents, and packages are evidence that is never overwritten.\nA \"running\" record (queued or packaging) blocks a retry until it is older\nthan the packaging deadline plus a minute (a crashed worker). Like approval,\nthis returns as soon as the `running` record is committed; packaging runs in\nthe background.",
         "operationId": "retry_finding_package_api_findings__finding_id__package_retry_post",
         "parameters": [
           {

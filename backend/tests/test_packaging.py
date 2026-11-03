@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -580,7 +581,12 @@ def test_failure_mid_packaging_leaves_no_staging_and_no_out_dir(src, tmp_path, m
 
 
 def test_content_verification_failure_is_a_packaging_error(src, tmp_path, monkeypatch):
-    # Make the retained PDF read back differently from the source.
+    # Without Poppler the oracle is pypdf. Make the retained PDF read back differently
+    # from the source.
+    real_which = shutil.which
+    monkeypatch.setattr(
+        packaging.shutil, "which", lambda name, *a, **k: None if name == "pdftotext" else real_which(name, *a, **k)
+    )
     real_open = packaging._open_pdf
 
     def tampered(path, warnings, phase):
@@ -591,6 +597,24 @@ def test_content_verification_failure_is_a_packaging_error(src, tmp_path, monkey
         return reader, state
 
     monkeypatch.setattr(packaging, "_open_pdf", tampered)
+    work = tmp_path / "work"
+    with pytest.raises(PackagingError, match="text changed on source page 2"):
+        package_pdf(src, embedded(), work / "pkg", stem="stmt")
+    assert list(work.iterdir()) == []
+
+
+@needs_poppler
+def test_poppler_content_verification_failure_is_a_packaging_error(src, tmp_path, monkeypatch):
+    # The oracle is Poppler: the retained layout pass must equal the source pass.
+    real = packaging._pdftotext_pages
+
+    def tampered(exe, pdf, mode, count, timeout=None):
+        texts, err = real(exe, pdf, mode, count, timeout=timeout)
+        if mode == "layout" and Path(pdf).name.endswith(".pdf") and pdf != src:
+            texts = ["different"] * count
+        return texts, err
+
+    monkeypatch.setattr(packaging, "_pdftotext_pages", tampered)
     work = tmp_path / "work"
     with pytest.raises(PackagingError, match="text changed on source page 2"):
         package_pdf(src, embedded(), work / "pkg", stem="stmt")
@@ -761,7 +785,7 @@ def test_poppler_stderr_is_capped_in_stats(src, tmp_path, monkeypatch):
 
     def fake(exe, pdf, mode, count, timeout=None):
         seen[mode] = timeout
-        return [f"page {i}" for i in range(count)], huge if mode == "layout" else "short"
+        return ["page"] * count, huge if mode == "layout" else "short"
 
     monkeypatch.setattr(packaging, "_pdftotext_pages", fake)
     out = package_pdf(src, embedded(), tmp_path / "pkg", stem="stmt", deadline_seconds=100)
@@ -850,10 +874,10 @@ def test_publish_conflict_through_package_pdf_leaves_other_files_out(src, tmp_pa
     out_dir = tmp_path / "pkg"
     real_publish = packaging._publish
 
-    def racing(stage, out_dir_, names):
+    def racing(stage, out_dir_, names, **kw):
         out_dir_.mkdir(parents=True, exist_ok=True)
         (out_dir_ / "stmt.links.json").write_text("raced in")
-        real_publish(stage, out_dir_, names)
+        real_publish(stage, out_dir_, names, **kw)
 
     monkeypatch.setattr(packaging, "_publish", racing)
     with pytest.raises(PackagingError, match="stmt.links.json"):
@@ -868,13 +892,14 @@ def test_publish_conflict_through_package_pdf_leaves_other_files_out(src, tmp_pa
 
 def comparable(out: packaging.PackageOutput) -> dict:
     return {
-        "files": {f.role: f.sha256 for f in out.files if f.role != "package_record"},
+        # The stats and the record carry wall-clock timings, so their bytes differ run to run.
+        "files": {f.role: f.sha256 for f in out.files if f.role not in ("package_record", "extraction_stats")},
         "source": out.source_sha256,
         "retained": out.retained_sha256,
         "pages": (out.source_page_count, out.retained_page_count, out.full_original_retained),
         "text_mode": out.text_mode,
         "poppler": out.poppler_version,
-        "stats": out.stats,
+        "stats": {k: v for k, v in out.stats.items() if k != "timings"},
         "warnings": out.parser_warning_count,
     }
 
@@ -1006,3 +1031,547 @@ def test_child_environment_is_path_only(src, tmp_path, monkeypatch):
         packaging.run_packaging(src, embedded(), tmp_path / "pkg", stem="s")
     assert set(json.loads(probe.read_text())) - {"LC_CTYPE", "__CF_USER_TEXT_ENCODING"} == {"PATH"}
     assert sys.executable  # the worker is launched with the same interpreter
+
+
+# -- OCR supplement ------------------------------------------------------------
+
+HAS_OCR_TOOLS = all(shutil.which(t) for t in ("pdftoppm", "tesseract"))
+try:
+    import PIL  # noqa: F401
+
+    HAS_PILLOW = True
+except ImportError:  # pragma: no cover - Pillow is a dependency of the app
+    HAS_PILLOW = False
+needs_ocr = pytest.mark.skipif(
+    not (HAS_OCR_TOOLS and HAS_PILLOW), reason="pdftoppm, tesseract and Pillow are needed for real OCR"
+)
+
+SCAN_WORDS = "SCANNED DICTIONARY ENTRY"
+
+
+def make_mixed_pdf() -> bytes:
+    """Three pages: native text, an image of text with no text layer, native text."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    image = Image.new("RGB", (1500, 400), "white")
+    ImageDraw.Draw(image).text((60, 140), SCAN_WORDS, fill="black", font=ImageFont.load_default(size=90))
+    buf = io.BytesIO()
+    image.save(buf, "PDF", resolution=200.0)
+    native = PdfReader(io.BytesIO(make_pdf(3, links=False)))
+    writer = PdfWriter()
+    writer.add_page(native.pages[0])
+    writer.add_page(PdfReader(io.BytesIO(buf.getvalue())).pages[0])
+    writer.add_page(native.pages[2])
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+@pytest.fixture
+def mixed_src(tmp_path: Path) -> Path:
+    path = tmp_path / "mixed.pdf"
+    path.write_bytes(make_mixed_pdf() if HAS_PILLOW else make_pdf(3, links=False))
+    return path
+
+
+@pytest.fixture
+def fake_ocr(monkeypatch):
+    """Pretend Tesseract is installed and 'read' each page; no subprocess involved."""
+    real_which = shutil.which
+    monkeypatch.setattr(
+        packaging.shutil,
+        "which",
+        lambda name, *a, **k: f"/fake/{name}" if name in ("pdftoppm", "tesseract") else real_which(name, *a, **k),
+    )
+    monkeypatch.setattr(packaging, "_tesseract_version", lambda exe: "tesseract 9.9.9")
+    seen: list[list[int]] = []
+
+    def pages(pdftoppm, tesseract, pdf, work, retained_pages, remaining, deadline, scale_pages=frozenset()):
+        seen.append(list(retained_pages))
+        return [f"fake ocr of retained page {n}\n" for n in retained_pages], False
+
+    monkeypatch.setattr(packaging, "_ocr_pages", pages)
+    return seen
+
+
+def test_validate_rejects_a_bad_ocr_value():
+    with pytest.raises(PackageMapError, match="ocr must be one of off, auto, all"):
+        validate_map(standalone(ocr="always"), 3)
+    for ok in ("off", "auto", "all"):
+        assert validate_map(standalone(ocr=ok), 3) == [1, 2, 3]
+    assert standalone().ocr == "off"
+
+
+def test_ocr_off_keeps_the_seven_file_contract(src, tmp_path):
+    out = package_pdf(src, standalone(), tmp_path / "pkg", stem="fs")
+    assert len(out.files) == 7
+    assert "ocr_text" not in {f.role for f in out.files}
+    assert "ocr" not in out.stats and "ocr" not in out.record
+    assert "ocr_text" not in out.record["artifacts"]
+    assert not any("OCR" in line for line in out.record["limitations"])
+    assert not (tmp_path / "pkg" / "fs.ocr.md").exists()
+
+
+@needs_ocr
+def test_ocr_auto_reads_only_native_empty_pages(mixed_src, tmp_path):
+    out = package_pdf(mixed_src, standalone(ocr="auto"), tmp_path / "pkg", stem="mix")
+
+    assert len(out.files) == 8
+    assert [f.role for f in out.files][:4] == ["retained_pdf", "layout_text", "raw_text", "ocr_text"]
+    ocr_file = next(f for f in out.files if f.role == "ocr_text")
+    assert ocr_file.filename == "mix.ocr.md"
+    assert ocr_file.content_type.startswith("text/markdown")
+    assert sorted(p.name for p in (tmp_path / "pkg").iterdir()) == sorted(f.filename for f in out.files)
+
+    stats = out.stats["ocr"]
+    assert out.stats["modes"]["layout"]["empty_pages"] == [2]
+    assert stats["status"] == "done"
+    assert stats["mode"] == "auto"
+    assert stats["engine"].startswith("tesseract")
+    assert (stats["dpi"], stats["psm"]) == (200, 6)
+    assert stats["pages"] == [2] and stats["page_count"] == 1
+    assert stats["truncated"] is False
+    assert stats["characters"] > 0
+
+    md = (tmp_path / "pkg" / "mix.ocr.md").read_text()
+    assert "OCR supplement" in md and "separately labelled" in md
+    assert "OCR is not exact transcription; the retained PDF controls; native text is unchanged" in md
+    assert "200 dpi" in md and "psm) 6" in md and stats["engine"] in md
+    assert re.findall(r"^## Original PDF page .*$", md, re.M) == [
+        '## Original PDF page 2 (source label "2"); retained page 2 — OCR'
+    ]
+    assert "DICTIONARY" in md.upper()
+
+    # Native text is untouched: the OCR page stays empty in the layout file.
+    layout = (tmp_path / "pkg" / "mix.layout.md").read_text()
+    assert "DICTIONARY" not in layout.upper()
+    assert "Physical page 1 marker" in layout
+
+    record = out.record
+    assert record["artifacts"]["ocr_text"] == "mix.ocr.md"
+    assert record["ocr"] == stats
+    assert any("OCR text is a supplement produced from rendered pages" in x for x in record["limitations"])
+    assert json.loads((tmp_path / "pkg" / "mix.package.json").read_text()) == record
+    assert json.loads((tmp_path / "pkg" / "mix.extraction_stats.json").read_text())["ocr"] == stats
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".packaging-stage-")] == []
+
+
+@needs_ocr
+def test_ocr_all_reads_every_retained_page(mixed_src, tmp_path):
+    out = package_pdf(mixed_src, embedded(ranges=((2, 3),), ocr="all"), tmp_path / "pkg", stem="mix")
+    stats = out.stats["ocr"]
+    assert stats["status"] == "done" and stats["mode"] == "all"
+    assert stats["pages"] == [2, 3] and stats["page_count"] == 2
+    md = (tmp_path / "pkg" / "mix.ocr.md").read_text()
+    assert len(re.findall(r"^## Original PDF page ", md, re.M)) == 2
+    assert "retained page 1 — OCR" in md and "retained page 2 — OCR" in md
+    assert "marker" in md.lower()  # page 3's native text, read back from pixels
+
+
+@needs_ocr
+def test_ocr_leaves_no_png_behind_and_publishes_nothing_extra(mixed_src, tmp_path):
+    package_pdf(mixed_src, standalone(ocr="auto"), tmp_path / "pkg", stem="mix")
+    assert not list(tmp_path.rglob("*.png"))
+
+
+def test_ocr_auto_with_no_empty_pages_is_skipped(src, tmp_path, fake_ocr):
+    out = package_pdf(src, standalone(ocr="auto"), tmp_path / "pkg", stem="fs")
+    assert len(out.files) == 7
+    assert out.stats["ocr"]["status"] == "skipped"
+    assert out.stats["ocr"]["pages"] == [] and out.stats["ocr"]["page_count"] == 0
+    assert out.record["ocr"] == out.stats["ocr"]
+    assert "ocr_text" not in out.record["artifacts"]
+    assert fake_ocr == []
+
+
+@pytest.mark.skipif(not HAS_POPPLER, reason="auto needs pdftotext to know which pages are empty")
+@pytest.mark.parametrize("missing", [("tesseract",), ("pdftoppm",), ("pdftoppm", "tesseract")])
+def test_ocr_unavailable_still_packages(mixed_src, tmp_path, monkeypatch, missing):
+    real_which = shutil.which
+    monkeypatch.setattr(
+        packaging.shutil, "which", lambda name, *a, **k: None if name in missing else real_which(name, *a, **k)
+    )
+    mapping = standalone(ocr="all")
+    out = package_pdf(mixed_src, mapping, tmp_path / "pkg", stem="mix")
+
+    assert len(out.files) == 7
+    ocr = out.stats["ocr"]
+    assert ocr["status"] == "unavailable" and ocr["mode"] == "all"
+    assert all(name in ocr["reason"] for name in missing)
+    assert ocr["pages"] == [] and ocr["page_count"] == 0
+    assert out.record["ocr"] == ocr
+    assert "ocr_text" not in out.record["artifacts"]
+    assert any("unavailable" in x and "no OCR supplement" in x for x in out.record["limitations"])
+    assert not (tmp_path / "pkg" / "mix.ocr.md").exists()
+
+
+def test_ocr_page_cap_truncates_and_records_it(src, tmp_path, monkeypatch, fake_ocr):
+    monkeypatch.setattr(packaging, "MAX_OCR_PAGES", 2)
+    out = package_pdf(src, standalone(ocr="all"), tmp_path / "pkg", stem="fs")
+
+    assert fake_ocr == [[1, 2]]
+    stats = out.stats["ocr"]
+    assert stats["status"] == "done" and stats["truncated"] is True
+    assert stats["pages"] == [1, 2] and stats["page_count"] == 2
+    assert stats["truncated_pages"] == [3, 4, 5, 6]
+    assert stats["engine"] == "tesseract 9.9.9"
+    md = (tmp_path / "pkg" / "fs.ocr.md").read_text()
+    assert stats["truncated_reason"] == "page_cap"
+    assert "Truncated (page_cap): only the first 2 target pages" in md
+    assert len(re.findall(r"^## Original PDF page ", md, re.M)) == 2
+    assert len(out.files) == 8
+
+
+def test_ocr_markdown_fences_text_containing_backticks(src, tmp_path, monkeypatch, fake_ocr):
+    monkeypatch.setattr(packaging, "_ocr_pages", lambda *a, **k: (["a ```` b\n"] * 6, False))
+    out = package_pdf(src, standalone(ocr="all"), tmp_path / "pkg", stem="fs")
+    md = (tmp_path / "pkg" / "fs.ocr.md").read_text()
+    assert "`````text\na ```` b\n`````" in md
+    assert out.stats["ocr"]["characters"] == 6 * len("a ```` b\n")
+
+
+def test_ocr_name_is_claimed_by_the_request(src, tmp_path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "fs.ocr.md").write_text("someone else's")
+    with pytest.raises(PackagingError, match="fs.ocr.md"):
+        package_pdf(src, standalone(ocr="auto"), pkg, stem="fs")
+    # With OCR off the stray file is not ours to care about.
+    assert len(package_pdf(src, standalone(), pkg, stem="fs").files) == 7
+    assert (pkg / "fs.ocr.md").read_text() == "someone else's"
+
+
+def test_ocr_failure_publishes_nothing(src, tmp_path, monkeypatch, fake_ocr):
+    def boom(*a, **k):
+        raise PackagingError("tesseract exited 1 on retained page 1: bad")
+
+    monkeypatch.setattr(packaging, "_ocr_pages", boom)
+    with pytest.raises(PackagingError, match="tesseract exited 1"):
+        package_pdf(src, standalone(ocr="all"), tmp_path / "pkg", stem="fs")
+    assert not (tmp_path / "pkg").exists()
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".packaging-stage-")] == []
+
+
+@needs_ocr
+def test_run_packaging_round_trips_the_ocr_file(mixed_src, tmp_path):
+    out = packaging.run_packaging(mixed_src, standalone(ocr="auto"), tmp_path / "iso", stem="mix")
+
+    assert len(out.files) == 8
+    assert all(isinstance(f.path, Path) and f.path.parent == tmp_path / "iso" for f in out.files)
+    ocr_file = next(f for f in out.files if f.role == "ocr_text")
+    assert ocr_file.filename == "mix.ocr.md" and ocr_file.path.is_file()
+    assert ocr_file.sha256 == hashlib.sha256(ocr_file.path.read_bytes()).hexdigest()
+    assert "DICTIONARY" in ocr_file.path.read_text().upper()
+    assert out.stats["ocr"]["status"] == "done" and out.stats["ocr"]["pages"] == [2]
+    assert out.record["ocr"] == out.stats["ocr"]
+    assert out.record["artifacts"]["ocr_text"] == "mix.ocr.md"
+    assert json.loads(out_files(out)["package_record"].read_text()) == out.record
+    assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".packaging-stage-")] == []
+
+
+def test_run_packaging_rejects_a_bad_ocr_value_as_a_map_error(src, tmp_path):
+    with pytest.raises(PackageMapError, match="ocr must be one of"):
+        packaging.run_packaging(src, standalone(ocr="sometimes"), tmp_path / "pkg", stem="fs")
+    assert not (tmp_path / "pkg").exists()
+
+
+def test_run_packaging_off_is_still_seven_files(src, tmp_path):
+    out = packaging.run_packaging(src, standalone(ocr="off"), tmp_path / "pkg", stem="fs")
+    assert len(out.files) == 7 and "ocr" not in out.stats
+
+
+# -- verification oracle and timings -------------------------------------------------
+
+
+@pytest.fixture
+def counters(monkeypatch):
+    """Count pypdf page text extractions and pdftotext runs (by mode and target)."""
+    from pypdf._page import PageObject
+
+    count = {"pypdf_extract": 0, "pdftotext": []}
+    real_extract = PageObject.extract_text
+    real_pdftotext = packaging._pdftotext_pages
+
+    def extract(self, *a, **k):
+        count["pypdf_extract"] += 1
+        return real_extract(self, *a, **k)
+
+    def pdftotext(exe, pdf, mode, n, timeout=None):
+        count["pdftotext"].append((Path(pdf).name, mode))
+        return real_pdftotext(exe, pdf, mode, n, timeout=timeout)
+
+    monkeypatch.setattr(PageObject, "extract_text", extract)
+    monkeypatch.setattr(packaging, "_pdftotext_pages", pdftotext)
+    return count
+
+
+@needs_poppler
+def test_byte_copy_skips_per_page_text_verification(src, tmp_path, counters):
+    out = package_pdf(src, standalone(), tmp_path / "pkg", stem="fs")
+
+    assert counters["pypdf_extract"] == 0
+    # Only the retained file is read by Poppler, once per mode: no pass over the source.
+    assert counters["pdftotext"] == [("fs.pdf", "layout"), ("fs.pdf", "raw")]
+    ver = out.record["verification"]
+    assert ver["oracle"] == "sha256"
+    assert any("byte equality" in c and "skipped" in c for c in ver["checked"])
+    assert not any("extract_text equality" in c or "pdftotext -layout equality" in c for c in ver["checked"])
+    assert out.stats["content_verification"].startswith("SHA-256 byte equality")
+    assert out.source_sha256 == out.retained_sha256
+
+
+def test_byte_copy_skips_text_verification_without_poppler_too(src, tmp_path, monkeypatch, counters):
+    real_which = shutil.which
+    monkeypatch.setattr(
+        packaging.shutil, "which", lambda name, *a, **k: None if name == "pdftotext" else real_which(name, *a, **k)
+    )
+    out = package_pdf(src, standalone(), tmp_path / "pkg", stem="fs")
+
+    assert out.record["verification"]["oracle"] == "sha256"
+    # The pypdf fallback extracts for the markdown (layout and raw), never to verify.
+    assert counters["pypdf_extract"] == 2 * 6
+
+
+@needs_poppler
+def test_subset_verifies_with_one_poppler_pass_over_the_source(src, tmp_path, counters):
+    out = package_pdf(src, embedded(), tmp_path / "pkg", stem="stmt")
+
+    assert counters["pypdf_extract"] == 0
+    assert sorted(counters["pdftotext"]) == sorted(
+        [("stmt.pdf", "layout"), ("stmt.pdf", "raw"), ("source.pdf", "layout")]
+    )
+    ver = out.record["verification"]
+    assert ver["oracle"] == "pdftotext"
+    assert any("pdftotext -layout equality" in c for c in ver["checked"])
+    assert not any("byte equality" in c for c in ver["checked"])
+    assert "pdftotext -layout" in out.stats["content_verification"]
+
+
+def test_subset_falls_back_to_pypdf_equality_without_poppler(src, tmp_path, monkeypatch, counters):
+    real_which = shutil.which
+    monkeypatch.setattr(
+        packaging.shutil, "which", lambda name, *a, **k: None if name == "pdftotext" else real_which(name, *a, **k)
+    )
+    out = package_pdf(src, embedded(), tmp_path / "pkg", stem="stmt")
+
+    assert counters["pdftotext"] == []
+    ver = out.record["verification"]
+    assert ver["oracle"] == "pypdf"
+    assert any("pypdf extract_text equality" in c for c in ver["checked"])
+    # 4 selected pages: two pypdf reads each for verification, plus layout and raw markdown.
+    assert counters["pypdf_extract"] == 4 * 2 + 4 * 2
+    assert out.stats["content_verification"].startswith("exact pypdf extract_text equality")
+
+
+@pytest.mark.parametrize("factory", [standalone, embedded])
+def test_timings_are_recorded_in_stats_and_record(src, tmp_path, factory):
+    out = package_pdf(src, factory(), tmp_path / "pkg", stem="s")
+
+    keys = {"open", "subset_write", "verify", "text_layout", "text_raw", "ocr", "publish", "total"}
+    assert tuple(out.stats["timings"]) == packaging.TIMING_PHASES
+    assert set(out.stats["timings"]) == keys
+    assert out.record["timings"] == out.stats["timings"]
+    assert all(isinstance(v, float) and v >= 0 for v in out.stats["timings"].values())
+    assert out.stats["timings"]["ocr"] == 0.0  # not requested
+    assert out.stats["timings"]["total"] >= out.stats["timings"]["open"]
+    assert out.stats["timings"]["total"] >= out.stats["timings"]["publish"] > 0
+    # What is on disk is what is returned, publish and total included.
+    assert json.loads(out_files(out)["extraction_stats"].read_text()) == out.stats
+    assert json.loads(out_files(out)["package_record"].read_text()) == out.record
+
+
+def test_a_late_publish_failure_rolls_back_the_data_files_too(src, tmp_path, monkeypatch):
+    real = packaging._create_exclusive
+
+    def flaky(stage_file, target):
+        if target.name == "stmt.package.json":
+            raise FileExistsError
+        real(stage_file, target)
+
+    monkeypatch.setattr(packaging, "_create_exclusive", flaky)
+    with pytest.raises(PackagingError, match="stmt.package.json"):
+        package_pdf(src, embedded(), tmp_path / "work" / "pkg", stem="stmt")
+    assert not (tmp_path / "work" / "pkg").exists()
+
+
+def test_default_deadline_is_ten_minutes():
+    import inspect
+
+    assert packaging.DEFAULT_DEADLINE_SECONDS == 600
+    assert inspect.signature(packaging.run_packaging).parameters["deadline_seconds"].default == 600
+    assert packaging._PDFTOTEXT_TIMEOUT_SECONDS == 300  # per-call bound, further capped by the deadline
+
+
+# -- OCR: deadline reserve and render scale ------------------------------------------
+
+
+def _fake_ocr_tools(monkeypatch):
+    """Replace subprocess.run inside packaging with a pdftoppm that writes a PNG and a
+    tesseract that reads it back as text. Returns the list of commands run."""
+    commands: list[list[str]] = []
+    real_run = subprocess.run
+
+    def run(cmd, **kw):
+        tool = Path(cmd[0]).name
+        if tool not in ("pdftoppm", "tesseract"):
+            return real_run(cmd, **kw)  # pdftotext and friends are the real thing
+        commands.append([tool, *cmd[1:]])
+        if tool == "pdftoppm":
+            Path(cmd[-1] + ".png").write_bytes(b"png")
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+        return subprocess.CompletedProcess(cmd, 0, b"words\n\f", b"")
+
+    monkeypatch.setattr(packaging.subprocess, "run", run)
+    return commands
+
+
+def test_ocr_stops_starting_pages_inside_the_deadline_reserve(tmp_path, monkeypatch):
+    commands = _fake_ocr_tools(monkeypatch)
+    # Plenty of time while fewer than two pages are done, then less than the reserve.
+    def left() -> float:
+        done = sum(c[0] == "pdftoppm" for c in commands)
+        return 200.0 if done < 2 else packaging.OCR_DEADLINE_RESERVE_SECONDS - 1
+
+    texts, out_of_time = packaging._ocr_pages(
+        "pdftoppm", "tesseract", tmp_path / "x.pdf", tmp_path, [1, 2, 3, 4], left, 600
+    )
+
+    assert out_of_time is True
+    assert texts == ["words\n", "words\n"]
+    assert [c[0] for c in commands].count("pdftoppm") == 2
+    assert not list(tmp_path.glob("*.png"))
+
+
+def test_ocr_without_a_deadline_never_stops_early(tmp_path, monkeypatch):
+    _fake_ocr_tools(monkeypatch)
+    texts, out_of_time = packaging._ocr_pages(
+        "pdftoppm", "tesseract", tmp_path / "x.pdf", tmp_path, [1, 2, 3], lambda: None, None
+    )
+    assert len(texts) == 3 and out_of_time is False
+
+
+def test_ocr_tool_failure_still_raises_even_with_time_left(tmp_path, monkeypatch):
+    def run(cmd, **kw):
+        if cmd[0] == "pdftoppm":
+            Path(cmd[-1] + ".png").write_bytes(b"png")
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+        return subprocess.CompletedProcess(cmd, 1, b"", b"Error in pixReadStream")
+
+    monkeypatch.setattr(packaging.subprocess, "run", run)
+    with pytest.raises(PackagingError, match="tesseract exited 1 on retained page 1: Error in pixReadStream"):
+        packaging._ocr_pages("pdftoppm", "tesseract", tmp_path / "x.pdf", tmp_path, [1], lambda: 500.0, 600)
+    assert not list(tmp_path.glob("*.png"))
+
+
+def test_ocr_deadline_stop_publishes_what_was_read_and_says_so(src, tmp_path, monkeypatch, fake_ocr):
+    # Two of six pages were read before the reserve was hit.
+    monkeypatch.setattr(
+        packaging, "_ocr_pages", lambda *a, **k: (["one\n", "two\n"], True)
+    )
+    out = package_pdf(src, standalone(ocr="all"), tmp_path / "pkg", stem="fs")
+
+    assert len(out.files) == 8
+    stats = out.stats["ocr"]
+    assert stats["status"] == "done" and stats["truncated"] is True
+    assert stats["truncated_reason"] == "deadline"
+    assert stats["pages"] == [1, 2] and stats["page_count"] == 2
+    assert stats["truncated_pages"] == [3, 4, 5, 6]
+    assert out.record["ocr"] == stats
+    md = (tmp_path / "pkg" / "fs.ocr.md").read_text()
+    assert "Truncated (deadline): only the first 2 target pages" in md
+    assert len(re.findall(r"^## Original PDF page ", md, re.M)) == 2
+    assert any("OCR covers 2 of 6 target pages (stopped: deadline)" in x for x in out.record["limitations"])
+
+
+def test_ocr_out_of_time_before_the_first_page_is_skipped_not_fatal(src, tmp_path, monkeypatch, fake_ocr):
+    monkeypatch.setattr(packaging, "_ocr_pages", lambda *a, **k: ([], True))
+    out = package_pdf(src, standalone(ocr="all"), tmp_path / "pkg", stem="fs")
+
+    assert len(out.files) == 7
+    stats = out.stats["ocr"]
+    assert stats["status"] == "skipped" and "deadline" in stats["reason"]
+    assert stats["truncated"] is True and stats["truncated_reason"] == "deadline"
+    assert stats["truncated_pages"] == [1, 2, 3, 4, 5, 6] and stats["page_count"] == 0
+    assert "ocr_text" not in out.record["artifacts"]
+    assert not (tmp_path / "pkg" / "fs.ocr.md").exists()
+    assert any("OCR covers 0 of 6" in x for x in out.record["limitations"])
+
+
+def test_a_package_near_its_deadline_still_publishes_with_real_ocr_skipped(src, tmp_path, monkeypatch):
+    # Not mocked: with the reserve larger than the whole deadline OCR never starts.
+    real_which = shutil.which
+    monkeypatch.setattr(
+        packaging.shutil, "which", lambda name, *a, **k: f"/fake/{name}" if name in ("pdftoppm", "tesseract") else real_which(name, *a, **k)
+    )
+    monkeypatch.setattr(packaging, "_tesseract_version", lambda exe: "tesseract 9.9.9")
+    monkeypatch.setattr(packaging, "OCR_DEADLINE_RESERVE_SECONDS", 10_000)
+    commands = _fake_ocr_tools(monkeypatch)
+    out = package_pdf(src, standalone(ocr="all"), tmp_path / "pkg", stem="fs", deadline_seconds=600)
+
+    assert len(out.files) == 7
+    assert out.stats["ocr"]["status"] == "skipped"
+    assert not [c for c in commands if c[0] in ("pdftoppm", "tesseract")]
+
+
+def test_pdftoppm_gets_scale_to_only_for_pages_that_need_it(tmp_path, monkeypatch):
+    commands = _fake_ocr_tools(monkeypatch)
+    packaging._ocr_pages(
+        "pdftoppm", "tesseract", tmp_path / "x.pdf", tmp_path, [1, 2], lambda: None, None, {2}
+    )
+
+    first, second = [c for c in commands if c[0] == "pdftoppm"]
+    assert "-scale-to" not in first and first[first.index("-r") + 1] == "200"
+    assert second[second.index("-scale-to") + 1] == "4000" and second[second.index("-r") + 1] == "200"
+
+
+def _blank_pages(*sizes) -> list:
+    writer = PdfWriter()
+    for w, h in sizes:
+        writer.add_blank_page(w, h)
+    return list(writer.pages)
+
+
+def test_needs_scale_follows_the_rendered_pixel_size():
+    letter, a0, wide, big_but_ok = _blank_pages((612, 792), (2384, 3370), (3000, 400), (1440, 1440))
+    assert not packaging._needs_scale(letter)  # 2200 px
+    assert packaging._needs_scale(a0)  # 9361 px
+    assert packaging._needs_scale(wide)  # 8333 px
+    assert not packaging._needs_scale(big_but_ok)  # 4000 px exactly: not over
+    wide[NameObject("/UserUnit")] = NumberObject(1)
+    assert packaging._needs_scale(wide)
+
+    class Broken:
+        @property
+        def mediabox(self):
+            raise ValueError("bad box")
+
+    assert packaging._needs_scale(Broken())  # unreadable: take the safe renderer
+
+
+def test_ocr_stats_record_the_scale_even_when_unavailable(src, tmp_path, monkeypatch):
+    real_which = shutil.which
+    monkeypatch.setattr(
+        packaging.shutil, "which", lambda name, *a, **k: None if name == "tesseract" else real_which(name, *a, **k)
+    )
+    out = package_pdf(src, standalone(ocr="all"), tmp_path / "pkg", stem="fs")
+    assert out.stats["ocr"]["scale_to"] == 4000 and out.stats["ocr"]["scaled_pages"] == []
+
+
+@needs_ocr
+def test_ocr_scaled_pages_are_recorded_and_ordinary_pages_are_not(mixed_src, tmp_path):
+    writer = PdfWriter()
+    writer.append(PdfReader(str(mixed_src)), pages=[0, 1])
+    writer.add_blank_page(3000, 4000)  # 8333 x 11111 px at 200 dpi
+    big = tmp_path / "big.pdf"
+    with big.open("wb") as f:
+        writer.write(f)
+
+    out = package_pdf(big, standalone(ocr="all"), tmp_path / "pkg", stem="big")
+
+    stats = out.stats["ocr"]
+    assert stats["status"] == "done" and stats["pages"] == [1, 2, 3]
+    assert stats["scaled_pages"] == [3]
+    assert (stats["dpi"], stats["scale_to"]) == (200, 4000)
+    md = (tmp_path / "pkg" / "big.ocr.md").read_text()
+    assert "Source pages 3 are larger than 4000 px at 200 dpi" in md
+    assert "DICTIONARY" in md.upper()  # the unscaled scan page still reads at 200 dpi

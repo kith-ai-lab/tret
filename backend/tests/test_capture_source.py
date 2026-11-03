@@ -20,6 +20,8 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
+import subprocess
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +34,7 @@ from sqlalchemy import select
 # same fixtures the sibling file's tests stand on.
 from test_web_tools import _no_leaked_overrides, ctx, db, research  # noqa: F401
 
+from tests.test_packaging import make_pdf
 from tret.db.models import Document, EgressCall
 from tret.engine import tools as tools_module
 from tret.engine.tools import (
@@ -44,6 +47,7 @@ from tret.engine.tools import (
 )
 from tret.net.fetch import SOURCE_KIND_WEB, FetchedPage, FetchError, fetch_page
 from tret.net.fetch import fetch as fetch_module
+from tret.net.fetch import snapshot as snapshot_module
 from tret.net.policy import MODE_OFF, MODE_ON, MODE_REPLAY
 
 URL = "https://issuer.example.com/reports/2025-sustainability.pdf"
@@ -638,3 +642,93 @@ async def test_only_the_provenance_headers_are_kept_lower_cased(wire):
         "etag",
         "content-disposition",
     }
+
+
+# ── extraction budget for captured originals ───────────────────────────────────
+def _page_of(body: bytes, extension: str) -> FetchedPage:
+    return FetchedPage(
+        url=URL,
+        requested_url=URL,
+        status_code=200,
+        content_type="application/pdf",
+        extension=extension,
+        body=body,
+        sha256=hashlib.sha256(body).hexdigest(),
+        duration_ms=1,
+        redirects=(),
+        truncated=False,
+        headers=(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("extension", "size", "expected"),
+    [
+        (".pdf", 100_000, snapshot_module.EXTRACTION_TIMEOUT_SECONDS),  # a normal fetch_url page
+        (".pdf", 2_000_000, snapshot_module.EXTRACTION_TIMEOUT_SECONDS),  # at the fetch_url cap
+        (".pdf", 2_000_001, snapshot_module.CAPTURE_PDF_EXTRACTION_TIMEOUT_SECONDS),  # capture only
+        (".docx", 3_000_000, snapshot_module.EXTRACTION_TIMEOUT_SECONDS),  # only PDFs get longer
+    ],
+)
+async def test_large_captured_pdfs_get_the_longer_extraction_budget(monkeypatch, extension, size, expected):
+    seen: list[float] = []
+    real_wait_for = snapshot_module.asyncio.wait_for
+
+    async def spy(aw, timeout):
+        seen.append(timeout)
+        return await real_wait_for(aw, timeout)
+
+    def fake_extract(filename, data):
+        return "text", {"pages": 1}
+
+    monkeypatch.setattr(snapshot_module.asyncio, "wait_for", spy)
+    monkeypatch.setattr(snapshot_module, "extract_text", fake_extract)
+    body = b"%PDF-" + b"0" * (size - 5)
+
+    text, meta, status = await snapshot_module._extract(_page_of(body, extension), "report" + extension)
+
+    assert (text, status) == ("text", "done")
+    assert seen == [expected]
+    assert snapshot_module.EXTRACTION_TIMEOUT_SECONDS == 30.0
+    assert snapshot_module.CAPTURE_PDF_EXTRACTION_TIMEOUT_SECONDS == 180.0
+
+
+async def test_a_timeout_message_names_the_budget_that_applied(monkeypatch):
+    monkeypatch.setattr(snapshot_module, "CAPTURE_PDF_EXTRACTION_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(snapshot_module, "extract_text", lambda filename, data: time.sleep(0.3))
+    body = b"%PDF-" + b"0" * 2_000_000
+
+    text, meta, status = await snapshot_module._extract(_page_of(body, ".pdf"), "report.pdf")
+
+    assert status == "failed" and text == ""
+    assert meta == {"error": "text extraction timed out after 0s"}
+
+
+def _pdftotext_timeouts(monkeypatch) -> list[float]:
+    """Run the real extractor with Poppler stubbed to time out; record each bound."""
+    from tret.services import documents as documents_service
+
+    seen: list[float] = []
+
+    def run(cmd, **kw):
+        seen.append(kw["timeout"])
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    monkeypatch.setattr(documents_service.shutil, "which", lambda name, *a, **k: "/fake/pdftotext")
+    monkeypatch.setattr(documents_service.subprocess, "run", run)
+    return seen
+
+
+async def test_snapshot_bounds_pdftotext_by_the_budget_that_applies(monkeypatch):
+    seen = _pdftotext_timeouts(monkeypatch)
+    small = make_pdf(4, links=False)
+    large = small + b"\n%" + b"0" * 2_000_000  # trailing bytes: only capture can deliver this size
+
+    for body in (small, large):
+        text, meta, status = await snapshot_module._extract(_page_of(body, ".pdf"), "report.pdf")
+        assert (text, status) == ("", "failed")
+        assert meta["text_extractor"] == "pdftotext" and "timed out" in meta["error"]
+
+    # fetch_url pages keep the 30 s bound; a captured report gets Poppler's own 120 s cap
+    # (inside its 180 s wall), and never more than the wall.
+    assert seen == [30.0, 120.0]

@@ -26,6 +26,12 @@ Design rules that are easy to lose in a refactor:
   xref or a wrong pointer. Those are captured with the phase they happened in and
   carried into the stats and the record, because a clean-looking package built
   from a repaired source should say so.
+* **OCR is a supplement, never a replacement.** When the reviewed map asks for it
+  (`ocr="auto"` for native-empty pages, `"all"` for every retained page), the
+  retained pages are rendered and read with Tesseract into a separately labelled
+  `{stem}.ocr.md`. The native markdown, the retained PDF and every hash are
+  untouched; OCR is not exact transcription and the retained PDF controls. A
+  machine without Tesseract still produces the normal package and says so.
 * **Poppler is preferred, not required.** `pdftotext -layout/-raw` gives the best
   page-referenced text. Without it the pypdf fallback still produces a complete
   package, but says so in the markdown header and the record: layout fidelity is
@@ -52,7 +58,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import pypdf
 from pypdf import PdfReader, PdfWriter
@@ -63,6 +69,7 @@ log = logging.getLogger("tret.packaging")
 PACKAGING_VERSION = "1.0.0"
 
 SCOPES = ("standalone", "embedded")
+OCR_MODES = ("off", "auto", "all")
 ROLES = (
     "primary_disclosure",
     "assurance",
@@ -88,7 +95,25 @@ _PDFTOTEXT_TIMEOUT_SECONDS = 300
 # make it emit a warning per glyph; the stats file is for people to read.
 MAX_POPPLER_STDERR_BYTES = 64 * 1024
 
-DEFAULT_DEADLINE_SECONDS = 300
+# OCR bounds: pages per package, and wall-clock for one pdftoppm or tesseract run.
+MAX_OCR_PAGES = 60
+OCR_DPI = 200
+OCR_PSM = 6
+_OCR_TOOL_TIMEOUT_SECONDS = 120
+# A page whose render at OCR_DPI would be longer than this many pixels is rendered
+# with `pdftoppm -scale-to` instead, so one huge page cannot exhaust the child's
+# address-space limit. (`-scale-to` overrides `-r`, so it is only passed for such
+# pages; passing it everywhere would re-render ordinary pages at ~360 dpi.)
+OCR_MAX_PIXELS = 4000
+# OCR stops starting pages once this much of the deadline is left, so the package
+# is still written and published rather than lost to a late timeout.
+OCR_DEADLINE_RESERVE_SECONDS = 45
+
+DEFAULT_DEADLINE_SECONDS = 600
+# Wall seconds per phase, in the stats and the record. `publish` is the move of the
+# data files into place; the stats and record files are moved after it (they carry
+# the number), and `total` runs to just before them.
+TIMING_PHASES = ("open", "subset_write", "verify", "text_layout", "text_raw", "ocr", "publish", "total")
 DEFAULT_MAX_RSS_BYTES = 600 * 1024 * 1024
 
 _REPAIR_WARNING_RE = re.compile(
@@ -99,6 +124,8 @@ _FILE_SUFFIX = {
     "retained_pdf": ".pdf",
     "layout_text": ".layout.md",
     "raw_text": ".raw.md",
+    # Only present when OCR actually ran; see `_names_for`.
+    "ocr_text": ".ocr.md",
     "page_map": ".page_map.json",
     "links": ".links.json",
     "extraction_stats": ".extraction_stats.json",
@@ -108,10 +135,17 @@ _CONTENT_TYPE = {
     "retained_pdf": "application/pdf",
     "layout_text": "text/markdown; charset=utf-8",
     "raw_text": "text/markdown; charset=utf-8",
+    "ocr_text": "text/markdown; charset=utf-8",
     "page_map": "application/json",
     "links": "application/json",
     "extraction_stats": "application/json",
     "package_record": "application/json",
+}
+
+_CONTENT_VERIFICATION = {
+    "sha256": "SHA-256 byte equality of the whole original; per-page text equality skipped as redundant",
+    "pdftotext": "exact pdftotext -layout equality for each selected source page against its retained page",
+    "pypdf": "exact pypdf extract_text equality for each selected source page against its retained page",
 }
 
 _VERIFICATION_NOT_ESTABLISHED = (
@@ -142,6 +176,9 @@ class PackageMap:
     incorporations: tuple[dict, ...] = ()
     # Passthrough {range, reason}.
     exclusions: tuple[dict, ...] = ()
+    # OCR supplement: "off" | "auto" (retained pages whose native layout text is
+    # empty) | "all" (every retained page). Never changes the native text.
+    ocr: str = "off"
 
 
 @dataclass(frozen=True)
@@ -155,7 +192,7 @@ class SourceInfo:
 
 @dataclass(frozen=True)
 class PackageFile:
-    role: str  # retained_pdf | layout_text | raw_text | page_map | links | extraction_stats | package_record
+    role: str  # retained_pdf | layout_text | raw_text | ocr_text | page_map | links | extraction_stats | package_record
     path: Path
     filename: str
     content_type: str
@@ -184,6 +221,16 @@ class PackageOutput:
 
 def _utc() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+@contextlib.contextmanager
+def _timed(timings: dict[str, float], name: str) -> Iterator[None]:
+    """Add the wall time of the block to `timings[name]` (phases can run in pieces)."""
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        timings[name] = timings.get(name, 0.0) + (time.monotonic() - start)
 
 
 def _digest(path: Path) -> str:
@@ -302,8 +349,13 @@ def _check_stem(stem: Any) -> None:
         raise PackageMapError(f"stem is longer than {MAX_STEM_LENGTH} characters")
 
 
-def _names_for(stem: str) -> dict[str, str]:
-    return {role: stem + suffix for role, suffix in _FILE_SUFFIX.items()}
+def _names_for(stem: str, ocr: bool = False) -> dict[str, str]:
+    """Filenames of a package: seven, or eight when the OCR supplement is included."""
+    return {
+        role: stem + suffix
+        for role, suffix in _FILE_SUFFIX.items()
+        if ocr or role != "ocr_text"
+    }
 
 
 def _check_pair(pair: Any, page_count: int, what: str) -> tuple[int, int]:
@@ -325,6 +377,8 @@ def validate_map(mapping: PackageMap, page_count: int) -> list[int]:
         raise PackageMapError("Every document needs scope=standalone or embedded")
     if not isinstance(mapping.review_note, str):
         raise PackageMapError("review_note must be a string")
+    if mapping.ocr not in OCR_MODES:
+        raise PackageMapError(f"ocr must be one of {', '.join(OCR_MODES)}; got {mapping.ocr!r}")
     if type(page_count) is not int or page_count < 1:
         raise PackageMapError("source has no pages")
 
@@ -674,6 +728,163 @@ def _write_markdown(
     path.write_text("".join(out), encoding="utf-8")
 
 
+# -- OCR supplement ------------------------------------------------------------
+
+
+def _ocr_env() -> dict[str, str]:
+    # One OpenMP thread: Tesseract otherwise spawns a thread per core, which is
+    # wasted under the child's address-space ceiling and noisy next to other jobs.
+    return {**_tool_env(), "OMP_THREAD_LIMIT": "1"}
+
+
+def _tesseract_version(exe: str) -> str:
+    try:
+        run = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30, env=_ocr_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PackagingError(f"tesseract could not be run: {exc}") from exc
+    # Older builds print the banner on stderr, newer on stdout.
+    first = ((run.stdout or run.stderr).strip().splitlines() or [""])[0]
+    return first.strip()
+
+
+def _ocr_stats(mode: str, status: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "status": status,
+        "mode": mode,
+        "engine": None,
+        "dpi": OCR_DPI,
+        "psm": OCR_PSM,
+        "pages": [],
+        "page_count": 0,
+        "scale_to": OCR_MAX_PIXELS,
+        "scaled_pages": [],
+        "truncated": False,
+        "characters": 0,
+        **extra,
+    }
+
+
+def _needs_scale(page: Any) -> bool:
+    """True when `page` rendered at OCR_DPI would exceed OCR_MAX_PIXELS on a side."""
+    try:
+        box = page.mediabox
+        unit = float(page.get("/UserUnit", 1) or 1)
+        longest = max(float(box.width), float(box.height)) * unit
+    except Exception:  # unreadable box: take the safe renderer
+        return True
+    return longest / 72.0 * OCR_DPI > OCR_MAX_PIXELS
+
+
+def _ocr_pages(
+    pdftoppm: str,
+    tesseract: str,
+    pdf: Path,
+    work: Path,
+    retained_pages: list[int],
+    remaining: Any,
+    deadline_seconds: float | None,
+    scale_pages: frozenset[int] | set[int] = frozenset(),
+) -> tuple[list[str], bool]:
+    """OCR the given 1-based pages of the retained PDF, one at a time.
+
+    `remaining()` is the seconds left of the package deadline (or None). The PNG
+    of a page is deleted before the next page is rendered. Pages in `scale_pages`
+    are rendered with `-scale-to OCR_MAX_PIXELS` instead of at OCR_DPI. Returns the
+    texts of the pages read, in order, and whether it stopped early because less
+    than OCR_DEADLINE_RESERVE_SECONDS of the deadline was left; a tool failure on
+    a page still raises.
+    """
+
+    def budget() -> float:
+        left = remaining()
+        if left is None:
+            return _OCR_TOOL_TIMEOUT_SECONDS
+        if left <= 0:
+            raise PackagingError(f"packaging exceeded {deadline_seconds:g} s")
+        return min(_OCR_TOOL_TIMEOUT_SECONDS, left)
+
+    texts: list[str] = []
+    for n in retained_pages:
+        left = remaining()
+        if left is not None and left < OCR_DEADLINE_RESERVE_SECONDS:
+            return texts, True
+        prefix = work / f"ocr-p{n}"
+        png = prefix.with_suffix(".png")
+        try:
+            try:
+                render = subprocess.run(
+                    [pdftoppm, "-r", str(OCR_DPI), *(["-scale-to", str(OCR_MAX_PIXELS)] if n in scale_pages else []),
+                     "-f", str(n), "-l", str(n), "-png", "-singlefile", str(pdf), str(prefix)],
+                    capture_output=True,
+                    timeout=budget(),
+                    env=_tool_env(),
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise PackagingError(f"pdftoppm failed on retained page {n}: {exc}") from exc
+            if render.returncode != 0 or not png.is_file():
+                tail = render.stderr.decode("utf-8", errors="replace").strip()[:300]
+                raise PackagingError(f"pdftoppm exited {render.returncode} on retained page {n}: {tail}")
+            try:
+                read = subprocess.run(
+                    [tesseract, str(png), "stdout", "-l", "eng", "--psm", str(OCR_PSM)],
+                    capture_output=True,
+                    timeout=budget(),
+                    env=_ocr_env(),
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise PackagingError(f"tesseract failed on retained page {n}: {exc}") from exc
+            if read.returncode != 0:
+                tail = read.stderr.decode("utf-8", errors="replace").strip()[:300]
+                raise PackagingError(f"tesseract exited {read.returncode} on retained page {n}: {tail}")
+            texts.append(read.stdout.decode("utf-8", errors="replace").replace("\f", ""))
+        finally:
+            png.unlink(missing_ok=True)
+    return texts, False
+
+
+def _write_ocr_markdown(
+    path: Path,
+    title: str,
+    texts: list[str],
+    page_map: list[dict],
+    source_sha: str,
+    retained_sha: str,
+    ocr: dict[str, Any],
+) -> None:
+    out = [
+        f"# {title} - OCR supplement\n",
+        f"OCR supplement, separately labelled from the native text. Engine: {ocr['engine']}; "
+        f"render {ocr['dpi']} dpi; page segmentation mode (psm) {ocr['psm']}; mode: {ocr['mode']}. "
+        f"Original SHA-256: `{source_sha}`. Retained SHA-256: `{retained_sha}`.\n",
+        "OCR is not exact transcription; the retained PDF controls; native text is unchanged. "
+        "Recognition confidence is not accuracy, and table alignment is not preserved. Consult the "
+        "PDF for the wording of record.\n",
+    ]
+    if ocr["scaled_pages"]:
+        out.append(
+            f"Source pages {', '.join(str(n) for n in ocr['scaled_pages'])} are larger than "
+            f"{OCR_MAX_PIXELS} px at {ocr['dpi']} dpi and were rendered scaled to {ocr['scale_to']} px "
+            "on the long side instead.\n"
+        )
+    if ocr["truncated"]:
+        out.append(
+            f"Truncated ({ocr['truncated_reason']}): only the first {ocr['page_count']} target pages "
+            f"were read (page limit {MAX_OCR_PAGES}); the remaining target pages "
+            f"({len(ocr['truncated_pages'])}) have no OCR text.\n"
+        )
+    for txt, pm in zip(texts, page_map, strict=True):
+        fence = "`" * max(3, max([len(x) for x in re.findall(r"`+", txt)] + [0]) + 1)
+        out.append(
+            f"## Original PDF page {pm['source_pdf_page']} "
+            f"(source label {json.dumps(pm['source_page_label'], ensure_ascii=False)}); "
+            f"retained page {pm['retained_pdf_page']} \u2014 OCR\n\n{fence}text\n{txt}"
+        )
+        if not txt.endswith("\n"):
+            out.append("\n")
+        out.append(f"{fence}\n\n")
+    path.write_text("".join(out), encoding="utf-8")
+
+
 # -- publishing --------------------------------------------------------------
 
 
@@ -696,23 +907,35 @@ def _create_exclusive(src: Path, target: Path) -> None:
     src.unlink(missing_ok=True)
 
 
-def _publish(stage: Path, out_dir: Path, names: list[str]) -> None:
+def _publish(
+    stage: Path,
+    out_dir: Path,
+    names: list[str],
+    *,
+    then: Callable[[], None] | None = None,
+    then_names: list[str] = (),  # type: ignore[assignment]
+) -> None:
     """Move staged files into `out_dir`, refusing to overwrite, undoing on failure.
 
     Rollback removes only what this call created: a file that already existed is
-    the reason we are failing and is never touched.
+    the reason we are failing and is never touched. `then`, when given, runs after
+    `names` are in place and stages `then_names` (files that depend on how long the
+    first move took); all of them are covered by the same rollback.
     """
     made_dir = not out_dir.exists()
     out_dir.mkdir(parents=True, exist_ok=True)
     created: list[Path] = []
     try:
-        for name in names:
-            target = out_dir / name
-            try:
-                _create_exclusive(stage / name, target)
-            except FileExistsError:
-                raise PackagingError(f"refusing to overwrite existing file: {name}") from None
-            created.append(target)
+        for batch, hook in ((names, None), (then_names, then)):
+            if hook is not None:
+                hook()
+            for name in batch:
+                target = out_dir / name
+                try:
+                    _create_exclusive(stage / name, target)
+                except FileExistsError:
+                    raise PackagingError(f"refusing to overwrite existing file: {name}") from None
+                created.append(target)
     except BaseException:
         for target in created:
             target.unlink(missing_ok=True)
@@ -761,44 +984,43 @@ def package_pdf(
     if not source_path.is_file():
         raise PackagingError(f"source file not found: {source_path.name}")
 
+    # An .ocr.md already in out_dir blocks a package that asks for OCR, even if OCR
+    # ends up not running: the name was claimed by the request.
     names = _names_for(stem)
-    taken = [n for n in names.values() if (out_dir / n).exists()]
+    taken = [n for n in _names_for(stem, ocr=mapping.ocr != "off").values() if (out_dir / n).exists()]
     if taken:
         raise PackagingError(f"refusing to overwrite existing package files: {', '.join(sorted(taken))}")
 
     parser_warnings: list[dict] = []
-    reader, source_state = _open_pdf(source_path, parser_warnings, "source_open")
-    source_count = len(reader.pages)
-    with _parser_warning_capture(parser_warnings, "source_page_selection"):
-        pages = validate_map(mapping, source_count)
-        labels = _page_labels(reader)
-    source_sha = _digest(source_path)
+    # Every phase is present even when it did not run (0.0), so the shape is fixed.
+    timings: dict[str, float] = dict.fromkeys(TIMING_PHASES, 0.0)
+    with _timed(timings, "open"):
+        reader, source_state = _open_pdf(source_path, parser_warnings, "source_open")
+        source_count = len(reader.pages)
+        with _parser_warning_capture(parser_warnings, "source_page_selection"):
+            pages = validate_map(mapping, source_count)
+            labels = _page_labels(reader)
+        source_sha = _digest(source_path)
     full = len(pages) == source_count
 
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     stage = _stage_dir or Path(tempfile.mkdtemp(prefix=".packaging-stage-", dir=out_dir.parent))
     try:
         dst = stage / names["retained_pdf"]
-        if full:
-            shutil.copyfile(source_path, dst)
-        with _parser_warning_capture(parser_warnings, "source_retention"):
-            audit = _links_and_subset(reader, pages, labels, dst, full)
+        with _timed(timings, "subset_write"):
+            if full:
+                shutil.copyfile(source_path, dst)
+            with _parser_warning_capture(parser_warnings, "source_retention"):
+                audit = _links_and_subset(reader, pages, labels, dst, full)
 
-        retained, retained_state = _open_pdf(dst, parser_warnings, "retained_pdf_open")
+        with _timed(timings, "open"):
+            retained, retained_state = _open_pdf(dst, parser_warnings, "retained_pdf_open")
         if len(retained.pages) != len(pages):
             raise PackagingError("output page count mismatch")
-        # Meaningful content check independent of the selected range count.
-        with _parser_warning_capture(parser_warnings, "retained_content_verification"):
-            for idx, p in enumerate(pages):
-                try:
-                    same = reader.pages[p - 1].extract_text() == retained.pages[idx].extract_text()
-                except Exception as exc:
-                    raise PackagingError(f"text extraction failed verifying source page {p}: {exc}") from exc
-                if not same:
-                    raise PackagingError(f"text changed on source page {p}")
-        retained_sha = _digest(dst)
-        if full and retained_sha != source_sha:
-            raise PackagingError("Byte-copy integrity failed")
+        with _timed(timings, "verify"):
+            retained_sha = _digest(dst)
+            if full and retained_sha != source_sha:
+                raise PackagingError("Byte-copy integrity failed")
 
         page_map = [
             {"retained_pdf_page": i + 1, "source_pdf_page": p, "source_page_label": labels[p - 1]}
@@ -834,42 +1056,151 @@ def package_pdf(
                 a["status"] in ("unresolved_source_destination", "no_resolvable_destination") for a in audit
             ),
             "external_links": sum(a["type"] in ("/URI", "/GoToR", "/Launch") for a in audit),
-            "content_verification": (
-                "exact pypdf extract_text equality for each selected source page; "
-                "byte equality for full originals"
-            ),
             "structure_fidelity": "unverified; visual source PDF controls",
         }
+        def tool_budget() -> float:
+            budget = _PDFTOTEXT_TIMEOUT_SECONDS
+            if deadline_seconds is not None:
+                budget = min(budget, deadline_seconds - (time.monotonic() - clock))
+                if budget <= 0:
+                    raise PackagingError(f"packaging exceeded {deadline_seconds:g} s")
+            return budget
+
+        layout_texts: list[str] = []
         for mode in ("layout", "raw"):
-            if exe:
-                budget = _PDFTOTEXT_TIMEOUT_SECONDS
-                if deadline_seconds is not None:
-                    budget = min(budget, deadline_seconds - (time.monotonic() - clock))
-                    if budget <= 0:
-                        raise PackagingError(f"packaging exceeded {deadline_seconds:g} s")
-                texts, tool_stderr = _pdftotext_pages(exe, dst, mode, len(pages), timeout=budget)
-            else:
-                with _parser_warning_capture(parser_warnings, "retained_text_extraction"):
-                    texts, tool_stderr = _pypdf_pages(retained, len(pages)), ""
-            _write_markdown(
-                stage / names[f"{mode}_text"],
-                mapping.title,
-                texts,
-                page_map,
-                source_sha,
-                retained_sha,
-                mode,
-                text_mode,
-            )
+            with _timed(timings, f"text_{mode}"):
+                if exe:
+                    texts, tool_stderr = _pdftotext_pages(exe, dst, mode, len(pages), timeout=tool_budget())
+                else:
+                    with _parser_warning_capture(parser_warnings, "retained_text_extraction"):
+                        texts, tool_stderr = _pypdf_pages(retained, len(pages)), ""
+                _write_markdown(
+                    stage / names[f"{mode}_text"],
+                    mapping.title,
+                    texts,
+                    page_map,
+                    source_sha,
+                    retained_sha,
+                    mode,
+                    text_mode,
+                )
+            if mode == "layout":
+                layout_texts = texts
             stats["modes"][mode] = {
                 "characters": sum(len(s) for s in texts),
                 "empty_pages": [page_map[i]["source_pdf_page"] for i, s in enumerate(texts) if not s.strip()],
                 "replacement_characters": sum(s.count("�") for s in texts),
                 **_capped_stderr(tool_stderr),
             }
-        # Warnings can arrive during text extraction; refresh the count last.
-        stats["parser_warning_count"] = len(parser_warnings)
-        _write_json(stage / names["extraction_stats"], stats)
+
+        # Content verification: do the retained pages read back as the source pages?
+        # A whole original is a byte copy, so equal SHA-256 (checked above) is the
+        # stronger statement and per-page text equality would only repeat it slowly.
+        # For a subset the oracle is Poppler when present: one more `pdftotext
+        # -layout` pass over the source, compared page by page with the retained
+        # layout pass above (pypdf's extract_text costs seconds per page on a small
+        # machine). Without Poppler it is pypdf equality, page by page.
+        with _timed(timings, "verify"):
+            if full:
+                oracle = "sha256"
+            elif exe:
+                oracle = "pdftotext"
+                source_layout, _ = _pdftotext_pages(
+                    exe, source_path, "layout", source_count, timeout=tool_budget()
+                )
+                for idx, p in enumerate(pages):
+                    if source_layout[p - 1] != layout_texts[idx]:
+                        raise PackagingError(f"text changed on source page {p}")
+            else:
+                oracle = "pypdf"
+                with _parser_warning_capture(parser_warnings, "retained_content_verification"):
+                    for idx, p in enumerate(pages):
+                        try:
+                            same = reader.pages[p - 1].extract_text() == retained.pages[idx].extract_text()
+                        except Exception as exc:
+                            raise PackagingError(
+                                f"text extraction failed verifying source page {p}: {exc}"
+                            ) from exc
+                        if not same:
+                            raise PackagingError(f"text changed on source page {p}")
+        stats["content_verification"] = _CONTENT_VERIFICATION[oracle]
+
+        ocr_stats: dict[str, Any] | None = None
+        ocr_started = time.monotonic()
+        if mapping.ocr != "off":
+            empty = set(stats["modes"]["layout"]["empty_pages"])
+            wanted = [
+                i + 1
+                for i, pm in enumerate(page_map)
+                if mapping.ocr == "all" or pm["source_pdf_page"] in empty
+            ]
+            pdftoppm_exe, tesseract_exe = shutil.which("pdftoppm"), shutil.which("tesseract")
+            if not wanted:
+                ocr_stats = _ocr_stats(
+                    mapping.ocr, "skipped", reason="every retained page has native text"
+                )
+            elif not (pdftoppm_exe and tesseract_exe):
+                missing = [n for n, e in (("pdftoppm", pdftoppm_exe), ("tesseract", tesseract_exe)) if not e]
+                ocr_stats = _ocr_stats(
+                    mapping.ocr, "unavailable", reason=f"{' and '.join(missing)} not found on PATH"
+                )
+            else:
+                assert pdftoppm_exe and tesseract_exe
+                targets = wanted[:MAX_OCR_PAGES]
+                scale_pages = {n for n in targets if _needs_scale(retained.pages[n - 1])}
+
+                def remaining() -> float | None:
+                    if deadline_seconds is None:
+                        return None
+                    return deadline_seconds - (time.monotonic() - clock)
+
+                engine = _tesseract_version(tesseract_exe)
+                with tempfile.TemporaryDirectory(prefix=".ocr-", dir=stage) as work:
+                    ocr_texts, out_of_time = _ocr_pages(
+                        pdftoppm_exe, tesseract_exe, dst, Path(work), targets, remaining, deadline_seconds,
+                        scale_pages,
+                    )
+                read = targets[: len(ocr_texts)]
+                unread = [page_map[n - 1]["source_pdf_page"] for n in wanted[len(ocr_texts):]]
+                reason = "deadline" if out_of_time else "page_cap"
+                common: dict[str, Any] = {
+                    "truncated": bool(unread),
+                    "truncated_pages": unread,
+                    "truncated_reason": reason,
+                } if unread else {}
+                if not ocr_texts:
+                    # Out of time before the first page: nothing to supplement.
+                    ocr_stats = _ocr_stats(
+                        mapping.ocr,
+                        "skipped",
+                        engine=engine,
+                        reason=f"less than {OCR_DEADLINE_RESERVE_SECONDS} s of the deadline left for OCR",
+                        **common,
+                    )
+                else:
+                    ocr_map = [page_map[n - 1] for n in read]
+                    ocr_stats = _ocr_stats(
+                        mapping.ocr,
+                        "done",
+                        engine=engine,
+                        pages=[pm["source_pdf_page"] for pm in ocr_map],
+                        page_count=len(ocr_map),
+                        scaled_pages=[page_map[n - 1]["source_pdf_page"] for n in read if n in scale_pages],
+                        characters=sum(len(t) for t in ocr_texts),
+                        **common,
+                    )
+                    names = _names_for(stem, ocr=True)
+                    _write_ocr_markdown(
+                        stage / names["ocr_text"],
+                        mapping.title,
+                        ocr_texts,
+                        ocr_map,
+                        source_sha,
+                        retained_sha,
+                        ocr_stats,
+                    )
+            stats["ocr"] = ocr_stats
+        timings["ocr"] = time.monotonic() - ocr_started
 
         limitations = [
             "PDF page content is preserved; PDF tagging, bookmarks, embedded attachments, forms, and "
@@ -888,54 +1219,107 @@ def package_pdf(
                 "Poppler (pdftotext) was unavailable; text was extracted with pypdf for both the layout "
                 "and raw files, so layout fidelity is lower and the two files carry the same text."
             )
+        if ocr_stats is not None and ocr_stats["status"] == "done":
+            limitations.append(
+                "OCR text is a supplement produced from rendered pages; confidence is not accuracy; "
+                "table alignment is not preserved."
+            )
+        if ocr_stats is not None and ocr_stats["truncated"]:
+            limitations.append(
+                f"OCR covers {ocr_stats['page_count']} of "
+                f"{ocr_stats['page_count'] + len(ocr_stats['truncated_pages'])} target pages (stopped: "
+                f"{ocr_stats['truncated_reason']}); the remaining pages have no OCR text."
+            )
+        if ocr_stats is not None and ocr_stats["status"] == "unavailable":
+            limitations.append(
+                f"OCR was requested (ocr={mapping.ocr}) but unavailable ({ocr_stats['reason']}); "
+                "no OCR supplement was produced."
+            )
         checked = [
             "output page count equals the number of selected pages",
-            "exact pypdf extract_text equality for each selected source page against its retained page",
             "SHA-256 of the source and of the retained PDF",
         ]
         if full:
-            checked.append("byte equality between the source and the retained PDF (whole original retained)")
+            checked.append(
+                "byte equality between the source and the retained PDF (whole original retained); "
+                "this is stronger than per-page text equality, so that check was skipped"
+            )
+        else:
+            checked.append(
+                f"{_CONTENT_VERIFICATION[oracle]}"
+                if oracle == "pypdf"
+                else "exact pdftotext -layout equality for each selected source page against its retained "
+                "page (one Poppler pass over the source, compared with the retained layout pass)"
+            )
         if text_mode == "pdftotext":
             checked.append("pdftotext produced exactly one text segment per retained page, in both modes")
         verification = {
             "checked": checked,
+            "oracle": oracle,
             "establishes": "content extraction and page retention",
             "does_not_establish": _VERIFICATION_NOT_ESTABLISHED,
         }
 
-        completed = _utc()
-        wall = round(time.monotonic() - clock, 3)
-        record: dict[str, Any] = {
-            "packaging_version": PACKAGING_VERSION,
-            "title": mapping.title,
-            "role": mapping.role,
-            "scope": mapping.scope,
-            "keep_ranges": [list(r) for r in mapping.keep_ranges] if mapping.keep_ranges is not None else None,
-            "review_note": mapping.review_note,
-            "incorporations": [dict(x) for x in mapping.incorporations],
-            "exclusions": [dict(x) for x in mapping.exclusions],
-            "source_meta": source_meta if source_meta is not None else {},
-            "source_sha256": source_sha,
-            "retained_sha256": retained_sha,
-            "source_page_count": source_count,
-            "retained_page_count": len(pages),
-            "full_original_retained": full,
-            "source_pdf_state": source_state,
-            "retained_pdf_state": retained_state,
-            "parser_warnings": parser_warnings,
-            "text_mode": text_mode,
-            "poppler_version": poppler_version,
-            "runtime": {"python": sys.version.split()[0], "pypdf": pypdf.__version__},
-            "started_utc": started,
-            "completed_utc": completed,
-            "wall_seconds": wall,
-            "artifacts": dict(names),
-            "limitations": limitations,
-            "verification": verification,
-        }
-        _write_json(stage / names["package_record"], record)
+        record: dict[str, Any] = {}
+        publish_started = 0.0
 
-        _publish(stage, out_dir, list(names.values()))
+        def finalize() -> None:
+            """Write the two files that carry the timings, once the data files are in place."""
+            nonlocal record
+            timings["publish"] = time.monotonic() - publish_started
+            timings["total"] = time.monotonic() - clock
+            stats["timings"] = {k: round(v, 3) for k, v in timings.items()}
+            # Warnings can arrive during text extraction; refresh the count last.
+            stats["parser_warning_count"] = len(parser_warnings)
+            _write_json(stage / names["extraction_stats"], stats)
+
+            completed = _utc()
+            wall = round(time.monotonic() - clock, 3)
+            record = {
+                "packaging_version": PACKAGING_VERSION,
+                "title": mapping.title,
+                "role": mapping.role,
+                "scope": mapping.scope,
+                "keep_ranges": [list(r) for r in mapping.keep_ranges] if mapping.keep_ranges is not None else None,
+                "review_note": mapping.review_note,
+                "incorporations": [dict(x) for x in mapping.incorporations],
+                "exclusions": [dict(x) for x in mapping.exclusions],
+                "source_meta": source_meta if source_meta is not None else {},
+                "source_sha256": source_sha,
+                "retained_sha256": retained_sha,
+                "source_page_count": source_count,
+                "retained_page_count": len(pages),
+                "full_original_retained": full,
+                "source_pdf_state": source_state,
+                "retained_pdf_state": retained_state,
+                "parser_warnings": parser_warnings,
+                "text_mode": text_mode,
+                "poppler_version": poppler_version,
+                "runtime": {"python": sys.version.split()[0], "pypdf": pypdf.__version__},
+                "started_utc": started,
+                "completed_utc": completed,
+                "wall_seconds": wall,
+                "artifacts": dict(names),
+                "limitations": limitations,
+                "verification": verification,
+            }
+            if ocr_stats is not None:
+                record["ocr"] = ocr_stats
+            record["timings"] = stats["timings"]
+            _write_json(stage / names["package_record"], record)
+
+        # Data files go first and are timed as `publish`; the stats and the record
+        # are written and moved after them because they carry the timings. One
+        # rollback covers both moves.
+        late = ["extraction_stats", "package_record"]
+        publish_started = time.monotonic()
+        _publish(
+            stage,
+            out_dir,
+            [n for r, n in names.items() if r not in late],
+            then=finalize,
+            then_names=[names[r] for r in late],
+        )
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
@@ -959,7 +1343,7 @@ def package_pdf(
         full_original_retained=full,
         text_mode=text_mode,
         poppler_version=poppler_version,
-        wall_seconds=wall,
+        wall_seconds=record["wall_seconds"],
         parser_warning_count=len(parser_warnings),
         stats=stats,
         record=record,
@@ -1032,7 +1416,7 @@ def run_packaging(
     except (TypeError, ValueError) as exc:
         raise PackageMapError(f"map and source_meta must be JSON-serializable: {exc}") from exc
 
-    names = list(_names_for(stem).values())
+    names = list(_names_for(stem, ocr=mapping.ocr != "off").values())
     taken = [n for n in names if (out_dir / n).exists()]
     if taken:
         raise PackagingError(f"refusing to overwrite existing package files: {', '.join(sorted(taken))}")
