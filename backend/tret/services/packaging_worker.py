@@ -68,6 +68,7 @@ def _run(job: dict[str, Any]) -> dict[str, Any]:
             review_note=m.get("review_note", ""),
             incorporations=tuple(m.get("incorporations") or ()),
             exclusions=tuple(m.get("exclusions") or ()),
+            ocr=m.get("ocr", "off"),
         )
         output = pk.package_pdf(
             Path(job["source_path"]),

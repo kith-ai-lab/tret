@@ -585,9 +585,27 @@ function selectionText(payload: PackageMapPayload): string {
   return `${label} ${ranges.map(rangeText).join(', ')} · ${kept}`
 }
 
+// Packaging runs in a background task on the server (approval returns at once),
+// so the Approvals page polls the finding while it says "running". The server's
+// own deadline is 600 s and it lets a retry take over a "running" record once
+// that plus a 60 s grace has passed (PACKAGING_TIMEOUT_SECONDS +
+// PACKAGING_STALE_GRACE_SECONDS in api/findings.py); past that the worker is
+// presumed dead and the page offers the retry.
+const PACKAGING_POLL_MS = 5000
+const PACKAGING_STALE_MS = (600 + 60) * 1000
+
+function packagingLooksDead(result: PackageResult): boolean {
+  if (result.status !== 'running') return false
+  const startedAt = result.started_at ? Date.parse(result.started_at) : NaN
+  // No usable start time: the server treats that as stale too.
+  return Number.isNaN(startedAt) || Date.now() - startedAt > PACKAGING_STALE_MS
+}
+
 /** What the packaging step produced, shown once a package_map is approved:
  *  status, retained pages, how text was extracted, the documents written, and
- *  — on failure — the error with a retry. */
+ *  — on failure — the error with a retry. While packaging is queued or running
+ *  it polls the finding every 5 s; a run older than the server's deadline plus
+ *  grace is offered a retry. */
 function PackageResultBlock({
   findingId,
   result,
@@ -597,6 +615,24 @@ function PackageResultBlock({
   result: PackageResult | null
 }) {
   const queryClient = useQueryClient()
+  const running = result?.status === 'running'
+  // Same key as the detail pane's own query, so each poll refreshes the pane's
+  // data (and this component's `result` prop) rather than a second copy. React
+  // Query stops the interval when this component unmounts or `running` flips.
+  useQuery({
+    queryKey: ['finding', findingId],
+    queryFn: () => api.getFinding(findingId),
+    refetchInterval: running ? PACKAGING_POLL_MS : false,
+    enabled: running,
+  })
+  // The list's badges and counts should catch up once the job leaves "running".
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (wasRunning.current && !running) {
+      queryClient.invalidateQueries({ queryKey: ['findings'] })
+    }
+    wasRunning.current = running
+  }, [running, queryClient])
   const retryMutation = useMutation({
     mutationFn: () => api.retryFindingPackage(findingId),
     onSuccess: () => {
@@ -633,11 +669,44 @@ function PackageResultBlock({
   }
 
   if (result.status === 'running') {
+    // A queued job is alive, just waiting for a slot; only a started one can look dead.
+    const dead = !result.queued && packagingLooksDead(result)
     return (
-      <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
-        <StatusBadge status="running" />
-        {result.started_at && (
-          <span className="fine-print">Started {formatDateTime(result.started_at)}</span>
+      <div className="stack" style={{ gap: 8 }}>
+        <div className="row" style={{ gap: 12, flexWrap: 'wrap' }}>
+          <StatusBadge status="running" />
+          <span className="fine-print">
+            {result.queued ? 'Queued…' : 'Packaging…'}
+            {result.started_at && !result.queued && ` · started ${formatDateTime(result.started_at)}`}
+          </span>
+        </div>
+        {result.queued && (
+          <div className="fine-print">
+            Waiting for a free packaging slot (one or two run at a time, depending on the machine). This page updates on its own.
+          </div>
+        )}
+        {dead && (
+          <>
+            <div className="fine-print">
+              Packaging started more than eleven minutes ago and has not finished; the previous worker
+              appears to have died (for example, the server restarted).
+            </div>
+            <div>
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={retryMutation.isPending}
+                onClick={() => retryMutation.mutate()}
+              >
+                {retryMutation.isPending ? 'Retrying…' : 'Retry packaging'}
+              </button>
+            </div>
+            {retryError && (
+              <div className="error-text">
+                {retryError.status === 403 ? 'Requires approver role.' : retryError.message}
+              </div>
+            )}
+          </>
         )}
       </div>
     )

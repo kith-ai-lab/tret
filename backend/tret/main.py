@@ -101,8 +101,9 @@ async def _drain_in_flight_runs(
     (`sweep_orphaned_runs`) found its row still `running` and closed it out.
     Waiting here, before *this* process exits, gives an ordinary run the
     chance to reach `completed`/`failed` on its own, so that sweep never even
-    sees it next boot. `tasks` is the union of `tret.api.runs`'s and `tret.api.chat`'s
-    background-task registries in production (each task wraps one run)
+    sees it next boot. `tasks` is the union of `tret.api.runs`'s, `tret.api.chat`'s
+    and `tret.api.findings`'s (approval-time packaging) background-task
+    registries in production (each task wraps one run or one packaging job)
     — an injectable set in tests, so a fake engine's tasks can stand in for
     it without booting a real app.
 
@@ -256,6 +257,16 @@ async def lifespan(app: FastAPI):
     else:
         async with get_session_factory()() as db:
             await sweep_orphaned_runs(db)
+        # Same reasoning for approval-time packaging: a `running` record can only
+        # belong to a task the previous process took down with it. Best effort:
+        # a sweep that cannot run (schema not yet at head, a test's minimal
+        # session) must never keep the app from booting — the stale-takeover
+        # path in `package-retry` still covers whatever it would have closed.
+        try:
+            async with get_session_factory()() as db:
+                await findings.sweep_orphaned_packaging(db)
+        except Exception:  # noqa: BLE001 — boot must not depend on this sweep
+            log.warning("orphaned-packaging sweep skipped", exc_info=True)
     # M2: a stored workspace's emissions override document can stop validating
     # without anyone touching it (tret itself tightening a rule, e.g.
     # `PROVIDER_KEY_RE`) — a run against it already fails open, silently, so
@@ -316,12 +327,15 @@ async def lifespan(app: FastAPI):
             )
         else:
             async with get_session_factory()() as db:
-                # Both registries: Workbench runs live in `runs`, chat turns
+                # All three registries: Workbench runs live in `runs`, chat turns
                 # in `chat` — a drain that watched only one would sweep the
-                # other's live run as an orphan while it was still executing.
+                # other's live run as an orphan while it was still executing —
+                # and approval-time packaging in `findings`. A packaging task
+                # still unfinished at the deadline leaves its `running` record
+                # for the stale-takeover retry; the sweep touches runs only.
                 await _drain_in_flight_runs(
                     db,
-                    runs._background_tasks | chat._background_tasks,
+                    runs._background_tasks | chat._background_tasks | findings._packaging_tasks,
                     get_settings().shutdown_drain_seconds,
                 )
         # Release last: a process that never actually held the lock (SQLite,

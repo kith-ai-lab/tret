@@ -1792,6 +1792,19 @@ def _read_head_sync(path: Path, n: int = 5) -> bytes:
                 },
                 "description": "Page ranges you considered and deliberately left out, with why.",
             },
+            "ocr": {
+                "type": "string",
+                "enum": list(packaging_service.OCR_MODES),
+                "default": "off",
+                "description": (
+                    "OCR supplement for pages with no extractable text. Use \"auto\" when retained "
+                    "pages are scanned or image-only (for example a raster data dictionary or a "
+                    "scanned assurance statement): only retained pages whose native text is empty "
+                    "are read. \"all\" reads every retained page; use it only when native text is "
+                    "present but unreliable. Default \"off\". The output is a separately labelled "
+                    "supplement file; it never replaces or alters the native text or the PDF."
+                ),
+            },
             "review_note": {
                 "type": "string",
                 "default": "",
@@ -1819,6 +1832,7 @@ async def propose_package_map(
     exclusions: list | None = None,
     review_note: str = "",
     stem: str | None = None,
+    ocr: str = "off",
 ) -> str:
     try:
         doc_id = uuid.UUID(source_document_id)
@@ -1881,6 +1895,7 @@ async def propose_package_map(
         review_note=review_note,
         incorporations=tuple(incorporation_records),
         exclusions=tuple(exclusion_records),
+        ocr=ocr,
     )
     try:
         pages = packaging_service.validate_map(mapping, info.page_count)
@@ -1925,6 +1940,7 @@ async def propose_package_map(
                 "review_note": review_note,
                 "incorporations": incorporation_records,
                 "exclusions": exclusion_records,
+                "ocr": ocr,
             },
             "stem": stem,
             "selected_page_count": len(pages),

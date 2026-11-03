@@ -17,9 +17,11 @@ FROM python:3.12-slim
 # (tret/services/packaging.py); the pypdf fallback works but is lower fidelity.
 # poppler-data: CJK and other non-Latin glyph maps for pdftotext; Recommends, so
 # --no-install-recommends would skip it and that text would extract as nothing.
+# tesseract-ocr(+eng): OCR supplement for scanned disclosure pages; English only by design.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 \
     libcairo2 libffi8 shared-mime-info fonts-dejavu-core poppler-utils poppler-data \
+    tesseract-ocr tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/* \
     && command -v setpriv
 

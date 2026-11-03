@@ -1304,8 +1304,11 @@ export interface PackageResultDocument {
 }
 
 export interface PackageResult {
-  /** `running` carries only `started_at`; every other field is absent until it ends. */
+  /** `running` carries only `queued` and `started_at`; every other field is absent until it ends. */
   status: 'packaged' | 'failed' | 'running'
+  /** While `running`: true until the background task gets one of the (two) packaging slots. */
+  queued?: boolean
+  /** While `running`: when packaging started (restamped when a queued job gets its slot). */
   started_at?: string
   packaged_at: string | null
   approver_id: string | null

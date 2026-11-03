@@ -108,7 +108,10 @@ A workspace approver sees the map in the Approvals queue and accepts or rejects 
 Rejecting packages nothing.
 
 Accepting runs the packager (`services/packaging.py`) once the decision has
-committed. First the source file is hashed again: if its bytes are not the ones the
+committed. The approval request returns immediately: packaging can take minutes,
+so it runs in a background task on its own database session (one or two at a time,
+depending on the machine; further approvals wait their turn and show as queued), and the Approvals page polls
+the finding every five seconds until it settles. First the source file is hashed again: if its bytes are not the ones the
 map was reviewed against, packaging fails with "source bytes changed since the map
 was reviewed; recapture and re-review" and writes nothing. Otherwise it writes, under
 `storage/packages/<finding id>/`, with the chosen stem:
@@ -126,9 +129,16 @@ Each file is registered as its own `Document` with `source_kind='package'`,
 `uploaded_by` empty, and `meta` linking it back: `package_finding_id`,
 `package_role`, `source_document_id`, `source_sha256`, `retained_sha256`,
 `text_mode`, `stem`, `title`, `role`, `scope`, `keep_ranges`. The finding
-reads `running` from the moment of approval, in the same commit, and `package-retry`
-refuses (409) while it does, so two attempts never race; a `running` record older than
-the deadline plus a minute is a worker that died and may be retried. A directory left
+reads `running` from the moment of approval, in the same commit (`queued: true` until
+the background task gets a packaging slot, then `queued: false` with
+`started_at` restamped), and `package-retry` refuses (409) while it does, so two
+attempts never race. A `running` record older than the 600-second deadline plus a
+60-second grace is a worker that died (the server restarted mid-package, say): the
+Approvals page then offers "Retry packaging" and the retry takes it over. A retry
+likewise returns at once and packages in the background. On shutdown the server
+waits up to its usual drain window (`TRET_SHUTDOWN_DRAIN_SECONDS`) for packaging
+tasks to finish and never cancels one; a task still unfinished when the process
+exits leaves its `running` record as it was. A directory left
 under `packages/<finding id>` by a dead attempt, with no package Documents registered,
 is removed on retry. The outcome
 (`packaged` or `failed`, the document ids, hashes, page counts, `text_mode`,
@@ -138,11 +148,37 @@ Poppler version, wall time, parser-warning count, limitations) is written to
 Packaging never fails the approval. A failure is a recorded fact on the finding,
 with its reason, and `POST /api/findings/{id}/package-retry` runs it again (for
 example after a source file is restored, or after a timeout). Packaging runs in a
-sandboxed child process with a 300-second deadline and, on Linux, a 600 MB
+sandboxed child process with a 600-second deadline and, on Linux, a 600 MB
 address-space limit; at the deadline the child is killed and nothing is left
 behind. On any failure nothing is left in the package directory and no
 Documents are kept: a package is evidence, and existing package files are never
 overwritten.
+
+A `running` record can also be orphaned by a restart, since the task died with the
+process. At boot, once the instance lock is held, every `package_map` finding still
+`running` is marked `failed` ("server restarted during packaging; retry") so it can be
+retried at once instead of after the 660-second window. If a packaging task itself
+crashes (a database error on its final write, say) it records a `failed` result the
+same way.
+
+### OCR supplement
+
+`propose_package_map` takes an `ocr` parameter: `off` (the default), `auto` (OCR only
+the retained pages whose native layout text is empty, such as a scanned assurance
+statement) or `all` (every retained page; for native text that is present but
+unreliable). When it is not `off`, the package gains an eighth file,
+`<stem>.ocr.md`, a separately labelled supplement. It is registered as its own
+searchable `Document` (`package_role` `ocr_text`), headed per page with the original
+page number, source label and retained page number, and labelled as OCR.
+
+The supplement never replaces anything: the native `layout.md` and `raw.md`, the
+retained PDF and every hash are unchanged. Pages are rendered at 200 dpi and read with
+Tesseract, English only, page segmentation mode 6, at most 60 pages per package (the
+rest are listed as truncated). OCR confidence is not accuracy: a high score says the
+engine was sure, not that the text is right, so the text is not exact transcription and
+the retained PDF controls. If Poppler's renderer or Tesseract is unavailable, the
+package is still produced without the supplement and a limitation records that OCR was
+requested and could not run.
 
 ### What verification establishes, and what it does not
 
@@ -214,8 +250,10 @@ Drive has no write path.
 - **Choosing pages.** Code does not guess a disclosure's range, a statement's end or
   where an incorporated section sits. Every range is the model's proposal and a
   person's decision.
-- **OCR.** A scanned PDF with no text layer packages (the pages are retained) but its
-  text files are empty for those pages, and the stats list them. Nothing reads images.
+- **OCR by default.** A scanned PDF with no text layer packages (the pages are retained)
+  but its native text files are empty for those pages, and the stats list them. Images
+  are read only when the map asks for the OCR supplement above, and then only into a
+  separate, labelled file.
 - **Downloads a browser would get.** `capture_source` makes a plain HTTPS request. A
   page that needs JavaScript, a login, a click-through or a bot check is not
   collected; a person downloads the file and uploads it, which gives it
