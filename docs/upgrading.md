@@ -30,6 +30,34 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## 2026-10-20 · OpenRouter requests are zero-data-retention by default
+
+Behaviour change, no migration. With `TRET_OPENROUTER_PROVIDER_PREFS` unset or
+blank, tret now sends a `provider` object on **every** OpenRouter call:
+
+```
+{"zdr": true, "data_collection": "deny", "ignore": ["moonshotai"]}
+```
+
+OpenRouter does not train on prompts, but it forwards them to downstream
+providers that may unless the request restricts routing. This keeps traffic on
+zero-data-retention endpoints and off Moonshot AI's, whose standard terms allow
+improving its models with Customer Content. The router's per-call `ignore`
+evidence is still unioned in. The fallback table no longer lists
+`openrouter/moonshotai/kimi-k3`; direct `kimi/*` models are unaffected and still
+need your own `TRET_MOONSHOT_API_KEY`.
+
+A model with no ZDR endpoint now fails with OpenRouter's "no eligible provider"
+error. Any explicit value replaces the default verbatim, so to opt out:
+
+```
+TRET_OPENROUTER_PROVIDER_PREFS={}                 # send no provider preferences
+TRET_OPENROUTER_PROVIDER_PREFS={"zdr":false}      # explicit ZDR opt-out
+```
+
+Malformed JSON logs a warning and uses the default. See
+[hardening.md](hardening.md) section 10 for the vendor terms behind this.
+
 ## 2026-09-21 · opt-in anonymous telemetry
 
 One migration, additive: a new table `instance_state` (`key TEXT PRIMARY

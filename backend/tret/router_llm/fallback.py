@@ -36,17 +36,22 @@ from tret.router_llm.objectives import (
 )
 from tret.router_llm.priors_base import ModelPrior
 
+# Policy (SOC 2 vendor review, 2026-10-19): never list an `openrouter/moonshotai/*`
+# model here. Moonshot AI's own terms permit using Customer Content to improve its
+# models, and the shipped OpenRouter provider preferences
+# (`config.OPENROUTER_DEFAULT_PROVIDER_PREFS`) ignore `moonshotai`, so such an
+# entry would be unroutable by default. Moonshot stays reachable only as the
+# key-gated direct `kimi/*` entries, which run only when the operator supplies
+# their own `TRET_MOONSHOT_API_KEY`. Enforced by tests/test_fallback_table_policy.py.
 FALLBACK_TABLE: dict[str, list[str]] = {
     "verdict": [
         "anthropic/claude-sonnet-5",
         "openrouter/openai/gpt-5.6-terra",
-        "openrouter/moonshotai/kimi-k3",
         "kimi/kimi-k2",
     ],
     "extraction": [
         "anthropic/claude-sonnet-5",
         "openrouter/openai/gpt-5.6-terra",
-        "openrouter/moonshotai/kimi-k3",
         "kimi/kimi-k2",
     ],
     "drafting": [
