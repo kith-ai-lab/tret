@@ -70,7 +70,7 @@ rlimits, a wall clock, output caps, no DB handle, and — on Linux where
 network, subprocess, FFI, and dynamic-code use.
 
 **The web is not a third door.** tret can search and read the public web
-(`web_search`, `fetch_url` — off by default, see hardening.md §9), and that
+(`web_search`, `fetch_url`, `capture_source` — off by default, see hardening.md §9), and that
 capability deliberately changes nothing above. A fetched page is not returned as
 prose: it is stored byte-for-byte, hashed, and recorded as a `Document` with
 `source_kind='web'`, its URL and its fetch time, which the model then reads with
@@ -79,7 +79,7 @@ audit trail, and a reviewer can see the page *as it was when the run read it*
 rather than as it is today.
 
 What a web page may never do is put a number into a verdict. Nothing `fetch_url`
-retrieves is registered in `ctx.retrieved_values`, so the cited-values
+or `capture_source` retrieves is registered in `ctx.retrieved_values`, so the cited-values
 cross-check refuses a figure that came from one — without having been taught
 anything about the web. The check did not change, and that is the point. Web
 material can be described and attributed; it cannot be cited as a value.

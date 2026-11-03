@@ -1559,7 +1559,7 @@ class HarnessEngine:
                 workspace_id=harness.workspace_id,
             )
             return
-        # Registered, but withheld. `web_search`/`fetch_url` are always in the
+        # Registered, but withheld. `web_search`/`fetch_url`/`capture_source` are always in the
         # registry — "read one file to see everything an agent can do" stays true
         # only if the registry is complete — while whether they are *available*
         # is an operator switch (TRET_EGRESS_RESEARCH). The two are separate

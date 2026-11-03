@@ -463,7 +463,7 @@ def log_egress_at_boot(settings=None, logger=None) -> None:
                 CLASS_PROVIDER: "no model calls will reach a cloud provider",
                 CLASS_CATALOG: "the OpenRouter catalog and key validation are unavailable",
                 CLASS_LOCAL: "the configured local model server is unreachable",
-                CLASS_RESEARCH: "web_search and fetch_url are withheld from every run",
+                CLASS_RESEARCH: "web_search, fetch_url and capture_source are withheld from every run",
                 CLASS_SEARCH: "the web search backend is unreachable (research is off)",
                 CLASS_TELEMETRY: "no anonymous usage report will ever be sent",
             }[name],

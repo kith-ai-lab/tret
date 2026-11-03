@@ -494,6 +494,19 @@ class Settings(BaseSettings):
     egress_research_max_bytes: int = 2_000_000  # per fetched page
     egress_research_timeout_seconds: float = 20.0
     egress_research_max_fetches_per_run: int = 10
+    # `capture_source` is collection work, not reading: it keeps the complete
+    # original (an issuer's sustainability report runs to 15 MB) and refuses a file
+    # over the limit rather than storing a truncated PDF that looks like the real
+    # one and cannot be re-read. That is why it has its own, larger byte ceiling
+    # instead of raising `egress_research_max_bytes`, which would let every
+    # `fetch_url` page into the prompt-sized lane at 13x the weight. The default is
+    # `MAX_DOCUMENT_BYTES` (services/documents.py, 25 MiB) because a captured file
+    # is a Document like an upload or an import, and those paths are meant to share
+    # one answer to "too large"; raise the two together.
+    egress_capture_max_bytes: int = 26_214_400  # per captured file (25 MiB)
+    # Its own per-run count for the same reason: captures are rare, deliberate and
+    # large, so they must not spend (or be starved by) the fetch budget above.
+    egress_capture_max_per_run: int = 40
     # Force every outbound request through one proxy. The app-level allowlist is
     # a deterrent; a proxy that the workload cannot bypass is a boundary.
     egress_proxy: str = ""  # e.g. http://egress-proxy.internal:3128

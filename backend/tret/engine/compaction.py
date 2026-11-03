@@ -60,6 +60,9 @@ ELIDABLE_TOOLS = frozenset(
         # still re-read the page in full via `read_document`.
         "web_search",
         "fetch_url",
+        # Same shape as `fetch_url`: a short preview and a document id, with the
+        # complete original (hash included) in the Document row.
+        "capture_source",
         # Same reasoning as the web tools, for the same shape of tool:
         # `list_connected_sources` and `search_connected_files` are short
         # listings/navigation, cheap to re-call. `read_connected_file`
