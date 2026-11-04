@@ -29,6 +29,7 @@ from tret.router_llm.objectives import (
     DEFAULT_MAX_COST_TIER,
     DEFAULT_OBJECTIVE,
     THRIFT_OBJECTIVES,
+    TIER_ORDER,
     TIER_POOR,
     candidate_sort_key,
     evidence_tier,
@@ -83,6 +84,7 @@ def fallback_model(
     priors: dict[str, ModelPrior] | None = None,
     min_context_window: int | None = None,
     exclude: set[str] | None = None,
+    min_cost_tier: str | None = None,
 ) -> str | None:
     """The model this shape falls back to, or None if the policy permits none.
 
@@ -93,6 +95,10 @@ def fallback_model(
     which is the documented contract for a capped harness with nothing to run —
     see docs/local-models.md. Escalating past the ceiling instead would send
     confidential work to a provider the operator excluded on purpose.
+
+    `min_cost_tier` is the harness floor (`model_policy["min_cost_tier"]`), applied
+    to the same pool as the ceiling for the same reason: a floor the fallback
+    ignored would be lifted exactly when the LLM router is unavailable.
 
     `exclude` — model ids the caller's own model-level circuit breaker just
     flagged (`router_llm.priors.OutcomePriors.cooldown_for`, applied by
@@ -116,7 +122,7 @@ def fallback_model(
     pretending the window still fits by falling through to whatever the table
     would otherwise have preferred.
     """
-    usable = _usable(catalog, registry, allowed, max_cost_tier)
+    usable = _usable(catalog, registry, allowed, max_cost_tier, min_cost_tier)
     if not usable:
         return None
     if exclude:
@@ -186,6 +192,7 @@ def _usable(
     registry: ProviderRegistry,
     allowed: list[str] | None,
     max_cost_tier: str = DEFAULT_MAX_COST_TIER,
+    min_cost_tier: str | None = None,
 ) -> list[ModelInfo]:
     return [
         m
@@ -194,4 +201,5 @@ def _usable(
         and registry.has_key(m.provider)
         and (not allowed or m.id in allowed)
         and within_cost_tier(m, max_cost_tier)
+        and (min_cost_tier is None or TIER_ORDER.get(m.cost_tier, 2) >= TIER_ORDER[min_cost_tier])
     ]

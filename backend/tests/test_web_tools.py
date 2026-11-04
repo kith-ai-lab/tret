@@ -185,6 +185,127 @@ async def test_web_search_without_a_backend_says_which_variable_to_set(ctx, rese
     assert "TRET_SEARCH_PROVIDER" in str(excinfo.value)
 
 
+# ── the per-run search cap ───────────────────────────────────────────────────
+class _FakeSearch:
+    name = "fake"
+    host = "search.example"
+
+    async def search(self, query, max_results=5):
+        return []
+
+
+def _search_cap(monkeypatch, n: int) -> None:
+    from tret.config import get_settings
+
+    monkeypatch.setenv("TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN", str(n))
+    get_settings.cache_clear()
+    monkeypatch.setattr(tools_module, "get_search_provider", lambda: _FakeSearch())
+
+
+async def test_the_per_run_search_cap_is_enforced(ctx, research, monkeypatch):
+    research(MODE_ON)
+    _search_cap(monkeypatch, 2)
+    await web_search(ctx, query="a")
+    await web_search(ctx, query="b")
+    assert ctx.web_searches == 2
+    with pytest.raises(ToolError) as excinfo:
+        await web_search(ctx, query="c")
+    text = str(excinfo.value)
+    assert "TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN=2" in text
+    assert "Stop searching" in text
+    assert "allowlist" not in text  # nothing was refused, so nothing to name
+    assert ctx.web_searches == 2
+
+
+async def test_the_search_cap_is_independent_of_fetch_and_capture_counters(
+    ctx, research, monkeypatch
+):
+    research(MODE_ON)
+    _search_cap(monkeypatch, 1)
+    ctx.web_fetches = 10_000
+    ctx.web_captures = 10_000
+    await web_search(ctx, query="a")  # exhausted fetch/capture budgets do not block it
+    with pytest.raises(ToolError):
+        await web_search(ctx, query="b")
+
+
+async def test_a_failing_search_backend_still_spends_a_search(ctx, research, monkeypatch):
+    research(MODE_ON)
+    from tret.config import get_settings
+
+    monkeypatch.setenv("TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN", "1")
+    get_settings.cache_clear()
+    with pytest.raises(ToolError) as first:  # the null backend is unavailable
+        await web_search(ctx, query="a")
+    assert "TRET_SEARCH_PROVIDER" in str(first.value)
+    with pytest.raises(ToolError) as second:
+        await web_search(ctx, query="a")
+    assert "per-run limit" in str(second.value)
+
+
+async def test_allowlist_denial_says_so_and_the_cap_error_names_the_host(
+    ctx, research, monkeypatch
+):
+    from tret.net.policy import EgressDenied
+
+    research(MODE_ON)
+    _search_cap(monkeypatch, 1)
+
+    async def refuse(url):
+        raise EgressDenied(
+            "host_not_allowed", url, CLASS_RESEARCH, "pdfs.issuer.example is not in the allowlist"
+        )
+
+    monkeypatch.setattr(tools_module, "fetch_page", refuse)
+    with pytest.raises(ToolError) as denied:
+        await fetch_url(ctx, url="https://pdfs.issuer.example/report.pdf")
+    assert str(denied.value) == (
+        "host pdfs.issuer.example is not on this deployment's research allowlist "
+        "(TRET_EGRESS_RESEARCH_ALLOW_HOSTS); searching again will not help — "
+        "ask an operator to add it"
+    )
+    assert ctx.allowlist_refusals == ["pdfs.issuer.example"]
+
+    await web_search(ctx, query="a")
+    with pytest.raises(ToolError) as capped:
+        await web_search(ctx, query="b")
+    assert "pdfs.issuer.example" in str(capped.value)
+    assert "TRET_EGRESS_RESEARCH_ALLOW_HOSTS" in str(capped.value)
+
+
+async def test_a_redirect_refused_at_another_host_names_that_host(ctx, research, monkeypatch):
+    from tret.net.policy import EgressDenied
+
+    research(MODE_ON)
+
+    async def refuse(url):
+        raise EgressDenied(
+            "host_not_allowed", "https://cdn.other.net/x.pdf", CLASS_RESEARCH, "not allowlisted"
+        )
+
+    monkeypatch.setattr(tools_module, "fetch_page", refuse)
+    with pytest.raises(ToolError) as excinfo:
+        await fetch_url(ctx, url="https://example.com/x.pdf")
+    assert "host cdn.other.net is not on" in str(excinfo.value)
+    assert ctx.allowlist_refusals == ["cdn.other.net"]
+
+
+async def test_other_denial_reasons_keep_their_wording(ctx, research, monkeypatch):
+    from tret.net.policy import EgressDenied
+
+    research(MODE_ON)
+
+    async def refuse(url):
+        raise EgressDenied("private_address", url, CLASS_RESEARCH, "resolves to 127.0.0.1")
+
+    monkeypatch.setattr(tools_module, "fetch_page", refuse)
+    with pytest.raises(ToolError) as excinfo:
+        await fetch_url(ctx, url="https://example.com/x")
+    assert "(private_address)" in str(excinfo.value)
+    assert "allowlist" not in str(excinfo.value)
+    assert ctx.allowlist_refusals == []
+
+
 # ── a fetched page is a document ─────────────────────────────────────────────
 async def test_fetch_url_records_a_web_document_and_attaches_it(ctx, research, fetches):
     research(MODE_ON)
@@ -354,4 +475,4 @@ async def test_a_denied_fetch_is_a_tool_error_not_a_dead_run(ctx, research, monk
     spec = get_builtin_tools()["fetch_url"]
     result, is_error = await execute_tool(ctx, spec, {"url": "https://blocked.example.com/"})
     assert is_error is True
-    assert "host_not_allowed" in result
+    assert "blocked.example.com is not on this deployment's research allowlist" in result

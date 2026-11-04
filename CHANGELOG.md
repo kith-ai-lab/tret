@@ -56,6 +56,15 @@ one that needs action on an existing install.
 
 ### Changed
 
+- **Collection runs stop searching when they cannot fetch.** `web_search` is capped
+  per run (`TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN`, default 12), and a fetch or
+  capture refused by the research allowlist now says the host is not allowlisted,
+  that searching again will not help, and that an operator must add it; the search-cap
+  error names the hosts refused that run.
+- **Routing floor.** `model_policy.min_cost_tier` (default none) excludes models
+  below a tier on every automatic routing path, the mirror of `max_cost_tier`. The
+  seeded Disclosure Collector now requires the standard tier, and an unedited
+  collector with the previous seed policy is upgraded at boot.
 - Energy figures are labelled by what they are: the headline **Energy** is
   facility energy (IT energy × PUE, the basis for the carbon figure); **IT
   energy (before PUE)** is shown as the secondary figure; a run still

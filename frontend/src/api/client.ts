@@ -1065,6 +1065,8 @@ export interface ModelPolicy {
   model?: string
   allowed?: string[]
   max_cost_tier?: string
+  /** Optional routing floor: models in a cheaper tier are never chosen. Absent = no floor. */
+  min_cost_tier?: string
   objective?: RoutingObjective
   adaptive?: AdaptivePolicy
 }

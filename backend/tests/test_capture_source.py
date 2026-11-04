@@ -337,6 +337,52 @@ async def test_a_spent_fetch_budget_does_not_block_a_capture(ctx, research, capt
     assert ctx.web_captures == 1
 
 
+async def test_allowlist_denial_wording_and_refused_host_is_recorded(ctx, research, monkeypatch):
+    from tret.net.policy import CLASS_RESEARCH, EgressDenied
+
+    research(MODE_ON)
+
+    async def refuse(url, **kw):
+        raise EgressDenied("host_not_allowed", url, CLASS_RESEARCH, "not in the allowlist")
+
+    monkeypatch.setattr(tools_module, "fetch_page", refuse)
+    with pytest.raises(ToolError) as excinfo:
+        await capture_source(ctx, url=URL)
+    assert str(excinfo.value) == (
+        "host issuer.example.com is not on this deployment's research allowlist "
+        "(TRET_EGRESS_RESEARCH_ALLOW_HOSTS); searching again will not help — "
+        "ask an operator to add it"
+    )
+    assert ctx.allowlist_refusals == ["issuer.example.com"]
+
+    # A second refusal of the same host is not listed twice.
+    with pytest.raises(ToolError):
+        await capture_source(ctx, url=URL)
+    assert ctx.allowlist_refusals == ["issuer.example.com"]
+
+
+async def test_other_capture_denials_keep_their_wording(ctx, research, monkeypatch):
+    from tret.net.policy import CLASS_RESEARCH, EgressDenied
+
+    research(MODE_ON)
+
+    async def refuse(url, **kw):
+        raise EgressDenied("private_address", url, CLASS_RESEARCH, "resolves to 127.0.0.1")
+
+    monkeypatch.setattr(tools_module, "fetch_page", refuse)
+    with pytest.raises(ToolError) as excinfo:
+        await capture_source(ctx, url=URL)
+    assert "(private_address)" in str(excinfo.value)
+    assert ctx.allowlist_refusals == []
+
+
+async def test_capture_attempts_do_not_spend_the_search_budget(ctx, research, captures):
+    research(MODE_ON)
+    captures(_pdf_bytes())
+    await capture_source(ctx, url=URL)
+    assert ctx.web_searches == 0
+
+
 async def test_replay_serves_a_captured_snapshot_without_a_request(
     ctx, research, captures, monkeypatch, db
 ):

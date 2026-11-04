@@ -47,10 +47,18 @@ def validate_policy(policy: dict) -> None:
     # so capping there leaves local models as the only candidates — the
     # zero-cloud policy (docs/local-models.md), expressed as a cost tier.
     tier = policy.get("max_cost_tier", "premium")
-    if tier not in TIER_ORDER:
+    if not isinstance(tier, str) or tier not in TIER_ORDER:
         raise HTTPException(
             422, f"max_cost_tier must be one of {'|'.join(TIER_ORDER)}"
         )
+    # The floor, if any: same vocabulary as the ceiling, and it may not sit above
+    # it (nothing could ever be routed). Absent/None means no floor.
+    floor = policy.get("min_cost_tier")
+    if floor is not None:
+        if not isinstance(floor, str) or floor not in TIER_ORDER:
+            raise HTTPException(422, f"min_cost_tier must be one of {'|'.join(TIER_ORDER)}")
+        if TIER_ORDER[floor] > TIER_ORDER[tier]:
+            raise HTTPException(422, "min_cost_tier must not be above max_cost_tier")
     # An unrecognized objective must never fall through to the default: silently
     # routing on "balanced" when the operator asked for "eco" is exactly the kind
     # of quiet substitution this platform exists to rule out.

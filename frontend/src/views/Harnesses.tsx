@@ -558,6 +558,29 @@ function HarnessEditor({
                   : 'Not a tier this build recognizes — kept exactly as stored unless you change it.'}
               </div>
             </div>
+            <div className="field">
+              <label className="mono-label">Min cost tier</label>
+              <select
+                value={form.model_policy.min_cost_tier ?? ''}
+                onChange={(e) => setPolicy({ min_cost_tier: e.target.value || undefined })}
+              >
+                <option value="">none (no floor)</option>
+                {COST_TIERS.map((tier) => (
+                  <option key={tier} value={tier}>
+                    {tier}
+                  </option>
+                ))}
+                {form.model_policy.min_cost_tier &&
+                  !(COST_TIERS as readonly string[]).includes(form.model_policy.min_cost_tier) && (
+                    <option value={form.model_policy.min_cost_tier}>
+                      {form.model_policy.min_cost_tier} (as stored)
+                    </option>
+                  )}
+              </select>
+              <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text-muted)', fontFamily: 'var(--mono)' }}>
+                Models in a cheaper tier are never chosen. Must not be above the max.
+              </div>
+            </div>
             <div className="field" style={{ marginBottom: 0 }}>
               <label className="mono-label">
                 Allowed models (optional — empty allows all candidates)
