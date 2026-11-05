@@ -361,7 +361,7 @@ COLLECTION_HARNESS_TOOLS = [
 
 
 # Collection runs are tool-heavy (search, capture, page-boundary proposals, write-back
-# over up to 24 iterations) and a weak model loops: on 2026-11-04 the router picked an
+# over up to 40 iterations) and a weak model loops: on 2026-11-04 the router picked an
 # economy-tier model that spent 22 of 24 iterations on web_search. The collector is
 # therefore held to exactly the standard tier: `min_cost_tier` is a hard routing floor
 # (the `quality` objective only reorders candidates, it excludes none), and the
@@ -375,6 +375,15 @@ COLLECTION_HARNESS_MODEL_POLICY = {
 # policy equals this exactly was never edited, so boot upgrades it; any other
 # policy is an operator's and is left alone.
 _LEGACY_COLLECTION_MODEL_POLICY = {"mode": "auto", "max_cost_tier": "standard"}
+# A 380-page annual report with an embedded sustainability statement needs more
+# than 24 iterations to locate, read and map; the seed is raised to 40. A harness
+# whose loop_config equals the previous seed was never edited, so boot upgrades it.
+COLLECTION_HARNESS_LOOP_CONFIG = {"max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3}
+_PREVIOUS_COLLECTION_HARNESS_LOOP_CONFIG = {
+    "max_iterations": 24,
+    "max_output_tokens": 4096,
+    "temperature": 0.3,
+}
 
 
 async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
@@ -408,7 +417,8 @@ async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
     The seeded `model_policy` carries a routing floor
     (`COLLECTION_HARNESS_MODEL_POLICY`). An existing harness whose policy is
     still exactly the previous seed value is moved to it; an edited policy is
-    never touched.
+    never touched. The same holds, independently, for `loop_config`
+    (`COLLECTION_HARNESS_LOOP_CONFIG`, 40 iterations).
     """
     existing = (
         await db.execute(
@@ -423,6 +433,8 @@ async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
             existing.tool_names = [*(existing.tool_names or []), *missing]
         if existing.model_policy == _LEGACY_COLLECTION_MODEL_POLICY:
             existing.model_policy = dict(COLLECTION_HARNESS_MODEL_POLICY)
+        if existing.loop_config == _PREVIOUS_COLLECTION_HARNESS_LOOP_CONFIG:
+            existing.loop_config = dict(COLLECTION_HARNESS_LOOP_CONFIG)
         return
     if effective_mode(CLASS_RESEARCH) == MODE_OFF:
         return
@@ -436,7 +448,7 @@ async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
             task_profile="freeform",
             model_policy=dict(COLLECTION_HARNESS_MODEL_POLICY),
             tool_names=list(COLLECTION_HARNESS_TOOLS),
-            loop_config={"max_iterations": 24, "max_output_tokens": 4096, "temperature": 0.3},
+            loop_config=dict(COLLECTION_HARNESS_LOOP_CONFIG),
         )
     )
 

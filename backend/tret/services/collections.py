@@ -257,6 +257,38 @@ class CreateCollectionBody(BaseModel):
     fiscal_year: int = Field(default=2025, ge=2000, le=2100)
     auto_write: bool = True
     model_override: str | None = Field(default=None, max_length=200)
+    max_iterations: int | None = Field(default=None, ge=1, le=50)
+
+
+_URL_RE = re.compile(r"https?://\S+")
+ERROR_SUMMARY_MAX = 300
+
+
+def summarise_run_error(text: str | None) -> str | None:
+    """A run's error made safe for a customer-facing record. A provider error
+    often carries the raw upstream JSON body, with an internal key identifier
+    and account URL in it. The first `{` to the last `}` is replaced by the
+    object's `error.message` (or `message`) when it parses, else dropped; then
+    every http(s) URL is removed, whitespace collapsed and the result capped at
+    300 characters. A plain error passes through unchanged."""
+    if text is None:
+        return None
+    s = str(text)
+    start, end = s.find("{"), s.rfind("}")
+    if start != -1 and end > start:
+        message = ""
+        with contextlib.suppress(ValueError, TypeError):
+            obj = json.loads(s[start : end + 1])
+            if isinstance(obj, dict):
+                err = obj.get("error")
+                found = err.get("message") if isinstance(err, dict) else None
+                if not isinstance(found, str):
+                    found = obj.get("message")
+                if isinstance(found, str):
+                    message = found
+        s = s[:start] + message + s[end + 1 :]
+    s = _URL_RE.sub("", s)
+    return re.sub(r"\s+", " ", s).strip()[:ERROR_SUMMARY_MAX]
 
 
 class RegisterError(ValueError):
@@ -542,7 +574,7 @@ DOCTRINE (from the Kith Climate collection briefing; follow it exactly)
 PROCEDURE
 a. Open the known URLs, or search with a few precise queries ("{company} sustainability report {fy} pdf", "{company} annual report {fy} sustainability statement"). Do not loop on searches: if the document cannot be reached, report it.
 b. capture_source the primary PDF, and separate assurance or appendix PDFs if they exist.
-c. read_document to confirm company, period and page layout before mapping.
+c. read_document to confirm company, period and page layout before mapping. In a long report, locate the sustainability statement, its assurance report and any appendix with search_documents using the section titles from the contents page (each hit names its page and chunk), then read_document with that hit's chunk_ordinal and read forward from there. Never page through a long document from the start and never guess chunk ordinals; the page ranges you map must come from pages you read this way.
 d. propose_package_map for each document to retain. Every stem must be unique within this target: use "{slug}" for the primary disclosure, "{slug}-assurance", "{slug}-appendix", and for each further document "{slug}-container-<short-topic>" (for example "{slug}-container-methodology"); never reuse a stem. role is one of {roles}: {role_guidance}. Request ocr="auto" when pages look scanned.
 e. Finish by calling report_collection_outcome exactly once with status captured, substituted, gap or blocked and the metadata you established. Call it even when you found nothing; it is how this target is scored.
 
@@ -709,7 +741,7 @@ def target_out(t: CollectionTarget, run: Run | None, findings: list[Finding]) ->
         "run_id": str(t.run_id) if t.run_id else None,
         "finding_ids": list(t.finding_ids or []),
         "attempts": t.attempts or 0,
-        "error": t.error,
+        "error": summarise_run_error(t.error),
         "outcome": t.outcome,
         "packages": package_summaries(findings),
         "written_files": [
@@ -758,6 +790,7 @@ def collection_out(c: Collection, targets: list[CollectionTarget], runs: dict[uu
                 "fiscal_year",
                 "auto_write",
                 "model_override",
+                "max_iterations",
             )
         },
         "created_by": str(c.created_by) if c.created_by else None,
@@ -905,6 +938,7 @@ async def create_collection(
             "fiscal_year": body.fiscal_year,
             "auto_write": body.auto_write,
             "model_override": (body.model_override or "").strip() or None,
+            "max_iterations": body.max_iterations,
         },
         warnings=warnings,
         created_by=user_id,
@@ -999,7 +1033,7 @@ def _archive_attempt(t: CollectionTarget, run: Run | None) -> None:
             "attempt": t.attempts or 0,
             "run_id": str(t.run_id) if t.run_id else None,
             "status": t.status,
-            "error": t.error,
+            "error": summarise_run_error(t.error),
             "outcome": t.outcome,
             "cost_usd": round(run_cost(run), 6),
             "model_used": run.model_used if run else None,
@@ -1093,6 +1127,7 @@ async def _launch(collection_id: uuid.UUID) -> int:
                 return 0
             pack = resolve_pack_for_task(await packs_for_harness(db, harness), "freeform")
             model_override = (c.settings or {}).get("model_override")
+            max_iterations = (c.settings or {}).get("max_iterations")
             previous = await load_runs(db, pending)
             launched: list[tuple[uuid.UUID, uuid.UUID]] = []
             for t in pending:
@@ -1106,6 +1141,8 @@ async def _launch(collection_id: uuid.UUID) -> int:
                 }
                 if model_override:
                     task_input["_model_override"] = model_override
+                if max_iterations:
+                    task_input["_max_iterations"] = int(max_iterations)
                 run = Run(
                     id=uuid.uuid4(),
                     project_id=c.project_id,
@@ -1218,7 +1255,7 @@ async def _run_target(collection_id: uuid.UUID, target_id: uuid.UUID, run_id: uu
                 t = await db.get(CollectionTarget, target_id)
                 if t is not None and t.run_id == run_id:
                     t.status = "failed"
-                    t.error = f"{type(e).__name__}: {e}"[:2000]
+                    t.error = summarise_run_error(f"{type(e).__name__}: {e}")
                     t.finished_at = _now()
                     await db.commit()
     finally:
@@ -1250,7 +1287,7 @@ async def _settle_target(
             run.status if run else None,
             t.outcome,
             maps,
-            run_error=run.error if run else "run missing",
+            run_error=summarise_run_error(run.error) if run else "run missing",
             auto_write=auto_write or force_write,
             written=_all_written(t, maps),
         )
@@ -1261,7 +1298,7 @@ async def _settle_target(
                 status, write_error = await _write_packages(db, c, t, maps)
                 error = write_error or error
         t.status = status
-        t.error = error
+        t.error = summarise_run_error(error)
         if status in TERMINAL_TARGET_STATUSES:
             t.finished_at = t.finished_at or _now()
         else:
@@ -1731,6 +1768,7 @@ async def build_records(
         "packaging": packaging_rows,
         "concurrency": settings.get("concurrency"),
         "model_override": settings.get("model_override"),
+        "max_iterations": settings.get("max_iterations"),
         "tret_version": __version__,
         "packaging_version": PACKAGING_VERSION,
         "timing_notes": ["Phases overlap; summed run wall seconds exceed elapsed time."],
@@ -1751,7 +1789,7 @@ async def build_records(
                 "company": t.company,
                 "market": t.market,
                 "status": t.status,
-                "error": t.error,
+                "error": summarise_run_error(t.error),
                 "outcome_status": outcome.get("status"),
                 "outcome_summary": outcome.get("summary"),
                 "blocked_urls": outcome.get("blocked_urls") or [],
@@ -1857,7 +1895,7 @@ def _results_summary(
                 if f.status == "approved" and (_package_of(f) or {}).get("status") == "packaged"
             )
             outcome = t.outcome or {}
-            note = str(t.error or outcome.get("substitution_note") or "")[:200]
+            note = str(summarise_run_error(t.error) or outcome.get("substitution_note") or "")[:200]
             if not note and outcome.get("status") in ("gap", "blocked") and outcome.get("summary"):
                 # A gap with no error only explains itself through the outcome.
                 note = f"{outcome['status']}: {outcome['summary']}"

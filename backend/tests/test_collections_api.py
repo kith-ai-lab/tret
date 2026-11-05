@@ -44,6 +44,11 @@ from tret.services import connections as connections_service
 from tret.services.reconcile import ORPHAN_ERROR
 from tret.services.workspace import COLLECTION_HARNESS_NAME, COLLECTION_HARNESS_TOOLS
 
+LEAKY_ERROR = (
+    '[openrouter] {"error":{"message":"Key limit exceeded (total limit). Manage it using '
+    'https://openrouter.ai/workspaces/default/keys/' + "ab" * 32 + ' $15.49 of $15.38 used; '
+    'does not reset.","code":402}}'
+)
 HEADER = "company,market,domicile_country,sector,category,expected_form,fiscal_year,known_urls,notes\n"
 REGISTER = HEADER + (
     "Allianz SE,EU,Germany,Insurance,financial,embedded,,https://allianz.example/r.pdf,\n"
@@ -82,9 +87,9 @@ class FakeEngine:
                 while run_id not in self.cancelled:
                     await asyncio.sleep(0.02)
                 mode = "map"
-            failing = mode in ("fail", "fail_with_map")
+            failing = mode in ("fail", "fail_with_map", "fail_leaky")
             run.status = "failed" if failing else "completed"
-            run.error = "provider exploded" if failing else None
+            run.error = LEAKY_ERROR if mode == "fail_leaky" else ("provider exploded" if failing else None)
             run.model_used = "test/model"
             run.iterations = 7
             run.cost_usd = Decimal("0.0100")
@@ -276,7 +281,7 @@ def test_create_returns_the_collection_with_targets_and_warnings(client, world):
     assert d["status"] == "draft"
     assert d["settings"] == {
         "target_slug": "test-output", "write_root": "runs", "concurrency": 2, "first_batch_size": 2,
-        "fiscal_year": 2025, "auto_write": True, "model_override": None,
+        "fiscal_year": 2025, "auto_write": True, "model_override": None, "max_iterations": None,
     }
     assert [t["slug"] for t in d["targets"]] == ["allianz", "shell", "apple", "siemens", "hsbc-holdings"]
     assert [t["status"] for t in d["targets"]] == ["pending", "pending", "held", "held", "held"]
@@ -1113,3 +1118,46 @@ def test_main_wires_the_router_sweep_and_drain():
     assert "sweep_orphaned_collections" in source
     assert "collections_service._collection_tasks" in source
     assert "collections_api.router" in source
+
+
+def test_max_iterations_is_stored_and_stamped_on_every_run(client, world):
+    r = create(client, max_iterations=40)
+    assert r.status_code == 200, r.text
+    cid = r.json()["id"]
+    assert client.get(f"/api/collections/{cid}").json()["settings"]["max_iterations"] == 40
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+
+    async def caps(db):
+        return {r.task_input.get("_max_iterations") for r in (await db.execute(select(Run))).scalars()}
+
+    assert run_db(client, world, caps) == {40}
+
+
+def test_max_iterations_out_of_range_is_a_422(client, world):
+    assert create(client, max_iterations=0).status_code == 422
+    assert create(client, max_iterations=51).status_code == 422
+
+
+def test_a_provider_error_body_is_sanitised_on_the_target(client, world):
+    world.engine.behaviour.update({"allianz": "fail_leaky", "shell": "gap", "apple": "gap",
+                                   "siemens": "gap", "hsbc-holdings": "gap"})
+    cid = create(client).json()["id"]
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+    err = by_slug(detail(client, cid))["allianz"]["error"]
+    assert err == ("[openrouter] Key limit exceeded (total limit). Manage it using "
+                   "$15.49 of $15.38 used; does not reset.")
+    assert "openrouter.ai" not in err and "{" not in err
+
+
+def test_summarise_run_error():
+    f = service.summarise_run_error
+    assert f(None) is None
+    assert f("max_iterations (24) reached without completion") == "max_iterations (24) reached without completion"
+    assert f('boom {"error":{"message":"bad key"}} end') == "boom bad key end"
+    assert f('boom {"message":"top level"}') == "boom top level"
+    assert f('boom {"code": 402}') == "boom"
+    assert f("boom {not json}") == "boom"
+    assert f("see https://x.example/a?b=1 for more\n details") == "see for more details"
+    assert len(f("x" * 1000)) == 300

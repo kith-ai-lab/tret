@@ -89,7 +89,7 @@ async def test_seeded_when_research_is_on(db, monkeypatch):
         "min_cost_tier": "standard",
         "max_cost_tier": "standard",
     }
-    assert h.loop_config["max_iterations"] == 24
+    assert h.loop_config == {"max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3}
     assert not h.is_archived
 
     # Idempotent: a second boot adds nothing.
@@ -216,3 +216,46 @@ async def test_an_operator_edited_policy_is_never_touched(db, monkeypatch, edite
     await db.flush()
 
     assert existing.model_policy == edited
+
+
+async def test_backfills_the_previous_loop_config(db, monkeypatch):
+    _research(monkeypatch, "off")
+    ws = await _workspace(db)
+    existing = Harness(
+        workspace_id=ws.id,
+        name=COLLECTION_HARNESS_NAME,
+        task_profile="freeform",
+        model_policy={"mode": "pinned", "model": "x/y"},  # edited: stays, independent
+        loop_config={"max_iterations": 24, "max_output_tokens": 4096, "temperature": 0.3},
+        tool_names=list(COLLECTION_HARNESS_TOOLS),
+    )
+    db.add(existing)
+    await db.flush()
+
+    await ensure_collection_harness(db, ws.id)
+    await db.flush()
+
+    assert existing.loop_config == {"max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3}
+    assert existing.model_policy == {"mode": "pinned", "model": "x/y"}
+
+
+async def test_an_edited_loop_config_is_kept(db, monkeypatch):
+    _research(monkeypatch, "off")
+    ws = await _workspace(db)
+    edited = {"max_iterations": 30, "max_output_tokens": 4096, "temperature": 0.3}
+    existing = Harness(
+        workspace_id=ws.id,
+        name=COLLECTION_HARNESS_NAME,
+        task_profile="freeform",
+        model_policy={"mode": "auto", "max_cost_tier": "standard"},
+        loop_config=dict(edited),
+        tool_names=list(COLLECTION_HARNESS_TOOLS),
+    )
+    db.add(existing)
+    await db.flush()
+
+    await ensure_collection_harness(db, ws.id)
+    await db.flush()
+
+    assert existing.loop_config == edited
+    assert existing.model_policy["min_cost_tier"] == "standard"  # the other upgrade still applied

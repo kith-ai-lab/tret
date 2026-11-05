@@ -144,6 +144,19 @@
             "title": "Fiscal Year",
             "type": "integer"
           },
+          "max_iterations": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Iterations"
+          },
           "model_override": {
             "anyOf": [
               {
