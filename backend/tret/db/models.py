@@ -1001,3 +1001,89 @@ class InstanceState(Base):
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[Any] = mapped_column(JSONB, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class Collection(Base):
+    """A collection run: one register of target companies, each collected by its
+    own engine run on the "Disclosure Collector" harness, tracked from proposal
+    through approval, packaging and SharePoint upload
+    (`tret/services/collections.py`).
+
+    `settings` is the run's own configuration (write target, concurrency, the
+    first-batch gate, fiscal year, auto-write, model override); `warnings` are
+    the register validation warnings set at creation; `finalize` records the
+    run-level files written by `POST /collections/{id}/finalize`.
+    """
+
+    __tablename__ = "collections"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "run_slug"),
+        Index("ix_collections_workspace_created", "workspace_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    run_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    # draft | running | paused | gate | review | completed | finalized | failed
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    settings: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    warnings: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    finalize: Mapped[dict | None] = mapped_column(JSONB)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = created_at_col()
+    started_at: Mapped[datetime | None] = mapped_column()
+    finalized_at: Mapped[datetime | None] = mapped_column()
+
+
+class CollectionTarget(Base):
+    """One company in a collection's register, and where its collection stands.
+
+    `status`: pending | held | running | review | packaging | written |
+    completed | gap | failed | rejected | write_failed (see
+    `services/collections.py::derive_target_status`). `outcome` is what the
+    target's run reported through `report_collection_outcome`; `finding_ids`
+    are the run's `package_map` findings; `written_files` the package files
+    uploaded to SharePoint; `history` the earlier attempts. Cost, model and
+    package state of the current attempt are derived on read
+    from the Run and Finding rows, never stored here.
+    """
+
+    __tablename__ = "collection_targets"
+    __table_args__ = (
+        UniqueConstraint("collection_id", "slug"),
+        Index("ix_collection_targets_collection_position", "collection_id", "position"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    collection_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    company: Mapped[str] = mapped_column(Text, nullable=False)
+    market: Mapped[str] = mapped_column(Text, nullable=False)
+    domicile_country: Mapped[str | None] = mapped_column(Text)
+    sector: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(Text)
+    expected_form: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
+    fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    known_urls: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    notes: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    finding_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    outcome: Mapped[dict | None] = mapped_column(JSONB)
+    written_files: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # Earlier attempts, oldest first: {attempt, run_id, status, error, outcome,
+    # cost_usd, model_used, started_at, finished_at}, pushed at each relaunch.
+    history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    started_at: Mapped[datetime | None] = mapped_column()
+    finished_at: Mapped[datetime | None] = mapped_column()

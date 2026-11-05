@@ -2590,6 +2590,7 @@ async def upload_connected_file(
     actor_user_id: uuid.UUID | None = None,
     actor_run_id: uuid.UUID | None = None,
     conflict: str = "rename",
+    max_bytes: int | None = None,
 ) -> UploadResult:
     """Write `data` into workspace `workspace_id`'s m365 write target
     `target_slug`, under a `tret/` subfolder created on first use and reused
@@ -2610,8 +2611,12 @@ async def upload_connected_file(
     `conflict` is Graph's `@microsoft.graph.conflictBehavior` for the final
     file: `"rename"` (default) lets Graph pick a new name when one is taken;
     `"fail"` refuses instead, raising `UploadConflictError` (a
-    `ConnectionWriteError`) naming the existing path. Anything else is a
-    `ValueError`. `replace` is deliberately not offered.
+    `ConnectionWriteError`) naming the existing path; `"replace"` overwrites
+    the file at that path. `replace` exists for exactly one caller: a
+    collection run (services/collections.py) owns its own
+    `runs/<run>/...` folder and re-writes its package files and run records
+    there on a retry or re-finalize, where a renamed "manifest 1.json" next
+    to the original would be wrong. Anything else is a `ValueError`.
 
     Refusal order — every one of these raises `ConnectionWriteError` (never
     `ConnectionUnavailable`, which only `ensure_connection_usable`'s own
@@ -2631,7 +2636,9 @@ async def upload_connected_file(
     5. `filename` fails `safe_upload_path` (a bare filename or a relative
        sub-folder path; see that function).
     6. `data` exceeds `IMPORT_MAX_BYTES` (the same 25MB cap the import path
-       enforces — reused, not reinvented, for write-back's own cap).
+       enforces — reused, not reinvented, for write-back's own cap), or
+       `max_bytes` when the caller passes one (a collection run uploads
+       retained package PDFs under the larger capture cap).
 
     Only past all six does this module ever touch the network: ensuring the
     `tret` subfolder, then the small- or large-file upload path depending on
@@ -2643,8 +2650,8 @@ async def upload_connected_file(
     actually used, `bytes_count=len(data)`) and returns an `UploadResult`
     built from the final `driveItem` Graph reported.
     """
-    if conflict not in ("rename", "fail"):
-        raise ValueError(f"conflict must be 'rename' or 'fail', not {conflict!r}")
+    if conflict not in ("rename", "fail", "replace"):
+        raise ValueError(f"conflict must be 'rename', 'fail' or 'replace', not {conflict!r}")
     conn = await ensure_connection_usable(db, workspace_id, M365)
 
     gate = await get_extension_registry().check_workspace_gate(db, workspace_id, WRITE_ACTION)
@@ -2681,10 +2688,11 @@ async def upload_connected_file(
             reason=str(exc), actor_user_id=actor_user_id, actor_run_id=actor_run_id,
         ) from exc
 
-    if len(data) > IMPORT_MAX_BYTES:
+    cap = IMPORT_MAX_BYTES if max_bytes is None else max_bytes
+    if len(data) > cap:
         reason = (
             f"{len(data) // (1024 * 1024)}MB exceeds the "
-            f"{IMPORT_MAX_BYTES // (1024 * 1024)}MB write-back limit"
+            f"{cap // (1024 * 1024)}MB write-back limit"
         )
         raise await _refuse_upload(
             db, workspace_id=workspace_id, target=target.slug, bytes_count=len(data),

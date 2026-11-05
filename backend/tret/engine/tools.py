@@ -865,6 +865,8 @@ _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 async def capture_source(
     ctx: RunContext, url: str, expected_sha256: str | None = None, note: str | None = None
 ) -> str:
+    from tret.net.policy import capture_policy
+
     mode = _research_mode()
     _refuse_if_disabled(mode)
     settings = get_settings()
@@ -915,7 +917,13 @@ async def capture_source(
 
     max_bytes = int(settings.egress_capture_max_bytes)
     try:
-        page = await fetch_page(url, max_bytes=max_bytes, fail_on_truncate=True, capture=True)
+        page = await fetch_page(
+            url,
+            max_bytes=max_bytes,
+            fail_on_truncate=True,
+            capture=True,
+            policy=capture_policy(settings),
+        )
     except EgressDenied as e:
         await _record_egress(
             ctx, method="GET", host=_host_of(url), path=_path_of(url),

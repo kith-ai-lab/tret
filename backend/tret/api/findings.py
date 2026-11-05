@@ -187,7 +187,91 @@ async def decide_finding(
     ctx: WorkspaceContext = Depends(require_workspace_approver),
     db: AsyncSession = Depends(get_db),
 ):
+    result = await _decide(db, finding_id, body.action, body.note, user=user, workspace_id=ctx.id)
+    await _notify_collections_decided(db, [finding_id])
+    return result
+
+
+class DecideBatchBody(BaseModel):
+    """`POST /findings/decide-batch`: one decision applied to several findings.
+    No approver field, for the same reason as `ApprovalBody`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    finding_ids: list[uuid.UUID] = Field(min_length=1, max_length=200)
+    action: str = Field(
+        description="'approve' or 'reject'",
+        json_schema_extra={"enum": list(APPROVAL_ACTIONS)},
+    )
+    note: str | None = Field(default=None, description="Optional reviewer comment")
+
+
+@router.post("/findings/decide-batch")
+async def decide_findings_batch(
+    body: DecideBatchBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    """Approve or reject several findings in one request (the collection run's
+    review queue). Each finding is decided exactly as `POST /findings/{id}/
+    approval` decides it, independently: one that is not decidable (already
+    decided, not found) reports its own error and never stops the others."""
     if body.action not in APPROVAL_ACTIONS:
+        raise HTTPException(422, "action must be 'approve' or 'reject'")
+    results: list[dict] = []
+    decided: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for finding_id in body.finding_ids:
+        if finding_id in seen:
+            continue
+        seen.add(finding_id)
+        try:
+            out = await _decide(db, finding_id, body.action, body.note, user=user, workspace_id=ctx.id)
+            results.append({"id": str(finding_id), "ok": True, "status": out["status"]})
+            decided.append(finding_id)
+        except HTTPException as e:
+            with contextlib.suppress(Exception):
+                await db.rollback()  # release the row lock of a refused decision
+            results.append({"id": str(finding_id), "ok": False, "error": str(e.detail)})
+        except Exception as e:  # noqa: BLE001 - one bad finding must not sink the batch
+            log.exception("batch decision failed for finding %s", finding_id)
+            with contextlib.suppress(Exception):
+                await db.rollback()
+            results.append({"id": str(finding_id), "ok": False, "error": f"{type(e).__name__}: {e}"})
+    await _notify_collections_decided(db, decided)
+    return {"results": results}
+
+
+async def _notify_collections_decided(db: AsyncSession, finding_ids: list[uuid.UUID]) -> None:
+    """Let a collection run re-derive the status of the targets behind these
+    findings (`review` -> `packaging`/`rejected`): a cheap lookup here, the
+    settle itself in a background task. Never raises: the decision has already
+    committed, and collection status is re-derived again when packaging
+    finishes."""
+    try:
+        from tret.services import collections as collections_service
+
+        await collections_service.notify_decided(
+            finding_ids, db=db, session_factory=get_session_factory
+        )
+    except Exception:  # noqa: BLE001 - bookkeeping must never fail a decision
+        log.warning("collection status update after a decision failed", exc_info=True)
+
+
+async def _decide(
+    db: AsyncSession,
+    finding_id: uuid.UUID,
+    action: str,
+    note: str | None,
+    *,
+    user: User,
+    workspace_id: uuid.UUID,
+) -> dict:
+    """Decide one finding: the body of `decide_finding`, shared with
+    `decide_findings_batch`. Raises `HTTPException` (404/409/422) for a finding
+    that cannot be decided."""
+    if action not in APPROVAL_ACTIONS:
         raise HTTPException(422, "action must be 'approve' or 'reject'")
     # Locked for the length of the decision: two approvers deciding the same
     # draft at the same moment would otherwise both read 'draft', both write an
@@ -196,19 +280,19 @@ async def decide_finding(
     # lock makes the second request re-read the committed status and lose to the
     # 'already decided' branch below.
     f = await db.get(Finding, finding_id, with_for_update=True)
-    if f is None or await project_in_workspace(db, f.project_id, ctx.id) is None:
+    if f is None or await project_in_workspace(db, f.project_id, workspace_id) is None:
         raise HTTPException(404, "Finding not found")
     if f.status != "draft":
         raise HTTPException(409, f"Finding is already '{f.status}'")
     approval = Approval(
         finding_id=f.id,
-        action=body.action,
+        action=action,
         approver_id=user.id,  # session-stamped
-        note=body.note,
+        note=note,
     )
     db.add(approval)
-    f.status = "approved" if body.action == "approve" else "rejected"
-    if body.action == "approve" and f.schema_slug == "draft_section":
+    f.status = "approved" if action == "approve" else "rejected"
+    if action == "approve" and f.schema_slug == "draft_section":
         # A stale "this is a draft" banner must not survive approval — see
         # `services/export.py::strip_draft_status_banner`.
         original = f.payload.get("markdown")
@@ -220,7 +304,7 @@ async def decide_finding(
                 "markdown": stripped,
                 "stripped_draft_banner": original[: len(original) - len(stripped)].strip(),
             }
-    if body.action == "approve" and f.schema_slug == "package_map":
+    if action == "approve" and f.schema_slug == "package_map":
         # Recorded in the SAME commit as the approval, so there is never a moment
         # when an approved map shows no packaging state: `package-retry` refuses
         # while this says "running", which keeps a second attempt from racing
@@ -231,15 +315,15 @@ async def decide_finding(
     # SharePoint upload — `propose_connected_write` (engine/tools.py) never
     # touches Graph itself, only this does, and only once the status flip
     # above has already committed. A rejected finding is never uploaded.
-    if body.action == "approve" and f.schema_slug == "connected_write":
-        await _upload_connected_write(db, f, ctx.id, actor_user_id=user.id)
+    if action == "approve" and f.schema_slug == "connected_write":
+        await _upload_connected_write(db, f, workspace_id, actor_user_id=user.id)
     # Approving a `package_map` finding runs the deterministic packager over the
     # approved page map (`propose_package_map` itself packages nothing). It can
     # take minutes, so the request returns now, with the `running` record the
     # commit above already holds, and the packager runs in a background task on
     # its own session. Outcome recorded in `payload["package"]`, which the
     # Approvals page polls; retryable via `package-retry`.
-    if body.action == "approve" and f.schema_slug == "package_map":
+    if action == "approve" and f.schema_slug == "package_map":
         _start_packaging(f.id, approver_user_id=user.id)
     # A human just said whether this output was right, which is the strongest
     # signal tret has about the model that produced it — re-score the run behind
@@ -452,6 +536,18 @@ async def _packaging_task(finding_id: uuid.UUID, approver_user_id: uuid.UUID) ->
         await _record_task_crash(finding_id, approver_user_id, e)
     finally:
         _packaging_active.discard(finding_id)
+    # A collection run tracks this finding's target through packaging and the
+    # SharePoint upload that follows it (services/collections.py); it decides
+    # whether the finding belongs to one. Only logs: the package record above is
+    # already committed either way.
+    try:
+        from tret.services import collections as collections_service
+
+        await collections_service.notify_package_finished(
+            finding_id, session_factory=get_session_factory
+        )
+    except Exception:  # noqa: BLE001 - collection bookkeeping is best effort
+        log.warning("collection update after packaging failed for finding %s", finding_id, exc_info=True)
 
 
 async def _record_task_crash(

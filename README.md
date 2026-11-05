@@ -363,7 +363,7 @@ See [docs/architecture.md](docs/architecture.md) and
 | [trust-doctrine.md](docs/trust-doctrine.md) | the rules, and why they are structural |
 | [pack-authoring.md](docs/pack-authoring.md) | write a domain pack |
 | [connections.md](docs/connections.md) | Google Drive / Microsoft 365 workspace connections |
-| [disclosure-collection.md](docs/disclosure-collection.md) | capture a public disclosure, propose and approve its page map, keep the verified subset |
+| [disclosure-collection.md](docs/disclosure-collection.md) | capture a public disclosure, propose and approve its page map, keep the verified subset; run it for a register of companies |
 | [embedding.md](docs/embedding.md) | the SDK and the `tret run` CLI |
 | [eco-accounting.md](docs/eco-accounting.md) | routing objectives, energy and carbon |
 | [local-models.md](docs/local-models.md) | zero-cloud operation |

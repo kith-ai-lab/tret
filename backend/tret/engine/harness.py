@@ -64,6 +64,8 @@ from tret.engine.tools import (
     withheld_connector_tools,
     withheld_web_tools,
 )
+# Registers `report_collection_outcome` (collection runs) with the builtins above.
+import tret.engine.collection_tools  # noqa: E402,F401
 from tret.providers.base import (
     Msg,
     ProviderError,

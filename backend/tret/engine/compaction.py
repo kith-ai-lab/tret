@@ -110,6 +110,9 @@ PROTECTED_TOOLS = frozenset(
         # Same reasoning again: a proposed lesson a later turn can no longer
         # see is one it might propose a second time or contradict.
         "propose_pack_lesson",
+        # A recording tool too: the collection target's outcome. A run that can
+        # no longer see it is one that might report a second, different one.
+        "report_collection_outcome",
     }
 )
 
