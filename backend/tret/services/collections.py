@@ -1096,6 +1096,10 @@ async def _launch(collection_id: uuid.UUID) -> int:
                     created_by=c.created_by,
                 )
                 db.add(run)
+                # Insert the run before the target points at it: with no ORM
+                # relationship between the two, the unit of work does not order
+                # the UPDATE after the INSERT and Postgres rejects the FK.
+                await db.flush()
                 t.status = "running"
                 t.run_id = run.id
                 t.started_at = _now()
