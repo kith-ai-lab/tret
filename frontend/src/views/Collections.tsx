@@ -174,6 +174,7 @@ function CreateCollectionModal({ open, onClose }: { open: boolean; onClose: () =
   const [fiscalYear, setFiscalYear] = useState(2025)
   const [autoWrite, setAutoWrite] = useState(true)
   const [model, setModel] = useState('')
+  const [maxIterations, setMaxIterations] = useState('')
   const [csv, setCsv] = useState(`${CSV_HEADER}\n`)
   const [created, setCreated] = useState<Collection | null>(null)
   const [fileError, setFileError] = useState<string | null>(null)
@@ -205,6 +206,7 @@ function CreateCollectionModal({ open, onClose }: { open: boolean; onClose: () =
       fiscal_year: fiscalYear,
       auto_write: autoWrite,
       model_override: model.trim() || null,
+      max_iterations: maxIterations.trim() ? Number(maxIterations) : null,
     })
   }
 
@@ -323,6 +325,19 @@ function CreateCollectionModal({ open, onClose }: { open: boolean; onClose: () =
             type="number"
             value={fiscalYear}
             onChange={(e) => setFiscalYear(Number(e.target.value) || 2025)}
+          />
+        </div>
+        <div className="field">
+          <label className="mono-label">Max iterations (1–50, blank = harness)</label>
+          <input
+            type="number"
+            min={1}
+            max={50}
+            value={maxIterations}
+            onChange={(e) => {
+              const raw = e.target.value
+              setMaxIterations(raw === '' ? '' : String(Math.min(50, Math.max(1, Number(raw) || 1))))
+            }}
           />
         </div>
       </div>
@@ -454,7 +469,8 @@ function CollectionDetail({ id }: { id: string }) {
         {c.run_slug} · target {s.target_slug} · {s.write_root}/ · concurrency {s.concurrency} ·{' '}
         {s.first_batch_size === 0 ? 'no gate' : `gate after ${s.first_batch_size}`} · FY
         {s.fiscal_year} · auto-write {s.auto_write ? 'on' : 'off'}
-        {s.model_override ? ` · model ${s.model_override}` : ''} · cost {formatCost(c.cost_usd)}
+        {s.model_override ? ` · model ${s.model_override}` : ''}
+        {s.max_iterations ? ` · max iterations ${s.max_iterations}` : ''} · cost {formatCost(c.cost_usd)}
       </div>
 
       <WarningsBox warnings={c.warnings} />

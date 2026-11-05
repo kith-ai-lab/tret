@@ -10,6 +10,24 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Pack routing defaults.** A task type in `pack.yaml` can carry a `routing:` block
+  (`objective`, `max_cost_tier`, `min_cost_tier`), and a harness preset can set
+  `objective` and `min_cost_tier` beside `suggested_cost_tier`. All are validated by
+  `tret packs validate`. Precedence: a run's `_objective` beats the harness's own
+  objective, which beats the pack task's, which beats the global default; tier
+  bounds merge to the lower ceiling and higher floor, and a floor above the ceiling
+  is dropped. See [docs/pack-authoring.md](docs/pack-authoring.md).
+- **Local-first routing shortcut.** Under `eco` or `token_conservation`, when a
+  probe-verified local model heads the candidate list (no run override, harness not
+  pinned), the router picks it without a cloud router call. The decision records
+  `router_served_by: "local_first"`, no router spend, and the usual context-fit
+  record.
+- **`objective_source` on routing decisions.** `runs.routing` now says whether the
+  objective came from `run_override`, `harness`, `pack_task` or `default`.
+- **Preset policy refresh.** Reinstalling or upgrading a pack updates an existing
+  preset harness whose `model_policy` is still exactly what an older preset shape
+  produced; an operator-edited policy is never touched. See
+  [docs/upgrading.md](docs/upgrading.md).
 - **Disclosure collection.** A run can now collect a public sustainability
   disclosure and keep a verified page subset of it, with a person approving every
   page decision. See [docs/disclosure-collection.md](docs/disclosure-collection.md).
@@ -94,6 +112,12 @@ one that needs action on an existing install.
 
 ### Changed
 
+- **Climate pack: local-first for routine work.** The "Climate Analyst" preset no
+  longer suggests `premium` (the router's default ceiling anyway), and
+  `evidence_extraction` and `tcfd_section_draft` default to the `eco` objective, so
+  with a local model server present they run locally; verdicts and QA follow the
+  harness objective. Existing untouched Climate Analyst harnesses pick up the new
+  policy on the next pack install.
 - **Collection runs stop searching when they cannot fetch.** `web_search` is capped
   per run (`TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN`, default 12), and a fetch or
   capture refused by the research allowlist now says the host is not allowlisted,
@@ -119,6 +143,8 @@ one that needs action on an existing install.
 
 ### Fixed
 
+- **Collections page: Max iterations field.** The New collection form now sends
+  `max_iterations` (1–50) as the docs described, and the collection header shows the cap.
 - The OAuth connection callback refuses a workspace that was archived after
   the authorize step.
 - The public-address check on outbound requests now refuses carrier-grade NAT

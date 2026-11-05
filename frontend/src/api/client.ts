@@ -192,9 +192,14 @@ export interface RoutingDecision {
   /** The upstream provider that served the router's own LLM call
    *  (`JsonCompletion.served_by` server-side), e.g. "Anthropic". Null on every
    *  path that never contacted a router: a single candidate, the deterministic
-   *  fallback, or an override/pin — the same cases `router_prompt` is null for. */
+   *  fallback, or an override/pin — the same cases `router_prompt` is null for.
+   *  The sentinel "local_first" means the local-first shortcut chose a
+   *  probe-verified local model and no router call was made at all. */
   router_served_by?: string | null
   objective: string // quality | balanced | token_conservation | eco
+  /** Who supplied `objective`: "run_override" | "harness" | "pack_task" |
+   *  "default". Absent on decisions recorded before the field existed. */
+  objective_source?: string
   /** The shape the fallback table keys on, and the key evidence is grouped by. */
   task_shape?: string
   max_cost_tier?: string
@@ -3072,6 +3077,7 @@ export interface CollectionSettings {
   fiscal_year: number
   auto_write: boolean
   model_override: string | null
+  max_iterations?: number | null
 }
 
 export interface CollectionMarketCounts {
@@ -3221,6 +3227,8 @@ export interface CreateCollectionBody {
   fiscal_year: number
   auto_write: boolean
   model_override: string | null
+  /** Optional iteration cap (1–50) for every target run, in place of the harness value. */
+  max_iterations?: number | null
 }
 
 /** GET /collections/{id}/records: a preview of what finalize writes. */
