@@ -32,7 +32,7 @@ import httpx
 from tret.config import get_settings
 from tret.net.client import USER_AGENT, open_client
 from tret.net.guard import check_url
-from tret.net.policy import CLASS_RESEARCH, EgressDenied
+from tret.net.policy import CLASS_RESEARCH, ClassPolicy, EgressDenied
 
 MAX_REDIRECTS = 3
 
@@ -126,6 +126,7 @@ async def fetch_page(
     max_bytes: int | None = None,
     fail_on_truncate: bool = False,
     capture: bool = False,
+    policy: ClassPolicy | None = None,
 ) -> FetchedPage:
     """Retrieve one URL as bytes. Raises EgressDenied or FetchError.
 
@@ -145,11 +146,12 @@ async def fetch_page(
         timeout=timeout,
         headers={"User-Agent": USER_AGENT, "Accept": "text/html,text/plain,application/pdf,*/*;q=0.5"},
         follow_redirects=False,
+        policy=policy,
     ) as client:
         for _hop in range(MAX_REDIRECTS + 1):
             # The client's event hook checks this too; doing it here as well is
             # what lets a denial name the hop that caused it.
-            await check_url(current, CLASS_RESEARCH)
+            await check_url(current, CLASS_RESEARCH, policy)
             try:
                 async with client.stream("GET", current) as resp:
                     if resp.is_redirect:

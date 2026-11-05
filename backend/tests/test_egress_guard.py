@@ -72,6 +72,7 @@ async def test_a_hostname_resolving_to_loopback_is_refused(resolves):
         "192.168.1.10",
         "172.16.4.4",
         "169.254.169.254",  # the cloud metadata endpoint
+        "100.64.0.1",  # CGNAT: not "private" to the stdlib, not global either
         "::1",
         "fe80::1",
         "::ffff:127.0.0.1",  # IPv4-mapped loopback

@@ -51,7 +51,7 @@ policy around the container — see docs/hardening.md §9.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
 from tret.config import get_settings
@@ -402,6 +402,22 @@ def policy_for(egress_class: str, settings=None) -> ClassPolicy:
         max_bytes=0,
         timeout_seconds=300.0,
     )
+
+
+def capture_policy(settings=None) -> ClassPolicy:
+    """The policy `capture_source` runs under: research, with its own byte ceiling.
+
+    Mode narrowing (master switch, class switch, runtime override, replay) is
+    inherited from research untouched. With `egress_capture_any_public_host` on,
+    the host allowlist is dropped (empty = any host); every other rule (https
+    only, standard ports, public-address verification) is research's.
+    """
+    s = settings or get_settings()
+    base = policy_for(CLASS_RESEARCH, s)
+    changes: dict = {"max_bytes": int(s.egress_capture_max_bytes)}
+    if s.egress_capture_any_public_host:
+        changes["allow_hosts"] = frozenset()
+    return replace(base, **changes)
 
 
 def host_allowed(host: str, policy: ClassPolicy) -> bool:

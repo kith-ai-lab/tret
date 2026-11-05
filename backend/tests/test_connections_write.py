@@ -1055,8 +1055,46 @@ async def test_an_unknown_conflict_value_is_a_value_error(configured_m365, sessi
         with pytest.raises(ValueError):
             await upload_connected_file(
                 db, workspace_id=workspace.id, target_slug="budget-folder",
-                filename="x.pdf", data=b"x", content_type="application/pdf", conflict="replace",
+                filename="x.pdf", data=b"x", content_type="application/pdf", conflict="overwrite",
             )
+
+
+async def test_conflict_replace_is_sent_on_both_paths_and_a_409_is_not_a_conflict_error(
+    configured_m365, session_factory, seed
+):
+    workspace = make_workspace()
+    await seed(workspace, make_connection(workspace, selected_resources={"write": [WRITE_ENTRY]}))
+    big = b"x" * (connections_module._UPLOAD_SIMPLE_MAX_BYTES + 1)
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/drives/drive-1/items/folder-item-1/children").mock(
+            return_value=httpx.Response(200, json=TRET_FOLDER_LISTING)
+        )
+        put_route = mock.put(f"{GRAPH}/drives/drive-1/items/tret-folder-id:/runs/r1/x.pdf:/content").mock(
+            return_value=httpx.Response(200, json={"id": "i", "name": "x.pdf", "size": 1})
+        )
+        session_route = mock.post(
+            f"{GRAPH}/drives/drive-1/items/tret-folder-id:/runs/r1/big.pdf:/createUploadSession"
+        ).mock(return_value=httpx.Response(409, json={"error": {"code": "nameAlreadyExists"}}))
+        async with session_factory() as db:
+            result = await upload_connected_file(
+                db, workspace_id=workspace.id, target_slug="budget-folder",
+                filename="runs/r1/x.pdf", data=b"x", content_type="application/pdf",
+                conflict="replace",
+            )
+            with pytest.raises(ConnectionWriteError) as excinfo:
+                await upload_connected_file(
+                    db, workspace_id=workspace.id, target_slug="budget-folder",
+                    filename="runs/r1/big.pdf", data=big, content_type="application/pdf",
+                    conflict="replace",
+                )
+            await db.commit()
+    assert result.name == "x.pdf"
+    assert put_route.calls[0].request.url.params["@microsoft.graph.conflictBehavior"] == "replace"
+    assert json.loads(session_route.calls[0].request.content)["item"][
+        "@microsoft.graph.conflictBehavior"
+    ] == "replace"
+    assert not isinstance(excinfo.value, UploadConflictError)
 
 
 # ── large uploads: resume, backoff, abandon ──────────────────────────────────

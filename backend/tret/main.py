@@ -15,6 +15,7 @@ from tret.api import (
     auth,
     budgets as budgets_api,
     chat,
+    collections as collections_api,
     connections as connections_api,
     docs,
     documents,
@@ -37,6 +38,7 @@ from tret.db.migrate import ensure_schema
 from tret.engine.extensions import get_extension_registry, load_extensions
 from tret.net import log_egress_at_boot
 from tret.providers.catalog import get_catalog
+from tret.services import collections as collections_service
 from tret.services import lifecycle
 from tret.services.telemetry import sender_loop as telemetry_sender_loop
 
@@ -87,6 +89,17 @@ CONTENT_SECURITY_POLICY = (
     "base-uri 'self'; "
     "form-action 'self'"
 )
+
+class _LiveTasks:
+    """The union of several task registries, re-read on every iteration, so a
+    task added to one of them after the drain started is still waited on."""
+
+    def __init__(self, *registries: set[asyncio.Task]) -> None:
+        self._registries = registries
+
+    def __iter__(self):
+        return iter([t for registry in self._registries for t in list(registry)])
+
 
 async def _drain_in_flight_runs(
     db, tasks: set[asyncio.Task], deadline_seconds: float
@@ -208,6 +221,9 @@ class SecurityHeadersMiddleware:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     lifecycle.mark_draining(app, False)  # a fresh process is never draining
+    # Collection runs launch targets from background tasks with no request in
+    # hand; this is the app whose draining flag stops them (services/collections.py).
+    collections_service.bind_app(app)
     # Enforce the single-instance assumption the run event bus depends on,
     # before anything else touches the database: a deploy handover's brief
     # overlap is retried out (services/instance_lock.py), and only once that
@@ -267,6 +283,15 @@ async def lifespan(app: FastAPI):
                 await findings.sweep_orphaned_packaging(db)
         except Exception:  # noqa: BLE001 — boot must not depend on this sweep
             log.warning("orphaned-packaging sweep skipped", exc_info=True)
+        # Collection targets whose run the sweep above just failed, and the
+        # collections they belong to (services/collections.py). Same best effort.
+        try:
+            from tret.services.collections import sweep_orphaned_collections
+
+            async with get_session_factory()() as db:
+                await sweep_orphaned_collections(db)
+        except Exception:  # noqa: BLE001 — boot must not depend on this sweep
+            log.warning("orphaned-collection sweep skipped", exc_info=True)
     # M2: a stored workspace's emissions override document can stop validating
     # without anyone touching it (tret itself tightening a rule, e.g.
     # `PROVIDER_KEY_RE`) — a run against it already fails open, silently, so
@@ -333,9 +358,18 @@ async def lifespan(app: FastAPI):
                 # and approval-time packaging in `findings`. A packaging task
                 # still unfinished at the deadline leaves its `running` record
                 # for the stale-takeover retry; the sweep touches runs only.
+                # A live view, not a snapshot: a collection target finishing
+                # mid-drain spawns its follow-up task into its registry, and the
+                # drain must wait for that one too (no new target launches while
+                # draining — `collections._launch` checks the flag).
                 await _drain_in_flight_runs(
                     db,
-                    runs._background_tasks | chat._background_tasks | findings._packaging_tasks,
+                    _LiveTasks(
+                        runs._background_tasks,
+                        chat._background_tasks,
+                        findings._packaging_tasks,
+                        collections_service._collection_tasks,
+                    ),
                     get_settings().shutdown_drain_seconds,
                 )
         # Release last: a process that never actually held the lock (SQLite,
@@ -399,6 +433,9 @@ def create_app() -> FastAPI:
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)
     app.include_router(findings.router)
+    # Collection runs (tret/api/collections.py): one engine run per register
+    # target, tracked through the approvals and packaging above.
+    app.include_router(collections_api.router)
     # Pack lessons (tret/api/lessons.py): list/review/retire, the same
     # blessing-gate shape as findings above, applied to a pack's own
     # per-workspace memory instead of a run's output.

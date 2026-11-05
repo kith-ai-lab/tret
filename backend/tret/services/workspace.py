@@ -35,6 +35,7 @@ from tret.config import get_settings
 from tret.db.models import Harness, Project, User, Workspace, WorkspaceMember
 from tret.engine.delegation import SUBAGENT_ALLOWED_TOOLS, SUBAGENT_TASK_PROFILE
 from tret.engine.extensions import GateResult, get_extension_registry
+import tret.engine.collection_tools  # noqa: F401 - registers report_collection_outcome
 from tret.net.policy import CLASS_RESEARCH, MODE_OFF, effective_mode
 from tret.packs.links import link_all_workspace_packs
 from tret.packs.loader import PackValidationError, install_pack
@@ -353,6 +354,9 @@ COLLECTION_HARNESS_TOOLS = [
     "spawn_subagent",
     "run_harness_task",
     "file_data_request",
+    # How a collection run's target run scores itself (engine/collection_tools.py);
+    # refuses harmlessly in any run that is not part of a collection.
+    "report_collection_outcome",
 ]
 
 

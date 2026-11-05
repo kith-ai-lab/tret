@@ -14,6 +14,17 @@ const STATUS_COLOR: Record<string, string> = {
   rejected: 'badge-red',
   // package_map packaging result (`failed` is shared with runs above)
   packaged: 'badge-green',
+  // collections (batch disclosure collection); running, completed, failed,
+  // pending and rejected are shared with the maps above.
+  held: 'badge-gray',
+  paused: 'badge-amber',
+  gate: 'badge-amber',
+  review: 'badge-amber',
+  packaging: 'badge-blue',
+  written: 'badge-green',
+  gap: 'badge-amber',
+  write_failed: 'badge-red',
+  finalized: 'badge-green',
   // documents
   pending: 'badge-gray',
   done: 'badge-green',

@@ -16,7 +16,7 @@ one that needs action on an existing install.
   - `capture_source` stores the complete original of a public file (an issuer PDF,
     a workbook) as a `source_kind='web'` Document with its SHA-256, retrieval time,
     redirects, headers and a changed-source warning when `expected_sha256` does not
-    match. A file over `TRET_EGRESS_CAPTURE_MAX_BYTES` (25 MiB) is refused rather
+    match. A file over `TRET_EGRESS_CAPTURE_MAX_BYTES` (60 MiB) is refused rather
     than truncated, and `TRET_EGRESS_CAPTURE_MAX_PER_RUN` bounds attempts per run.
   - `propose_package_map` records a draft `package_map` finding: which physical
     pages of a captured PDF form the disclosure, with explicit ranges for embedded
@@ -32,6 +32,44 @@ one that needs action on an existing install.
   - `propose_connected_write` accepts a `document_id`, uploading a stored Document
     unchanged (up to 25 MB) to a relative path under the target's `tret/` folder,
     pinned to the SHA-256 the approver saw.
+  - **Collection runs.** A register of target companies (CSV or JSON, up to 500
+    rows, with warnings when the sample is thinner than the briefing asks) is
+    collected one engine run per target on the Disclosure Collector harness.
+    New `collections` and `collection_targets` tables hold the register and each
+    target's run, outcome, page-map findings and uploaded files; the target
+    status is re-derived from those facts, never set by hand. `/api/collections`
+    (create, list, detail, start, pause, resume, release, per-target retry and
+    retry-write, a records preview, finalize) is read-open to members and
+    approver-only for every change, and the Collections page drives it: a
+    first-batch gate with Release, a review queue of draft page maps, and a
+    per-target table. New tool `report_collection_outcome` is how a target's run
+    scores itself (captured, substituted, gap or blocked, with the dates,
+    framework and URLs it established). `POST /api/findings/decide-batch`
+    approves or rejects several findings in one request, each decided as the
+    single approval would be. With auto-write on, approving a map uploads that
+    package's files under the write target's `tret/` folder; finalize writes
+    `manifest.json`, `execution.json`, `exception_log.json`,
+    `target_register.json`, `SHA256SUMS.txt` and `results_summary.md`.
+    Uploads replace, attributed to
+    each map's approver; finalize can be repeated (it overwrites the six files,
+    `SHA256SUMS.txt` last) and is refused while targets are busy or maps are
+    undecided. Retry covers `failed`, `gap`, `rejected` and `write_failed`, keeps
+    earlier attempts and their cost in `history`, and a run that failed but proposed
+    maps is judged by them. Collection status: running, then review, then gate, then
+    completed. Settings `TRET_COLLECTIONS_MAX_CONCURRENT` (3) and
+    `TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS` (1200). A restart re-settles in-flight
+    targets (a killed run becomes failed) and pauses a collection that still has
+    pending targets for an operator to resume; no target launches during shutdown. See
+    [docs/disclosure-collection.md](docs/disclosure-collection.md#6-collection-runs-batches).
+  - `TRET_EGRESS_CAPTURE_ANY_PUBLIC_HOST` (default off): `capture_source`, and
+    only it, may fetch an original from any public https host, because issuers
+    serve reports from CDNs nobody can allowlist ahead of time. `fetch_url` and
+    `web_search` stay behind the allowlist; the address, https, port, size and
+    PDF checks are unchanged.
+  - The capture ceiling `TRET_EGRESS_CAPTURE_MAX_BYTES` now defaults to 60 MiB
+    (was 25 MiB).
+  - `upload_connected_file` takes an optional `max_bytes`; a collection uploads
+    package files under the capture ceiling instead of the 25 MB import cap.
 - **Archive a team.** `POST /api/workspaces/{id}/archive` (owner only, team
   workspaces only, the workspace name typed back as confirmation) soft-deletes
   a workspace: `workspaces.archived_at` is set, pending invites are revoked,
@@ -83,6 +121,9 @@ one that needs action on an existing install.
 
 - The OAuth connection callback refuses a workspace that was archived after
   the authorize step.
+- The public-address check on outbound requests now refuses carrier-grade NAT
+  addresses (100.64.0.0/10), which the earlier private-range list missed. It
+  applies to every egress class, not only captures.
 
 ## [0.2.0] — 2026-10-15
 

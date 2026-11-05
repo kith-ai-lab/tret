@@ -285,6 +285,15 @@ class Settings(BaseSettings):
     # iteration and cost caps, as it always has been.
     delegation_timeout_seconds: int = 900
 
+    # ── collection runs (tret/services/collections.py) ────────────────────────
+    # Target runs one collection executes at once, across the process (clamped
+    # 1..6 in code; a collection's own `concurrency` setting is clamped the same
+    # way). Each holds a database session, like a delegated child.
+    collections_max_concurrent: int = 3
+    # Wall-clock limit (seconds) for one target's engine run. A run still going
+    # is cancelled and the target marked failed with error "timeout" (retryable).
+    collections_run_timeout_seconds: int = 1200
+
     # ── database pool (tret/db/engine.py) ─────────────────────────────────────
     # Stated rather than inherited from SQLAlchemy (whose default is 5 + 10
     # overflow) because parallel delegation makes the pool load-bearing: every
@@ -538,10 +547,18 @@ class Settings(BaseSettings):
     # one and cannot be re-read. That is why it has its own, larger byte ceiling
     # instead of raising `egress_research_max_bytes`, which would let every
     # `fetch_url` page into the prompt-sized lane at 13x the weight. The default is
-    # `MAX_DOCUMENT_BYTES` (services/documents.py, 25 MiB) because a captured file
-    # is a Document like an upload or an import, and those paths are meant to share
-    # one answer to "too large"; raise the two together.
-    egress_capture_max_bytes: int = 26_214_400  # per captured file (25 MiB)
+    # 60 MiB: issuer report sets and workbooks run well past the 25 MiB that
+    # uploads (`MAX_DOCUMENT_BYTES`, services/documents.py) accept, so a capture
+    # may be larger than an upload of the same file would be.
+    egress_capture_max_bytes: int = 62_914_560  # per captured file (60 MiB)
+    # When on, `capture_source` (and only it) may fetch originals from any public
+    # https host: the research allowlist keeps governing `fetch_url` and
+    # `web_search`. DNS/private-address, https-only, standard-port, byte-ceiling,
+    # content-type and PDF-magic checks are unchanged. Captured bytes are stored
+    # as untrusted documents: the model may read them with read_document, as
+    # untrusted text under the unverified banner, and nothing in them becomes a
+    # citable fact. Approvals gate packaging and writes.
+    egress_capture_any_public_host: bool = False
     # Its own per-run count for the same reason: captures are rare, deliberate and
     # large, so they must not spend (or be starved by) the fetch budget above.
     egress_capture_max_per_run: int = 40
@@ -1117,6 +1134,12 @@ def production_config_problems(settings: Settings | None = None) -> tuple[list[s
             "agent may fetch any public URL, including URLs it read out of an uploaded "
             "document. Set an allowlist, or put an egress proxy in front (TRET_EGRESS_PROXY) "
             "— docs/hardening.md §9."
+        )
+    if s.egress_research == "on" and s.egress_capture_any_public_host:
+        warnings.append(
+            "capture_source may fetch originals from any public host "
+            "(TRET_EGRESS_CAPTURE_ANY_PUBLIC_HOST=on); fetch_url and web_search remain "
+            "allowlisted."
         )
     if s.egress_research != "off" and not (s.search_provider or "").strip():
         warnings.append(

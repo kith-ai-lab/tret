@@ -88,9 +88,14 @@ async def open_client(
     timeout: float | httpx.Timeout | None = None,
     headers: dict | None = None,
     follow_redirects: bool = False,
+    policy: ClassPolicy | None = None,
 ) -> AsyncIterator[httpx.AsyncClient]:
     client = build_client(
-        egress_class, timeout=timeout, headers=headers, follow_redirects=follow_redirects
+        egress_class,
+        timeout=timeout,
+        headers=headers,
+        follow_redirects=follow_redirects,
+        policy=policy,
     )
     async with client:
         yield client

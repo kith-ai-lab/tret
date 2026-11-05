@@ -32,14 +32,16 @@ puts a number into a verdict. See [What is deliberately not automated](#what-is-
 ESEF package) as a `Document`. It is the one tool built to keep *originals*:
 
 - the **complete** body is stored, up to `TRET_EGRESS_CAPTURE_MAX_BYTES` (default
-  25 MiB). A file over the limit is refused, never stored truncated;
+  62914560, 60 MiB). A file over the limit is refused, never stored truncated;
 - the stored file is named by its SHA-256 and the `Document` records it;
 - each run may make at most `TRET_EGRESS_CAPTURE_MAX_PER_RUN` capture attempts
   (default 40); an attempt counts whether or not it succeeded, because a refused
   download still cost the bandwidth;
-- `https` only, public addresses only, redirects re-checked hop by hop, and the host
-  must pass the research allowlist. These are the same checks `fetch_url` makes (see
-  [hardening.md](hardening.md), "What the research class checks");
+- `https` only, public addresses only (carrier-grade NAT addresses, 100.64.0.0/10,
+  count as non-public), redirects re-checked hop by hop, and the host must pass the
+  research allowlist unless `TRET_EGRESS_CAPTURE_ANY_PUBLIC_HOST` is on (below). These
+  are the same checks `fetch_url` makes (see [hardening.md](hardening.md), "What the
+  research class checks");
 - pass `expected_sha256` when re-collecting a source captured before. The new copy
   is stored either way, and the result says plainly if the file changed. A reviewed
   page range belongs to specific bytes, so a changed source needs re-review.
@@ -52,6 +54,21 @@ optional `operator_note`. Every retrieval is also a row in the egress log.
 
 Report-only subagents are not granted `capture_source`: collecting an original is the
 main run's act.
+
+**Capturing from any public host.** Set `TRET_EGRESS_CAPTURE_ANY_PUBLIC_HOST=true`
+(default off) and `capture_source`, only it, may fetch an original from any public
+`https` host. Every other check is unchanged: DNS resolution and the private-address
+test on every hop, https only, standard ports, the byte ceiling and the `%PDF-` check
+for PDFs. `fetch_url` and `web_search` stay behind `TRET_EGRESS_RESEARCH_ALLOW_HOSTS`.
+This is acceptable for captures because captured bytes are stored as untrusted
+documents and never become facts or reach the model as page text on their own; a
+`fetch_url` result goes straight to the model, which is why it stays restricted. The
+operational reason is that issuers serve reports from CDNs and document hosts
+(scene7, akamai and the like) that nobody can list in advance, and without the flag
+each target needs an allowlist entry first. The research mode (`off`, `replay`, `on`)
+still governs: the flag widens hosts, not whether research is on. With the flag off,
+a capture to a host outside the allowlist is refused as described under "Two per-run
+limits" below.
 
 ## 2. Read
 
@@ -233,7 +250,8 @@ an operator has edited is left alone.
 
 Two per-run limits keep a run that cannot reach a source from spinning:
 `TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN` (default 12) caps `web_search`, and when a
-fetch or capture is refused because the host is not on `TRET_EGRESS_RESEARCH_ALLOW_HOSTS`,
+fetch (or, with `TRET_EGRESS_CAPTURE_ANY_PUBLIC_HOST` off, a capture) is refused because
+the host is not on `TRET_EGRESS_RESEARCH_ALLOW_HOSTS`,
 the tool error says so, says that searching again will not help, and asks for an operator
 to add the host. At the search cap the error names every host refused that way during the
 run.
@@ -250,22 +268,306 @@ is overwritten, and a document upload fails if its name is already taken rather
 than landing as a renamed copy beside a manifest that names the original. Google
 Drive has no write path.
 
+A [collection run](#6-collection-runs-batches) does this for you for the packages an
+approver has approved, without a per-file proposal.
+
+## 6. Collection runs (batches)
+
+Sections 1 to 5 describe one disclosure. A **collection** is the same workflow run for
+a register of target companies, one engine run per company, with the approvals,
+packaging and SharePoint uploads tracked per target and a set of run-level records
+written at the end. It adds bookkeeping and parallelism. It adds no new authority:
+every page map is still a draft until an approver decides it.
+
+A collection is made of two kinds of row. The **collection** holds the settings
+(write target, concurrency, gate, fiscal year) and the register warnings. A **target**
+is one register row: its run, its page-map findings, the outcome the run reported, its
+status and the files written for it. A target's status is never advanced by hand. It is
+re-derived from the run's status, the state of its `package_map` findings and the
+packaging results every time any of those changes.
+
+Reading is open to every workspace member. Everything that changes state (create,
+start, pause, resume, release, retry, finalize, and deciding maps) needs the approver
+role. The API is under `/api/collections`; the Collections page is the front end for it.
+
+### The register
+
+One row per company. As CSV the header row is:
+
+```
+company,market,domicile_country,sector,category,expected_form,fiscal_year,known_urls,notes
+```
+
+An optional tenth column, `slug`, is also accepted. Any other column is refused, and an
+error names the row it found the problem on. Blank cells take the default.
+
+| Column | Meaning |
+|---|---|
+| `company` | required, at most 200 characters |
+| `market` | required: `US`, `UK` or `EU` |
+| `domicile_country`, `sector` | free text, shown to the run and carried into the manifest |
+| `category` | `financial`, `industrial` or `other`; blank is allowed and counts as none of them |
+| `expected_form` | `standalone`, `embedded` or `unknown` (the default). Whether the disclosure is expected to be its own report or a section of an annual report |
+| `fiscal_year` | the year wanted; blank takes the collection's fiscal year |
+| `known_urls` | up to 20 `https://` URLs separated by `\|`. The run opens these first, exactly as given |
+| `notes` | at most 2000 characters, passed to the run |
+| `slug` | optional. Lowercase letters, digits and hyphens, at most 40. It names the target's folder and the file stems. Left out, it is derived from the company name (corporate suffixes such as plc, SE, Inc. dropped) and made unique |
+
+A register has at most 500 targets. The API also accepts the same rows as JSON
+(`register`) instead of `register_csv`; exactly one of the two must be given.
+
+Creation also checks the sample against the briefing and returns **warnings**, never
+errors: a market with no targets; fewer than 3 `financial` or fewer than 5
+`industrial` targets in a market; fewer than 6 `expected_form=embedded` targets in UK or
+EU. The warnings show in a box on the collection and are copied into
+`target_register.json`. A register that trips them can still be run.
+
+### Creating a collection
+
+On the Collections page choose New collection. The write target must be a Microsoft 365
+write target that an admin has already connected with write access (Settings,
+Connections); without one the page says so and the API refuses with 422.
+
+| Setting | Meaning |
+|---|---|
+| Name, run slug | the slug is 3 to 61 lowercase letters, digits and hyphens, unique in the workspace. It becomes a folder name |
+| Write target | the SharePoint folder everything is written under, always inside its `tret/` subfolder |
+| Write root | one or two folder names, default `runs`. Package files go to `<write root>/<run slug>/packages/<target slug>/<file>`, the records to `<write root>/<run slug>/` |
+| Concurrency | targets executing at once for this collection, 1 to 6 (default 3) |
+| First batch | `0` means no gate. Otherwise only the first N targets in register order start; the rest are `held` until released |
+| Fiscal year | the year wanted for a target that does not set its own (default 2025) |
+| Auto-write | on (default): package files are uploaded when packaging succeeds. Off: packages stay in tret and the target ends `completed` |
+| Model override | optional model id used for every target run instead of the router's choice |
+
+The collection starts as `draft`; Start launches the first targets. A workspace without
+a "Disclosure Collector" harness cannot start one (the harness is seeded at boot while
+the research class is on; see [The Disclosure Collector harness](#the-disclosure-collector-harness)).
+
+### What happens to one target
+
+Each target gets its own run on the Disclosure Collector harness, with a prompt built
+from the register row. No person is in the run; it is told not to ask questions. The
+prompt carries the target's facts and the briefing's doctrine: collect the wanted fiscal
+year where it is published, and if only an earlier period exists collect that and say so
+rather than jumping to a later year; prefer issuer sources, then official repositories
+(SEC EDGAR, the FCA National Storage Mechanism, ESEF portals), and report a third-party
+copy as a substitution with the reason; keep the disclosure, its assurance statement,
+substantive data appendices and material incorporated by reference, and leave general
+financial statements out; take page ranges only from pages actually read; record the
+period, publication date (with its basis) and assurance date separately, with unknown
+left unknown. The procedure is: open the known URLs or search a few precise queries
+(without looping), `capture_source` the PDFs, `read_document` to confirm company, period
+and layout, `propose_package_map` for each document worth keeping (with stems
+`<slug>`, `<slug>-assurance`, `<slug>-appendix`, `<slug>-container`, and `ocr="auto"` for
+scanned pages; the role is one of the packaging roles `primary_disclosure`,
+`embedded_statement_and_assurance`, `assurance`, `data_appendix`, `incorporated_context`,
+`methodology` and `other`, each described in the prompt), then finish. The run is told not to call `propose_connected_write`: the
+collection writes approved packages itself.
+
+The last step is `report_collection_outcome`, called once, even when nothing was found.
+It is how the target is scored. It takes `status` (`captured`, `substituted`, `gap` or
+`blocked`) and a `summary`, and optionally the reporting period label, start and end,
+publication date and its basis, disclosure type, framework, language, `fy2025_gap` (true
+when the period collected is not the requested fiscal year, whatever year that is), a
+substitution note, `blocked_urls` and `candidate_urls`. A second call replaces the first.
+Outside a collection run the tool refuses. This metadata is the model's report of what it
+read. It is recorded as reported and not independently checked.
+
+The run has the same limits as any other: the search cap and capture budget in section 4,
+and a wall-clock limit (below). A run that exceeds it is cancelled and the target fails
+with `timeout`.
+
+### Target status
+
+| Status | Meaning | What the operator does |
+|---|---|---|
+| `pending` | will launch when a slot is free | nothing |
+| `held` | beyond the first batch; waiting for the gate | Release, below |
+| `running` | its run is executing | nothing |
+| `review` | the run finished and at least one of its page maps is still a draft (a run that ended failed or cancelled but proposed maps lands here too, with the run failure shown as a warning) | decide the maps (batch approval, below) |
+| `packaging` | every map is decided and at least one approved map is being packaged | nothing; it settles on its own |
+| `written` | every approved map is packaged and every file is uploaded | nothing |
+| `completed` | every approved map is packaged; auto-write is off, so nothing was uploaded. Also a target packaged after its collection was finalized: nothing is uploaded and the error reads "collection finalized before write" | nothing, or write the files by hand; after finalize, Retry write, then finalize again |
+| `gap` | the run ended with no page map. The outcome says `gap` or `blocked`, or the error says "run ended without a package map" | read the outcome summary and the candidate and blocked URLs; Retry, or leave it as a recorded gap |
+| `failed` | the run failed, was cancelled, timed out, crashed or was killed by a restart, and proposed no page map; or an approved map's packaging failed | read the error; Retry (a new run) or, for a packaging failure, fix the cause and use package-retry on the finding in Approvals |
+| `rejected` | every page map was rejected | Retry for a new attempt, or leave it |
+| `write_failed` | packaging succeeded but an upload did not; files already uploaded are kept | fix the cause (connection, scopes, a name already taken), then Retry write |
+
+A run that ended failed or cancelled but had already proposed page maps is judged by
+those maps like any other run (the approver still decides them) and the run failure is
+shown as a warning on the target. Only a run with no maps becomes `failed`.
+
+The collection's own status follows from its targets, in the order below, except
+`draft`, `paused`, `finalized` and `failed`, which stay until the operator moves them
+(`failed` is reserved and not used).
+
+| Collection status | Meaning |
+|---|---|
+| `draft` | created, not started |
+| `running` | any target is `running` or `pending` |
+| `review` | nothing running or pending, and at least one target is in `review` or `packaging` (this outranks `gate`, so decisions still owed stay visible) |
+| `gate` | nothing running, pending, in review or packaging, and some targets are still `held` |
+| `completed` | every target is in a final state |
+| `paused` | an operator paused it, or a restart paused it (below) |
+| `finalized` | the run-level records were written |
+
+### The review gate
+
+With a first batch of, say, 12, the collection runs those 12 and then sits at `gate`.
+The gate opens as soon as the first batch has nothing left to launch. It does not wait
+for their maps to be decided, so the sensible order is to decide and inspect the first
+batch's packages (the page ranges, the incorporated sections, the link audits, the
+files in SharePoint) before you press **Release remaining**. Release is allowed from `gate`,
+`review`, `completed` or `paused` whenever held targets exist (409 otherwise). It turns
+every held target into `pending` and launches them, or leaves them pending if the
+collection is paused. There is no second gate.
+
+### Batch approval
+
+A collection's draft page maps are listed together on its page ("Package maps awaiting
+review"), each with the target, role, scope, page ranges, the source and the reviewer
+note. Select some or all, add an optional note, and Approve selected or Reject
+selected. This calls `POST /api/findings/decide-batch`, which decides each finding
+exactly as the single approval does, one by one: one that cannot be decided (already
+decided, not found) reports its own error and does not stop the others. Up to 200
+findings per request.
+
+Approving a map is the approval for everything that follows from it, as in section 4: it
+starts packaging. With **auto-write on**, it is also the approval to write that package's
+files to SharePoint, under `<write target>/tret/<write root>/<run slug>/packages/<target
+slug>/`, with each upload attributed in the connection audit log to the approver of that
+map. There is no separate upload approval per file inside a collection, which is why
+batch approval should be done by reading the maps, not by pressing select-all. With
+auto-write off nothing is uploaded. Uploads replace: re-uploading an approved
+package overwrites the previous copy under `runs/<run_slug>/packages/<slug>/`, because
+the collection owns that folder. An upload that fails sends the target to `write_failed`,
+keeping the files already uploaded; a retry skips documents already recorded as written.
+
+Packaging is the same sandboxed, verified packager as section 4, at most two at a time
+whatever the number of collections. Maps approved faster than that wait their turn.
+
+### Retry, pause and resume
+
+- **Retry** starts a new run for a `failed`, `gap`, `rejected` or `write_failed` target.
+  It is refused on a `draft` or `finalized` collection. The attempt count rises, the
+  earlier run stays in the run list, and the previous attempt is archived in the
+  target's `history` with its outcome, error, cost, model and run id. Target and
+  collection cost include earlier attempts.
+- **Retry write** re-attempts the uploads of a `write_failed` target, or of a target
+  packaged after its collection was finalized. Files already uploaded are not uploaded
+  again.
+- **Pause** is allowed while the collection is `running`, `gate` or `review`. It stops
+  new launches. Runs already executing finish, and approvals, packaging and uploads
+  carry on. A target still waiting for a process-wide slot goes back to `pending`.
+  **Resume** launches the pending targets again.
+- **A restart.** Runs and packaging tasks live in the server process. At boot, the sweep
+  re-settles every target that was `running`, in `review` or `packaging`: one whose run
+  was killed by the restart (and proposed no map) becomes `failed` (retry); the others
+  settle to `review`, `packaging`, `written` and so on from their maps. A collection
+  that still has pending targets after the sweep is set to `paused` with a note that
+  the server restarted; nothing launches by itself at boot. The operator presses
+  Resume, then Retry on the failed targets. Other collections settle to `review`,
+  `gate` or `completed`. On a clean shutdown the server waits for in-flight target runs
+  the same way it waits for packaging, and launches no new target while it drains.
+
+### Finalize
+
+Finalize writes six files to `<write target>/tret/<write root>/<run slug>/`. It is
+available from `gate`, `review`, `completed`, `paused` and `finalized`, not while the
+collection is `draft` or `running`. It is refused (409) while any target is `running`,
+`pending` or `packaging`, or any package map is still a draft (approve or reject it
+first). Pressing it is the approval for writing these records; the page
+asks you to confirm the folder first. The same content can be previewed beforehand
+(`GET /api/collections/{id}/records`, the Preview records button). The files are
+modelled on the pilot's manifest, execution record and `SHA256SUMS`.
+
+| File | Contents |
+|---|---|
+| `manifest.json` | the run, the sample by market, outcome counts (written, completed, gap, failed, rejected, retained documents and pages), the completeness definition, and per company: status, reported outcome, reporting period, publication date and basis, disclosure type, framework, language, FY gap and substitution note, and per document the stem, role, scope, kept ranges, source URL, SHA-256 and page count, the retained SHA-256, page count and files with their SharePoint links, the approver, decision time and note, packaging timings and limitations |
+| `execution.json` | start, finalize time and measured elapsed seconds; one row per target run (run id, status, model, iterations, catalog-priced cost, provider-reported cost, wall seconds, attempts); totals; packaging seconds and OCR pages per target; concurrency, model override, tret and packaging versions |
+| `exception_log.json` | every target that did not end `written` or `completed`, and every substituted one: status, error, outcome summary, blocked and candidate URLs, substitution note, attempts |
+| `target_register.json` | the register as run (positions, slugs, resolved fiscal years), the first-batch size and the creation warnings |
+| `SHA256SUMS.txt` | `sha256  path` for the five other record files plus every package file written, paths relative to the run folder (`packages/<slug>/<file>`). Written last. With auto-write off it lists only the five records |
+| `results_summary.md` | a table per market of company, status, retained pages and note, and the status totals |
+
+The completeness line in the manifest reads "captured core disclosure within reviewed
+scope; not independently certified complete", and means exactly that. Writes use
+`conflict="replace"`, so finalizing again overwrites the six files at the same names.
+`SHA256SUMS.txt` is uploaded last. If any file fails, the collection records the error,
+stays unfinalized and shows it; fix the cause and finalize again. After a finalize,
+later packaging uploads nothing: the target is `completed` with the error "collection
+finalized before write". Use Retry write on it, then finalize again so the records and
+`SHA256SUMS.txt` match.
+
+### Cost and instrumentation
+
+`execution.json` records, per run, the model used, iteration count, wall seconds and two
+costs. `cost_usd` is priced from token counts at the catalog rate, includes cost
+delegated to subagents and includes earlier attempts of a retried target;
+`current_run_cost_usd` is the current run alone, so the file shows both. `reported_cost_usd` is what the provider said it charged, where
+the provider says. The two can differ, and neither is an invoice. The collection page
+shows the first. Packaging makes no model call and costs none; its wall seconds are
+recorded separately. Run seconds are summed over targets that overlapped, so the sum
+exceeds elapsed time. `measured_wall_seconds` is the elapsed figure and the file says
+so in `timing_notes`.
+
+### Limits
+
+| Limit | Value |
+|---|---|
+| Targets executing at once, per collection | 1 to 6 (the setting) |
+| Targets executing at once, whole process | `TRET_COLLECTIONS_MAX_CONCURRENT` (default 3, clamped 1 to 6); the lower of the two applies |
+| Wall-clock limit per target run | `TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS` (default 1200); on expiry the run gets 30 seconds to stop, then the target is `failed` with `timeout` |
+| Packaging jobs at once | 2 (1 on a single-CPU machine), shared with ordinary approvals |
+| `web_search` calls per run | `TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN`, 12 |
+| `capture_source` attempts per run | `TRET_EGRESS_CAPTURE_MAX_PER_RUN`, 40 |
+| Captured file size, and the largest file a collection will upload | `TRET_EGRESS_CAPTURE_MAX_BYTES`, 60 MiB |
+| Targets per register / known URLs per target | 500 / 20 |
+
+Each running target holds a database session, so check the database connection pool
+before raising concurrency on a small database.
+
+### The first run
+
+Do not start with 48. Make a collection of the 12 pilot companies with their known URLs,
+concurrency 3, a first batch of 12 and auto-write on to a test folder (a write target
+and root you can delete from). Read every map, check what landed in SharePoint against
+the page ranges, read the exception log, and look at the cost and wall time per target.
+Then create the 48-target register as a second collection with a new run slug, following
+the briefing's sample shape (the warnings tell you when it drifts), a first batch of 12 so the first dozen can be
+checked before the rest are released. Finalize each
+collection when its targets have settled.
+
 ## Acceptance dimensions, and where each one lives
 
 | Dimension | What a reviewer asks | Where tret keeps it |
 |---|---|---|
-| Discovery | How was this source found, and is it the right one? | `web_search` is navigation only and carries no evidence. The run transcript and the egress log show what was searched and fetched; the `capture_source` `note` and the finding's `review_note` say why this source |
+| Discovery | How was this source found, and is it the right one? | `web_search` is navigation only and carries no evidence. The run transcript and the egress log show what was searched and fetched; the `capture_source` `note` and the finding's `review_note` say why this source. In a collection, the target's reported outcome (status, summary, substitution note, blocked and candidate URLs) and the exception log record where discovery fell short or substituted |
 | Capture | Is this the complete original, and can it be verified later? | The `source_kind='web'` Document: SHA-256, `url`, `redirects`, `http_status`, `retrieved_at`, headers, `body_truncated`, `sha256_mismatch`; the stored file; the egress row |
 | Completeness | Do the retained pages cover the disclosure and what it incorporates? | The `package_map` finding (`keep_ranges`, `incorporations`, `exclusions`, `review_note`) and the approval; `page_map.json`; the link audit (`target_page_not_retained`, `unresolved_source_destination`) |
 | Extraction quality | Is the text usable? | `extraction_stats.json` (empty pages, replacement characters, parser warnings by phase), `text_mode` and Poppler version, the `limitations` list |
-| QA | Who checked it, and against what? | The `Approval` row (approver, time, note); the verification block in `package.json` (what was checked, what it establishes and does not); the source and retained SHA-256 on every package Document; `payload.package` including retries |
+| QA | Who checked it, and against what? | The `Approval` row (approver, time, note), repeated per document in a collection's `manifest.json`; the verification block in `package.json` (what was checked, what it establishes and does not); the source and retained SHA-256 on every package Document; `payload.package` including retries |
 | Analytical eligibility | May a number from this be used in a verdict? | Not here. Captured and package documents are third-party text and are never registered for citation. A figure becomes usable only when an operator promotes it into a dataset and it comes back through `lookup_dataset` ([trust-doctrine.md](trust-doctrine.md)) |
 
 ## What is deliberately not automated
 
 - **Choosing pages.** Code does not guess a disclosure's range, a statement's end or
   where an incorporated section sits. Every range is the model's proposal and a
-  person's decision.
+  person's decision. Batch approval of a collection's maps changes how many are decided
+  in one request, not who decides: each map is still approved or rejected by a person,
+  and that approval is what authorises the upload.
+- **Discovery.** Which source is the right one is the model's judgement, made without a
+  person in the run. Nothing checks it except the approver reading the map and the
+  exception log afterwards. A collection never decides that a company has no
+  disclosure: `gap` and `blocked` are the model's reports, shown for a person to
+  retry or accept.
+- **Acceptance review and reference facts.** The period, publication date, framework and
+  language in a target's outcome are what the model says it read. They are recorded as
+  reported and are not checked against any reference. Whether the sample meets the
+  briefing's shape is only warned about at creation. Finalize records completeness as
+  "within reviewed scope; not independently certified complete".
+- **Releasing the gate and finalizing.** A person does both. Nothing runs the rest of
+  a batch or writes its records on a timer.
 - **OCR by default.** A scanned PDF with no text layer packages (the pages are retained)
   but its native text files are empty for those pages, and the stats list them. Images
   are read only when the map asks for the OCR supplement above, and then only into a
@@ -290,8 +592,11 @@ The collection tools are off until an operator turns them on.
 | `TRET_EGRESS_RESEARCH` | `off` (default) withholds `web_search`, `fetch_url` and `capture_source` from every run; `replay` serves earlier snapshots without new requests; `on` enables them |
 | `TRET_EGRESS_RESEARCH_ALLOW_HOSTS` | comma-separated hosts the research class may reach, subdomains included. Empty means the public web, and production boot warns about it. For this workflow, list the issuers' domains |
 | `TRET_SEARCH_PROVIDER` | the search backend for `web_search` (its host rides the separate `search` egress class and need not be in the allowlist) |
-| `TRET_EGRESS_CAPTURE_MAX_BYTES` | largest file `capture_source` stores, default 26214400 (25 MiB); bigger is refused |
+| `TRET_EGRESS_CAPTURE_MAX_BYTES` | largest file `capture_source` stores, default 62914560 (60 MiB); bigger is refused. A collection uploads package files under the same ceiling |
 | `TRET_EGRESS_CAPTURE_MAX_PER_RUN` | capture attempts per run, default 40 |
+| `TRET_EGRESS_CAPTURE_ANY_PUBLIC_HOST` | default `false`. When `true`, `capture_source` (only) may fetch from any public https host; `fetch_url` and `web_search` stay on the allowlist. Boot logs a note when it is on |
+| `TRET_COLLECTIONS_MAX_CONCURRENT` | collection target runs executing at once across the process, default 3 (clamped 1 to 6) |
+| `TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS` | wall-clock limit for one target's run, default 1200; the run is cancelled and the target fails with `timeout`. No new target is launched while the server drains for shutdown, and a restart pauses a collection that still has pending targets (section 6) |
 
 `propose_package_map` itself makes no network request; it works on documents already
 in the project, so it is available whether or not research is enabled (a PDF someone

@@ -3039,6 +3039,204 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return (await res.json()) as T
 }
 
+// ── Collections (batch disclosure-collection runs) ───────────────────────
+
+export type CollectionStatus =
+  | 'draft'
+  | 'running'
+  | 'paused'
+  | 'gate'
+  | 'review'
+  | 'completed'
+  | 'finalized'
+  | 'failed'
+
+export type CollectionTargetStatus =
+  | 'pending'
+  | 'held'
+  | 'running'
+  | 'review'
+  | 'packaging'
+  | 'written'
+  | 'completed'
+  | 'gap'
+  | 'failed'
+  | 'rejected'
+  | 'write_failed'
+
+export interface CollectionSettings {
+  target_slug: string
+  write_root: string
+  concurrency: number
+  first_batch_size: number
+  fiscal_year: number
+  auto_write: boolean
+  model_override: string | null
+}
+
+export interface CollectionMarketCounts {
+  total: number
+  done: number
+  gap: number
+  failed: number
+}
+
+export interface CollectionFinalizeFile {
+  name: string
+  web_url: string | null
+  sha256: string
+}
+
+export interface Collection {
+  id: string
+  workspace_id: string
+  name: string
+  run_slug: string
+  status: CollectionStatus
+  settings: CollectionSettings
+  created_by: string | null
+  created_at: string
+  started_at: string | null
+  finalized_at: string | null
+  counts: {
+    total: number
+    by_status: Partial<Record<CollectionTargetStatus, number>>
+    by_market: Record<string, CollectionMarketCounts>
+  }
+  cost_usd: number
+  warnings: string[]
+  finalize: { written_at: string; files: CollectionFinalizeFile[]; error: string | null } | null
+  /** Present on create and on GET /collections/{id}. */
+  targets?: CollectionTarget[]
+  /** Present on GET /collections/{id}: draft package_map findings awaiting a decision. */
+  pending_maps?: CollectionPendingMap[]
+}
+
+export interface CollectionTargetOutcome {
+  status: 'captured' | 'substituted' | 'gap' | 'blocked' | (string & {})
+  summary: string | null
+  reporting_period_label?: string | null
+  period_start?: string | null
+  period_end?: string | null
+  publication_date?: string | null
+  publication_basis?: string | null
+  disclosure_type?: string | null
+  framework?: string | null
+  language?: string | null
+  fy2025_gap?: boolean
+  substitution_note?: string | null
+  blocked_urls?: string[]
+  candidate_urls?: string[]
+}
+
+export interface CollectionTargetPackage {
+  finding_id: string
+  stem?: string
+  role: string
+  status: 'draft' | 'approved' | 'rejected' | (string & {})
+  package_status: 'running' | 'packaged' | 'failed' | null
+  retained_page_count: number | null
+  retained_sha256: string | null
+  documents: { role: string; filename: string; sha256: string; byte_size: number }[]
+  wall_seconds: number | null
+}
+
+export interface CollectionWrittenFile {
+  filename: string
+  web_url: string | null
+  sha256: string
+  byte_size: number
+  uploaded_at: string
+}
+
+export interface CollectionTargetAttempt {
+  attempt: number
+  run_id: string | null
+  status: string
+  error: string | null
+  outcome: CollectionTargetOutcome | null
+  cost_usd: number | null
+  model_used: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface CollectionTarget {
+  id: string
+  collection_id: string
+  position: number
+  slug: string
+  company: string
+  market: 'US' | 'UK' | 'EU' | (string & {})
+  domicile_country: string | null
+  sector: string | null
+  category: 'financial' | 'industrial' | 'other' | null
+  expected_form: 'standalone' | 'embedded' | 'unknown' | (string & {})
+  fiscal_year: number
+  known_urls: string[]
+  notes: string | null
+  status: CollectionTargetStatus
+  run_id: string | null
+  finding_ids: string[]
+  attempts: number
+  error: string | null
+  outcome: CollectionTargetOutcome | null
+  packages: CollectionTargetPackage[]
+  written_files: CollectionWrittenFile[]
+  /** Earlier attempts; cost_usd above includes them. */
+  history: CollectionTargetAttempt[]
+  cost_usd: number
+  model_used: string | null
+  iterations: number | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+/** A draft package_map finding of a collection, plus the target it belongs to. */
+export type CollectionPendingMap = Finding & { target_id: string }
+
+export interface CollectionTargetIn {
+  company: string
+  market: string
+  domicile_country?: string | null
+  sector?: string | null
+  category?: string | null
+  expected_form?: string | null
+  fiscal_year?: number | null
+  known_urls?: string[]
+  notes?: string | null
+  slug?: string | null
+}
+
+export interface CreateCollectionBody {
+  name: string
+  run_slug: string
+  /** Exactly one of `register` / `register_csv`. */
+  register?: CollectionTargetIn[] | null
+  register_csv?: string | null
+  target_slug: string
+  write_root: string
+  concurrency: number
+  first_batch_size: number
+  fiscal_year: number
+  auto_write: boolean
+  model_override: string | null
+}
+
+/** GET /collections/{id}/records: a preview of what finalize writes. */
+export interface CollectionRecords {
+  manifest: Record<string, unknown>
+  execution: Record<string, unknown>
+  exception_log: Record<string, unknown>
+  target_register: Record<string, unknown>
+  sha256sums: string
+  results_summary: string
+}
+
+export type BatchDecideResult =
+  | { id: string; ok: true; status: string }
+  | { id: string; ok: false; error: string }
+
 // ── API functions ────────────────────────────────────────────────────────
 
 export const api = {
@@ -3167,6 +3365,37 @@ export const api = {
   // approver-role rule as retryFindingUpload.
   retryFindingPackage: (id: string) =>
     request<Finding>(`/findings/${id}/package-retry`, { method: 'POST' }),
+
+  // collections (batch disclosure collection). Mutations are approver-only
+  // (403 otherwise); 409 carries a `detail` worth showing; create 422s name
+  // the offending register row.
+  listCollections: () =>
+    request<{ collections: Collection[] }>('/collections').then((r) => r.collections),
+  getCollection: (id: string) => request<Collection>(`/collections/${id}`),
+  createCollection: (body: CreateCollectionBody) =>
+    request<Collection>('/collections', { method: 'POST', body }),
+  startCollection: (id: string) =>
+    request<Collection>(`/collections/${id}/start`, { method: 'POST' }),
+  pauseCollection: (id: string) =>
+    request<Collection>(`/collections/${id}/pause`, { method: 'POST' }),
+  resumeCollection: (id: string) =>
+    request<Collection>(`/collections/${id}/resume`, { method: 'POST' }),
+  releaseCollection: (id: string) =>
+    request<Collection>(`/collections/${id}/release`, { method: 'POST' }),
+  retryCollectionTarget: (id: string, tid: string) =>
+    request<CollectionTarget>(`/collections/${id}/targets/${tid}/retry`, { method: 'POST' }),
+  retryCollectionTargetWrite: (id: string, tid: string) =>
+    request<CollectionTarget>(`/collections/${id}/targets/${tid}/retry-write`, {
+      method: 'POST',
+    }),
+  collectionRecords: (id: string) => request<CollectionRecords>(`/collections/${id}/records`),
+  finalizeCollection: (id: string) =>
+    request<Collection>(`/collections/${id}/finalize`, { method: 'POST' }),
+  decideFindingsBatch: (ids: string[], action: 'approve' | 'reject', note?: string) =>
+    request<{ results: BatchDecideResult[] }>('/findings/decide-batch', {
+      method: 'POST',
+      body: { finding_ids: ids, action, note: note || null },
+    }),
   listDataRequests: (status?: string) =>
     request<DataRequest[]>(`/data-requests${status ? `?status=${status}` : ''}`),
   updateDataRequest: (id: string, status: 'open' | 'fulfilled' | 'dismissed') =>

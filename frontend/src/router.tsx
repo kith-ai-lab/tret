@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { Analytics } from './views/Analytics'
 import { Approvals } from './views/Approvals'
 import { Chat } from './views/Chat'
+import { Collections } from './views/Collections'
 import { ConnectionsView } from './views/Connections'
 import { Deliverables } from './views/Deliverables'
 import { Documents } from './views/Documents'
@@ -25,6 +26,8 @@ export function AppRoutes() {
       <Route path="/runs" element={<Runs />} />
       <Route path="/runs/:id" element={<RunDetailView />} />
       <Route path="/approvals" element={<Approvals />} />
+      <Route path="/collections" element={<Collections />} />
+      <Route path="/collections/:id" element={<Collections />} />
       <Route path="/analytics" element={<Analytics />} />
       <Route path="/emissions" element={<Emissions />} />
       <Route path="/deliverables" element={<Deliverables />} />

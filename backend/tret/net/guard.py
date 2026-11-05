@@ -69,7 +69,8 @@ def _is_public(address: str) -> bool:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return False
-    return not (
+    # `is_global` closes what the denylist below misses, e.g. CGNAT 100.64.0.0/10.
+    return ip.is_global and not (
         ip.is_private
         or ip.is_loopback
         or ip.is_link_local

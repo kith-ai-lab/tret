@@ -384,11 +384,26 @@ uploaded third-party documents — the prompt-injection surface. So:
   each run has a fetch budget (`..._MAX_FETCHES_PER_RUN`) and a separate search
   budget (`TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN`, default 12);
 - `capture_source` takes the same checks but is for collecting originals, so it
-  has its own ceiling (`TRET_EGRESS_CAPTURE_MAX_BYTES`, default 25 MiB) and its own
+  has its own ceiling (`TRET_EGRESS_CAPTURE_MAX_BYTES`, default 60 MiB) and its own
   per-run count (`TRET_EGRESS_CAPTURE_MAX_PER_RUN`, default 40). A file over the
   ceiling is refused outright, never stored truncated. Report-only subagents are
   not granted `capture_source` by design (`SUBAGENT_ALLOWED_TOOLS` in
   `engine/delegation.py`): collecting an original is the main run's act.
+
+**Capturing originals from any public host.** An issuer's report is often served
+from a CDN or document host nobody can list in advance. Set
+`TRET_EGRESS_CAPTURE_ANY_PUBLIC_HOST=true` and `capture_source`, and only it,
+drops the host allowlist (`capture_policy` in `tret/net/policy.py`); `fetch_url`
+and `web_search` keep today's allowlist. Everything else still applies to
+captures, on every redirect hop: https only, standard ports, every resolved
+address must be public (private, loopback, link-local and CGNAT ranges are
+refused), the byte ceiling, the content-type list and the `%PDF-` check. The
+mode (`off`/`replay`/`on`) is inherited from research. Captured bytes are stored
+as untrusted documents: the model may read them with `read_document`, as
+untrusted text under the unverified banner, and nothing in them becomes a
+citable fact; approvals gate packaging and writes. That is why this is widened
+for captures and not for `fetch_url`, whose page text is the model's working
+input for the rest of the run. Boot logs a note when the flag is on.
 
 **An empty allowlist means the public web.** A general web search cannot run
 against an allowlist, and an allowlist covering everything would be a comforting

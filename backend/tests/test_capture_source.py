@@ -167,9 +167,14 @@ async def test_a_pdf_over_the_research_cap_is_stored_whole(ctx, research, captur
     result = await capture_source(ctx, url=URL, note="FY25 report, page 1 of the disclosure set")
 
     # Called with the capture limits, not the research ones.
-    assert captures.calls == [
-        {"url": URL, "max_bytes": 26_214_400, "fail_on_truncate": True, "capture": True}
-    ]
+    from tret.net.policy import capture_policy
+
+    assert len(captures.calls) == 1
+    call = captures.calls[0]
+    policy = call.pop("policy")
+    assert call == {"url": URL, "max_bytes": 62_914_560, "fail_on_truncate": True, "capture": True}
+    assert policy.max_bytes == 62_914_560
+    assert policy == capture_policy()
     doc = (await db.execute(select(Document))).scalars().one()
     assert doc.source_kind == SOURCE_KIND_WEB
     assert doc.byte_size == len(body)
@@ -300,7 +305,7 @@ async def test_an_oversize_file_is_refused_and_nothing_is_stored(ctx, research, 
     monkeypatch.setattr(tools_module, "fetch_page", too_big)
     with pytest.raises(ToolError) as excinfo:
         await capture_source(ctx, url=URL)
-    assert "26214400-byte limit" in str(excinfo.value)
+    assert "62914560-byte limit" in str(excinfo.value)
 
     await db.rollback()  # the engine rolls a failed tool call back; the audit row must survive
     assert (await db.execute(select(Document))).scalars().all() == []
@@ -526,7 +531,7 @@ def wire(monkeypatch):
     def _install(handler):
         @asynccontextmanager
         async def fake_open_client(
-            egress_class, *, timeout=None, headers=None, follow_redirects=False
+            egress_class, *, timeout=None, headers=None, follow_redirects=False, policy=None
         ):
             async with httpx.AsyncClient(
                 transport=httpx.MockTransport(handler), headers=headers, timeout=timeout
