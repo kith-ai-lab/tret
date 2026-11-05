@@ -1197,7 +1197,9 @@ def test_at_most_two_packagings_run_at_once_and_the_rest_queue(client, world, pe
     login_as(client, people["approver"])
     for f in findings:
         assert fw.decide(client, f.id, action="approve").status_code == 200
-        assert f.payload["package"]["queued"] is True  # written by the request itself
+        # The request writes status=running + queued=True, but the background task may
+        # already have flipped queued to False by the time we look; only the status is stable.
+        assert f.payload["package"]["status"] == "running"
 
     gate.wait_started(2)
     time.sleep(0.2)  # give a (wrongly) unlimited third task the chance to start

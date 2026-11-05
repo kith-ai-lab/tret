@@ -1374,7 +1374,8 @@ def test_timings_are_recorded_in_stats_and_record(src, tmp_path, factory):
     assert all(isinstance(v, float) and v >= 0 for v in out.stats["timings"].values())
     assert out.stats["timings"]["ocr"] == 0.0  # not requested
     assert out.stats["timings"]["total"] >= out.stats["timings"]["open"]
-    assert out.stats["timings"]["total"] >= out.stats["timings"]["publish"] > 0
+    # Rounded to the millisecond: moving a handful of files can legitimately read 0.0.
+    assert out.stats["timings"]["total"] >= out.stats["timings"]["publish"] >= 0
     # What is on disk is what is returned, publish and total included.
     assert json.loads(out_files(out)["extraction_stats"].read_text()) == out.stats
     assert json.loads(out_files(out)["package_record"].read_text()) == out.record
