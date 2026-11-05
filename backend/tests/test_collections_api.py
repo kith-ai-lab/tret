@@ -134,6 +134,15 @@ def world(tmp_path, monkeypatch):
 
     install_sqlite_type_shims()
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'collections.db'}")
+
+    # Enforce foreign keys like Postgres does, so a flush that updates a target
+    # before its run row exists fails here too (it did on the first live batch).
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _fk_on(dbapi_connection, _record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
     factory = async_sessionmaker(engine, expire_on_commit=False)
     ws = Workspace(id=uuid.uuid4(), name="Kith", kind="team")
     other_ws = Workspace(id=uuid.uuid4(), name="Other", kind="team")
@@ -1028,6 +1037,7 @@ def test_the_boot_sweep_fails_orphaned_targets_and_pauses_unfinished_collections
                   task_type="freeform", task_input={}, document_ids=[], status="failed",
                   error=ORPHAN_ERROR)
         db.add(run)
+        await db.flush()  # the run row must exist before the target points at it
         targets[0].status = "running"
         targets[0].run_id = run.id
         await db.commit()

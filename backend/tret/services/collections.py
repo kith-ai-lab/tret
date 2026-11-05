@@ -289,9 +289,29 @@ _CORPORATE_SUFFIXES = (
     "ab",
     "oyj",
     "a/s",
+    "a.s.",
+    "a. s.",
     "gmbh",
     "kgaa",
 )
+
+
+# Letters NFKD does not decompose into an ascii base; without this "Ørsted"
+# loses its first letter.
+_TRANSLITERATE = str.maketrans(
+    {
+        "ø": "o", "Ø": "O", "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "ß": "ss",
+        "ð": "d", "Ð": "D", "þ": "th", "Þ": "TH", "ł": "l", "Ł": "L", "đ": "d", "Đ": "D",
+    }
+)
+
+
+def _strip_dangling_and(slug: str) -> str:
+    # "Chase & Co." loses "Co." as a suffix and leaves the "&" spelled out. A
+    # leading "and" stays: it can be the name itself ("AND Digital").
+    while slug.endswith("-and"):
+        slug = slug[:-4]
+    return slug
 
 
 def slugify(company: str) -> str:
@@ -308,10 +328,11 @@ def slugify(company: str) -> str:
                 name = stripped[: -len(suffix) - 1]
                 changed = True
                 break
+    name = name.translate(_TRANSLITERATE)
     ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     ascii_name = ascii_name.lower().replace("&", " and ")
-    slug = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")
-    slug = slug[:40].strip("-")
+    slug = _strip_dangling_and(re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-"))
+    slug = _strip_dangling_and(slug[:40].strip("-"))
     return slug or "target"
 
 
@@ -522,7 +543,7 @@ PROCEDURE
 a. Open the known URLs, or search with a few precise queries ("{company} sustainability report {fy} pdf", "{company} annual report {fy} sustainability statement"). Do not loop on searches: if the document cannot be reached, report it.
 b. capture_source the primary PDF, and separate assurance or appendix PDFs if they exist.
 c. read_document to confirm company, period and page layout before mapping.
-d. propose_package_map for each document to retain. Use stem "{slug}" for the primary disclosure and "{slug}-assurance", "{slug}-appendix", "{slug}-container" for the others. role is one of {roles}: {role_guidance}. Request ocr="auto" when pages look scanned.
+d. propose_package_map for each document to retain. Every stem must be unique within this target: use "{slug}" for the primary disclosure, "{slug}-assurance", "{slug}-appendix", and for each further document "{slug}-container-<short-topic>" (for example "{slug}-container-methodology"); never reuse a stem. role is one of {roles}: {role_guidance}. Request ocr="auto" when pages look scanned.
 e. Finish by calling report_collection_outcome exactly once with status captured, substituted, gap or blocked and the metadata you established. Call it even when you found nothing; it is how this target is scored.
 
 Do not call propose_connected_write: the collection run writes approved packages itself. There is no user in this run; do not ask questions. Stop after report_collection_outcome."""
@@ -1096,6 +1117,10 @@ async def _launch(collection_id: uuid.UUID) -> int:
                     created_by=c.created_by,
                 )
                 db.add(run)
+                # Insert the run before the target points at it: with no ORM
+                # relationship between the two, the unit of work does not order
+                # the UPDATE after the INSERT and Postgres rejects the FK.
+                await db.flush()
                 t.status = "running"
                 t.run_id = run.id
                 t.started_at = _now()
@@ -1275,7 +1300,20 @@ async def _write_packages(
     root = f"{settings.get('write_root') or 'runs'}/{c.run_slug}"
     cap = get_settings().egress_capture_max_bytes
     approvals = await _approvals(db, [f.id for f in maps])
-    for f, d in _package_documents(maps):
+    documents = _package_documents(maps)
+    # Uploads use conflict="replace", so two packages with one file name would
+    # silently overwrite each other; refuse before uploading anything.
+    names: set[str] = set()
+    for _f, d in documents:
+        name = str(d.get("filename"))
+        if name.casefold() in names:  # SharePoint names ignore case
+            return (
+                "write_failed",
+                f"two approved packages for this target share the file name '{name}'; "
+                "re-propose one with a distinct stem",
+            )
+        names.add(name.casefold())
+    for f, d in documents:
         written = list(t.written_files or [])
         if any(w.get("document_id") == d.get("document_id") for w in written):
             continue
@@ -1819,10 +1857,16 @@ def _results_summary(
                 if f.status == "approved" and (_package_of(f) or {}).get("status") == "packaged"
             )
             outcome = t.outcome or {}
-            note = t.error or outcome.get("substitution_note") or (
-                "FY gap" if outcome.get("fy2025_gap") else ""
-            )
-            note = str(note).replace("|", "/").replace("\n", " ")[:200]
+            note = str(t.error or outcome.get("substitution_note") or "")[:200]
+            if not note and outcome.get("status") in ("gap", "blocked") and outcome.get("summary"):
+                # A gap with no error only explains itself through the outcome.
+                note = f"{outcome['status']}: {outcome['summary']}"
+                blocked = outcome.get("blocked_urls")
+                if isinstance(blocked, list) and blocked:
+                    note += f" ({len(blocked)} URL(s) blocked)"
+                note = note[:200]
+            note = note or ("FY gap" if outcome.get("fy2025_gap") else "")
+            note = note.replace("|", "/").replace("\n", " ")
             lines.append(f"| {t.company.replace('|', '/')} | {t.status} | {pages or ''} | {note} |")
         lines.append("")
     by_status = counts["by_status"]

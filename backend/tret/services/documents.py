@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Iterator
@@ -41,9 +42,27 @@ MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 # unbounded stretch of CPU inside a request.
 MAX_EXTRACTED_CHARS = 2_000_000
 EXTRACTION_TIMEOUT_SECONDS = 30.0
+# Captured annual reports run to tens of MB; on a loaded 1-vCPU machine 30 s
+# left them with no text at all, so a caller may scale the budget with size.
+EXTRACTION_SECONDS_PER_MIB = 4.0
+EXTRACTION_MAX_SECONDS = 240.0
 # One pdftotext run over a whole PDF. Poppler does a 117-page report in seconds
 # where pypdf takes minutes on a 1-vCPU machine, so it is the preferred reader.
 PDFTOTEXT_TIMEOUT_SECONDS = 120.0
+# pypdf (page count, fallback) is only started when this much of the caller's
+# bound is left: the larger of a fraction of it and a fixed floor.
+PYPDF_HEADROOM_FRACTION = 0.2
+PYPDF_HEADROOM_MIN_SECONDS = 10.0
+
+
+def extraction_budget_seconds(byte_size: int) -> float:
+    """The wall-clock extraction budget for a document of `byte_size` bytes."""
+    scaled = EXTRACTION_TIMEOUT_SECONDS + byte_size / 2**20 * EXTRACTION_SECONDS_PER_MIB
+    return min(EXTRACTION_MAX_SECONDS, max(EXTRACTION_TIMEOUT_SECONDS, scaled))
+
+
+_clock = time.monotonic  # a seam for tests
+
 # The wall-clock bound of whoever is waiting on `extract_text` (`extract_bounded`,
 # the web snapshot). Poppler's own timeout is never longer than this, so a slow
 # PDF ends as a recorded timeout rather than as a thread still running pypdf
@@ -184,13 +203,33 @@ def _pdf_page_count(data: bytes) -> int | None:
 
 def _extract_pdf(data: bytes, budget_seconds: float | None = None) -> tuple[str, dict]:
     bound = budget_seconds if budget_seconds is not None else _pdf_budget.get()
-    timeout = PDFTOTEXT_TIMEOUT_SECONDS if bound is None else min(PDFTOTEXT_TIMEOUT_SECONDS, bound)
+    # A caller's bound may exceed Poppler's default (a large captured report); it
+    # is still never longer than the caller waits, nor than the overall ceiling.
+    ceiling = max(PDFTOTEXT_TIMEOUT_SECONDS, EXTRACTION_MAX_SECONDS)
+    timeout = PDFTOTEXT_TIMEOUT_SECONDS if bound is None else min(ceiling, bound)
+    started = _clock()
     try:
         pages = _pdftotext_pages(data, timeout)
     except _PdftotextTimeout:
         # Recorded, not retried: pypdf is the slower reader, and the caller's own
         # bound is about to expire.
         return "", {"text_extractor": "pdftotext", "error": f"pdftotext timed out after {timeout:.0f}s"}
+    if bound is not None:
+        remaining = bound - (_clock() - started)
+        if remaining < max(bound * PYPDF_HEADROOM_FRACTION, PYPDF_HEADROOM_MIN_SECONDS):
+            # Poppler used most of the bound; pypdf started now would still be
+            # running in this thread after the caller has given up waiting.
+            if pages is None:
+                return "", {
+                    "text_extractor": "pdftotext",
+                    "error": "pdftotext failed with too little time left for pypdf",
+                    "fallback_skipped": "budget",
+                }
+            return _page_blocks(pages), {
+                "pages": len(pages),
+                "text_extractor": "pdftotext",
+                "fallback_skipped": "budget",
+            }
     if pages is not None:
         # Poppler ends every page with a form feed, so n segments is n pages, unless
         # a stray form feed inside the text has split one. Page numbers are what
@@ -362,12 +401,15 @@ def _extract_pptx(filename: str, data: bytes) -> tuple[str, dict]:
     return "\n".join(parts), meta
 
 
-async def extract_bounded(filename: str, data: bytes) -> tuple[str, dict, str]:
+async def extract_bounded(
+    filename: str, data: bytes, *, budget_seconds: float | None = None
+) -> tuple[str, dict, str]:
     """(text, meta, status). Bounded in wall time and in characters returned.
 
     Extraction is third-party parsing of third-party bytes: it runs off the event
     loop so one slow document cannot stall every other request, it is abandoned
-    after EXTRACTION_TIMEOUT_SECONDS, its output is truncated, and *any* parser
+    after `budget_seconds` (default EXTRACTION_TIMEOUT_SECONDS; see
+    `extraction_budget_seconds`), its output is truncated, and *any* parser
     failure is recorded on the row rather than raised — a corrupt PDF is a
     document with no text, not a 500 on upload.
 
@@ -376,13 +418,12 @@ async def extract_bounded(filename: str, data: bytes) -> tuple[str, dict, str]:
     the request, and the memory that thread holds (one document, at most the size cap
     its caller enforced before getting here).
     """
+    budget = EXTRACTION_TIMEOUT_SECONDS if budget_seconds is None else budget_seconds
     try:
-        with pdf_budget(EXTRACTION_TIMEOUT_SECONDS):
-            text, meta = await asyncio.wait_for(
-                asyncio.to_thread(extract_text, filename, data), EXTRACTION_TIMEOUT_SECONDS
-            )
+        with pdf_budget(budget):
+            text, meta = await asyncio.wait_for(asyncio.to_thread(extract_text, filename, data), budget)
     except (asyncio.TimeoutError, TimeoutError):
-        return "", {"error": f"text extraction timed out after {EXTRACTION_TIMEOUT_SECONDS:.0f}s"}, "failed"
+        return "", {"error": f"text extraction timed out after {budget:.0f}s"}, "failed"
     except ValueError as e:  # unsupported type: the message is for the user
         return "", {"error": str(e)}, "failed"
     except Exception as e:  # a parser blowing up on hostile bytes

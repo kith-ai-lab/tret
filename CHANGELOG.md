@@ -124,6 +124,21 @@ one that needs action on an existing install.
 - The public-address check on outbound requests now refuses carrier-grade NAT
   addresses (100.64.0.0/10), which the earlier private-range list missed. It
   applies to every egress class, not only captures.
+- **Lessons from the first live 12-company collection run.** `propose_package_map`
+  refuses a stem another map in the same run already uses, the collection prompt
+  asks for `<slug>-container-<topic>` stems, and a collection refuses to write two
+  packages whose file names collide (three HSBC methodology documents had shared one
+  stem and replaced each other on SharePoint). A captured file is written atomically
+  and an existing content-addressed copy is kept rather than rewritten (a copy owned
+  by another user had made the capture fail). Text extraction of a captured PDF over
+  2 MB keeps its 180 s wait and grows beyond it with size (30 s plus 4 s per MiB,
+  at most 240 s), and Poppler is now allowed the same time instead of being
+  stopped at 120 s while the caller was still waiting, which is what left 15 MB and
+  48 MB annual reports with no text. Upload-session chunks
+  to Microsoft Graph get 180 s instead of 60 s, and a transport error without a
+  message is named by its type. Target slugs transliterate ø, æ, ß and friends and
+  drop a trailing "and" (Ørsted, "& Co."). `results_summary.md` carries the blocked
+  or gap reason the run reported.
 
 ## [0.2.0] — 2026-10-15
 

@@ -746,6 +746,8 @@ async def test_large_captured_pdfs_get_the_longer_extraction_budget(monkeypatch,
 
 async def test_a_timeout_message_names_the_budget_that_applied(monkeypatch):
     monkeypatch.setattr(snapshot_module, "CAPTURE_PDF_EXTRACTION_TIMEOUT_SECONDS", 0.05)
+    # The size-scaled budget would otherwise lift the floor back to seconds.
+    monkeypatch.setattr(snapshot_module, "extraction_budget_seconds", lambda byte_size: 0.0)
     monkeypatch.setattr(snapshot_module, "extract_text", lambda filename, data: time.sleep(0.3))
     body = b"%PDF-" + b"0" * 2_000_000
 
@@ -780,6 +782,6 @@ async def test_snapshot_bounds_pdftotext_by_the_budget_that_applies(monkeypatch)
         assert (text, status) == ("", "failed")
         assert meta["text_extractor"] == "pdftotext" and "timed out" in meta["error"]
 
-    # fetch_url pages keep the 30 s bound; a captured report gets Poppler's own 120 s cap
-    # (inside its 180 s wall), and never more than the wall.
-    assert seen == [30.0, 120.0]
+    # fetch_url pages keep the 30 s bound; a captured report gets its whole 180 s wall
+    # (a larger caller budget lifts Poppler's own 120 s default), never more.
+    assert seen == [30.0, 180.0]

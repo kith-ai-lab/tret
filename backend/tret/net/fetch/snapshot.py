@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
+import tempfile
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -37,7 +39,7 @@ from tret.config import get_settings
 from tret.db.models import Document
 from tret.net.fetch.extract import html_to_text
 from tret.net.fetch.fetch import FetchedPage
-from tret.services.documents import extract_text, pdf_budget
+from tret.services.documents import extract_text, extraction_budget_seconds, pdf_budget
 
 log = logging.getLogger("tret.net")
 
@@ -62,6 +64,31 @@ CAPTURE_PDF_THRESHOLD_BYTES = 2_000_000
 CAPTURE_PDF_EXTRACTION_TIMEOUT_SECONDS = 180.0
 
 _UNSAFE = re.compile(r"[^a-z0-9._-]+")
+
+
+def _write_content_addressed(storage_dir: Path, storage_path: Path, body: bytes) -> None:
+    """Write `body` to its `<sha256>-<name>` path, atomically.
+
+    The name carries the hash, so an existing readable file of the same size
+    already holds these bytes; it is kept as is (it may belong to another OS user
+    and be unwritable). Otherwise a temp file is renamed into place, which needs
+    only write permission on the directory.
+    """
+    try:
+        if storage_path.stat().st_size == len(body) and os.access(storage_path, os.R_OK):
+            return
+    except FileNotFoundError:
+        pass
+    tmp = tempfile.NamedTemporaryFile(dir=storage_dir, delete=False)
+    try:
+        with tmp:
+            tmp.write(body)
+        # NamedTemporaryFile is 0600; other service users must still read it.
+        os.chmod(tmp.name, 0o644)
+        os.replace(tmp.name, storage_path)
+    except BaseException:
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
 
 
 def snapshot_filename(url: str, extension: str) -> str:
@@ -95,7 +122,9 @@ async def _extract(page: FetchedPage, filename: str) -> tuple[str, dict, str]:
         return text, {"title": title}, "done"
     timeout = EXTRACTION_TIMEOUT_SECONDS
     if page.extension == ".pdf" and len(page.body) > CAPTURE_PDF_THRESHOLD_BYTES:
-        timeout = CAPTURE_PDF_EXTRACTION_TIMEOUT_SECONDS
+        # 180 s floor, and more for the largest reports (a 48 MB registration
+        # document ran out of a flat budget on a busy single-vCPU machine).
+        timeout = max(CAPTURE_PDF_EXTRACTION_TIMEOUT_SECONDS, extraction_budget_seconds(len(page.body)))
     try:
         with pdf_budget(timeout):
             text, meta = await asyncio.wait_for(asyncio.to_thread(extract_text, filename, page.body), timeout)
@@ -128,7 +157,7 @@ async def store_snapshot(
     storage_path = (storage_dir / f"{page.sha256}-{filename}").resolve()
     if storage_path.parent != storage_dir:  # belt and braces over snapshot_filename
         raise ValueError("refusing to write a snapshot outside the storage directory")
-    await asyncio.to_thread(storage_path.write_bytes, page.body)
+    await asyncio.to_thread(_write_content_addressed, storage_dir, storage_path, page.body)
 
     text, meta, status = await _extract(page, filename)
     truncated_text = len(text) > MAX_EXTRACTED_CHARS

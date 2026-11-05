@@ -1334,3 +1334,49 @@ async def test_final_chunk_416_after_a_5xx_is_reported_as_unknown_not_success(
             await _upload_big(session_factory, workspace, total)
     assert [c.request.method for c in route.calls] == ["PUT", "PUT", "GET", "PUT"]
     assert "Check the target folder" in excinfo.value.reason
+
+
+class _FakeWriteClient:
+    def __init__(self, outcome):
+        self.outcome = outcome
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def request(self, method, url, **kw):
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+def _record_build_client(monkeypatch, outcome) -> list[float]:
+    timeouts: list[float] = []
+
+    def fake_build_client(egress_class, *, policy, timeout):
+        timeouts.append(timeout)
+        return _FakeWriteClient(outcome)
+
+    monkeypatch.setattr(connections_module, "build_client", fake_build_client)
+    return timeouts
+
+
+async def test_a_chunk_put_gets_the_longer_upload_timeout(monkeypatch):
+    timeouts = _record_build_client(monkeypatch, httpx.Response(202, json={}))
+    response, error = await connections_module._try_put_chunk(UPLOAD_URL, None, b"abcd", 0, 3, 4)
+    assert error is None and response.status_code == 202
+    await connections_module._upload_session_next_start(UPLOAD_URL, None)  # other calls keep 60 s
+    assert timeouts == [180.0, 60.0]
+    assert connections_module._UPLOAD_CHUNK_TIMEOUT_SECONDS == 180.0
+
+
+async def test_an_empty_transport_error_message_names_the_exception_class(monkeypatch):
+    _record_build_client(monkeypatch, httpx.ReadTimeout(""))
+    response, error = await connections_module._try_put_chunk(UPLOAD_URL, None, b"abcd", 0, 3, 4)
+    assert response is None
+    assert error.reason == "could not reach Microsoft Graph: ReadTimeout"
+    _record_build_client(monkeypatch, httpx.ConnectError("reset"))
+    _, error = await connections_module._try_put_chunk(UPLOAD_URL, None, b"abcd", 0, 3, 4)
+    assert error.reason == "could not reach Microsoft Graph: reset"

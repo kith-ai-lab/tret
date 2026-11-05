@@ -1923,6 +1923,33 @@ async def propose_package_map(
             f"a letter or digit, at most {_PACKAGE_STEM_MAX} characters"
         )
 
+    # Stems become upload file names, so two live maps sharing one in a run
+    # overwrite each other on upload (SharePoint names ignore case). A draft for
+    # this same document under this stem is a revision: it is superseded below.
+    revised: list[Finding] = []
+    for other in (
+        await ctx.db.execute(
+            select(Finding).where(
+                Finding.run_id == ctx.run_id,
+                Finding.schema_slug == "package_map",
+                Finding.status.notin_(("rejected", "superseded")),
+            )
+        )
+    ).scalars():
+        other_stem = (other.payload or {}).get("stem")
+        if not isinstance(other_stem, str) or other_stem.casefold() != stem.casefold():
+            continue
+        if other.status == "draft" and (other.subject or {}).get("source_document_id") == str(doc.id):
+            revised.append(other)
+            continue
+        other_title = ((other.payload or {}).get("map") or {}).get("title") or "untitled"
+        raise ToolError(
+            f"stem {stem!r} is already used by another proposed package in this run "
+            f"({other_title!r}); choose a distinct stem, for example '{stem}-2' or a "
+            f"descriptive suffix such as '{stem}-methodology'. To revise a draft map, "
+            "re-propose it with the same source document and the same stem"
+        )
+
     if keep_ranges is not None and not isinstance(keep_ranges, list):
         raise ToolError("keep_ranges must be an array of [first, last] pairs, or null")
     if not isinstance(review_note, str):
@@ -2029,7 +2056,10 @@ async def propose_package_map(
         .scalars()
         .all()
     )
-    await _supersede_drafts(ctx, finding, [f for f in earlier if f.subject == finding.subject])
+    revised_ids = {f.id for f in revised}
+    await _supersede_drafts(
+        ctx, finding, [f for f in earlier if f.subject == finding.subject or f.id in revised_ids]
+    )
     return (
         f"Proposed package map '{title}' for {doc.filename}: {len(pages)} of {info.page_count} "
         f"physical pages selected (role {role}, scope {scope}, {len(incorporation_records)} "

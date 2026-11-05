@@ -98,6 +98,15 @@ def test_exactly_one_register_form_is_required():
         ("Marks & Spencer Group plc", "marks-and-spencer-group"),
         ("A" * 60, "a" * 40),
         ("!!!", "target"),
+        ("Ørsted A/S", "orsted"),
+        ("Ørsted A/S and Ørsted Group", "orsted-a-s-and-orsted-group"),
+        ("JPMorgan Chase & Co.", "jpmorgan-chase"),
+        ("AND Digital", "and-digital"),
+        ("Komerční banka, a. s.", "komercni-banka"),
+        ("Equinor ASA", "equinor"),
+        ("Nokia Oyj", "nokia"),
+        ("ČEZ a.s.", "cez"),
+        ("Straße Æble Łódź", "strasse-aeble-lodz"),
     ],
 )
 def test_slugify(company, slug):
