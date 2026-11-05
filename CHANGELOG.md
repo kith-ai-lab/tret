@@ -119,6 +119,8 @@ one that needs action on an existing install.
 
 ### Fixed
 
+- **Collections page: Max iterations field.** The New collection form now sends
+  `max_iterations` (1–50) as the docs described, and the collection header shows the cap.
 - The OAuth connection callback refuses a workspace that was archived after
   the authorize step.
 - The public-address check on outbound requests now refuses carrier-grade NAT
