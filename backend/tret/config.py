@@ -525,6 +525,13 @@ class Settings(BaseSettings):
     egress_research_max_bytes: int = 2_000_000  # per fetched page
     egress_research_timeout_seconds: float = 20.0
     egress_research_max_fetches_per_run: int = 10
+    # `web_search` is counted apart from fetches. A search result is only a
+    # pointer, so a run that cannot fetch what it finds (the one host that serves
+    # the PDF is off the allowlist, say) gets no closer to an answer by searching
+    # again, yet nothing else stops it doing so until `max_iterations` — a watched
+    # run spent 22 of its 24 iterations that way. The cap turns that loop into a
+    # tool error that says to stop, and names any host the allowlist refused.
+    egress_research_max_searches_per_run: int = 12
     # `capture_source` is collection work, not reading: it keeps the complete
     # original (an issuer's sustainability report runs to 15 MB) and refuses a file
     # over the limit rather than storing a truncated PDF that looks like the real

@@ -1099,6 +1099,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/findings/{finding_id}/package-retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry Finding Package
+         * @description Re-run the packager for an approved `package_map` finding whose first
+         *     attempt failed (source bytes changed and were restored, a timeout, a missing
+         *     Poppler binary mid-deploy). Only a failed package is retried: a packaged one
+         *     already has Documents, and packages are evidence that is never overwritten.
+         *     A "running" record (queued or packaging) blocks a retry until it is older
+         *     than the packaging deadline plus a minute (a crashed worker). Like approval,
+         *     this returns as soon as the `running` record is committed; packaging runs in
+         *     the background.
+         */
+        post: operations["retry_finding_package_api_findings__finding_id__package_retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/findings/{finding_id}/upload-retry": {
         parameters: {
             query?: never;
@@ -4248,6 +4275,37 @@ export interface operations {
                 "application/json": components["schemas"]["ApprovalBody"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_finding_package_api_findings__finding_id__package_retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                finding_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

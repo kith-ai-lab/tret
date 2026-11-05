@@ -381,7 +381,8 @@ uploaded third-party documents — the prompt-injection surface. So:
 - redirects are followed by hand, three hops maximum, each re-checked from
   scratch, because a redirect is a second destination chosen by the first;
 - the body is capped *while* it streams (`TRET_EGRESS_RESEARCH_MAX_BYTES`), and
-  each run has a fetch budget (`..._MAX_FETCHES_PER_RUN`);
+  each run has a fetch budget (`..._MAX_FETCHES_PER_RUN`) and a separate search
+  budget (`TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN`, default 12);
 - `capture_source` takes the same checks but is for collecting originals, so it
   has its own ceiling (`TRET_EGRESS_CAPTURE_MAX_BYTES`, default 25 MiB) and its own
   per-run count (`TRET_EGRESS_CAPTURE_MAX_PER_RUN`, default 40). A file over the

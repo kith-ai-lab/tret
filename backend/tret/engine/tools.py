@@ -164,6 +164,16 @@ class RunContext:
     # mode the result caps below exist for — with an outbound request attached.
     web_fetches: int = 0
     web_bytes: int = 0
+    # `web_search` calls this run, counted apart from fetches and captures: a
+    # search only points at pages, so it neither spends nor is starved by the
+    # fetch budget. Counted before the provider is called, so a failing search
+    # backend cannot be retried for free.
+    web_searches: int = 0
+    # Hosts a fetch_url / capture_source call was refused for by the research
+    # allowlist this run (deduplicated, in order). Surfaced when the search cap
+    # trips so the model — and through its report, an operator — can see which
+    # host to allowlist rather than searching for another route to the same file.
+    allowlist_refusals: list[str] = field(default_factory=list)
     # `capture_source` is counted apart from `web_fetches`: a capture is a rare,
     # deliberate, possibly 25 MB act of collection, and sharing the page-reading
     # budget would let one starve the other. It counts attempts, not successes (a
@@ -608,6 +618,31 @@ def _refuse_if_disabled(mode: str) -> None:
         )
 
 
+def _egress_denied_message(ctx: RunContext, e: EgressDenied, url: str) -> str:
+    """The tool-error text for a fetch/capture the egress policy refused.
+
+    An allowlist refusal gets its own wording because the model's natural next
+    move is to search for another route to the same file; it cannot work, and
+    saying so (and who can fix it) is what stops the loop. The host is also
+    remembered on the run so the search cap can name it later.
+    """
+    if e.reason == "host_not_allowed":
+        # The refused hop, not the requested URL: a redirect from an allowed
+        # issuer host to its CDN is refused at the CDN.
+        host = _host_of(e.url) or _host_of(url)
+        if host and host not in ctx.allowlist_refusals:
+            ctx.allowlist_refusals.append(host)
+        return (
+            f"host {host} is not on this deployment's research allowlist "
+            "(TRET_EGRESS_RESEARCH_ALLOW_HOSTS); searching again will not help — "
+            "ask an operator to add it"
+        )
+    return (
+        f"That URL was refused by this deployment's egress policy ({e.reason}): "
+        f"{e.detail or url}"
+    )
+
+
 async def _record_egress(
     ctx: RunContext,
     *,
@@ -665,6 +700,26 @@ async def web_search(ctx: RunContext, query: str, max_results: int = 5) -> str:
             "already snapshotted by an earlier run and makes no new requests. "
             "fetch_url still works for those pages."
         )
+    max_searches = int(get_settings().egress_research_max_searches_per_run)
+    if ctx.web_searches >= max_searches:
+        refused = (
+            " This run was refused access to "
+            + ", ".join(ctx.allowlist_refusals)
+            + " by the research allowlist (TRET_EGRESS_RESEARCH_ALLOW_HOSTS); an "
+            "operator can add " + ("it" if len(ctx.allowlist_refusals) == 1 else "them")
+            + "."
+            if ctx.allowlist_refusals
+            else ""
+        )
+        raise ToolError(
+            f"This run has already made {ctx.web_searches} web searches, which is the "
+            f"per-run limit (TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN={max_searches}). "
+            "Stop searching: work with the URLs you already have, and say plainly which "
+            "sources you could not collect." + refused
+        )
+    # Spent before the provider is called, as captures are: a failing backend
+    # must not be retryable for free.
+    ctx.web_searches += 1
     provider = get_search_provider()
     try:
         results = await provider.search(query, max_results=int(max_results))
@@ -745,10 +800,7 @@ async def fetch_url(ctx: RunContext, url: str) -> str:
             ctx, method="GET", host=_host_of(url), path=_path_of(url),
             decision=egress_audit.DECISION_DENIED, reason=e.reason,
         )
-        raise ToolError(
-            f"That URL was refused by this deployment's egress policy ({e.reason}): "
-            f"{e.detail or url}"
-        ) from e
+        raise ToolError(_egress_denied_message(ctx, e, url)) from e
     except FetchError as e:
         await _record_egress(
             ctx, method="GET", host=_host_of(url), path=_path_of(url),
@@ -869,10 +921,7 @@ async def capture_source(
             ctx, method="GET", host=_host_of(url), path=_path_of(url),
             decision=egress_audit.DECISION_DENIED, reason=e.reason,
         )
-        raise ToolError(
-            f"That URL was refused by this deployment's egress policy ({e.reason}): "
-            f"{e.detail or url}"
-        ) from e
+        raise ToolError(_egress_denied_message(ctx, e, url)) from e
     except FetchError as e:
         await _record_egress(
             ctx, method="GET", host=_host_of(url), path=_path_of(url),

@@ -46,6 +46,9 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    The tier order is `local < economy < standard < premium`, so a `max_cost_tier`
    never excludes a zero-cost local model — and setting it *to* `local` excludes
    every cloud candidate, which is how a harness expresses "local only".
+   `min_cost_tier` is the mirror image, a floor (default none): models in a
+   cheaper tier are never candidates on any automatic path, which the seeded
+   Disclosure Collector uses to require the standard tier.
    Routing also reads its own **track record**. Every finished run is scored into
    `run_outcomes` (`router_llm/outcomes.py`) from its status, its transcript's
    validation failures and nudges, and — weighted highest — the human

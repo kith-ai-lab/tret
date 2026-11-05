@@ -487,3 +487,71 @@ async def test_no_candidates_error_mixes_tier_and_key_reasons(no_llm_router):
     assert "above the policy's local cost tier" in msg
     assert "lacked a provider key (" in msg
     assert "openrouter" not in msg.split("lacked a provider key (")[1]
+
+
+# ── the cost-tier floor (model_policy.min_cost_tier) ─────────────────────────
+def test_fallback_floor_excludes_cheaper_tiers_and_default_is_no_floor():
+    catalog = ModelCatalog()
+    registry = _Registry({"openrouter", "anthropic", "kimi"})
+    for objective in ["balanced", "quality", "token_conservation", "eco"]:
+        chosen = fallback_model(
+            "verdict",
+            catalog,
+            registry,
+            objective=objective,
+            max_cost_tier="standard",
+            min_cost_tier="standard",
+        )
+        assert chosen is not None, objective
+        assert _tier_of(catalog, chosen) == "standard", (objective, chosen)
+    # No floor: the thrift objectives are free to pick below standard, as before.
+    eco = fallback_model("verdict", catalog, registry, objective="eco", max_cost_tier="standard")
+    assert eco is not None
+    assert TIER_ORDER[_tier_of(catalog, eco)] <= TIER_ORDER["standard"]
+
+
+async def test_route_with_a_floor_only_considers_models_at_or_above_it(no_llm_router):
+    catalog = ModelCatalog()
+    router = ModelRouter(catalog, _Registry({"openrouter", "anthropic", "kimi"}))
+
+    floored = await router.route(
+        model_policy={"mode": "auto", "min_cost_tier": "standard", "max_cost_tier": "premium"},
+        **ROUTE_ARGS,
+    )
+    assert floored.candidates
+    assert all(TIER_ORDER[_tier_of(catalog, c)] >= TIER_ORDER["standard"] for c in floored.candidates)
+    assert TIER_ORDER[_tier_of(catalog, floored.chosen_model)] >= TIER_ORDER["standard"]
+
+    unfloored = await router.route(model_policy={"mode": "auto"}, **ROUTE_ARGS)
+    assert any(TIER_ORDER[_tier_of(catalog, c)] < TIER_ORDER["standard"] for c in unfloored.candidates)
+
+
+async def test_a_floor_nothing_satisfies_fails_loudly_and_says_why(no_llm_router):
+    catalog = _catalog_with_locals("m1")
+    router = ModelRouter(catalog, _Registry({"local"}))
+
+    with pytest.raises(RoutingUnavailable) as exc:
+        await router.route(
+            model_policy={"mode": "auto", "min_cost_tier": "standard"}, **ROUTE_ARGS
+        )
+    assert "below the policy's standard cost-tier floor" in str(exc.value)
+
+
+async def test_fallback_unavailable_message_names_the_floor(no_llm_router, monkeypatch):
+    catalog = ModelCatalog()
+    router = ModelRouter(catalog, _Registry({"openrouter", "anthropic", "kimi"}))
+    monkeypatch.setattr(router_module, "fallback_model", lambda *a, **k: None)
+    with pytest.raises(RoutingUnavailable) as exc:
+        await router.route(
+            model_policy={"mode": "auto", "min_cost_tier": "standard"}, **ROUTE_ARGS
+        )
+    assert "cost ceiling 'premium' and floor 'standard'" in str(exc.value)
+
+
+async def test_an_unknown_floor_is_read_as_no_floor(no_llm_router):
+    catalog = _catalog_with_locals("m1")
+    router = ModelRouter(catalog, _Registry({"local"}))
+    decision = await router.route(
+        model_policy={"mode": "auto", "min_cost_tier": "bogus"}, **ROUTE_ARGS
+    )
+    assert decision.chosen_model == "local/m1"

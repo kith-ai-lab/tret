@@ -127,6 +127,19 @@ def _max_cost_tier(model_policy: dict) -> str:
     return tier if tier in TIER_ORDER else DEFAULT_MAX_COST_TIER
 
 
+def _min_cost_tier(model_policy: dict) -> str | None:
+    """The floor a policy asks for, or None for no floor (the default).
+
+    The mirror of `_max_cost_tier`, but a bad value reads as *no floor* rather
+    than as the strictest or loosest reading: the API refuses an unknown tier on
+    write, and a floor is a quality guard, so a malformed one must not make a
+    harness unroutable. `local` ranks below every cloud tier, so a floor of
+    `local` excludes nothing.
+    """
+    tier = (model_policy or {}).get("min_cost_tier")
+    return tier if tier in TIER_ORDER else None
+
+
 def _today() -> date:
     """Today's date (UTC) — mirrors `providers.catalog._today`.
 
@@ -564,14 +577,18 @@ class ModelRouter:
         return self._candidates_with_fit(model_policy, priors, min_context_window)[0]
 
     def _exclusion_reason(
-        self, m: ModelInfo, allowed: set | list | None, max_tier: str
+        self,
+        m: ModelInfo,
+        allowed: set | list | None,
+        max_tier: str,
+        min_tier: str | None = None,
     ) -> str | None:
         """Why the policy filter drops `m`, or None if it survives.
 
         One predicate shared by `_candidates_with_fit` and the empty-result
         diagnosis (`_no_candidates_detail`), so the explanation can never drift
         from the filter. Reasons: `no_tools`, `no_key:<provider>`,
-        `not_allowed`, `tier:<tier>`; the first failing check wins.
+        `not_allowed`, `tier:<tier>`, `below_floor:<tier>`; the first failing check wins.
         """
         if not m.supports_tools:
             return "no_tools"
@@ -581,6 +598,8 @@ class ModelRouter:
             return "not_allowed"
         if not within_cost_tier(m, max_tier):
             return f"tier:{m.cost_tier}"
+        if min_tier is not None and TIER_ORDER.get(m.cost_tier, 2) < TIER_ORDER[min_tier]:
+            return f"below_floor:{m.cost_tier}"
         return None
 
     def _no_candidates_detail(self, model_policy: dict) -> str:
@@ -591,14 +610,16 @@ class ModelRouter:
         """
         allowed = model_policy.get("allowed") or None
         max_tier = _max_cost_tier(model_policy)
+        min_tier = _min_cost_tier(model_policy)
         considered = 0
         no_tools = 0
         not_allowed = 0
         by_provider: dict[str, int] = {}
         by_tier: dict[str, int] = {}
+        by_floor: dict[str, int] = {}
         for m in self._catalog.all():
             considered += 1
-            reason = self._exclusion_reason(m, allowed, max_tier)
+            reason = self._exclusion_reason(m, allowed, max_tier, min_tier)
             if reason is None:
                 continue
             kind, _, detail = reason.partition(":")
@@ -610,10 +631,15 @@ class ModelRouter:
                 not_allowed += 1
             elif kind == "tier":
                 by_tier[detail] = by_tier.get(detail, 0) + 1
+            elif kind == "below_floor":
+                by_floor[detail] = by_floor.get(detail, 0) + 1
         parts: list[tuple[int, str]] = []
         n_tier = sum(by_tier.values())
         if n_tier:
             parts.append((n_tier, f"{n_tier} above the policy's {max_tier} cost tier"))
+        n_floor = sum(by_floor.values())
+        if n_floor:
+            parts.append((n_floor, f"{n_floor} below the policy's {min_tier} cost-tier floor"))
         n_key = sum(by_provider.values())
         if n_key:
             providers = ", ".join(
@@ -644,10 +670,11 @@ class ModelRouter:
         """
         allowed = model_policy.get("allowed") or None
         max_tier = _max_cost_tier(model_policy)
+        min_tier = _min_cost_tier(model_policy)
         objective = objective_of(model_policy)
         out = []
         for m in self._catalog.all():
-            if self._exclusion_reason(m, allowed, max_tier) is None:
+            if self._exclusion_reason(m, allowed, max_tier, min_tier) is None:
                 out.append(m)
         # Ordered by the harness objective, with any recorded evidence leading;
         # cap the list the router sees. Note the order of operations: the
@@ -1243,14 +1270,20 @@ class ModelRouter:
             model_policy.get("allowed"),
             objective=objective,
             max_cost_tier=max_tier,
+            min_cost_tier=_min_cost_tier(model_policy),
             priors=priors,
             min_context_window=min_context_window,
             exclude={c["model"] for c in cooldown_records} or None,
         )
         if chosen is None:
+            min_tier = _min_cost_tier(model_policy)
+            band = (
+                f"cost ceiling '{max_tier}' and floor '{min_tier}'"
+                if min_tier
+                else f"cost ceiling '{max_tier}'"
+            )
             raise RoutingUnavailable(
-                "Router failed and no fallback model is available within the harness "
-                f"cost ceiling '{max_tier}'."
+                f"Router failed and no fallback model is available within the harness {band}."
             )
         self._assert_within_ceiling(chosen, max_tier)
         if not router_usable:

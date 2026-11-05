@@ -83,7 +83,12 @@ async def test_seeded_when_research_is_on(db, monkeypatch):
     (h,) = await _collectors(db, ws.id)
     assert h.task_profile == "freeform"
     assert h.tool_names == COLLECTION_HARNESS_TOOLS
-    assert h.model_policy == {"mode": "auto", "max_cost_tier": "standard"}
+    # A hard routing floor: weak models loop on tool-heavy collection runs.
+    assert h.model_policy == {
+        "mode": "auto",
+        "min_cost_tier": "standard",
+        "max_cost_tier": "standard",
+    }
     assert h.loop_config["max_iterations"] == 24
     assert not h.is_archived
 
@@ -160,3 +165,54 @@ async def test_chat_front_door_selection_is_unchanged(db, monkeypatch):
     assert again is not None and again.id == chat.id
     (collector,) = await _collectors(db, ws.id)
     assert collector.task_profile != "chat"
+
+
+async def test_backfills_the_old_seed_policy_to_the_routing_floor(db, monkeypatch):
+    _research(monkeypatch, "off")  # backfill is not gated on the egress mode
+    ws = await _workspace(db)
+    existing = Harness(
+        workspace_id=ws.id,
+        name=COLLECTION_HARNESS_NAME,
+        task_profile="freeform",
+        model_policy={"mode": "auto", "max_cost_tier": "standard"},
+        tool_names=list(COLLECTION_HARNESS_TOOLS),
+    )
+    db.add(existing)
+    await db.flush()
+
+    await ensure_collection_harness(db, ws.id)
+    await db.flush()
+
+    assert existing.model_policy == {
+        "mode": "auto",
+        "min_cost_tier": "standard",
+        "max_cost_tier": "standard",
+    }
+
+
+@pytest.mark.parametrize(
+    "edited",
+    [
+        {"mode": "auto"},
+        {"mode": "auto", "max_cost_tier": "premium"},
+        {"mode": "auto", "max_cost_tier": "standard", "objective": "quality"},
+        {"mode": "pinned", "model": "anthropic/claude-sonnet"},
+    ],
+)
+async def test_an_operator_edited_policy_is_never_touched(db, monkeypatch, edited):
+    _research(monkeypatch, "on")
+    ws = await _workspace(db)
+    existing = Harness(
+        workspace_id=ws.id,
+        name=COLLECTION_HARNESS_NAME,
+        task_profile="freeform",
+        model_policy=dict(edited),
+        tool_names=list(COLLECTION_HARNESS_TOOLS),
+    )
+    db.add(existing)
+    await db.flush()
+
+    await ensure_collection_harness(db, ws.id)
+    await db.flush()
+
+    assert existing.model_policy == edited

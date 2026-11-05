@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 
 import httpx
+import pytest
 import pytest_asyncio
 from argon2 import PasswordHasher
 from fastapi import FastAPI
@@ -423,6 +424,49 @@ async def test_analyst_can_still_list_and_get_harnesses(client, seed):
 
 
 # ── task_profile 'chat' is reserved for the seeded chat front door ──────────
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"mode": "auto", "min_cost_tier": "premium", "max_cost_tier": "standard"},
+        {"mode": "auto", "min_cost_tier": "bogus"},
+        {"mode": "auto", "min_cost_tier": ["standard"]},
+        {"mode": "auto", "max_cost_tier": ["standard"]},
+        {"mode": "auto", "max_cost_tier": 3},
+    ],
+)
+async def test_a_bad_cost_tier_floor_or_ceiling_is_422_not_500(client, seed, policy):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+    await login(client, admin.email)
+
+    response = await client.post(
+        "/api/harnesses",
+        json={"name": "H", "task_profile": "freeform", "tool_names": [], "model_policy": policy},
+    )
+    assert response.status_code == 422, response.text
+
+
+async def test_a_valid_floor_is_accepted(client, seed):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+    await login(client, admin.email)
+
+    response = await client.post(
+        "/api/harnesses",
+        json={
+            "name": "H",
+            "task_profile": "freeform",
+            "tool_names": [],
+            "model_policy": {"mode": "auto", "min_cost_tier": "standard", "max_cost_tier": "premium"},
+        },
+    )
+    assert response.status_code in (200, 201), response.text
 
 
 async def test_create_harness_with_task_profile_chat_is_422(client, seed):
