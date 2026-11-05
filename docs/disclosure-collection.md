@@ -338,6 +338,7 @@ Connections); without one the page says so and the API refuses with 422.
 | Fiscal year | the year wanted for a target that does not set its own (default 2025) |
 | Auto-write | on (default): package files are uploaded when packaging succeeds. Off: packages stay in tret and the target ends `completed` |
 | Model override | optional model id used for every target run instead of the router's choice |
+| Max iterations | optional, 1 to 50: the iteration cap for every target run, in place of the harness value (the Disclosure Collector is seeded at 40) |
 
 The collection starts as `draft`; Start launches the first targets. A workspace without
 a "Disclosure Collector" harness cannot start one (the harness is seeded at boot while
@@ -357,7 +358,7 @@ financial statements out; take page ranges only from pages actually read; record
 period, publication date (with its basis) and assurance date separately, with unknown
 left unknown. The procedure is: open the known URLs or search a few precise queries
 (without looping), `capture_source` the PDFs, `read_document` to confirm company, period
-and layout, `propose_package_map` for each document worth keeping (with stems
+and layout (in a long report it finds the sustainability statement, its assurance report and any appendix with `search_documents` on the contents-page titles and reads forward from the hit's `chunk_ordinal`, never guessing ordinals or paging from the start), `propose_package_map` for each document worth keeping (with stems
 `<slug>`, `<slug>-assurance`, `<slug>-appendix` and `<slug>-container-<topic>` for each
 further document, every stem unique within the target, and `ocr="auto"` for
 scanned pages; the tool refuses a stem another map in the run already uses, and the

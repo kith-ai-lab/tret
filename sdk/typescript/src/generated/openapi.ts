@@ -2516,6 +2516,8 @@ export interface components {
              * @default 2025
              */
             fiscal_year: number;
+            /** Max Iterations */
+            max_iterations?: number | null;
             /** Model Override */
             model_override?: string | null;
             /** Name */

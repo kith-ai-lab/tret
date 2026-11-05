@@ -25,7 +25,7 @@ from tret.config import get_settings
 from tret.db.models import Run
 from tret.engine.compaction import ELIDABLE_TOOLS
 from tret.engine.events import RunEvent
-from tret.engine.harness import _effective_max_cost, _spent
+from tret.engine.harness import _effective_max_cost, _effective_max_iterations, _spent
 from tret.engine.tools import (
     COST_CAP_KEY,
     DELEGATION_TOOLS,
@@ -853,3 +853,11 @@ async def test_run_harness_task_result_keys_are_unchanged(db):  # noqa: F811
         "findings",
         "note",
     }
+
+
+def test_effective_max_iterations_honours_a_stamped_override_within_the_ceiling():
+    assert _effective_max_iterations(24, {}) == 24
+    assert _effective_max_iterations(24, {"_max_iterations": 40}) == 40
+    assert _effective_max_iterations(24, {"_max_iterations": 999}) == 50
+    for junk in (0, -3, "40", True, None):
+        assert _effective_max_iterations(24, {"_max_iterations": junk}) == 24

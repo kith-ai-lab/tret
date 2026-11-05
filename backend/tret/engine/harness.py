@@ -219,6 +219,16 @@ def _near_context_limit(est_tokens: int, context_limit: int) -> bool:
     return bool(context_limit) and est_tokens >= EXACT_COUNT_THRESHOLD * context_limit
 
 
+def _effective_max_iterations(harness_value: int, task_input: dict | None) -> int:
+    """The iteration cap for a run: a positive int `_max_iterations` stamped on
+    `task_input` (collections do) replaces the harness value; anything else is
+    ignored. Always clamped to 1..MAX_ITERATIONS_CEILING."""
+    stamped = (task_input or {}).get("_max_iterations")
+    if isinstance(stamped, int) and not isinstance(stamped, bool) and stamped > 0:
+        harness_value = stamped
+    return max(1, min(harness_value, MAX_ITERATIONS_CEILING))
+
+
 def _effective_max_cost(harness_cap: Decimal, task_input: dict) -> Decimal:
     """`harness_cap` narrowed by `_cost_cap_usd` (COST_CAP_KEY) if a
     delegating parent stamped one onto `task_input` (`_prepare_child`,
@@ -1509,7 +1519,7 @@ class HarnessEngine:
 
         loop_cfg = {**(harness.loop_config or {})}
         requested_iterations = int(loop_cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS))
-        max_iterations = max(1, min(requested_iterations, MAX_ITERATIONS_CEILING))
+        max_iterations = _effective_max_iterations(requested_iterations, run.task_input)
         max_output_tokens = int(loop_cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS))
         temperature = float(loop_cfg.get("temperature", DEFAULT_TEMPERATURE))
         max_cost = _effective_max_cost(
