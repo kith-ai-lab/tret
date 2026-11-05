@@ -267,7 +267,8 @@ async def test_an_earlier_draft_with_the_same_subject_is_superseded(ctx, attache
 async def test_a_different_subject_is_not_superseded(ctx, attached):
     await propose_package_map(ctx, source_document_id=str(attached.id), **EMBEDDED)
     await propose_package_map(
-        ctx, source_document_id=str(attached.id), **{**EMBEDDED, "title": "Assurance only"}
+        ctx, source_document_id=str(attached.id), stem="assurance",
+        **{**EMBEDDED, "title": "Assurance only"},
     )
     statuses = [f.status for f in (await ctx.db.execute(select(Finding))).scalars().all()]
     assert statuses == ["draft", "draft"]
@@ -278,9 +279,63 @@ async def test_an_approved_package_map_is_never_superseded(ctx, attached):
     first = (await ctx.db.execute(select(Finding))).scalars().one()
     first.status = "approved"
     await ctx.db.flush()
-    await propose_package_map(ctx, source_document_id=str(attached.id), **EMBEDDED)
+    # The approved map still owns its stem, so the same proposal is refused.
+    with pytest.raises(ToolError, match="already used"):
+        await propose_package_map(ctx, source_document_id=str(attached.id), **EMBEDDED)
     await ctx.db.refresh(first)
     assert first.status == "approved"
+
+
+async def test_a_stem_already_used_in_the_run_is_refused(ctx, attached, tmp_path):
+    await propose_package_map(ctx, source_document_id=str(attached.id), stem="hsbc-container", **EMBEDDED)
+    other = await _source_document(ctx.db, ctx.project_id, tmp_path, data=make_pdf(8), filename="m.pdf")
+    ctx.document_ids.append(other.id)
+    with pytest.raises(ToolError) as exc:
+        await propose_package_map(
+            ctx, source_document_id=str(other.id), stem="hsbc-container",
+            **{**EMBEDDED, "title": "Methodology"},
+        )
+    msg = str(exc.value)
+    assert "'hsbc-container' is already used" in msg
+    assert "'Sustainability statement'" in msg
+    assert "'hsbc-container-2'" in msg and "'hsbc-container-methodology'" in msg
+    assert "same source document and the same stem" in msg
+    assert len((await ctx.db.execute(select(Finding))).scalars().all()) == 1
+
+
+async def test_a_retitled_draft_for_the_same_document_and_stem_is_a_revision(ctx, attached):
+    await propose_package_map(ctx, source_document_id=str(attached.id), stem="hsbc", **EMBEDDED)
+    await propose_package_map(
+        ctx, source_document_id=str(attached.id), stem="hsbc", **{**EMBEDDED, "title": "Renamed"}
+    )
+    rows = (await ctx.db.execute(select(Finding).order_by(Finding.created_at))).scalars().all()
+    older = next(f for f in rows if f.payload["map"]["title"] == "Sustainability statement")
+    newer = next(f for f in rows if f.payload["map"]["title"] == "Renamed")
+    assert older.status == "superseded" and newer.status == "draft"
+    assert newer.provenance["supersedes"] == [str(older.id)]
+
+
+async def test_a_stem_differing_only_in_case_is_refused(ctx, attached, tmp_path):
+    await propose_package_map(ctx, source_document_id=str(attached.id), stem="HSBC-Container", **EMBEDDED)
+    other = await _source_document(ctx.db, ctx.project_id, tmp_path, data=make_pdf(8), filename="m.pdf")
+    ctx.document_ids.append(other.id)
+    with pytest.raises(ToolError, match="already used"):
+        await propose_package_map(ctx, source_document_id=str(other.id), stem="hsbc-container", **EMBEDDED)
+
+
+async def test_a_rejected_or_other_run_stem_does_not_block(ctx, attached, tmp_path):
+    await propose_package_map(ctx, source_document_id=str(attached.id), stem="dup", **EMBEDDED)
+    first = (await ctx.db.execute(select(Finding))).scalars().one()
+    first.status = "rejected"
+    await ctx.db.flush()
+    await propose_package_map(
+        ctx, source_document_id=str(attached.id), stem="dup", **{**EMBEDDED, "title": "Again"}
+    )
+    ctx.run_id = uuid.uuid4()
+    await propose_package_map(
+        ctx, source_document_id=str(attached.id), stem="dup", **{**EMBEDDED, "title": "Other run"}
+    )
+    assert len((await ctx.db.execute(select(Finding))).scalars().all()) == 3
 
 
 @pytest.mark.parametrize(

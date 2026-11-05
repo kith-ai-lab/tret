@@ -1077,6 +1077,9 @@ async def browse_m365(
 IMPORT_MAX_BYTES = MAX_DOCUMENT_BYTES
 _DOWNLOAD_CHUNK_BYTES = 256 * 1024
 _DOWNLOAD_TIMEOUT_SECONDS = 60.0
+# A 5 MiB upload-session chunk PUT timed out at 60 s on a busy machine; the
+# session survives a slow chunk, so it gets a longer bound.
+_UPLOAD_CHUNK_TIMEOUT_SECONDS = 180.0
 _MAX_DOWNLOAD_REDIRECTS = 4
 
 # Google-native files `files.get?alt=media` refuses to serve raw — exported
@@ -2214,6 +2217,7 @@ async def _graph_write_call(
     json_body: dict | None = None,
     content: bytes | None = None,
     params: dict | None = None,
+    timeout: float = _DOWNLOAD_TIMEOUT_SECONDS,
 ) -> httpx.Response:
     """One write-back HTTP call — GET/POST/PUT against a fixed Graph path or
     (for an upload-session chunk) an upload URL Microsoft's own response
@@ -2225,14 +2229,15 @@ async def _graph_write_call(
     collapsing that distinction into an exception here would take it away.
     """
     try:
-        async with build_client(_EGRESS_CLASS, policy=policy, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as client:
+        async with build_client(_EGRESS_CLASS, policy=policy, timeout=timeout) as client:
             return await client.request(
                 method, url, params=params, json=json_body, content=content, headers=headers
             )
     except EgressDenied as exc:
         raise ConnectionWriteError(f"connections egress is unavailable: {exc}") from exc
     except httpx.HTTPError as exc:
-        raise GraphNetworkError(f"could not reach Microsoft Graph: {exc}") from exc
+        # httpx timeouts often carry an empty message; the class name says what happened.
+        raise GraphNetworkError(f"could not reach Microsoft Graph: {str(exc) or type(exc).__name__}") from exc
 
 
 def _raise_for_graph_write_status(response: httpx.Response) -> None:
@@ -2387,6 +2392,7 @@ async def _try_put_chunk(
             "PUT", upload_url, policy=policy,
             headers={"Content-Range": f"bytes {start}-{end}/{total}"},
             content=data[start : end + 1],
+            timeout=_UPLOAD_CHUNK_TIMEOUT_SECONDS,
         )
     except GraphNetworkError as exc:
         return None, exc

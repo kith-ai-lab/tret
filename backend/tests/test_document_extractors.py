@@ -11,6 +11,7 @@ formats (`.xls`/`.ppt`/`.doc`) are still unsupported.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import re
 import shutil
@@ -378,12 +379,56 @@ def test_the_pdftotext_budget_never_exceeds_the_callers_bound(monkeypatch):
     data = make_two_page_pdf_bytes()
     extract_text("a.pdf", data)  # no bound: the 120 s default
     extract_text("a.pdf", data, budget_seconds=5)
-    extract_text("a.pdf", data, budget_seconds=500)  # never longer than the default either
+    extract_text("a.pdf", data, budget_seconds=200)  # a larger caller bound lifts the default
+    extract_text("a.pdf", data, budget_seconds=500)  # but never past the overall ceiling
     with documents_service.pdf_budget(30):
         extract_text("a.pdf", data)
         extract_text("a.pdf", data, budget_seconds=9)  # an explicit bound wins over the context
 
-    assert seen == [120.0, 5, 120.0, 30, 9]
+    assert seen == [120.0, 5, 200, 240.0, 30, 9]
+
+
+@pytest.mark.parametrize(
+    ("byte_size", "expected"),
+    [(0, 30.0), (2**20, 34.0), (48 * 2**20, 222.0), (100 * 2**20, 240.0)],
+)
+def test_the_extraction_budget_scales_with_size(byte_size, expected):
+    assert documents_service.extraction_budget_seconds(byte_size) == pytest.approx(expected)
+
+
+async def test_extract_bounded_honours_a_passed_budget(monkeypatch):
+    seen: list[float] = []
+    real_wait_for = asyncio.wait_for
+
+    async def wait_for(aw, timeout):
+        seen.append(timeout)
+        return await real_wait_for(aw, timeout)
+
+    def run(cmd, **kw):
+        seen.append(kw["timeout"])
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    _fake_pdftotext(monkeypatch, run)
+    _no_pypdf_reader(monkeypatch)
+    monkeypatch.setattr(documents_service.asyncio, "wait_for", wait_for)
+    data = make_two_page_pdf_bytes()
+    text, meta, status = await documents_service.extract_bounded("filing.pdf", data, budget_seconds=222.0)
+    assert seen == [222.0, 222.0]  # the wait and the Poppler run
+    assert status == "failed" and "222s" in meta["error"]
+    seen.clear()
+    await documents_service.extract_bounded("filing.pdf", data)  # uploads keep the 30 s default
+    assert seen == [30.0, 30.0]
+
+
+async def test_extract_bounded_reports_the_budget_it_timed_out_at(monkeypatch):
+    async def wait_for(aw, timeout):
+        aw.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(documents_service.asyncio, "wait_for", wait_for)
+    text, meta, status = await documents_service.extract_bounded("a.txt", b"x", budget_seconds=90.0)
+    assert (text, status) == ("", "failed")
+    assert meta["error"] == "text extraction timed out after 90s"
 
 
 async def test_extract_bounded_passes_its_own_timeout_to_pdftotext(monkeypatch):
@@ -495,3 +540,38 @@ def test_unsupported_type_message_now_lists_xlsx_and_pptx():
 def test_legacy_office_formats_stay_unsupported(filename):
     with pytest.raises(ValueError, match="Unsupported file type"):
         extract_text(filename, b"whatever bytes")
+
+
+def _slow_pdftotext(monkeypatch, seconds: float, result):
+    """Poppler that 'takes' `seconds` on a fake clock, then returns `result`."""
+    now = [1000.0]
+    monkeypatch.setattr(documents_service, "_clock", lambda: now[0])
+
+    def run(cmd, **kw):
+        now[0] += seconds
+        return result(cmd)
+
+    _fake_pdftotext(monkeypatch, run)
+
+
+def test_pypdf_is_not_started_when_poppler_used_most_of_the_bound(monkeypatch):
+    _slow_pdftotext(monkeypatch, 190.0, lambda cmd: subprocess.CompletedProcess(cmd, 0, b"one\fsecond\f", b""))
+    _no_pypdf_reader(monkeypatch)
+    text, meta = extract_text("big.pdf", make_two_page_pdf_bytes(), budget_seconds=222.0)
+    assert meta == {"pages": 2, "text_extractor": "pdftotext", "fallback_skipped": "budget"}
+    assert "one" in text and "second" in text
+
+
+def test_a_failed_poppler_near_the_bound_skips_the_pypdf_fallback(monkeypatch):
+    _slow_pdftotext(monkeypatch, 25.0, lambda cmd: subprocess.CompletedProcess(cmd, 1, b"", b"boom"))
+    _no_pypdf_reader(monkeypatch)
+    text, meta = extract_text("a.pdf", make_two_page_pdf_bytes(), budget_seconds=30.0)
+    assert text == ""
+    assert meta["fallback_skipped"] == "budget" and "pypdf" in meta["error"]
+
+
+def test_with_headroom_left_the_page_count_still_runs(monkeypatch):
+    # 30 s upload bound, Poppler done in 15 s: 15 s left is over the 10 s floor.
+    _slow_pdftotext(monkeypatch, 15.0, lambda cmd: subprocess.CompletedProcess(cmd, 0, b"one\fsecond\f", b""))
+    text, meta = extract_text("a.pdf", make_two_page_pdf_bytes(), budget_seconds=30.0)
+    assert meta == {"pages": 2, "text_extractor": "pdftotext"}

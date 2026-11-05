@@ -358,8 +358,11 @@ period, publication date (with its basis) and assurance date separately, with un
 left unknown. The procedure is: open the known URLs or search a few precise queries
 (without looping), `capture_source` the PDFs, `read_document` to confirm company, period
 and layout, `propose_package_map` for each document worth keeping (with stems
-`<slug>`, `<slug>-assurance`, `<slug>-appendix`, `<slug>-container`, and `ocr="auto"` for
-scanned pages; the role is one of the packaging roles `primary_disclosure`,
+`<slug>`, `<slug>-assurance`, `<slug>-appendix` and `<slug>-container-<topic>` for each
+further document, every stem unique within the target, and `ocr="auto"` for
+scanned pages; the tool refuses a stem another map in the run already uses, and the
+collection refuses to write two packages whose file names collide, so one package can
+never replace another's files on SharePoint; the role is one of the packaging roles `primary_disclosure`,
 `embedded_statement_and_assurance`, `assurance`, `data_appendix`, `incorporated_context`,
 `methodology` and `other`, each described in the prompt), then finish. The run is told not to call `propose_connected_write`: the
 collection writes approved packages itself.
@@ -526,6 +529,24 @@ so in `timing_notes`.
 
 Each running target holds a database session, so check the database connection pool
 before raising concurrency on a small database.
+
+Text extraction of a captured PDF over 2 MB gets at least 180 seconds, and a budget
+that grows with the file beyond about 37 MiB: 30 seconds plus 4 seconds per MiB, at most
+240 seconds (a 48 MB registration document gets about 215 seconds). Poppler itself is
+allowed the same time, where it used to be stopped at 120 seconds while the caller
+waited on. Uploads of package files to SharePoint send 5 MiB chunks with a
+180-second timeout each, and a target whose upload still fails is `write_failed`
+and can be retried from the Collections page without re-running the model.
+
+#### Sizing the machine
+
+The first live batch (12 companies, concurrency 3, two packaging jobs) on a
+one-vCPU, 1 GB machine ran at a load average near 3 for 25 minutes: two health
+checks blipped, two SharePoint uploads timed out and were retried, and two large
+PDFs ran out of extraction time. On such a machine set
+`TRET_COLLECTIONS_MAX_CONCURRENT=2`; for a 48-target register give the process two
+vCPUs and 2 GB. Packaging and OCR are CPU-bound and share the machine with the
+running targets.
 
 ### The first run
 
