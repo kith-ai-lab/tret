@@ -181,6 +181,10 @@ one that needs action on an existing install.
 
 ### Fixed
 
+- **Confirmation prompts no longer depend on `window.confirm`,** which some embedded
+  browsers (such as the Claude desktop app's browser pane) suppress, so Finalize, Clear
+  overrides and the pack-builder deletes silently did nothing there. They now open an
+  in-app dialog: Enter confirms, Escape cancels, and focus returns to the button.
 - **S3 cache eviction thrash.** With the cache cap below the never-evicted floor, every
   `put` or `local_path` unlinked every other blob older than 60 s and concurrent readers
   lost files ("The stored source file is missing"). Packager outputs under `packages/`

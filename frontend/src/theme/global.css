@@ -2012,6 +2012,22 @@ summary:focus-visible {
   background: var(--bg-input);
 }
 
+/* Confirmation prompt (ConfirmDialog): the in-app stand-in for window.confirm. */
+.confirm-message {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 /* A trigger that reads as a link but is a button, so it is keyboard-operable and
    announced as the control it is. */
 .link-button {
