@@ -660,6 +660,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batches/{collection_id}/targets/{target_id}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Target File
+         * @description The bytes of one file written for a target (a package file uploaded to
+         *     SharePoint), for the in-app viewer. `path` must exactly match a live
+         *     `written_files` filename; the content type comes from a fixed allowlist by
+         *     extension, never from the stored row.
+         */
+        get: operations["get_target_file_api_batches__collection_id__targets__target_id__files_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/batches/{collection_id}/targets/{target_id}/retry": {
         parameters: {
             query?: never;
@@ -925,6 +948,30 @@ export interface paths {
          * @deprecated
          */
         post: operations["start_collection_api_collections__collection_id__start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/{collection_id}/targets/{target_id}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Target File
+         * @deprecated
+         * @description The bytes of one file written for a target (a package file uploaded to
+         *     SharePoint), for the in-app viewer. `path` must exactly match a live
+         *     `written_files` filename; the content type comes from a fixed allowlist by
+         *     extension, never from the stored row.
+         */
+        get: operations["get_target_file_api_collections__collection_id__targets__target_id__files_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4340,6 +4387,41 @@ export interface operations {
             };
         };
     };
+    get_target_file_api_batches__collection_id__targets__target_id__files_get: {
+        parameters: {
+            query: {
+                path: string;
+                download?: boolean;
+            };
+            header?: never;
+            path: {
+                collection_id: string;
+                target_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     retry_target_api_batches__collection_id__targets__target_id__retry_post: {
         parameters: {
             query?: never;
@@ -4804,6 +4886,41 @@ export interface operations {
             header?: never;
             path: {
                 collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_target_file_api_collections__collection_id__targets__target_id__files_get: {
+        parameters: {
+            query: {
+                path: string;
+                download?: boolean;
+            };
+            header?: never;
+            path: {
+                collection_id: string;
+                target_id: string;
             };
             cookie?: never;
         };

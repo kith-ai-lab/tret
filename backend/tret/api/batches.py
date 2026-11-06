@@ -15,6 +15,7 @@ role, like the approvals it drives.
 from __future__ import annotations
 
 import uuid
+from urllib.parse import quote
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.api.auth import current_user
 from tret.api.findings import _finding_out
 from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_approver
+from tret.batches.core import written_files_latest
 from tret.batches.profiles.prompt import CreatePromptBatchBody
 from tret.db.engine import get_db
 from tret.db.models import Batch, BatchTarget, Document, Harness, User
@@ -33,6 +35,16 @@ from tret.services import lifecycle
 from tret.storage import document_bytes
 
 router = APIRouter(prefix="/api", tags=["batches"])
+
+# Text-like written files over this size are download-only (the web viewer renders them inline).
+INLINE_TEXT_MAX_BYTES = 5 * 1024 * 1024
+
+_FILE_TYPES = {
+    ".pdf": "application/pdf",
+    ".md": "text/markdown; charset=utf-8",
+    ".json": "application/json",
+    ".txt": "text/plain; charset=utf-8",
+}
 
 
 def _both(method: str, path: str):
@@ -319,4 +331,63 @@ async def download_record(
         content=data,
         media_type=doc.content_type,
         headers={"Content-Disposition": f'attachment; filename="{doc.filename}"'},
+    )
+
+
+@_both("get", "/{collection_id}/targets/{target_id}/files")
+async def get_target_file(
+    collection_id: uuid.UUID,
+    target_id: uuid.UUID,
+    path: str,
+    download: bool = False,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bytes of one file written for a target (a package file uploaded to
+    SharePoint), for the in-app viewer. `path` must exactly match a live
+    `written_files` filename; the content type comes from a fixed allowlist by
+    extension, never from the stored row."""
+    c = await service.get_collection(db, collection_id, ctx.id)
+    t = await _target_in(db, c, target_id)
+    entry = next((w for w in written_files_latest(t) if w.get("filename") == path), None)
+    if entry is None:
+        raise HTTPException(404, "This target has no written file at that path")
+    try:
+        doc_id = uuid.UUID(str(entry.get("document_id")))
+    except ValueError as e:
+        raise HTTPException(404, "This target has no written file at that path") from e
+    doc = await db.get(Document, doc_id)
+    if doc is None or doc.project_id != c.project_id or not doc.storage_path:
+        raise HTTPException(404, "This target has no written file at that path")
+    name = path.rsplit("/", 1)[-1].replace('"', "").replace("\r", "").replace("\n", "")
+    ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    media_type = _FILE_TYPES.get(ext, "application/octet-stream")
+    capped = not download and media_type != "application/pdf"
+    size = entry.get("byte_size")
+
+    def too_big(n: int) -> HTTPException:
+        return HTTPException(
+            413, f"{name} is {n / 1048576:.1f} MB, over the {INLINE_TEXT_MAX_BYTES // 1048576} MB inline view limit; download it instead."
+        )
+
+    if capped and isinstance(size, int) and size > INLINE_TEXT_MAX_BYTES:
+        raise too_big(size)
+    # No M365 fallback: written_files keep only web_url, not the drive/item id.
+    try:
+        data = await document_bytes(doc)
+    except FileNotFoundError as e:
+        raise HTTPException(404, "The file is no longer in storage") from e
+    if capped and len(data) > INLINE_TEXT_MAX_BYTES:
+        raise too_big(len(data))
+    disposition = "attachment" if download else "inline"
+    ascii_name = name.encode("ascii", "replace").decode("ascii")  # header values are latin-1
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name, safe='')}",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
     )

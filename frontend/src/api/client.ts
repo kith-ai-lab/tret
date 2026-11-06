@@ -3489,6 +3489,42 @@ export const api = {
     }),
   batchRecordUrl: (id: string, name: string) =>
     `/api/batches/${id}/records/${encodeURIComponent(name)}`,
+  /** A written file of one batch target, served by the backend from storage.
+   *  `download` forces an attachment and lifts the inline size cap. */
+  batchTargetFileUrl: (id: string, tid: string, path: string, opts?: { download?: boolean }) =>
+    `/api/batches/${id}/targets/${tid}/files?path=${encodeURIComponent(path)}${
+      opts?.download ? '&download=true' : ''
+    }`,
+  /** Fetch a written file's bytes. Throws `ApiError` (status + backend `detail`)
+   *  on a non-2xx response, e.g. 404 gone from storage or 413 too large inline. */
+  fetchBatchTargetFile: async (
+    id: string,
+    tid: string,
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> => {
+    const res = await fetch(api.batchTargetFileUrl(id, tid, path), {
+      credentials: 'include',
+      signal,
+    })
+    if (!res.ok) {
+      let message = `${res.status} ${res.statusText}`
+      let detail: unknown
+      let body: unknown
+      try {
+        const data: unknown = await res.json()
+        body = data
+        if (data && typeof data === 'object' && 'detail' in data) {
+          detail = (data as { detail: unknown }).detail
+          message = typeof detail === 'string' ? detail : JSON.stringify(detail)
+        }
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new ApiError(res.status, message, detail, body)
+    }
+    return await res.blob()
+  },
   decideFindingsBatch: (ids: string[], action: 'approve' | 'reject', note?: string) =>
     request<{ results: BatchDecideResult[] }>('/findings/decide-batch', {
       method: 'POST',

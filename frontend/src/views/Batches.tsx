@@ -16,6 +16,7 @@ import {
 } from '../api/client'
 import { DisclosurePanels } from '../components/batches/DisclosurePanels'
 import { PendingReviews } from '../components/batches/PendingReviews'
+import { WrittenFileViewer } from '../components/batches/WrittenFileViewer'
 import { usePromptBatchForm } from '../components/batches/PromptBatchForm'
 import { slugify } from '../components/batches/csv'
 import { errText, ExtLink, safeHref, shorten, WarningsBox } from '../components/batches/shared'
@@ -1000,6 +1001,8 @@ function PromptTargetExtras({ target: t }: { target: BatchTarget }) {
 }
 
 function TargetExtras({ target: t }: { target: BatchTarget }) {
+  const [viewFile, setViewFile] = useState<string | null>(null)
+  const viewIndex = viewFile === null ? -1 : t.written_files.findIndex((w) => w.filename === viewFile)
   const o = isPromptOutcome(t.outcome) ? null : (t.outcome as DisclosureTargetOutcome | null)
   const meta: [string, string | null | undefined][] = o
     ? [
@@ -1038,11 +1041,29 @@ function TargetExtras({ target: t }: { target: BatchTarget }) {
           <ul style={{ margin: 0, paddingLeft: 18 }} className="mono-body">
             {t.written_files.map((f) => (
               <li key={f.filename}>
-                <ExtLink url={f.web_url}>{f.filename}</ExtLink>{' '}
+                <button type="button" className="link-button" onClick={() => setViewFile(f.filename)}>
+                  {f.filename}
+                </button>{' '}
                 <span className="fine-print">{f.byte_size.toLocaleString('en-US')} B</span>
+                {f.web_url && (
+                  <>
+                    {' '}
+                    <span className="fine-print">
+                      <ExtLink url={f.web_url}>SharePoint ↗</ExtLink>
+                    </span>
+                  </>
+                )}
               </li>
             ))}
           </ul>
+          <WrittenFileViewer
+            batchId={t.collection_id}
+            targetId={t.id}
+            files={t.written_files}
+            index={viewIndex >= 0 ? viewIndex : null}
+            onIndexChange={(i) => setViewFile(t.written_files[i]?.filename ?? null)}
+            onClose={() => setViewFile(null)}
+          />
         </div>
       )}
       <FindingLinks target={t} />

@@ -14,6 +14,14 @@ one that needs action on an existing install.
 
 ### Added
 
+- **View a batch target's written files in the app.** On the Batches page, each file under
+  a target's **Written files** opens in a large in-app viewer (previous/next across the
+  target's files, Download, link to SharePoint): Markdown rendered with a source toggle,
+  PDFs embedded, JSON as a collapsible tree with table views for `page_map.json`,
+  `package.json`, `extraction_stats.json` and `links.json`. Served by the new
+  `GET /api/batches/{id}/targets/{target_id}/files?path=` from the stored copy; `path`
+  must match one of the target's `written_files` exactly, and text over 5 MB is
+  download-only. See [docs/batch-runs.md](docs/batch-runs.md#viewing-written-files).
 - **Attach documents from the chat composer.** A paperclip button and drag-and-drop
   on the composer upload files to the project's documents and attach them to the next
   turn (`document_ids` on `POST /api/chat/{id}/messages`); the model's user turn lists

@@ -1161,3 +1161,166 @@ def test_summarise_run_error():
     assert f("boom {not json}") == "boom"
     assert f("see https://x.example/a?b=1 for more\n details") == "see for more details"
     assert len(f("x" * 1000)) == 300
+
+
+# ── written file viewer ───────────────────────────────────────────────────────
+def _written(client, world, files=("allianz.pdf", "allianz.layout.md", "allianz.package.json")):
+    cid = _started(client, world)
+    fid = by_slug(detail(client, cid))["allianz"]["packages"][0]["finding_id"]
+    batch(client, [fid], "approve")
+    _package(client, world, fid, files=files)
+    t = by_slug(detail(client, cid))["allianz"]
+    assert t["status"] == "written"
+    return cid, t["id"], fid
+
+
+def test_a_written_file_is_served_inline_with_a_fixed_content_type(client, world):
+    cid, tid, fid = _written(client, world)
+    url = f"/api/collections/{cid}/targets/{tid}/files"
+    r = client.get(url, params={"path": "packages/allianz/allianz.layout.md"})
+    assert r.status_code == 200
+    assert r.content == f"bytes of allianz.layout.md for {fid}".encode()
+    assert r.headers["content-type"] == "text/markdown; charset=utf-8"
+    assert r.headers["content-disposition"].startswith('inline; filename="allianz.layout.md"')
+    assert "filename*=UTF-8''allianz.layout.md" in r.headers["content-disposition"]
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert r.headers["cache-control"] == "private, no-store"
+    pdf = client.get(url, params={"path": "packages/allianz/allianz.pdf"})
+    assert pdf.headers["content-type"] == "application/pdf"
+    js = client.get(url, params={"path": "packages/allianz/allianz.package.json"})
+    assert js.headers["content-type"] == "application/json"
+    # The batches route and the deprecated alias are the same handler.
+    assert client.get(url.replace("/collections/", "/batches/"), params={"path": "packages/allianz/allianz.pdf"}).status_code == 200
+
+
+def test_a_written_file_download_is_an_attachment(client, world):
+    cid, tid, _ = _written(client, world)
+    r = client.get(
+        f"/api/collections/{cid}/targets/{tid}/files",
+        params={"path": "packages/allianz/allianz.pdf", "download": "true"},
+    )
+    assert r.status_code == 200
+    assert r.headers["content-disposition"].startswith('attachment; filename="allianz.pdf"')
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["packages/allianz/../allianz/allianz.pdf", "../../etc/passwd", "packages/allianz/other.pdf",
+     "allianz.pdf", "/packages/allianz/allianz.pdf", ""],
+)
+def test_a_path_outside_written_files_is_a_404(client, world, path):
+    cid, tid, _ = _written(client, world)
+    r = client.get(f"/api/collections/{cid}/targets/{tid}/files", params={"path": path})
+    assert r.status_code == 404
+
+
+def test_a_written_file_in_another_workspace_is_a_404(client, world):
+    cid, tid, _ = _written(client, world)
+
+    async def move(db):
+        c = await db.get(Collection, uuid.UUID(cid))
+        c.workspace_id = world.other_ws.id
+        await db.commit()
+
+    run_db(client, world, move)
+    r = client.get(f"/api/collections/{cid}/targets/{tid}/files", params={"path": "packages/allianz/allianz.pdf"})
+    assert r.status_code == 404
+
+
+def test_a_missing_stored_file_is_a_404(client, world):
+    cid, tid, fid = _written(client, world)
+    (Path(world.tmp) / f"{fid}-allianz.pdf").unlink()
+    r = client.get(f"/api/collections/{cid}/targets/{tid}/files", params={"path": "packages/allianz/allianz.pdf"})
+    assert r.status_code == 404
+    assert "no longer in storage" in r.json()["detail"]
+
+
+def test_big_text_files_are_413_inline_but_pdfs_and_downloads_are_not(client, world, monkeypatch):
+    from tret.api import batches as batches_api
+
+    cid, tid, _ = _written(client, world)
+    monkeypatch.setattr(batches_api, "INLINE_TEXT_MAX_BYTES", 10)
+    url = f"/api/collections/{cid}/targets/{tid}/files"
+    r = client.get(url, params={"path": "packages/allianz/allianz.layout.md"})
+    assert r.status_code == 413
+    assert "allianz.layout.md" in r.json()["detail"] and "download it instead" in r.json()["detail"]
+    assert client.get(url, params={"path": "packages/allianz/allianz.pdf"}).status_code == 200
+    assert client.get(url, params={"path": "packages/allianz/allianz.layout.md", "download": "true"}).status_code == 200
+
+
+def _seed_written(client, world, cid, tid, entries, docs=()):
+    """Create Documents (project_id, filename, bytes) and set the target's written_files."""
+
+    async def go(db):
+        c = await db.get(Collection, uuid.UUID(cid))
+        made = []
+        for project_id, name, data in docs:
+            path = Path(world.tmp) / f"seed-{uuid.uuid4()}-{name}"
+            path.write_bytes(data)
+            d = Document(
+                id=uuid.uuid4(), project_id=project_id or c.project_id, filename=name,
+                content_type="text/html", byte_size=len(data), storage_path=str(path),
+                sha256=hashlib.sha256(data).hexdigest(), source_kind="package", meta={},
+            )
+            db.add(d)
+            made.append(str(d.id))
+        t = await db.get(CollectionTarget, uuid.UUID(tid))
+        t.written_files = [{**e, "document_id": e["document_id"].format(*made)} for e in entries]
+        await db.commit()
+
+    run_db(client, world, go)
+
+
+def _entry(filename, doc="{0}"):
+    return {"filename": filename, "web_url": "https://sp.example/x", "sha256": "0" * 64,
+            "byte_size": 3, "uploaded_at": "2026-11-06T00:00:00Z", "document_id": doc}
+
+
+def test_a_document_in_another_project_is_a_404(client, world):
+    cid, tid, _ = _written(client, world)
+    elsewhere = Project(id=uuid.uuid4(), workspace_id=world.ws.id, name="Elsewhere")
+
+    async def add_project(db):
+        db.add(elsewhere)
+        await db.commit()
+
+    run_db(client, world, add_project)
+    _seed_written(client, world, cid, tid, [_entry("packages/x/a.md")], docs=[(elsewhere.id, "a.md", b"abc")])
+    r = client.get(f"/api/collections/{cid}/targets/{tid}/files", params={"path": "packages/x/a.md"})
+    assert r.status_code == 404
+
+
+def test_a_malformed_document_id_is_a_404(client, world):
+    cid, tid, _ = _written(client, world)
+    _seed_written(client, world, cid, tid, [_entry("packages/x/a.md", "not-a-uuid"), _entry("packages/x/b.md", "None")])
+    for p in ("packages/x/a.md", "packages/x/b.md"):
+        assert client.get(f"/api/collections/{cid}/targets/{tid}/files", params={"path": p}).status_code == 404
+
+
+def test_a_reuploaded_filename_serves_the_newest_entry(client, world):
+    cid, tid, _ = _written(client, world)
+    _seed_written(
+        client, world, cid, tid,
+        [_entry("packages/x/a.md", "{0}"), _entry("packages/x/a.md", "{1}")],
+        docs=[(None, "a.md", b"old"), (None, "a.md", b"new")],
+    )
+    r = client.get(f"/api/collections/{cid}/targets/{tid}/files", params={"path": "packages/x/a.md"})
+    assert r.status_code == 200 and r.content == b"new"
+
+
+def test_an_unknown_extension_is_octet_stream(client, world):
+    cid, tid, _ = _written(client, world)
+    _seed_written(client, world, cid, tid, [_entry("packages/x/a.bin")], docs=[(None, "a.bin", b"abc")])
+    r = client.get(f"/api/collections/{cid}/targets/{tid}/files", params={"path": "packages/x/a.bin"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/octet-stream"
+
+
+def test_a_non_ascii_filename_gets_an_ascii_fallback_and_rfc5987_name(client, world):
+    cid, tid, _ = _written(client, world)
+    _seed_written(client, world, cid, tid, [_entry("packages/x/zürich.md")], docs=[(None, "zürich.md", b"abc")])
+    r = client.get(f"/api/collections/{cid}/targets/{tid}/files", params={"path": "packages/x/zürich.md"})
+    assert r.status_code == 200 and r.content == b"abc"
+    cd = r.headers["content-disposition"]
+    assert 'filename="z?rich.md"' in cd
+    assert "filename*=UTF-8''z%C3%BCrich.md" in cd

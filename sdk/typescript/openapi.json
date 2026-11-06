@@ -3174,6 +3174,77 @@
         ]
       }
     },
+    "/api/batches/{collection_id}/targets/{target_id}/files": {
+      "get": {
+        "description": "The bytes of one file written for a target (a package file uploaded to\nSharePoint), for the in-app viewer. `path` must exactly match a live\n`written_files` filename; the content type comes from a fixed allowlist by\nextension, never from the stored row.",
+        "operationId": "get_target_file_api_batches__collection_id__targets__target_id__files_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "target_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Target Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "download",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Download",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Target File",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
     "/api/batches/{collection_id}/targets/{target_id}/retry": {
       "post": {
         "operationId": "retry_target_api_batches__collection_id__targets__target_id__retry_post",
@@ -3848,6 +3919,78 @@
           }
         },
         "summary": "Start Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/{collection_id}/targets/{target_id}/files": {
+      "get": {
+        "deprecated": true,
+        "description": "The bytes of one file written for a target (a package file uploaded to\nSharePoint), for the in-app viewer. `path` must exactly match a live\n`written_files` filename; the content type comes from a fixed allowlist by\nextension, never from the stored row.",
+        "operationId": "get_target_file_api_collections__collection_id__targets__target_id__files_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "target_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Target Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "download",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Download",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Target File",
         "tags": [
           "batches"
         ]
