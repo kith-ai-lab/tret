@@ -281,6 +281,25 @@ the workspace, the same as creating a batch on the page; a CSV `document_id` mus
 `text/csv`, `text/plain` or `.csv` document of at most 2 MB; while the server is draining
 for a deploy the tool asks for a retry in a minute.
 
+**Disclosure collections.** `start_batch` also takes `profile: "disclosure"`, which starts
+the Kith disclosure collection (the Disclosure Collector harness over a register of
+companies, written to an M365 write target) instead of a prompt batch. Give the register as
+`register_document_id` (a CSV document of the workspace, at most 2 MB) or `register_csv`
+(inline text), and `target_slug` (required: the write target). `run_slug` defaults to
+`<today>-<name>`, `write_root` to `runs`, `fiscal_year` to 2025, `auto_write` to true; a
+taken `run_slug` comes back as the tool error and the model passes another.
+`concurrency`, `first_batch_size`, `model_override` and `max_iterations` are shared; the
+prompt-only parameters (`template`, `rows`, `document_id`, `label_column`, `review_schema`,
+`harness_id`) and the disclosure-only ones are refused for the other profile. The result adds
+`profile`, and, when the batch has warnings, the first five as `warnings` plus
+`warnings_count` (the stored warning lines; the last may be a summary line such as "... and N more"). `estimated_cost_usd` is the Disclosure Collector's per-run cap ($8)
+times the targets. Example:
+
+```json
+{"name": "Stage 1 (48)", "profile": "disclosure", "register_document_id": "<csv document id>",
+ "target_slug": "disclosures", "first_batch_size": 12}
+```
+
 **Batch or delegation.** The tool descriptions give the model the rule: a batch is for
 work that is large (tens to hundreds of rows), unattended, must be reviewable or
 auditable later, or whose answers nobody needs in this turn. For a few independent items
@@ -295,8 +314,8 @@ settle. While the parent run is still running the roll-up waits, so a batch cann
 the turn's own cost cap; it catches up on the next settle (or recompute) once the parent
 has finished.
 
-In the chat, a successful `start_batch` shows a card under the reply (name, target count,
-status, cost, a link to the batch page) that refreshes while the batch is running.
+In the chat, a successful `start_batch` shows a card under the reply (name, profile, target
+count, status, cost, register warnings if any, a link to the batch page) that refreshes while the batch is running.
 
 ## From the command line
 

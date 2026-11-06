@@ -395,14 +395,20 @@ COLLECTION_HARNESS_MODEL_POLICY = {
 # policy is an operator's and is left alone.
 _LEGACY_COLLECTION_MODEL_POLICY = {"mode": "auto", "max_cost_tier": "standard"}
 # A 380-page annual report with an embedded sustainability statement needs more
-# than 24 iterations to locate, read and map; the seed is raised to 40. A harness
-# whose loop_config equals the previous seed was never edited, so boot upgrades it.
-COLLECTION_HARNESS_LOOP_CONFIG = {"max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3}
-_PREVIOUS_COLLECTION_HARNESS_LOOP_CONFIG = {
-    "max_iterations": 24,
+# than 24 iterations to locate, read and map; the seed is raised to 40, and a run
+# is capped at $8 (the engine default of $5 stopped long reports mid-map). A
+# harness whose loop_config equals any previous seed was never edited, so boot
+# upgrades it.
+COLLECTION_HARNESS_LOOP_CONFIG = {
+    "max_iterations": 40,
     "max_output_tokens": 4096,
     "temperature": 0.3,
+    "max_cost_usd": 8.0,
 }
+_PREVIOUS_COLLECTION_HARNESS_LOOP_CONFIGS = (
+    {"max_iterations": 24, "max_output_tokens": 4096, "temperature": 0.3},
+    {"max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3},
+)
 
 
 async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
@@ -437,7 +443,7 @@ async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
     (`COLLECTION_HARNESS_MODEL_POLICY`). An existing harness whose policy is
     still exactly the previous seed value is moved to it; an edited policy is
     never touched. The same holds, independently, for `loop_config`
-    (`COLLECTION_HARNESS_LOOP_CONFIG`, 40 iterations).
+    (`COLLECTION_HARNESS_LOOP_CONFIG`, 40 iterations, $8 cap).
     """
     existing = (
         await db.execute(
@@ -452,7 +458,7 @@ async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
             existing.tool_names = [*(existing.tool_names or []), *missing]
         if existing.model_policy == _LEGACY_COLLECTION_MODEL_POLICY:
             existing.model_policy = dict(COLLECTION_HARNESS_MODEL_POLICY)
-        if existing.loop_config == _PREVIOUS_COLLECTION_HARNESS_LOOP_CONFIG:
+        if existing.loop_config in _PREVIOUS_COLLECTION_HARNESS_LOOP_CONFIGS:
             existing.loop_config = dict(COLLECTION_HARNESS_LOOP_CONFIG)
         return
     if effective_mode(CLASS_RESEARCH) == MODE_OFF:

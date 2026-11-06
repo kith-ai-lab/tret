@@ -219,6 +219,13 @@ which is the case in the shipped images. Without it the packager falls back to
 sources get one attempt at the empty password, which is how issuers usually ship
 them; anything needing a real password is refused.
 
+The check that retained pages match the source runs `pdftotext -f/-l` over only the
+selected page ranges of the source, so a 600-page report is not extracted whole. If
+Poppler times out or fails on the source, packaging still succeeds, the manifest records
+`verification.oracle: {status: skipped, reason}`, and the package's limitations say the
+pages were not compared with the source text. A Poppler failure on the retained subset
+still fails packaging.
+
 When a reader opens a package document with `read_document`, the banner says it is
 a reviewed package extract derived from the source document and gives the retained
 SHA-256 and `text_mode`. It still says that no number in it may be cited.
@@ -247,6 +254,12 @@ pick a standard-tier model. `min_cost_tier` is a hard floor, honoured wherever
 fails with "No candidate models". A harness still carrying the previous seed policy
 (`{"mode": "auto", "max_cost_tier": "standard"}`, exactly) is upgraded at boot; a policy
 an operator has edited is left alone.
+
+The seeded `loop_config` is 40 iterations, 4096 output tokens, temperature 0.3 and a
+`max_cost_usd` of 8.0: each run is capped at $8 (the engine default of $5 stopped long
+reports mid-map). A harness still carrying either previous seed `loop_config` exactly (24
+or 40 iterations, no cap) is upgraded at boot; one an operator has edited keeps its own,
+including its own cost cap.
 
 Two per-run limits keep a run that cannot reach a source from spinning:
 `TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN` (default 12) caps `web_search`, and when a
@@ -326,6 +339,11 @@ EU. The warnings show in a box on the collection and are copied into
 `target_register.json`. A register that trips them can still be run.
 
 ### Creating a collection
+
+A collection can also be started from a chat with `start_batch` (`profile: "disclosure"`),
+giving the register as an attached CSV document (`register_document_id`) or inline text
+(`register_csv`) and the write target as `target_slug`. It creates the same batch as the
+form below, with the chat's run as its parent; see [batch-runs.md](batch-runs.md).
 
 On the Collections page choose New collection. The write target must be a Microsoft 365
 write target that an admin has already connected with write access (Settings,
@@ -536,9 +554,9 @@ before raising concurrency on a small database.
 
 Text extraction of a captured PDF over 2 MB gets at least 180 seconds, and a budget
 that grows with the file beyond about 37 MiB: 30 seconds plus 4 seconds per MiB, at most
-240 seconds (a 48 MB registration document gets about 215 seconds). Poppler itself is
-allowed the same time, where it used to be stopped at 120 seconds while the caller
-waited on. Uploads of package files to SharePoint send 5 MiB chunks with a
+600 seconds (a 48 MB registration document gets about 222 seconds; the cap is reached at
+about 142 MiB). Poppler itself is allowed the same time, where it used to be stopped at
+120 seconds while the caller waited on. Uploads of package files to SharePoint send 5 MiB chunks with a
 180-second timeout each, and a target whose upload still fails is `write_failed`
 and can be retried from the Collections page without re-running the model.
 

@@ -183,3 +183,16 @@
   margin-left: auto;
   color: inherit;
 }
+
+.bc-profile {
+  padding: 0 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  font-size: 10.5px;
+  text-transform: lowercase;
+  color: var(--text-muted);
+}
+
+.bc-link-warn {
+  color: var(--amber);
+}
