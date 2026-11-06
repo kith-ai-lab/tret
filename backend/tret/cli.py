@@ -255,6 +255,13 @@ def _print_storage_status(info: dict) -> None:
         if info.get("region"):
             print(f"region:    {info['region']}")
         print(f"cache:     {info['cache_dir']} ({_fmt_bytes(info.get('cache_bytes', 0))} of {info['cache_max_mb']} MB max)")
+        if "cache_floor_bytes" in info:
+            print(
+                f"           packages {_fmt_bytes(info['cache_packages_bytes'])}, "
+                f"pinned {_fmt_bytes(info['cache_pinned_bytes'])}, "
+                f"non-evictable floor {_fmt_bytes(info['cache_floor_bytes'])}, "
+                f"evictable {_fmt_bytes(info['cache_evictable_bytes'])}"
+            )
     else:
         print(f"directory: {info['root']}")
     print(f"objects:   {info['objects']} ({_fmt_bytes(info['bytes'])})")

@@ -169,6 +169,13 @@ one that needs action on an existing install.
 
 ### Fixed
 
+- **S3 cache eviction thrash.** With the cache cap below the never-evicted floor, every
+  `put` or `local_path` unlinked every other blob older than 60 s and concurrent readers
+  lost files ("The stored source file is missing"). Packager outputs under `packages/`
+  are now ordinary cache after the run (pinned only while it runs), eviction accounts
+  the cap over evictable files and re-checks each file before unlinking, writers
+  re-create a pruned directory, `local_path` re-downloads a file that vanished
+  underneath it, and `tret storage status` reports the pinned/in-progress floor.
 - **Collections page: Max iterations field.** The New collection form now sends
   `max_iterations` (1–50) as the docs described, and the collection header shows the cap.
 - The OAuth connection callback refuses a workspace that was archived after

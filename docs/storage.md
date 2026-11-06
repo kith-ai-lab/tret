@@ -75,14 +75,21 @@ Document row (orphans) are not moved.
 ### `tret storage status`
 
 Prints the backend, bucket and endpoint (never credentials), object count and bytes, the cache
-size, and how many Document rows have a `storage_key`.
+size, and how many Document rows have a `storage_key`. On s3 it also reports
+`cache_packages_bytes`, `cache_pinned_bytes`, `cache_floor_bytes` (the non-evictable floor),
+`cache_evictable_bytes` and `cache_max_mb`.
 
 ## Operating notes
 
 - The migration uploads without filling the cache, so it does not grow the volume.
-- Cache eviction never touches `cache/packages/`, dot-prefixed staging directories, or a
-  file pinned by a running packaging job; `cache/packages/` therefore grows with the
-  packages you create (small, and evidence).
+- Cache eviction never touches a file that is pinned (or sits under a pinned directory, as a
+  running packaging job's `cache/packages/<finding_id>/` does) or lives under a dot-prefixed
+  in-progress directory or file. `.tmp-*` downloads older than an hour are crash debris and are
+  evicted. Everything else, including `cache/packages/` after a run finishes, is ordinary
+  cache: the bucket holds every output and `local_path` downloads it again on demand.
+- The pinned and in-progress files are a floor under the cap. If the floor exceeds
+  `TRET_STORAGE_CACHE_MAX_MB`, tret logs one warning (at most every 10 minutes) with both
+  numbers; raise the cap or run fewer packaging jobs at once.
 - Imports create objects with create-if-absent (`If-None-Match: *`). If an endpoint does not
   support that header, tret logs one warning and falls back to check-then-write.
 

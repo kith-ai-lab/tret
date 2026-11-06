@@ -36,6 +36,9 @@ async def status(store: BlobStore, session_factory: Any = None) -> dict[str, Any
     cache_size = getattr(store, "cache_size_bytes", None)
     if cache_size is not None:
         out["cache_bytes"] = await asyncio.to_thread(cache_size)
+    cache_status = getattr(store, "cache_status", None)
+    if cache_status is not None:
+        out.update(await asyncio.to_thread(cache_status))
     out["documents"] = None
     if session_factory is not None:
         from sqlalchemy import func, select

@@ -27,6 +27,10 @@ _NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound"}
 # A cache file this fresh is never evicted: it was just staged for a reader that
 # may not have opened it yet. The cache cap is therefore soft by this much.
 _EVICT_GRACE_SECONDS = 60.0
+_ORPHAN_TMP_SECONDS = 3600.0  # a `.tmp-*` download older than this is a crashed download's debris
+_FLOOR_WARN_INTERVAL = 600.0
+_PRUNABLE_ROOTS = ("packages", "batches")
+_STAGE_ORPHAN_SECONDS = 600 + 600  # PACKAGING_TIMEOUT_SECONDS + 10 minutes
 _CHUNK = 1024 * 1024
 _PRECONDITION_CODES = {"PreconditionFailed", "412"}
 _UNSUPPORTED_CODES = {"NotImplemented", "501"}
@@ -85,6 +89,7 @@ class S3Store:
         self._client_lock = threading.Lock()
         self._conditional_writes = True  # flips off if the endpoint rejects If-None-Match
         self._evict_lock = asyncio.Lock()
+        self._floor_warned_at = 0.0
 
     # ── plumbing ─────────────────────────────────────────────────────────────
     def _s3(self) -> Any:
@@ -189,8 +194,7 @@ class S3Store:
         if isinstance(data, Path):
             if data.resolve() != cached.resolve():
                 if move:
-                    cached.parent.mkdir(parents=True, exist_ok=True)
-                    await asyncio.to_thread(os.replace, data, cached)
+                    await asyncio.to_thread(self._replace_into, data, cached)
                 else:
                     await asyncio.to_thread(copy_atomic, cached, data)
         else:
@@ -199,6 +203,17 @@ class S3Store:
             )
         await self._evict(keep=cached)
         return True
+
+    @staticmethod
+    def _replace_into(source: Path, target: Path) -> None:
+        for attempt in (0, 1):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(source, target)
+                return
+            except FileNotFoundError:
+                if attempt or not source.exists():
+                    raise
 
     def pin(self, path: Path) -> None:
         pin_path(path)
@@ -217,17 +232,28 @@ class S3Store:
             if _is_not_found(e):
                 raise FileNotFoundError(key) from e
             raise
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = tempfile.NamedTemporaryFile(dir=target.parent, prefix=".tmp-", delete=False)
-        try:
-            with tmp:
-                while chunk := body.read(_CHUNK):
-                    tmp.write(chunk)
-            os.chmod(tmp.name, 0o644)
-            os.replace(tmp.name, target)
-        except BaseException:
-            Path(tmp.name).unlink(missing_ok=True)
-            raise
+        for attempt in (0, 1):
+            # A concurrent prune can rmdir the emptied directory under us; recreate, retry once.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = None
+            try:
+                tmp = tempfile.NamedTemporaryFile(dir=target.parent, prefix=".tmp-", delete=False)
+                with tmp:
+                    while chunk := body.read(_CHUNK):
+                        tmp.write(chunk)
+                os.chmod(tmp.name, 0o644)
+                os.replace(tmp.name, target)
+                return
+            except FileNotFoundError:
+                if tmp is not None:
+                    Path(tmp.name).unlink(missing_ok=True)
+                if attempt:
+                    raise
+                body = self._s3().get_object(Bucket=self.bucket, Key=key)["Body"]
+            except BaseException:
+                if tmp is not None:
+                    Path(tmp.name).unlink(missing_ok=True)
+                raise
 
     async def local_path(self, key: str) -> Path:
         path = self._cache_path(key)
@@ -236,6 +262,10 @@ class S3Store:
         else:
             await asyncio.to_thread(self._download_sync, key, path)
         await self._evict(keep=path)
+        if not await asyncio.to_thread(path.is_file):
+            # Another worker's eviction raced the touch; the bucket still has it.
+            log.info("cache file %s vanished after staging; downloading it again", key)
+            await asyncio.to_thread(self._download_sync, key, path)
         return path
 
     async def get(self, key: str) -> bytes:
@@ -311,6 +341,77 @@ class S3Store:
     def cache_size_bytes(self) -> int:
         return sum(size for _p, _m, size in self.cache_files())
 
+    def classify_cache(
+        self, keep: Path | None = None, files: list[tuple[Path, float, int]] | None = None
+    ) -> tuple[list[tuple[Path, float, int]], list[tuple[Path, float, int]]]:
+        """Split the cache into (non-evictable, evictable-sorted-oldest-first).
+
+        Non-evictable: `keep`, pinned paths (or under a pinned directory), and
+        dot-prefixed segments (in-progress temp work), except `.tmp-*` files older than
+        an hour, which are orphans of crashed downloads. Eviction and `tret storage
+        status` both use this so they cannot disagree.
+        """
+        if files is None:
+            files = self.cache_files()
+        keep_r = keep.resolve() if keep is not None else None
+        now = time.time()
+        fixed: list[tuple[Path, float, int]] = []
+        evictable: list[tuple[Path, float, int]] = []
+        rels = {}
+        for entry in files:
+            try:
+                rels[entry[0]] = entry[0].relative_to(self.cache_root).parts
+            except ValueError:
+                rels[entry[0]] = ()
+        # A `.packaging-stage-*` directory whose newest file is older than the packaging
+        # timeout (plus slack) is debris of a crashed run, not work in progress.
+        newest: dict[tuple[str, ...], float] = {}
+        for path, mtime, _size in files:
+            rel = rels[path]
+            for i, part in enumerate(rel[:-1]):
+                if part.startswith(".packaging-stage-"):
+                    newest[rel[: i + 1]] = max(newest.get(rel[: i + 1], 0.0), mtime)
+        dead_stages = {k for k, m in newest.items() if now - m > _STAGE_ORPHAN_SECONDS}
+
+        def dot_segment_ok(rel: tuple[str, ...], i: int, mtime: float) -> bool:
+            part = rel[i]
+            if part.startswith(".tmp-") and i == len(rel) - 1:
+                return now - mtime > _ORPHAN_TMP_SECONDS
+            if part.startswith(".packaging-stage-") and i < len(rel) - 1:
+                return rel[: i + 1] in dead_stages
+            return False
+
+        for entry in files:
+            path, mtime, _size = entry
+            rel = rels[path]
+            if not rel or (keep_r is not None and path.resolve() == keep_r) or is_pinned(path):
+                fixed.append(entry)
+            elif all(
+                dot_segment_ok(rel, i, mtime) for i, part in enumerate(rel) if part.startswith(".")
+            ):
+                evictable.append(entry)
+            else:
+                fixed.append(entry)
+        evictable.sort(key=lambda f: f[1])
+        return fixed, evictable
+
+    def cache_breakdown(self) -> dict[str, int]:
+        files = self.cache_files()
+        fixed, evictable = self.classify_cache(files=files)
+        pinned = sum(size for p, _m, size in fixed if is_pinned(p))
+        packages = sum(
+            size
+            for p, _m, size in files
+            if p.relative_to(self.cache_root).parts[:1] == ("packages",)
+        )
+        floor = sum(size for _p, _m, size in fixed)
+        return {
+            "cache_packages_bytes": packages,
+            "cache_pinned_bytes": pinned,
+            "cache_floor_bytes": floor,
+            "cache_evictable_bytes": sum(size for _p, _m, size in evictable),
+        }
+
     def _evict_sync(self, keep: Path) -> None:
         limit = self.cache_max_mb * 1024 * 1024
         if limit <= 0:
@@ -319,25 +420,48 @@ class S3Store:
         total = sum(size for _p, _m, size in files)
         if total <= limit:
             return
+        fixed, evictable = self.classify_cache(keep, files)
+        floor = sum(size for _p, _m, size in fixed)
         now = time.time()
-        keep = keep.resolve()
-        for path, mtime, size in sorted(files, key=lambda f: f[1]):
+        if floor > limit and now - self._floor_warned_at >= _FLOOR_WARN_INTERVAL:
+            self._floor_warned_at = now
+            log.warning(
+                "storage cache floor (%d bytes pinned or in progress) exceeds "
+                "TRET_STORAGE_CACHE_MAX_MB (%d bytes); raise the cap or run fewer "
+                "packaging jobs at once",
+                floor,
+                limit,
+            )
+        for path, _mtime, _size in evictable:
             if total <= limit:
                 break
-            if path.resolve() == keep or is_pinned(path):
+            # The snapshot may be stale: another worker can have touched, pinned or
+            # removed the file since. Re-check right before unlinking.
+            try:
+                st = path.stat()
+            except FileNotFoundError:
                 continue
-            rel = path.relative_to(self.cache_root).parts
-            # Dot-prefixed segments are staging/temp work in progress; `packages/` holds
-            # packager inputs and evidence a long run still reads. Neither is evictable.
-            if rel[0] == "packages" or any(part.startswith(".") for part in rel):
-                continue
-            if now - mtime < _EVICT_GRACE_SECONDS:
+            if time.time() - st.st_mtime < _EVICT_GRACE_SECONDS or is_pinned(path):
                 continue
             try:
                 path.unlink()
             except FileNotFoundError:
-                pass
-            total -= size
+                continue
+            total -= st.st_size
+            self._prune_empty_dirs(path.parent)
+
+    def _prune_empty_dirs(self, directory: Path) -> None:
+        root = self.cache_root
+        # Only the per-run directories (packages/<id>, batches/<id>) are ever pruned;
+        # any other prefix may be mid-creation by a writer. Callers hold the evict lock.
+        while directory != root and directory.is_relative_to(root):
+            if directory.relative_to(root).parts[0] not in _PRUNABLE_ROOTS:
+                return
+            try:
+                directory.rmdir()
+            except OSError:
+                return  # not empty (or gone)
+            directory = directory.parent
 
     async def _evict(self, *, keep: Path) -> None:
         if self.cache_max_mb <= 0:
@@ -354,3 +478,6 @@ class S3Store:
             "cache_dir": str(self.cache_root),
             "cache_max_mb": self.cache_max_mb,
         }
+
+    def cache_status(self) -> dict[str, int]:
+        return self.cache_breakdown()

@@ -116,7 +116,13 @@ def unpin_path(path: Path) -> None:
 
 
 def is_pinned(path: Path) -> bool:
-    return str(Path(path).resolve()) in _PINS
+    """True when `path` or any ancestor directory is pinned."""
+    if not _PINS:
+        return False
+    p = Path(path).resolve()
+    if str(p) in _PINS:
+        return True
+    return any(str(parent) in _PINS for parent in p.parents)
 
 
 @contextlib.asynccontextmanager

@@ -217,7 +217,7 @@ async def test_put_without_cache_does_not_populate_the_cache(tmp_path):
     assert not (store.cache_root / "j").exists()
 
 
-async def test_eviction_skips_pinned_dot_and_packages_paths(tmp_path):
+async def test_eviction_skips_pinned_and_dot_paths_and_packages_only_while_pinned(tmp_path):
     store, fake = make(tmp_path, cache_max_mb=1)
     cache = store.cache_root
     victims = {
@@ -229,14 +229,20 @@ async def test_eviction_skips_pinned_dot_and_packages_paths(tmp_path):
     for path in victims.values():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"x" * 400_000)
-        age(path)
+        age(path, 600 if path.parent.name.startswith(".") else 3600)  # live stage dir
     store.pin(victims["pinned.bin"])
+    store.pin(cache / "packages/F")
     fake.objects["new"] = b"y"
     await store.local_path("new")  # triggers eviction: 1.6 MB cached, 1 MB cap
     assert not victims["plain.bin"].exists()
     for name in ("pinned.bin", ".packaging-stage-1/src.pdf", "packages/F/out.pdf"):
         assert victims[name].exists(), name
     store.unpin(victims["pinned.bin"])
+    store.unpin(cache / "packages/F")
+    store.cache_max_mb = 0.5
+    await store.local_path("new")  # packages/ is ordinary cache once unpinned
+    assert not victims["packages/F/out.pdf"].exists()
+    assert not (cache / "packages/F").exists()  # empty dir pruned
     async with store.pinned(victims["pinned.bin"]):
         from tret.storage import is_pinned
 
@@ -265,3 +271,177 @@ def test_client_is_built_from_a_dedicated_session_with_relaxed_checksums(tmp_pat
     seen.clear()
     S3Store(storage_dir=tmp_path, bucket="b", endpoint_url="https://e.example", region="eu-1")._s3()
     assert seen["region_name"] == "eu-1"
+
+
+MB = 1024 * 1024
+
+
+def _snapshot_then_touch(store, path):
+    snap = store.cache_files()
+    os.utime(path)
+    return snap
+
+
+async def test_stale_snapshot_floor_above_cap_terminates_and_spares_touched_file(tmp_path):
+    from tret.storage import pin_path, unpin_path
+
+    store, _ = make(tmp_path, cache_max_mb=1)
+    c = store.cache_root
+    c.mkdir(parents=True)
+    pinned = c / "pin.bin"
+    pinned.write_bytes(b"x" * (2 * MB))
+    touched, stale = c / "touched", c / "stale"
+    touched.write_bytes(b"y" * 100_000)
+    stale.write_bytes(b"y" * 100_000)
+    age(touched)
+    age(stale)
+    pin_path(pinned)
+    try:
+        snap = store.cache_files()  # mtimes read before the touch
+        os.utime(touched)  # another worker's local_path touches it
+        store.cache_files = lambda: snap  # type: ignore[method-assign]
+        store._evict_sync(c / "other")
+    finally:
+        unpin_path(pinned)
+    assert touched.exists() and pinned.exists()
+    assert not stale.exists()
+
+
+async def test_directory_pin_protects_children_until_unpinned(tmp_path):
+    from tret.storage import is_pinned
+
+    store, _ = make(tmp_path, cache_max_mb=1)
+    d = store.cache_root / "packages/F1"
+    d.mkdir(parents=True)
+    a, b = d / "a.pdf", d / "b.pdf"
+    a.write_bytes(b"x" * 600_000)
+    b.write_bytes(b"x" * 600_000)
+    age(a, 7200)
+    age(b, 3600)
+    store.pin(d)
+    assert is_pinned(a) and not is_pinned(store.cache_root / "packages/F2/a.pdf")
+    store._evict_sync(store.cache_root / "none")
+    assert a.exists() and b.exists()
+    store.unpin(d)
+    assert not is_pinned(a)
+    store._evict_sync(store.cache_root / "none")
+    assert not a.exists() and b.exists()  # oldest first, stops under the cap
+    age(b, 7200)
+    store.cache_max_mb = 0.1
+    store._evict_sync(store.cache_root / "none")
+    assert not d.exists() and store.cache_root.exists()
+
+
+async def test_floor_warning_is_rate_limited(tmp_path, caplog):
+    import logging
+
+    store, _ = make(tmp_path, cache_max_mb=1)
+    f = store.cache_root / ".packaging-x/big"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"x" * (2 * MB))
+    with caplog.at_level(logging.WARNING, logger="tret.storage"):
+        store._evict_sync(store.cache_root / "none")
+        store._evict_sync(store.cache_root / "none")
+    assert sum("floor" in r.message for r in caplog.records) == 1
+    store._floor_warned_at -= 601
+    with caplog.at_level(logging.WARNING, logger="tret.storage"):
+        store._evict_sync(store.cache_root / "none")
+    assert sum("floor" in r.message for r in caplog.records) == 2
+
+
+async def test_local_path_redownloads_a_file_that_vanished(tmp_path, monkeypatch):
+    store, fake = make(tmp_path)
+    fake.objects["k"] = b"data"
+    path = await store.local_path("k")
+    path.unlink()  # another worker evicted it
+    assert (await store.local_path("k")).read_bytes() == b"data"
+
+    real = store._evict
+
+    async def evil(*, keep):
+        keep.unlink(missing_ok=True)
+
+    monkeypatch.setattr(store, "_evict", evil)
+    again = await store.local_path("k")
+    assert again.read_bytes() == b"data"
+    monkeypatch.setattr(store, "_evict", real)
+
+
+async def test_orphan_tmp_files_are_evicted_only_when_old(tmp_path):
+    store, _ = make(tmp_path, cache_max_mb=1)
+    c = store.cache_root
+    c.mkdir(parents=True)
+    old, fresh = c / ".tmp-old", c / ".tmp-fresh"
+    old.write_bytes(b"x" * 700_000)
+    fresh.write_bytes(b"x" * 700_000)
+    age(old, 7200)
+    age(fresh, 600)
+    store._evict_sync(c / "none")
+    assert not old.exists() and fresh.exists()
+
+
+async def test_cache_status_fields_are_consistent(tmp_path):
+    from tret.storage import admin
+
+    store, fake = make(tmp_path, cache_max_mb=50)
+    c = store.cache_root
+    (c / "packages/F").mkdir(parents=True)
+    (c / "packages/F/o.pdf").write_bytes(b"x" * 1000)
+    (c / "plain").write_bytes(b"y" * 500)
+    (c / ".staging").mkdir()
+    (c / ".staging/s").write_bytes(b"z" * 200)
+    store.pin(c / "packages/F")
+    try:
+        out = await admin.status(store)
+    finally:
+        store.unpin(c / "packages/F")
+    assert out["cache_max_mb"] == 50
+    assert out["cache_packages_bytes"] == 1000 and out["cache_pinned_bytes"] == 1000
+    assert out["cache_floor_bytes"] == 1200 and out["cache_evictable_bytes"] == 500
+    assert out["cache_floor_bytes"] + out["cache_evictable_bytes"] == out["cache_bytes"]
+
+
+async def test_download_survives_a_pruned_directory_mid_download(tmp_path, monkeypatch):
+    import tempfile as tf
+
+    store, fake = make(tmp_path)
+    fake.objects["packages/F/x.pdf"] = b"data"
+    real = tf.NamedTemporaryFile
+    calls = []
+
+    def flaky(*a, **kw):
+        if not calls:
+            calls.append(1)
+            kw["dir"].rmdir()  # eviction pruned the dir after mkdir
+        return real(*a, **kw)
+
+    monkeypatch.setattr("tret.storage.s3.tempfile.NamedTemporaryFile", flaky)
+    path = await store.local_path("packages/F/x.pdf")
+    assert path.read_bytes() == b"data" and calls
+
+
+async def test_pruning_is_limited_to_packages_and_batches(tmp_path):
+    store, _ = make(tmp_path, cache_max_mb=0.05)
+    c = store.cache_root
+    for rel in ("packages/F/a", "other/G/a"):
+        (c / rel).parent.mkdir(parents=True, exist_ok=True)
+        (c / rel).write_bytes(b"x" * 100_000)
+        age(c / rel)
+    store._evict_sync(c / "none")
+    assert not (c / "packages/F").exists() and not (c / "other/G/a").exists()
+    assert (c / "other/G").exists() and c.exists()
+
+
+async def test_crashed_packaging_stage_dirs_are_evictable_when_old(tmp_path):
+    store, _ = make(tmp_path, cache_max_mb=1)
+    c = store.cache_root
+    old, fresh = c / "packages/.packaging-stage-old/s.pdf", c / "packages/.packaging-stage-new/s.pdf"
+    for f in (old, fresh):
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x" * 700_000)
+    age(old, 3 * 3600)
+    age(fresh, 300)
+    fixed, evictable = store.classify_cache()
+    assert [p for p, _m, _s in evictable] == [old] and [p for p, _m, _s in fixed] == [fresh]
+    store._evict_sync(c / "none")
+    assert not old.exists() and fresh.exists()
