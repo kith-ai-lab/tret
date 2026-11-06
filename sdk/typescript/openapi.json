@@ -1312,6 +1312,14 @@
       },
       "SendMessageBody": {
         "properties": {
+          "document_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Document Ids",
+            "type": "array"
+          },
           "model_override": {
             "anyOf": [
               {

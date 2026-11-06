@@ -10,6 +10,13 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Attach documents from the chat composer.** A paperclip button and drag-and-drop
+  on the composer upload files to the project's documents and attach them to the next
+  turn (`document_ids` on `POST /api/chat/{id}/messages`); the model's user turn lists
+  each attachment's id and filename so `read_document`, `search_documents` and
+  `start_batch`'s `register_document_id` can use them, and the user message shows the
+  attachments as chips linking to the Documents page. A turn with attachments is
+  attached-only for document tools; the next turn without any is project-wide again.
 - **Batches from chat and the command line.** The chat harness gains `start_batch`,
   `batch_status` and `batch_results`: a turn can start a durable prompt batch over
   inline rows or a CSV document, read how it is going and synthesise its results later,

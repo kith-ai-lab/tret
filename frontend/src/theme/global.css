@@ -1152,6 +1152,17 @@ input[type="radio"] {
   word-break: break-word;
 }
 
+/* Attachment chips under a sent message. The bubble is --bg-panel with a
+   --border outline, so the chip's --bg-input fill and muted text stay legible
+   in both themes. */
+.chat-bubble-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  white-space: normal;
+}
+
 .chat-turn.assistant {
   display: flex;
   gap: 14px;
@@ -1429,6 +1440,131 @@ input[type="radio"] {
 
 .chat-inputbox textarea:focus {
   border: none;
+}
+
+.chat-attach {
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  margin-left: -8px;
+  border-radius: 10px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.chat-attach:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.chat-attach:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.chat-attach:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.chat-composer.drag .chat-inputbox {
+  border: 1px dashed var(--accent);
+  background: var(--accent-dim);
+}
+
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.chat-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text);
+  background: var(--bg-input);
+}
+
+.chat-attachment-chip svg {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  color: var(--text-muted);
+}
+
+.chat-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-attachment-meta {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.chat-attachment-chip.uploading {
+  color: var(--text-muted);
+}
+
+.chat-attachment-chip.error {
+  color: var(--red);
+  background: var(--red-dim);
+  border-color: var(--red-border);
+}
+
+.chat-attachment-chip.error .chat-attachment-meta,
+.chat-attachment-chip.error svg {
+  color: var(--red);
+}
+
+.chat-attachment-chip.link {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.chat-attachment-chip.link:hover,
+.chat-attachment-chip.link:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  text-decoration: underline;
+}
+
+.chat-attachment-remove {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.chat-attachment-remove:hover {
+  color: var(--text);
+}
+
+.chat-attachment-remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .chat-send {

@@ -14,14 +14,14 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
 from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.db.engine import get_db, get_session_factory
-from tret.db.models import Conversation, Dataset, Harness, Pack, Run, User
+from tret.db.models import Conversation, Dataset, Document, Harness, Pack, Project, Run, User
 from tret.engine.harness import get_harness_engine
 from tret.engine.tools import DELEGATION_TOOLS
 from tret.packs.links import pack_map_for_harnesses, packs_for_harness, resolve_pack_for_task
@@ -191,6 +191,10 @@ class SendMessageBody(BaseModel):
     # mutated, and the routing decision records the objective that actually
     # applied.
     objective: str | None = None
+    # Ids of documents already uploaded via POST /api/documents to attach to
+    # this turn. The turn's run becomes attached-only for document tools;
+    # later turns sent without attachments are project-wide again.
+    document_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
 def _validate_objective(objective: str | None) -> None:
@@ -328,6 +332,25 @@ async def send_message(
         raise HTTPException(422, "Empty message")
     _validate_objective(body.objective)
 
+    # Every attached document must belong to this workspace (same join as
+    # api/runs.py; documents carry no workspace_id of their own). Validated
+    # before the 409 check / row lock so a rejected send writes nothing.
+    document_ids = list(dict.fromkeys(body.document_ids))
+    attached_docs: list[Document] = []
+    if document_ids:
+        found = (
+            await db.execute(
+                select(Document)
+                .join(Project, Document.project_id == Project.id)
+                .where(Document.id.in_(document_ids), Project.workspace_id == ctx.id)
+            )
+        ).scalars().all()
+        by_id = {d.id: d for d in found}
+        missing = [i for i in document_ids if i not in by_id]
+        if missing:
+            raise HTTPException(404, f"Document not found: {', '.join(str(i) for i in missing)}")
+        attached_docs = [by_id[i] for i in document_ids]
+
     # One reply at a time: a second send while a run is live would create a
     # second paid run (the client resumes the live one from `active_run_id`).
     # The conversation row is locked first (a no-op on sqlite) so two
@@ -374,11 +397,20 @@ async def send_message(
             body.objective,
         ),
         created_by=user.id,
+        document_ids=document_ids,
     )
     db.add(run)
 
     now = datetime.now(timezone.utc).isoformat()
-    conv.messages = [*(conv.messages or []), {"role": "user", "content": text, "run_id": None, "ts": now}]
+    user_message: dict = {"role": "user", "content": text, "run_id": None, "ts": now}
+    if attached_docs:
+        # Display-only: stored on the message so the UI can show attachments
+        # after reload; never re-sent on later turns.
+        user_message["attachments"] = [
+            {"id": str(d.id), "filename": d.filename, "byte_size": d.byte_size, "content_type": d.content_type}
+            for d in attached_docs
+        ]
+    conv.messages = [*(conv.messages or []), user_message]
     if len(conv.messages) == 1:
         conv.title = text[:60] + ("…" if len(text) > 60 else "")
     await db.commit()
