@@ -148,6 +148,22 @@ the batch then waits in `gate` until an approver releases the rest
 `failed` or `rejected` target can be retried (`POST .../targets/{id}/retry`), which
 archives the earlier attempt in the target's `history`.
 
+## Viewing written files
+
+A disclosure target's `written_files` (the package files uploaded to SharePoint) can be
+opened from the Batches page: click a file under **Written files** and it opens in a
+large in-app viewer with previous/next across the target's files. Markdown is rendered
+(with a source toggle), PDFs show in an embedded viewer, and JSON is pretty-printed as a
+collapsible tree, with table views for the known shapes: `page_map.json` (retained vs
+source pages and the collapsed source page ranges, for checking a package map such as
+11 of 100 pages), `package.json` (the packaging record: keep ranges, scope, artifacts,
+limitations, verification), `extraction_stats.json` as key/values and `links.json` as a
+link audit table. The bytes come from the stored copy of the package Document, through
+`GET /api/batches/{id}/targets/{target_id}/files?path=<filename>`: `path` must equal one
+of the target's `written_files[*].filename` exactly (anything else is a 404), text files
+over 5 MB are refused for inline viewing (413) and `download=true` returns any file as an
+attachment. There is no SharePoint fallback: a file whose stored copy is gone is a 404.
+
 ## Records and where they go
 
 `POST /api/batches/{id}/finalize` (approver role) writes the batch's run-level
@@ -219,6 +235,7 @@ need workspace membership; writes need the approver role.
 | `POST /batches/{id}/targets/{target_id}/retry-write` | disclosure only: retry a failed upload |
 | `GET /batches/{id}/records` | preview the records |
 | `GET /batches/{id}/records/{name}` | a record kept as a Document (404 when the file went to SharePoint) |
+| `GET /batches/{id}/targets/{target_id}/files?path=` | one of a target's written files (`download=true` for an attachment) |
 | `POST /batches/{id}/finalize` | write the records; optional body `{"force": true}` |
 
 The prompt batch's `settings` carry `harness_id, harness_name, template,
