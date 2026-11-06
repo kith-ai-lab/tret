@@ -3219,6 +3219,8 @@ export interface components {
         };
         /** SendMessageBody */
         SendMessageBody: {
+            /** Document Ids */
+            document_ids?: string[];
             /** Model Override */
             model_override?: string | null;
             /** Objective */

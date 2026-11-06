@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { type DragEvent, type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 
 import {
   api,
   ApiError,
+  type ChatAttachment,
   type ChatMessage,
   type Harness,
   type ModelInfo,
@@ -77,6 +78,30 @@ function activeRunIdOf409(error: unknown): string | null {
   return typeof body?.active_run_id === 'string' ? body.active_run_id : null
 }
 
+/** A file chip in the composer: uploaded to /documents as soon as it is picked,
+ *  then referenced by id when the message is sent. */
+type Attachment = {
+  key: string
+  filename: string
+  size: number
+  status: 'uploading' | 'done' | 'error'
+  docId?: string
+  error?: string
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+/** Why a send must wait (null when attachments allow it). */
+function attachmentBlockReason(attachments: Attachment[]): string | null {
+  if (attachments.some((a) => a.status === 'uploading')) return 'Wait for uploads to finish'
+  if (attachments.some((a) => a.status === 'error')) return 'Remove failed attachments first'
+  return null
+}
+
 interface PendingTurn {
   conversationId: string
   runId: string
@@ -88,6 +113,8 @@ export function Chat() {
   const [pending, setPending] = useState<PendingTurn | null>(null)
   const [draft, setDraft] = useState('')
   const [railOpen, setRailOpen] = useState(true)
+  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const attachmentSeq = useRef(0)
 
   const conversationsQuery = useQuery({
     queryKey: ['conversations'],
@@ -161,6 +188,9 @@ export function Chat() {
     if (workspaceRef.current !== undefined && workspaceRef.current !== workspaceId) {
       setSelectedId(null)
       setPending(null)
+      // Chips hold document ids of the old workspace; sending them to the new
+      // one would 404.
+      setAttachments([])
       initializedRef.current = false
     }
     workspaceRef.current = workspaceId
@@ -219,16 +249,62 @@ export function Chat() {
   const startNewChat = useCallback(() => {
     setPending(null)
     setDraft('')
+    setAttachments([])
     setSelectedId(null)
   }, [])
 
+  // Each file uploads immediately. Completion handlers map over the current
+  // list by key, so a chip removed (or cleared by a send) mid-upload is simply
+  // not found and the late result is dropped.
+  const addFiles = useCallback(
+    (files: File[]) => {
+      for (const file of files) {
+        const key = `att-${(attachmentSeq.current += 1)}`
+        setAttachments((prev) => [
+          ...prev,
+          { key, filename: file.name, size: file.size, status: 'uploading' },
+        ])
+        api
+          .uploadDocument(file)
+          .then((doc) => {
+            setAttachments((prev) =>
+              prev.map((a) => (a.key === key ? { ...a, status: 'done', docId: doc.id } : a)),
+            )
+            queryClient.invalidateQueries({ queryKey: ['documents'] })
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : 'Upload failed'
+            setAttachments((prev) =>
+              prev.map((a) => (a.key === key ? { ...a, status: 'error', error: message } : a)),
+            )
+          })
+      }
+    },
+    [queryClient],
+  )
+  const removeAttachment = useCallback((key: string) => {
+    setAttachments((prev) => prev.filter((a) => a.key !== key))
+  }, [])
+
   const sendMutation = useMutation({
-    mutationFn: ({ conversationId, text }: { conversationId: string; text: string }) =>
+    mutationFn: ({
+      conversationId,
+      text,
+      documentIds,
+    }: {
+      conversationId: string
+      text: string
+      documentIds: string[]
+    }) =>
       api.sendChatMessage(conversationId, text, {
         model_override: modelOverride || undefined,
         objective: objective || undefined,
+        document_ids: documentIds,
       }),
-    onSuccess: (data) => {
+    onSuccess: (data, { documentIds }) => {
+      // Only the chips this send carried: a file attached while the landing
+      // screen was still creating the conversation stays for the next turn.
+      setAttachments((prev) => prev.filter((a) => !(a.docId && documentIds.includes(a.docId))))
       setPending({ conversationId: data.conversation_id, runId: data.run_id })
       queryClient.invalidateQueries({ queryKey: ['conversation', data.conversation_id] })
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
@@ -237,10 +313,12 @@ export function Chat() {
       // 409: a reply is already being generated (another tab, or a send that
       // raced a reload). Nothing was sent, so follow the live run instead of
       // erroring and hand the unsent text back to the composer.
+      // Any other error (e.g. 404 for an attachment deleted since upload)
+      // keeps the text and chips too, so nothing typed is lost.
       const activeRunId = activeRunIdOf409(error)
+      setDraft((d) => d || text)
       if (activeRunId) {
         setPending({ conversationId, runId: activeRunId })
-        setDraft((d) => d || text)
         queryClient.invalidateQueries({ queryKey: ['conversation', conversationId] })
       }
     },
@@ -268,7 +346,8 @@ export function Chat() {
   const send = useCallback(
     async (text: string) => {
       const trimmed = text.trim()
-      if (!trimmed || inFlight) return
+      if (!trimmed || inFlight || attachmentBlockReason(attachments)) return
+      const documentIds = attachments.flatMap((a) => (a.status === 'done' && a.docId ? [a.docId] : []))
       let conversationId = selectedId
       if (!conversationId) {
         const conv = await api.createConversation(selectedHarnessId || undefined)
@@ -278,9 +357,9 @@ export function Chat() {
         conversationId = conv.id
       }
       setDraft('')
-      sendMutation.mutate({ conversationId, text: trimmed })
+      sendMutation.mutate({ conversationId, text: trimmed, documentIds })
     },
-    [inFlight, selectedId, selectedHarnessId, queryClient, sendMutation],
+    [inFlight, attachments, selectedId, selectedHarnessId, queryClient, sendMutation],
   )
 
   const conversation = selectedId ? conversationQuery.data : undefined
@@ -363,6 +442,9 @@ export function Chat() {
             harnessValue={harnessSelectValue}
             harnessFixed={harnessFixed}
             onHarnessChange={setSelectedHarnessId}
+            attachments={attachments}
+            onAddFiles={addFiles}
+            onRemoveAttachment={removeAttachment}
           />
         ) : (
           <>
@@ -394,6 +476,9 @@ export function Chat() {
                   harnessValue={harnessSelectValue}
                   harnessFixed={harnessFixed}
                   onHarnessChange={setSelectedHarnessId}
+                  attachments={attachments}
+                  onAddFiles={addFiles}
+                  onRemoveAttachment={removeAttachment}
                 />
                 <div className="chat-hint">
                   Responses are drafts — structured findings go to Approvals before they count.
@@ -480,6 +565,9 @@ function Landing({
   harnessValue,
   harnessFixed,
   onHarnessChange,
+  attachments,
+  onAddFiles,
+  onRemoveAttachment,
 }: {
   draft: string
   onDraft: (v: string) => void
@@ -495,6 +583,9 @@ function Landing({
   harnessValue: string
   harnessFixed: boolean
   onHarnessChange: (v: string) => void
+  attachments: Attachment[]
+  onAddFiles: (files: File[]) => void
+  onRemoveAttachment: (key: string) => void
 }) {
   return (
     <div className="chat-landing">
@@ -524,6 +615,9 @@ function Landing({
           harnessValue={harnessValue}
           harnessFixed={harnessFixed}
           onHarnessChange={onHarnessChange}
+          attachments={attachments}
+          onAddFiles={onAddFiles}
+          onRemoveAttachment={onRemoveAttachment}
         />
         <div className="chat-cards">
           {EXAMPLE_PROMPTS.map((ex) => (
@@ -587,7 +681,25 @@ function Thread({
         {messages.map((m, i) =>
           m.role === 'user' ? (
             <div key={i} className="chat-turn user">
-              <div className="chat-bubble-user">{m.content}</div>
+              <div className="chat-bubble-user">
+                {m.content}
+                {m.attachments && m.attachments.length > 0 && (
+                  <div className="chat-bubble-attachments">
+                    {m.attachments.map((a: ChatAttachment) => (
+                      <Link
+                        key={a.id}
+                        className="chat-attachment-chip link"
+                        to={`/documents?doc=${a.id}`}
+                        title={`${a.filename} (${formatBytes(a.byte_size)}) — open in Documents`}
+                      >
+                        <PaperclipIcon />
+                        <span className="chat-attachment-name">{a.filename}</span>
+                        <span className="chat-attachment-meta">{formatBytes(a.byte_size)}</span>
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           ) : (
             <AssistantTurn key={i} message={m} />
@@ -915,6 +1027,9 @@ function Composer({
   harnessValue,
   harnessFixed,
   onHarnessChange,
+  attachments,
+  onAddFiles,
+  onRemoveAttachment,
 }: {
   value: string
   onChange: (v: string) => void
@@ -936,8 +1051,17 @@ function Composer({
   harnessValue: string
   harnessFixed: boolean
   onHarnessChange: (v: string) => void
+  attachments: Attachment[]
+  onAddFiles: (files: File[]) => void
+  onRemoveAttachment: (key: string) => void
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [dragging, setDragging] = useState(false)
+  // dragenter/leave fire for every child crossed; count them so the highlight
+  // only drops when the pointer really leaves the composer.
+  const dragDepth = useRef(0)
+  const blockReason = attachmentBlockReason(attachments)
 
   // Auto-grow up to a cap, then scroll.
   useLayoutEffect(() => {
@@ -955,12 +1079,45 @@ function Composer({
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      onSend()
+      if (!blockReason) onSend()
     }
   }
 
+  const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer.types).includes('Files')
+  const onDragEnter = (e: DragEvent) => {
+    if (disabled || !hasFiles(e)) return
+    e.preventDefault()
+    dragDepth.current += 1
+    setDragging(true)
+  }
+  const onDragOver = (e: DragEvent) => {
+    if (disabled || !hasFiles(e)) return
+    e.preventDefault()
+    setDragging(true)
+  }
+  const onDragLeave = (e: DragEvent) => {
+    if (disabled || !hasFiles(e)) return
+    dragDepth.current = Math.max(0, dragDepth.current - 1)
+    if (dragDepth.current === 0) setDragging(false)
+  }
+  const onDrop = (e: DragEvent) => {
+    if (!hasFiles(e)) return
+    e.preventDefault()
+    dragDepth.current = 0
+    setDragging(false)
+    if (disabled) return
+    const files = Array.from(e.dataTransfer.files)
+    if (files.length > 0) onAddFiles(files)
+  }
+
   return (
-    <div className="chat-composer">
+    <div
+      className={`chat-composer${dragging ? ' drag' : ''}`}
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       {error && <div className="error-text" style={{ marginBottom: 8 }}>{error}</div>}
       <ComposerControls
         models={models}
@@ -974,7 +1131,60 @@ function Composer({
         harnessFixed={harnessFixed}
         onHarnessChange={onHarnessChange}
       />
+      {attachments.length > 0 && (
+        <div className="chat-attachments">
+          {attachments.map((a) => (
+            <span
+              key={a.key}
+              className={`chat-attachment-chip ${a.status}`}
+              title={a.status === 'error' ? `${a.filename} — ${a.error ?? 'Upload failed'}` : a.filename}
+            >
+              <PaperclipIcon />
+              <span className="chat-attachment-name">{a.filename}</span>
+              <span className="chat-attachment-meta">
+                {formatBytes(a.size)}
+                {a.status === 'uploading' && (
+                  <>
+                    {' · '}
+                    <span className="pulse">uploading…</span>
+                  </>
+                )}
+                {a.status === 'error' && ' · failed'}
+              </span>
+              <button
+                type="button"
+                className="chat-attachment-remove"
+                aria-label={`Remove ${a.filename}`}
+                onClick={() => onRemoveAttachment(a.key)}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <div className={`chat-inputbox${disabled ? ' disabled' : ''}`}>
+        <button
+          type="button"
+          className="chat-attach"
+          aria-label="Attach documents"
+          title="Attach documents (25 MB max each)"
+          disabled={disabled}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <PaperclipIcon />
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? [])
+            e.target.value = ''
+            if (files.length > 0) onAddFiles(files)
+          }}
+        />
         <textarea
           ref={ref}
           rows={1}
@@ -999,9 +1209,9 @@ function Composer({
           <button
             className="chat-send"
             onClick={onSend}
-            disabled={disabled || !value.trim()}
+            disabled={disabled || !value.trim() || !!blockReason}
             aria-label="Send message"
-            title="Send (Enter)"
+            title={blockReason ?? 'Send (Enter)'}
           >
             {disabled ? <span className="chat-send-dot pulse" /> : <SendIcon />}
           </button>
@@ -1114,6 +1324,14 @@ function SendIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 19V5M5 12l7-7 7 7" />
+    </svg>
+  )
+}
+
+function PaperclipIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
     </svg>
   )
 }

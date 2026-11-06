@@ -1569,11 +1569,21 @@ export interface ChatActivity {
   summary: string
 }
 
+/** A document attached to a chat turn (user messages only). */
+export interface ChatAttachment {
+  id: string
+  filename: string
+  byte_size: number
+  content_type: string
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   run_id: string | null
   ts: string
+  // User-only: the documents attached to that turn (absent when none).
+  attachments?: ChatAttachment[]
   // Assistant-only fields, stamped when the turn's run finishes. Same shape as
   // a run summary/detail (RunSummary/RunDetail) so a chat turn is as legible
   // as the run behind it — nullable fields are null (never 0) when the turn
@@ -3599,11 +3609,16 @@ export const api = {
   sendChatMessage: (
     id: string,
     text: string,
-    overrides: { model_override?: string; objective?: string } = {},
+    overrides: { model_override?: string; objective?: string; document_ids?: string[] } = {},
   ) =>
     request<{ run_id: string; conversation_id: string }>(`/chat/${id}/messages`, {
       method: 'POST',
-      body: { text, ...overrides },
+      body: {
+        text,
+        ...overrides,
+        // Sent only when there is something to attach.
+        document_ids: overrides.document_ids?.length ? overrides.document_ids : undefined,
+      },
     }),
 
   // settings + catalog

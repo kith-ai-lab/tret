@@ -39,6 +39,7 @@ from tret.api.chat import (
 from tret.db.engine import get_db
 from tret.db.models import (
     Base,
+    Document,
     Harness,
     Pack,
     Project,
@@ -104,6 +105,10 @@ def test_send_message_body_defaults_omit_both_overrides():
     body = SendMessageBody(text="hi")
     assert body.model_override is None
     assert body.objective is None
+
+
+def test_send_message_body_defaults_to_no_document_ids():
+    assert SendMessageBody(text="hi").document_ids == []
 
 
 def test_send_message_body_accepts_both_overrides():
@@ -856,6 +861,10 @@ def test_assistant_message_carries_a_slim_method_v3_and_a_clean_routing():
 
 
 async def _seed_chat(client, seed, session_factory) -> str:
+    return (await _seed_chat_with_project(client, seed, session_factory))[0]
+
+
+async def _seed_chat_with_project(client, seed, session_factory) -> tuple[str, uuid.UUID]:
     team = make_workspace("Co")
     project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
     user = make_user("analyst@example.com")
@@ -874,7 +883,7 @@ async def _seed_chat(client, seed, session_factory) -> str:
     await login_(client, user.email)
     created = await client.post("/api/chat", json={})
     assert created.status_code == 200, created.text
-    return created.json()["id"]
+    return created.json()["id"], project.id
 
 
 async def test_active_run_id_is_null_without_a_live_run(client, seed, session_factory):
@@ -1012,3 +1021,119 @@ def test_assistant_message_keeps_start_batch_result_only():
     assert activity[0]["tool"] == "start_batch"
     assert activity[0]["result"] == big[:2000]
     assert activity[1]["tool"] == "lookup_dataset" and "result" not in activity[1]
+
+
+# ── document attachments ──
+
+
+def _doc(project_id: uuid.UUID, filename: str, **kw) -> Document:
+    return Document(
+        id=uuid.uuid4(),
+        project_id=project_id,
+        filename=filename,
+        content_type="text/csv",
+        byte_size=7,
+        storage_path=f"/tmp/{filename}",
+        sha256="0" * 64,
+        **kw,
+    )
+
+
+async def _run_count(session_factory) -> int:
+    from sqlalchemy import func, select
+
+    async with session_factory() as db:
+        return (await db.execute(select(func.count()).select_from(Run))).scalar_one()
+
+
+async def test_send_message_attaches_documents_to_the_turns_run(client, seed, session_factory):
+    from sqlalchemy import select
+
+    from tret.engine.context import build_user_message
+
+    conversation_id, project_id = await _seed_chat_with_project(client, seed, session_factory)
+    d1 = _doc(project_id, "a.csv", extracted_text="a,b\n1,2")
+    d2 = _doc(project_id, "b.csv")
+    await seed(d1, d2)
+
+    sent = await client.post(
+        f"/api/chat/{conversation_id}/messages",
+        json={"text": "Collect these", "document_ids": [str(d1.id), str(d2.id)]},
+    )
+    assert sent.status_code == 200, sent.text
+
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(sent.json()["run_id"]))
+        assert [uuid.UUID(str(i)) for i in run.document_ids] == [d1.id, d2.id]
+        docs = (await db.execute(select(Document).where(Document.id.in_(run.document_ids)))).scalars().all()
+        text = build_user_message(run, None, docs)
+    for d in (d1, d2):
+        assert d.filename in text and str(d.id) in text
+
+    got = await client.get(f"/api/chat/{conversation_id}")
+    (message,) = got.json()["messages"]
+    assert message["content"] == "Collect these"
+    assert [(a["id"], a["filename"]) for a in message["attachments"]] == [
+        (str(d1.id), "a.csv"),
+        (str(d2.id), "b.csv"),
+    ]
+
+
+async def _assert_rejected_without_trace(client, session_factory, conversation_id, doc_id):
+    sent = await client.post(
+        f"/api/chat/{conversation_id}/messages",
+        json={"text": "Collect this", "document_ids": [str(doc_id)]},
+    )
+    assert sent.status_code == 404, sent.text
+    assert "Document not found" in sent.json()["detail"]
+    assert str(doc_id) in sent.json()["detail"]
+    assert await _run_count(session_factory) == 0
+    got = await client.get(f"/api/chat/{conversation_id}")
+    assert got.json()["messages"] == []
+
+
+async def test_send_message_rejects_a_document_from_another_workspace(client, seed, session_factory):
+    conversation_id, _ = await _seed_chat_with_project(client, seed, session_factory)
+    other = make_workspace("Other")
+    other_project = Project(id=uuid.uuid4(), workspace_id=other.id, name="Q")
+    foreign = _doc(other_project.id, "secret.csv")
+    await seed(other, other_project, foreign)
+    await _assert_rejected_without_trace(client, session_factory, conversation_id, foreign.id)
+
+
+async def test_send_message_rejects_an_unknown_document_id(client, seed, session_factory):
+    conversation_id, _ = await _seed_chat_with_project(client, seed, session_factory)
+    await _assert_rejected_without_trace(client, session_factory, conversation_id, uuid.uuid4())
+
+
+async def test_send_message_without_attachments_is_unchanged(client, seed, session_factory):
+    conversation_id = await _seed_chat(client, seed, session_factory)
+    sent = await client.post(f"/api/chat/{conversation_id}/messages", json={"text": "Hi"})
+    assert sent.status_code == 200, sent.text
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(sent.json()["run_id"]))
+        assert list(run.document_ids or []) == []
+    got = await client.get(f"/api/chat/{conversation_id}")
+    (message,) = got.json()["messages"]
+    assert "attachments" not in message
+
+
+async def test_a_later_turn_without_attachments_is_project_wide_again(client, seed, session_factory):
+    conversation_id, project_id = await _seed_chat_with_project(client, seed, session_factory)
+    doc = _doc(project_id, "a.csv")
+    await seed(doc)
+    first = await client.post(
+        f"/api/chat/{conversation_id}/messages", json={"text": "One", "document_ids": [str(doc.id)]}
+    )
+    assert first.status_code == 200, first.text
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(first.json()["run_id"]))
+        assert [uuid.UUID(str(i)) for i in run.document_ids] == [doc.id]
+        run.status = "completed"
+        await db.commit()
+
+    second = await client.post(f"/api/chat/{conversation_id}/messages", json={"text": "Two"})
+    assert second.status_code == 200, second.text
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(second.json()["run_id"]))
+        assert list(run.document_ids or []) == []

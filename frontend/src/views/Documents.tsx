@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type DragEvent, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import { api, type TretDocument, type Dataset } from '../api/client'
 import { formatDateTime } from '../components/shared/format'
@@ -34,7 +35,9 @@ export function Documents() {
   const documentsQuery = useQuery({ queryKey: ['documents'], queryFn: api.listDocuments })
   const datasetsQuery = useQuery({ queryKey: ['datasets'], queryFn: api.listDatasets })
 
-  const [previewId, setPreviewId] = useState<string | null>(null)
+  // `?doc=<id>` (the chat attachment chips link here) opens that preview.
+  const [searchParams] = useSearchParams()
+  const [previewId, setPreviewId] = useState<string | null>(() => searchParams.get('doc'))
   const [dragging, setDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 

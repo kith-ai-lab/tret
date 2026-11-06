@@ -397,6 +397,17 @@ routing, validation, and audit trail. Delegated findings stay drafts behind
 the approval gate; the chat agent is instructed (and its tool results
 reiterate) to report them as such.
 
+The composer can also attach uploaded documents to a turn: `document_ids`
+on `POST /api/chat/{id}/messages` (ids from `POST /api/documents`) are
+validated against the workspace and become the turn run's initial
+`document_ids`. The model's user turn therefore lists each attachment's id and
+filename, and the document tools (`read_document`, `search_documents`, and any
+tool taking a document id, such as `start_batch`'s `register_document_id`) can
+use them. A turn with attachments is attached-only for document tools, while a
+turn with none stays project-wide (`engine/tools.py::_document_scope`). The
+attachment list is stored on the conversation's user message for display only
+and is never re-sent on later turns.
+
 Delegation **can** recurse, and is bounded by a hop counter rather than by what
 may be delegated to: any pack task type may list `run_harness_task` among its
 tools (or a harness may enable it), so A can delegate to B, B back to A, or a
