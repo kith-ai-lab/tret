@@ -89,8 +89,8 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    deliberately narrow rather than a general bandit: it requires outcome
    learning to be on (`adaptive.learn_from_outcomes`; with it off there are
    no priors to read at all, so nothing could be told apart from "untried" in
-   the first place), the default `balanced` objective, the `extraction` task
-   shape (schema-validated output, no open-ended judgment for an unproven
+   the first place), the `balanced` or `eco` objective, the `extraction` or `freeform` task
+   shape (schema-validated output or low-stakes chat, so little for an unproven
    model to get wrong), and no pin or run override having named a model
    already. Within those guardrails it considers candidates with no prior at
    all *or* fewer than `MIN_EFFECTIVE_SAMPLES` effective samples — a proven
@@ -98,9 +98,11 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    both have already been judged — filtered further to
    `adaptive.exploration_max_cost_tier` (default `economy`, itself never
    wider than the harness's own `max_cost_tier` — this tier applies *on top
-   of* that ceiling, never instead of it) and to whatever `context_fit`
+   of* that ceiling, never instead of it; when the harness's `min_cost_tier`
+   floor is above it, exploration uses the floor tier instead of going dead) and to whatever `context_fit`
    hasn't already excluded. With that probability, `route()` picks the
-   cheapest such candidate outright (ties broken by model id) instead of
+   cheapest such candidate outright (open-weight ones first under an
+   open-weights preference; ties broken by model id) instead of
    paying for a router call at all — the fastest and cheapest a routing
    decision can be — and records `runs.routing.exploration` on every
    decision that reaches this stage: `{explored: true, candidate,
@@ -554,7 +556,12 @@ SSE tool-delta aggregation).
 
 The **ModelCatalog** merges three sources: a curated static `models.yaml`
 (authoritative — prices, tiers, strengths, energy classes), an optional dynamic
-OpenRouter fetch (uncurated, 24h cache), and local discovery from
+OpenRouter fetch (uncurated; runs only with a global OpenRouter key or
+`TRET_OPENROUTER_CATALOG_PUBLIC_FETCH=true`, which allows the keyless fetch of
+the public list and is off by default; refreshed in the background and
+cached `TRET_OPENROUTER_CATALOG_TTL_SECONDS`, default 6h; it also reads the
+zero-data-retention endpoint list and each model's `hugging_face_id`, which
+become `zdr_tools_endpoint` and `open_weights`), and local discovery from
 `{TRET_LOCAL_BASE_URL}/models` (uncurated, 5-minute cache, since local
 availability changes mid-session). Local models are additionally **probed once
 for real tool-calling support** and excluded from candidacy if they fail: tret's

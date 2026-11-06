@@ -33,6 +33,7 @@ from tret.router_llm.objectives import (
     TIER_POOR,
     candidate_sort_key,
     evidence_tier,
+    favours_open_weights,
     within_cost_tier,
 )
 from tret.router_llm.priors_base import ModelPrior
@@ -85,8 +86,20 @@ def fallback_model(
     min_context_window: int | None = None,
     exclude: set[str] | None = None,
     min_cost_tier: str | None = None,
+    open_weights: str | None = "any",
+    require_zdr: bool = False,
 ) -> str | None:
     """The model this shape falls back to, or None if the policy permits none.
+
+    `open_weights` is the harness's open-weights policy: "require" removes
+    closed-weight models from the pool (so a harness that requires open weights
+    gets None, not a closed model), "prefer" narrows the pool to open-weight
+    models whenever any survive and otherwise leaves it alone. `require_zdr`
+    drops OpenRouter models known to have no tool-capable zero-data-retention
+    endpoint (`ModelInfo.zdr_tools_endpoint is False`), the same rule the
+    router's candidate filter applies. Uncurated non-local models are only
+    considered when they have a non-poor record in `priors`, the same gate the
+    router's general pool uses (skipped if it would leave nothing).
 
     `max_cost_tier` is the harness ceiling and is enforced here, not only in the
     router's candidate list: this path runs whenever the LLM router is skipped or
@@ -123,14 +136,28 @@ def fallback_model(
     would otherwise have preferred.
     """
     usable = _usable(catalog, registry, allowed, max_cost_tier, min_cost_tier)
+    if require_zdr:
+        usable = [
+            m for m in usable if not (m.provider == "openrouter" and m.zdr_tools_endpoint is False)
+        ]
+    if open_weights == "require":
+        usable = [m for m in usable if m.open_weights is True]
     if not usable:
         return None
+    earned = [
+        m
+        for m in usable
+        if m.curated
+        or m.provider == "local"
+        or (allowed and m.id in allowed)
+        or _has_record(m, priors)
+    ]
+    usable = earned or usable
     if exclude:
         survivors = [m for m in usable if m.id not in exclude]
         if survivors:
             usable = survivors
     usable = _drop_proven_poor(usable, priors)
-
     if min_context_window is not None:
         # Local-tier models are exempt, as in the router: they are usually
         # chosen for confidentiality, and trimming/compaction handles overflow.
@@ -146,11 +173,27 @@ def fallback_model(
         else:
             return min(usable, key=lambda m: (-m.context_window, not m.curated, m.id)).id
 
+    # Window first (as the router does), then prefer open only among models that fit.
+    if favours_open_weights(open_weights):
+        # Same precedence as `candidate_sort_key`: evidence tier first, then
+        # open-weight. "Prefer open" narrows within the best evidence tier
+        # present; it never lifts a worse-evidenced open model over a
+        # better-evidenced closed one.
+        def _tier(m: ModelInfo) -> int:
+            return evidence_tier(priors.get(m.id) if priors else None)
+
+        best = min(_tier(m) for m in usable)
+        open_pool = [m for m in usable if m.open_weights is True and _tier(m) == best]
+        usable = open_pool or usable
+
     if objective in THRIFT_OBJECTIVES:
         # Ranking the whole usable catalog *is* the fallback here: walking the
         # shape table first would hand a thrift objective a capability-ordered
         # answer and quietly ignore what the harness asked for.
-        return min(usable, key=candidate_sort_key(objective)).id
+        # Evidence leads the ordering only when open weights are favoured: the
+        # open-weight bias must never lift an unknown model over a proven one.
+        key_priors = priors if favours_open_weights(open_weights) else None
+        return min(usable, key=candidate_sort_key(objective, key_priors, open_weights)).id
 
     usable_ids = {m.id for m in usable}
     table = FALLBACK_TABLE.get(task_shape, FALLBACK_TABLE["freeform"])
@@ -167,6 +210,11 @@ def fallback_model(
     # local-only installation entirely, since discovered local models are never
     # curated). This is what lets tret route with zero cloud provider keys.
     return min(usable, key=lambda m: (not m.curated, m.id)).id
+
+
+def _has_record(m: ModelInfo, priors: dict[str, ModelPrior] | None) -> bool:
+    prior = priors.get(m.id) if priors else None
+    return prior is not None and evidence_tier(prior) != TIER_POOR
 
 
 def _drop_proven_poor(

@@ -14,7 +14,7 @@ from fastapi import HTTPException
 
 from tret.adaptive import validation_error as adaptive_validation_error
 from tret.providers.catalog import get_catalog
-from tret.router_llm.objectives import DEFAULT_OBJECTIVE, OBJECTIVES
+from tret.router_llm.objectives import DEFAULT_OBJECTIVE, OBJECTIVES, OPEN_WEIGHTS_MODES
 from tret.router_llm.router import TIER_ORDER
 
 
@@ -67,6 +67,11 @@ def validate_policy(policy: dict) -> None:
     objective = policy.get("objective") or DEFAULT_OBJECTIVE
     if objective not in OBJECTIVES:
         raise HTTPException(422, f"model_policy.objective must be one of {'|'.join(OBJECTIVES)}")
+    open_weights = policy.get("open_weights")
+    if open_weights is not None and open_weights not in OPEN_WEIGHTS_MODES:
+        raise HTTPException(
+            422, f"model_policy.open_weights must be one of {'|'.join(OPEN_WEIGHTS_MODES)}"
+        )
     # The adaptive block, same rule as everything above it: refused at the door,
     # never read as a default. A misspelled key here would silently leave a
     # behavior on that the operator believed they had turned off — and two of

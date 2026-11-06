@@ -42,6 +42,7 @@ from tret.router_llm.objectives import (
     DEFAULT_MAX_COST_TIER,
     DEFAULT_OBJECTIVE,
     EFFORT_LEVELS,
+    OPEN_WEIGHTS_MODES,
     THRIFT_OBJECTIVES,
     TIER_ORDER,
     TIER_POOR,
@@ -50,6 +51,7 @@ from tret.router_llm.objectives import (
     candidate_sort_key,
     default_effort,
     evidence_tier,
+    favours_open_weights,
     is_new_model,
     objective_of,
     within_cost_tier,
@@ -98,18 +100,83 @@ def _clamp_new_model_slots(slots: int) -> int:
     """
     return max(0, min(slots, CANDIDATE_LIMIT // 2))
 
-# Exploration (see `ModelRouter._exploration_pick`) only ever runs under these
-# two: the default objective, on the one shape cheap and safe enough to spend
-# a coin flip on. `extraction` pulls fields out of a document into a
-# schema-validated tool call — there is no open-ended judgment for an untried
-# model to get wrong, and a bad answer fails validation rather than silently
-# shipping. `balanced` is the objective every harness gets unless it asked for
-# something else, which is exactly the population an untried model needs a
-# chance to be seen by; `quality`, `eco`, and `token_conservation` are each
-# already optimizing for one specific thing evidence has to be trusted to
-# support, and an unproven model has by definition not earned that trust yet.
-EXPLORATION_OBJECTIVE = "balanced"
-EXPLORATION_TASK_SHAPE = "extraction"
+# Exploration (see `ModelRouter._maybe_explore`) only ever runs under these:
+# the objectives that already favour cheap models, on the shapes cheap and safe
+# enough to spend a coin flip on. `extraction` pulls fields out of a document
+# into a schema-validated tool call — a bad answer fails validation rather than
+# silently shipping; `freeform` (chat) is low-stakes and is where most traffic
+# lands, so an untried model otherwise never earns a record. `balanced` is the
+# default objective and `eco` already ranks by thrift, so an untried cheap model
+# is on-brief there. `quality` and `token_conservation` are each optimizing for
+# one specific thing evidence has to be trusted to support, and an unproven
+# model has by definition not earned that trust yet.
+EXPLORATION_OBJECTIVES = ("balanced", "eco")
+EXPLORATION_TASK_SHAPES = ("extraction", "freeform")
+
+# Words in the part of a wire id after "/" that mark a specialist variant. A
+# specialist is a poor default for a general seat even when it is brand new.
+_SPECIALIST_MARKERS = (
+    "code", "coder", "legal", "-vl", "vision", "omni", "audio", "tts", "speech",
+    "image", "embed", "guard", "ocr", "math", "rerank",
+)
+
+
+def _is_specialist_variant(m: ModelInfo) -> bool:
+    wire = m.wire_id or ""
+    if wire.endswith(":free"):
+        return True
+    name = (wire.split("/", 1)[1] if "/" in wire else wire).lower()
+    return any(marker in name for marker in _SPECIALIST_MARKERS)
+
+
+def _author_of(m: ModelInfo) -> str:
+    return (m.wire_id or "").split("/", 1)[0]
+
+
+def _newness(m: ModelInfo) -> float:
+    """Release time for "newest": OpenRouter's `created` when known, else the
+    first of the `released` (YYYY-MM) month, else 0."""
+    if m.created_ts is not None:
+        return float(m.created_ts)
+    try:
+        year, month = (m.released or "").split("-")[:2]
+        return datetime(int(year), int(month), 1, tzinfo=timezone.utc).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _open_weights_policy(model_policy: dict | None) -> str:
+    """The open-weights mode in force: the policy's own, else the deployment
+    default (`TRET_ROUTER_OPEN_WEIGHTS`). A Settings-like object that lacks the
+    field reads as "any" (the historical ordering)."""
+    value = (model_policy or {}).get("open_weights")
+    if value in OPEN_WEIGHTS_MODES:
+        return value
+    default = getattr(get_settings(), "router_open_weights", "any")
+    return default if default in OPEN_WEIGHTS_MODES else "any"
+
+
+def _zdr_required() -> bool:
+    """Do the effective OpenRouter provider preferences demand ZDR endpoints?"""
+    prefs = getattr(get_settings(), "openrouter_provider_prefs", None) or {}
+    return bool(prefs.get("zdr"))
+
+
+def _is_earned(
+    m: ModelInfo,
+    priors: dict[str, ModelPrior] | None,
+    allowed: set | list | None = None,
+) -> bool:
+    """May `m` enter the general candidate pool? Curated and local models
+    always; a model the policy names in `allowed` (the operator chose it on
+    purpose); otherwise an uncurated cloud model only once it has a non-poor
+    record."""
+    if m.curated or m.provider == "local":
+        return True
+    if allowed and m.id in allowed:
+        return True
+    prior = priors.get(m.id) if priors else None
+    return prior is not None and evidence_tier(prior) != TIER_POOR
 
 
 logger = logging.getLogger(__name__)
@@ -155,6 +222,9 @@ def _reserve_new_model_slots(
     candidates: list[ModelInfo],
     priors: dict[str, ModelPrior] | None,
     objective: str,
+    *,
+    seat_pool: list[ModelInfo] | None = None,
+    open_weights: str | None = "any",
 ) -> list[ModelInfo]:
     """Reserve up to `settings.router_new_model_slots` of the candidate list's
     slots for recently-released uncurated models, so one becomes reachable
@@ -169,11 +239,9 @@ def _reserve_new_model_slots(
     same way `fallback._drop_proven_poor` excludes one, using the same
     `evidence_tier`/`TIER_POOR` reading.
 
-    Cold-start guarantee: with `settings.router_new_model_slots == 0` (or no
-    uncurated models at all — e.g. `TRET_OPENROUTER_CATALOG=false`, how Tret
-    Cloud runs), `reserved` is empty and this returns `candidates` unchanged,
-    so the final `out[:CANDIDATE_LIMIT]` slice in `_candidates_with_fit` is
-    byte-for-byte what it has always been.
+    With `settings.router_new_model_slots == 0` (or no uncurated models at all,
+    e.g. `TRET_OPENROUTER_CATALOG=false`), `reserved` is empty and this returns
+    `candidates` unchanged.
 
     2026-09-23 — the same guarantee now also holds for a new model that
     would have reached the router on its own merits: a reserved model
@@ -185,6 +253,16 @@ def _reserve_new_model_slots(
     *beyond* that natural cutoff is actually pulled forward, and only up to
     however many slots the already-in-place ones didn't use, displacing the
     tail of the natural list exactly as before.
+
+    2026-11-06 — uncurated models no longer enter the general pool unless they
+    have earned a record (`_is_earned`), so `seat_pool` (default `candidates`)
+    is the wider list of policy-passing models the seats are chosen from.
+    Seats go to general-purpose models only: `:free` and specialist variants
+    (`_is_specialist_variant`) are skipped, and each author (the wire id's
+    prefix) gets at most one seat, its newest model (ties: the higher output
+    price — hosted price tracks size for open weights, so a lab's flagship beats
+    its small siblings). Seats are ordered open-weight first when the policy
+    favours open weights, then newest, then higher output price.
     """
     settings = get_settings()
     # getattr, not settings.router_new_model_slots: some tests substitute a
@@ -196,22 +274,38 @@ def _reserve_new_model_slots(
     if slots <= 0:
         return candidates
     today = _today()
-    window_days = getattr(settings, "router_new_model_window_days", 60)
+    window_days = getattr(settings, "router_new_model_window_days", 120)
     new_models = [
         m
-        for m in candidates
+        for m in (seat_pool if seat_pool is not None else candidates)
         if not m.curated
         and m.provider != "local"
         and is_new_model(m.released, today, window_days)
         and evidence_tier(priors.get(m.id) if priors else None) != TIER_POOR
+        and not _is_specialist_variant(m)
     ]
     if not new_models:
         return candidates
-    # Objective order first (stable sort), then newest-first as the primary
-    # key (a second stable sort preserves the objective order among ties) —
-    # "newest-first, then by the objective's own key" per the reservation spec.
-    new_models.sort(key=candidate_sort_key(objective, priors))
-    new_models.sort(key=lambda m: m.released or "", reverse=True)
+    # One seat per author: the newest, ties to the higher output price.
+    best_per_author: dict[str, ModelInfo] = {}
+    for m in new_models:
+        key = _author_of(m)
+        held = best_per_author.get(key)
+        if held is None or (_newness(m), m.prices_at()[1], m.id) > (
+            _newness(held),
+            held.prices_at()[1],
+            held.id,
+        ):
+            best_per_author[key] = m
+    new_models = sorted(
+        best_per_author.values(),
+        key=lambda m: (
+            favours_open_weights(open_weights) and m.open_weights is not True,
+            -_newness(m),
+            -m.prices_at()[1],
+            m.id,
+        ),
+    )
     reserved = new_models[:slots]
     if not reserved:
         return candidates
@@ -225,6 +319,12 @@ def _reserve_new_model_slots(
     pull_ids = {m.id for m in to_pull_in}
     base = [m for m in candidates if m.id not in pull_ids]
     return base[: CANDIDATE_LIMIT - len(to_pull_in)] + to_pull_in
+
+
+def _fits_window(m: ModelInfo, min_context_window: int) -> bool:
+    """The window predicate `_apply_context_fit` uses: a local model or an
+    unreported window is never excluded."""
+    return m.cost_tier == "local" or not m.context_window or m.context_window >= min_context_window
 
 
 def _apply_context_fit(
@@ -265,11 +365,7 @@ def _apply_context_fit(
     if min_context_window is None:
         return candidates, {"required": 0, "mode": "unchecked", "excluded": [], "exempt": []}
     exempt = [m.id for m in candidates if m.cost_tier == "local"]
-    fits = [
-        m
-        for m in candidates
-        if m.cost_tier == "local" or not m.context_window or m.context_window >= min_context_window
-    ]
+    fits = [m for m in candidates if _fits_window(m, min_context_window)]
     if fits:
         fit_ids = {m.id for m in fits}
         excluded = [m.id for m in candidates if m.id not in fit_ids]
@@ -534,6 +630,10 @@ class RoutingDecision:
     #     the roll fired: `chosen_model` is `candidate` and no router call was
     #     made for this decision at all (see `reasoning`, which says so).
     exploration: dict | None = None
+    # The open-weights mode applied to this decision ("prefer" | "require" |
+    # "any": the policy's own value, else `TRET_ROUTER_OPEN_WEIGHTS`). Null on
+    # the override/pin paths, which the open-weights policy does not govern.
+    open_weights: str | None = None
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -582,13 +682,19 @@ class ModelRouter:
         allowed: set | list | None,
         max_tier: str,
         min_tier: str | None = None,
+        open_weights: str | None = "any",
+        require_zdr: bool = False,
     ) -> str | None:
         """Why the policy filter drops `m`, or None if it survives.
 
         One predicate shared by `_candidates_with_fit` and the empty-result
         diagnosis (`_no_candidates_detail`), so the explanation can never drift
         from the filter. Reasons: `no_tools`, `no_key:<provider>`,
-        `not_allowed`, `tier:<tier>`, `below_floor:<tier>`; the first failing check wins.
+        `not_allowed`, `tier:<tier>`, `below_floor:<tier>`, `closed_weights` (policy
+        requires open weights), `no_zdr_endpoint` (ZDR-only provider prefs and this
+        OpenRouter model is known to have no tool-capable ZDR endpoint; unknown
+        never excludes); the first failing check wins. Run overrides and pins do
+        not go through this filter.
         """
         if not m.supports_tools:
             return "no_tools"
@@ -600,6 +706,10 @@ class ModelRouter:
             return f"tier:{m.cost_tier}"
         if min_tier is not None and TIER_ORDER.get(m.cost_tier, 2) < TIER_ORDER[min_tier]:
             return f"below_floor:{m.cost_tier}"
+        if open_weights == "require" and m.open_weights is not True:
+            return "closed_weights"
+        if require_zdr and m.provider == "openrouter" and m.zdr_tools_endpoint is False:
+            return "no_zdr_endpoint"
         return None
 
     def _no_candidates_detail(self, model_policy: dict) -> str:
@@ -611,6 +721,10 @@ class ModelRouter:
         allowed = model_policy.get("allowed") or None
         max_tier = _max_cost_tier(model_policy)
         min_tier = _min_cost_tier(model_policy)
+        open_weights = _open_weights_policy(model_policy)
+        require_zdr = _zdr_required()
+        closed = 0
+        no_zdr = 0
         considered = 0
         no_tools = 0
         not_allowed = 0
@@ -619,7 +733,9 @@ class ModelRouter:
         by_floor: dict[str, int] = {}
         for m in self._catalog.all():
             considered += 1
-            reason = self._exclusion_reason(m, allowed, max_tier, min_tier)
+            reason = self._exclusion_reason(
+                m, allowed, max_tier, min_tier, open_weights, require_zdr
+            )
             if reason is None:
                 continue
             kind, _, detail = reason.partition(":")
@@ -633,6 +749,10 @@ class ModelRouter:
                 by_tier[detail] = by_tier.get(detail, 0) + 1
             elif kind == "below_floor":
                 by_floor[detail] = by_floor.get(detail, 0) + 1
+            elif kind == "closed_weights":
+                closed += 1
+            elif kind == "no_zdr_endpoint":
+                no_zdr += 1
         parts: list[tuple[int, str]] = []
         n_tier = sum(by_tier.values())
         if n_tier:
@@ -648,6 +768,10 @@ class ModelRouter:
             parts.append((n_key, f"{n_key} lacked a provider key ({providers})"))
         if not_allowed:
             parts.append((not_allowed, f"{not_allowed} outside the policy's allowed list"))
+        if closed:
+            parts.append((closed, f"{closed} closed-weight (the policy requires open weights)"))
+        if no_zdr:
+            parts.append((no_zdr, f"{no_zdr} lacked a zero-data-retention endpoint with tool support"))
         if no_tools:
             parts.append((no_tools, f"{no_tools} lacked tool support"))
         parts.sort(key=lambda p: -p[0])  # stable: ties keep the order above
@@ -672,21 +796,63 @@ class ModelRouter:
         max_tier = _max_cost_tier(model_policy)
         min_tier = _min_cost_tier(model_policy)
         objective = objective_of(model_policy)
-        out = []
+        open_weights = _open_weights_policy(model_policy)
+        require_zdr = _zdr_required()
+        filtered = []
         for m in self._catalog.all():
-            if self._exclusion_reason(m, allowed, max_tier, min_tier) is None:
-                out.append(m)
+            if (
+                self._exclusion_reason(m, allowed, max_tier, min_tier, open_weights, require_zdr)
+                is None
+            ):
+                filtered.append(m)
+        # Uncurated cloud models (hundreds, once the live catalog loads) enter the
+        # general pool only with a non-poor record (or when the operator named
+        # them in `allowed`); otherwise they can only arrive through the
+        # new-model seats below. If that gate alone would leave nothing, the
+        # whole policy-passing pool is used rather than refusing to route.
+        out = [m for m in filtered if _is_earned(m, priors, allowed)]
+        if not out:
+            out = list(filtered)
+        earned_ids = {m.id for m in out}
         # Ordered by the harness objective, with any recorded evidence leading;
         # cap the list the router sees. Note the order of operations: the
         # `allowed` list, the provider-key check and the cost ceiling have all
         # already been applied above, so evidence only ever reorders models the
         # policy had already permitted.
-        out.sort(key=candidate_sort_key(objective, priors))
+        out.sort(key=candidate_sort_key(objective, priors, open_weights))
         # The context-window floor is applied last, and — like the cost ceiling
         # before it — only ever narrows or reorders what survived the earlier
         # filters. See `_apply_context_fit`.
         out, context_fit = _apply_context_fit(out, min_context_window, priors)
-        out = _reserve_new_model_slots(out, priors, objective)
+        # Seats are drawn from every policy-passing model, held to the same
+        # window rule themselves (the pool's verdict says nothing about models
+        # it never saw).
+        seat_pool = list(filtered)
+        if min_context_window is not None:
+            seat_excluded = [
+                m.id
+                for m in seat_pool
+                if m.id not in earned_ids and not _fits_window(m, min_context_window)
+            ]
+            seat_pool = [m for m in seat_pool if _fits_window(m, min_context_window)]
+            if seat_excluded:
+                context_fit = {
+                    **context_fit,
+                    "excluded": [*context_fit.get("excluded", []), *seat_excluded],
+                }
+        if context_fit.get("mode") == "best_effort":
+            # Nothing in the general pool fits. Best effort applies only if the
+            # seats cannot offer a model that does.
+            seated = _reserve_new_model_slots(
+                [], priors, objective, seat_pool=seat_pool, open_weights=open_weights
+            )
+            if seated:
+                context_fit = {**context_fit, "mode": "fit"}
+                return seated[:CANDIDATE_LIMIT], context_fit
+            return out[:CANDIDATE_LIMIT], context_fit
+        out = _reserve_new_model_slots(
+            out, priors, objective, seat_pool=seat_pool, open_weights=open_weights
+        )
         return out[:CANDIDATE_LIMIT], context_fit
 
     async def candidates_for(
@@ -795,6 +961,7 @@ class ModelRouter:
         priors: dict[str, ModelPrior],
         context_fit: dict,
         exploration_max_cost_tier: str,
+        min_cost_tier: str | None = None,
     ) -> list[ModelInfo]:
         """Which of `candidates` `_exploration_pick` may choose among.
 
@@ -813,6 +980,13 @@ class ModelRouter:
         that model, whatever the coin flip would have said.
         """
         fit_excluded = set(context_fit.get("excluded") or [])
+        # A policy floor above the exploration ceiling would make exploration
+        # dead for that harness (every candidate is at or above the floor), so
+        # it explores within the policy's own lowest allowed band instead.
+        if min_cost_tier is not None and TIER_ORDER[min_cost_tier] > TIER_ORDER.get(
+            exploration_max_cost_tier, 2
+        ):
+            exploration_max_cost_tier = min_cost_tier
         out = []
         for m in candidates:
             if m.id in fit_excluded:
@@ -827,8 +1001,14 @@ class ModelRouter:
             out.append(m)
         return out
 
-    def _pick_exploration_candidate(self, untried: list[ModelInfo]) -> ModelInfo:
-        """Deterministic among ties: cheapest current price, id breaks a tie."""
+    def _pick_exploration_candidate(
+        self, untried: list[ModelInfo], open_weights: str | None = "any"
+    ) -> ModelInfo:
+        """Deterministic among ties: cheapest current price, id breaks a tie.
+        Under a prefer/require open-weights policy, open-weight untried models
+        are picked from first."""
+        if favours_open_weights(open_weights):
+            untried = [m for m in untried if m.open_weights is True] or untried
         return min(untried, key=lambda m: (m.prices_at()[1], m.id))
 
     def _exploration_off_reason(
@@ -848,12 +1028,19 @@ class ModelRouter:
             # no track record to *earn* either, so exploration has nothing to
             # spend its coin flip on.
             return "outcome learning is off, so an untried model has nothing to earn"
-        if objective != EXPLORATION_OBJECTIVE:
-            return f"exploration only applies to the '{EXPLORATION_OBJECTIVE}' objective"
-        if task_shape != EXPLORATION_TASK_SHAPE:
-            return f"exploration only applies to the '{EXPLORATION_TASK_SHAPE}' task shape"
+        if objective not in EXPLORATION_OBJECTIVES:
+            names = "/".join(f"'{o}'" for o in EXPLORATION_OBJECTIVES)
+            return f"exploration only applies to the {names} objectives"
+        if task_shape not in EXPLORATION_TASK_SHAPES:
+            names = "/".join(f"'{s}'" for s in EXPLORATION_TASK_SHAPES)
+            return f"exploration only applies to the {names} task shapes"
         if adaptive.exploration <= 0:
             return "harness exploration rate is 0"
+        if isinstance(self._priors, NoPriors):
+            # SDK / `tret run` route with no outcome store: nothing is ever
+            # recorded, so a coin flip would make routing random for no
+            # learning. Decisions there stay reproducible from the policy.
+            return "no outcome store, so exploration has nothing to learn"
         return None
 
     def _maybe_explore(
@@ -865,6 +1052,8 @@ class ModelRouter:
         candidates: list[ModelInfo],
         context_fit: dict,
         priors: dict[str, ModelPrior],
+        min_cost_tier: str | None = None,
+        open_weights: str | None = "any",
     ) -> tuple[ModelInfo | None, dict]:
         """The exploration coin flip. Only ever called on the LLM-router path —
         after the single-candidate and override/pin paths have already
@@ -883,7 +1072,7 @@ class ModelRouter:
             }
 
         untried = self._untried_exploration_candidates(
-            candidates, priors, context_fit, adaptive.exploration_max_cost_tier
+            candidates, priors, context_fit, adaptive.exploration_max_cost_tier, min_cost_tier
         )
         if not untried:
             return None, {
@@ -903,7 +1092,7 @@ class ModelRouter:
                 "reason": "exploration roll did not fire",
             }
 
-        pick = self._pick_exploration_candidate(untried)
+        pick = self._pick_exploration_candidate(untried, open_weights)
         return pick, {
             "explored": True,
             "candidate": pick.id,
@@ -953,6 +1142,7 @@ class ModelRouter:
         max_tier = _max_cost_tier(model_policy)
         adaptive = adaptive_of(model_policy)
         learning = adaptive.learn_from_outcomes
+        open_weights = _open_weights_policy(model_policy)
         # Local and dynamic models reach the catalog only through a discovery
         # pass. On a fresh process this is the first thing that needs them, so
         # make sure one has been attempted before deciding there are no
@@ -1046,6 +1236,7 @@ class ModelRouter:
                 context_fit=context_fit,
                 fallback_used=False,
                 effort=default_effort(objective, task_shape, candidates[0].cost_tier),
+                open_weights=open_weights,
             )
 
         candidate_ids = [m.id for m in candidates]
@@ -1068,6 +1259,8 @@ class ModelRouter:
             candidates=candidates,
             context_fit=context_fit,
             priors=priors,
+            min_cost_tier=_min_cost_tier(model_policy),
+            open_weights=open_weights,
         )
         if exploration_pick is not None:
             return RoutingDecision(
@@ -1097,6 +1290,7 @@ class ModelRouter:
                 fallback_used=False,
                 effort=default_effort(objective, task_shape, exploration_pick.cost_tier),
                 exploration=exploration,
+                open_weights=open_weights,
             )
 
         settings = get_settings()
@@ -1124,6 +1318,7 @@ class ModelRouter:
                 candidates=candidates,
                 objective=objective,
                 priors=priors,
+                open_weights=open_weights,
             )
             prompt_fingerprint = prompt_sha256(prompt)
             start = time.monotonic()
@@ -1222,6 +1417,7 @@ class ModelRouter:
                             effort=chosen_effort,
                             router_served_by=completion.served_by,
                             exploration=exploration,
+                            open_weights=open_weights,
                         )
                 except ProviderError as e:
                     # 2026-09-23 — a call that reached the router model and
@@ -1274,6 +1470,8 @@ class ModelRouter:
             priors=priors,
             min_context_window=min_context_window,
             exclude={c["model"] for c in cooldown_records} or None,
+            open_weights=open_weights,
+            require_zdr=_zdr_required(),
         )
         if chosen is None:
             min_tier = _min_cost_tier(model_policy)
@@ -1327,6 +1525,7 @@ class ModelRouter:
             # from the catalog itself, so this lookup cannot miss.
             effort=default_effort(objective, task_shape, self._catalog.get(chosen).cost_tier),
             exploration=exploration,
+            open_weights=open_weights,
         )
 
     def _assert_within_ceiling(self, model_id: str, max_tier: str) -> None:

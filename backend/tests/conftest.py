@@ -14,6 +14,12 @@ import pytest
 
 LIVE_ENV_FLAG = "TRET_LIVE_EVALS"
 
+# The live OpenRouter catalog fetch needs no API key any more, so without this
+# every test that routes (ModelCatalog.warm_once) would call openrouter.ai.
+# Tests of the fetch pass `Settings(openrouter_catalog=True)` explicitly, which
+# beats the environment.
+os.environ.setdefault("TRET_OPENROUTER_CATALOG", "false")
+
 
 def pytest_collection_modifyitems(config, items) -> None:
     if os.environ.get(LIVE_ENV_FLAG) == "1":

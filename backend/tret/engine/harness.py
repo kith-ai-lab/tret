@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 
 if TYPE_CHECKING:
@@ -880,6 +881,31 @@ class _EmissionsContext:
             resolved = factors
         self._call_factor_sets[key] = resolved
         return resolved
+
+
+FAILED_CALL_REMINDER_AT = 3
+
+
+def _note_repeated_failure(
+    failed_calls: dict[str, int], call_key: str, result_text: str
+) -> tuple[str, int]:
+    """Count a failed tool call and, once the SAME call has failed with the SAME
+    error `FAILED_CALL_REMINDER_AT` times, append a pointed reminder.
+
+    Returns (possibly extended result text, failure count when the reminder
+    fired else 0).
+    """
+    key = f"{call_key}\n{result_text}"
+    failed_calls[key] = failed_calls.get(key, 0) + 1
+    count = failed_calls[key]
+    if count < FAILED_CALL_REMINDER_AT:
+        return result_text, 0
+    return (
+        result_text
+        + f"\n\n[NOTE: This exact call has failed {count} times with the same error; "
+        "change the arguments as the error says, or take a different step.]",
+        count,
+    )
 
 
 class HarnessEngine:
@@ -1895,6 +1921,7 @@ class HarnessEngine:
         # that turn's own comment for what this guards in the fallback below.
         grounding_final_reply_blank = False
         seen_calls: dict[str, int] = {}  # repeated-identical-call breaker
+        failed_calls: dict[str, int] = {}  # same call + same error, repeated
         # Stall signals for the supervisor. Counted here rather than re-derived
         # from the transcript each iteration, because "in a row" is a property of
         # the sequence and the transcript would have to be re-scanned to see it.
@@ -2364,6 +2391,9 @@ class HarnessEngine:
                     content="".join(assistant_text) or None,
                     tool_calls=tool_calls,
                     meta={"iteration": iteration},
+                    # Kept verbatim for replay on later requests of this run
+                    # (see `Msg.reasoning`); None for providers that don't use it.
+                    reasoning=turn.reasoning if turn is not None else None,
                 )
             )
 
@@ -2593,6 +2623,13 @@ class HarnessEngine:
                     # Reported success is durable success, before the model is
                     # ever told the call worked.
                     await db.commit()
+                    # Belt: a helper that rolled the shared session back while
+                    # still reporting success would have expired the run (the
+                    # engine runs with expire_on_commit=False and reads run
+                    # attributes synchronously); reload it rather than fault
+                    # on an async lazy load later.
+                    if sa_inspect(run).expired_attributes:
+                        await db.refresh(run)
                     # The terminal flag is the ENGINE's to set, from the task's
                     # declared `terminal_tool` — never a tool's own opinion of
                     # whether it is terminal. A tool and the task config can no
@@ -2616,6 +2653,16 @@ class HarnessEngine:
                         "the data you need — proceed to your terminal action "
                         f"({ctx.terminal_tool or 'your final answer'}) now.]"
                     )
+                elif is_error:
+                    # The same call failing the same way again and again (an
+                    # invented argument name, say) used to burn the run down to
+                    # max_iterations: the error text alone did not change the
+                    # model's next call.
+                    result_text, repeated = _note_repeated_failure(
+                        failed_calls, call_key, result_text
+                    )
+                    if repeated:
+                        repeated_call_trips += 1
                 # `iteration` is what `plan_compaction`'s `KEEP_RECENT_ITERATIONS`
                 # protection reads (`_iteration_of`, engine/compaction.py) — left
                 # off here, every tool result read back as iteration 0, so the

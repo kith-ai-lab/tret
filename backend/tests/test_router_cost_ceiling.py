@@ -267,7 +267,9 @@ async def test_route_with_economy_ceiling_never_returns_premium(no_llm_router):
 async def test_route_without_a_ceiling_is_unchanged(no_llm_router):
     catalog = ModelCatalog()
     router = ModelRouter(catalog, _Registry({"openrouter"}))
-    decision = await router.route(model_policy={"mode": "auto"}, **ROUTE_ARGS)
+    decision = await router.route(
+        model_policy={"mode": "auto", "open_weights": "any"}, **ROUTE_ARGS
+    )
     assert decision.fallback_used is True
     assert decision.chosen_model == "openrouter/openai/gpt-5.6-terra"
 

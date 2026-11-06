@@ -10,6 +10,48 @@ one that needs action on an existing install.
 
 ### Changed
 
+- **Routing prefers open-weight models and sees the live OpenRouter catalog.** Every
+  model carries `open_weights` (from OpenRouter's `hugging_face_id`, or `models.yaml`;
+  local models are open) and a harness policy can say `open_weights: prefer | require |
+  any` (default `TRET_ROUTER_OPEN_WEIGHTS=prefer`: evidence first, then open before
+  closed, then the objective; `any` is the old ordering byte for byte; an invalid
+  value now stops startup). The live OpenRouter catalog can load without a global
+  key when `TRET_OPENROUTER_CATALOG_PUBLIC_FETCH=true` (default false, so a keyless
+  self-hosted install still never calls openrouter.ai), refreshes in the background
+  every 6 hours (`TRET_OPENROUTER_CATALOG_TTL_SECONDS`, one shared download), and
+  brings OpenRouter's zero-data-retention endpoint list: under ZDR provider prefs a
+  model with no ZDR tool-capable endpoint (after `ignore`/`only`) is not routed to,
+  and a list that matches too few curated models is treated as unknown. Uncurated models reach the router only
+  through the new-model seats (6, newest per lab, 120 days, specialist variants
+  skipped, open-weight first, same context-window check as everything else), by
+  being named in the harness's `allowed` list, or by earning a non-poor record;
+  exploration now runs under `balanced` and `eco` on extraction and freeform tasks
+  (never for the SDK or `tret run`, which keep no outcome record). Routing prompt
+  `route-v7`. See [docs/upgrading.md](docs/upgrading.md).
+- The Disclosure Collector harness no longer seeds a `min_cost_tier: standard` floor
+  (eco objective, standard ceiling kept; an unedited harness is upgraded at boot).
+  The per-run web-search cap now stops the search loop the floor guarded against, and
+  price tiers excluded nearly every open-weight model regardless of capability.
+
+### Fixed
+
+- **`MissingGreenlet` in runs that searched documents another run was chunking.**
+  `ensure_chunks` rolled back the run's whole session when a concurrent run won the
+  `UNIQUE(document_id, ordinal)` race, expiring the run row mid-loop. Chunks are now
+  inserted under a savepoint (a lost race is "already chunked"), and the harness
+  reloads an expired run after a successful tool.
+- **Thinking models lost their reasoning between tool turns.** OpenRouter
+  `reasoning_details` (or the `reasoning` string; `reasoning_content` on the Kimi
+  adapter) is kept on the assistant turn and replayed unmodified on later requests to
+  the same model, as Kimi K3 and DeepSeek V4 require for tool loops.
+- **Tool argument errors name the accepted parameters.** An unknown argument gets a
+  did-you-mean and the full accepted list (required marked), unparseable JSON
+  arguments say so, and the same failing call repeated three times gets a pointed
+  reminder that also counts toward supervisor escalation. A live Kimi K3 run had
+  repeated one misnamed argument 36 times. Non-object arguments are a tool error,
+  not a crashed run, and a provider that rejects replayed reasoning gets the call
+  once more without it.
+
 - The Disclosure Collector harness now seeds routing objective `eco` within its standard-tier floor (an unedited harness is upgraded at boot): on the same 12 registers, `eco` (GPT-5.6 Luna, low effort) wrote 12/12 like `balanced` (GPT-5.6 Terra) at about a quarter of the cost and energy.
 
 ### Added

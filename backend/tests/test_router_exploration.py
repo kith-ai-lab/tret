@@ -204,7 +204,10 @@ async def test_ties_are_broken_deterministically_cheapest_then_id():
     b = _model("a-model", price="1")  # same price, lower id — must win the tie
     c = _model("mid-model", price="5")  # pricier — never wins
     router = ModelRouter(
-        _catalog(a, b, c), _NeverCalledRegistry({"openrouter"}), rng=random.Random(FIRES_AT_MAX_SEED)
+        _catalog(a, b, c),
+        _NeverCalledRegistry({"openrouter"}),
+        _StubPriors({}),  # a recording store: exploration needs one to learn into
+        rng=random.Random(FIRES_AT_MAX_SEED),
     )
 
     decision = await _route(router, _policy(adaptive={"exploration": MAX_EXPLORATION}))
@@ -249,6 +252,7 @@ async def test_a_declined_roll_still_lets_the_fallback_run_when_the_router_fails
     router = ModelRouter(
         _catalog(untried, other),
         _KeyedButUnreachable({"openrouter"}),
+        _StubPriors({}),
         rng=random.Random(DOES_NOT_FIRE_AT_DEFAULT_SEED),
     )
 
@@ -261,8 +265,8 @@ async def test_a_declined_roll_still_lets_the_fallback_run_when_the_router_fails
 
 
 # ── never fires: objective, task shape, and a zero rate ─────────────────────
-@pytest.mark.parametrize("objective", ["quality", "eco", "token_conservation"])
-async def test_never_fires_under_a_non_balanced_objective(objective):
+@pytest.mark.parametrize("objective", ["quality", "token_conservation"])
+async def test_never_fires_under_a_non_exploring_objective(objective):
     untried = _model("untried-economy")
     other = _model("other-economy", price="2")
     router = ModelRouter(
@@ -280,8 +284,8 @@ async def test_never_fires_under_a_non_balanced_objective(objective):
     assert "objective" in decision.exploration["reason"]
 
 
-@pytest.mark.parametrize("task_shape", ["verdict", "drafting", "freeform", "qa_review"])
-async def test_never_fires_outside_the_extraction_task_shape(task_shape):
+@pytest.mark.parametrize("task_shape", ["verdict", "drafting", "qa_review"])
+async def test_never_fires_outside_the_exploring_task_shapes(task_shape):
     untried = _model("untried-economy")
     other = _model("other-economy", price="2")
     router = ModelRouter(

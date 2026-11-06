@@ -659,11 +659,11 @@ class Settings(BaseSettings):
     # `router_llm.router._candidates_with_fit`'s slot reservation. This many of
     # the 20 slots are reserved for uncurated models released within
     # `router_new_model_window_days`, so a new release becomes usable within a
-    # day of shipping without a `models.yaml` edit. 0 disables the reservation
-    # entirely — ordering is then byte-for-byte what it always was, which is
-    # how a hosted deployment runs (its `openrouter_catalog=false` already yields zero
-    # uncurated models, so this is belt-and-braces there, not load-bearing).
-    router_new_model_slots: int = 3
+    # day of shipping without a `models.yaml` edit. Uncurated models reach the
+    # router ONLY through these seats or by having earned a track record (see
+    # `_candidates_with_fit`); 0 disables the seats. Default raised 3 -> 6
+    # (2026-11-06) once Tret Cloud started loading the live catalog.
+    router_new_model_slots: int = 6
 
     @field_validator("router_new_model_slots", mode="after")
     @classmethod
@@ -685,7 +685,19 @@ class Settings(BaseSettings):
     # unreviewed" marker in the router prompt, `router_llm.prompts`) — a model
     # counts as new if the first day of its `released` (YYYY-MM) month is
     # within this many days of today. An unknown `released` is never new.
-    router_new_model_window_days: int = 60
+    router_new_model_window_days: int = 120
+    # Open-weights policy default (`model_policy.open_weights` overrides it per
+    # harness): "prefer" orders open-weight models ahead of closed ones (evidence
+    # still leads), "require" excludes closed ones, "any" ignores weights.
+    router_open_weights: str = "prefer"
+
+    @field_validator("router_open_weights", mode="before")
+    @classmethod
+    def _validate_router_open_weights(cls, value):
+        text = str(value if value is not None else "").strip().lower()
+        if text not in ("prefer", "require", "any"):
+            raise ValueError(f"router_open_weights must be one of prefer|require|any, got {value!r}")
+        return text
 
     # Headless CLI ledger (`tret run`, tret/local_run.py). One JSON line is
     # appended here per run: what it cost, what it's estimated to have emitted,
@@ -832,7 +844,23 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
 
     # Optional dynamic OpenRouter catalog fetch (static models.yaml always wins)
+    # The fetch runs only when this is true AND either a global OpenRouter key is
+    # set or `openrouter_catalog_public_fetch` is true (a self-hosted install with
+    # no key makes no call to openrouter.ai). Routing to a fetched model still
+    # needs an OpenRouter key (global, or the workspace's own).
     openrouter_catalog: bool = True
+    # Allow the keyless fetch of the public model list. Off by default so an
+    # install without an OpenRouter key never contacts openrouter.ai; Tret Cloud
+    # (per-workspace keys only) turns it on.
+    openrouter_catalog_public_fetch: bool = False
+    # How long the fetched catalog (and ZDR endpoint list) is reused; clamped >= 300.
+    openrouter_catalog_ttl_seconds: int = 21600
+
+    @field_validator("openrouter_catalog_ttl_seconds", mode="after")
+    @classmethod
+    def _clamp_openrouter_catalog_ttl(cls, value: int) -> int:
+        return max(300, value)
+
     openrouter_referer: str = "https://github.com/kith-ai-lab/tret"
     openrouter_title: str = "tret"
     # Provider-selection preferences (see `OpenRouterProvider._provider_body`) —

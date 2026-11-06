@@ -380,17 +380,18 @@ COLLECTION_HARNESS_TOOLS = [
 
 
 # Collection runs are tool-heavy (search, capture, page-boundary proposals, write-back
-# over up to 40 iterations) and a weak model loops: on 2026-11-04 the router picked an
-# economy-tier model that spent 22 of 24 iterations on web_search. The collector is
-# therefore held to exactly the standard tier: `min_cost_tier` is a hard routing floor
-# (the `quality` objective only reorders candidates, it excludes none), and the
-# ceiling stays at standard so a collection run cannot silently climb to premium spend.
-# Within that tier the objective is `eco`: on 2026-11-06 the same 12 registers ran
-# under `balanced` (GPT-5.6 Terra, prior-driven) and `eco` (GPT-5.6 Luna, low
-# effort) with 12/12 written both times, at a quarter of the cost and energy.
+# over up to 40 iterations). The collector is held to a standard-tier ceiling so a run
+# cannot silently climb to premium spend, and routes on the `eco` objective: on
+# 2026-11-06 the same 12 registers ran under `balanced` (GPT-5.6 Terra) and `eco`
+# (GPT-5.6 Luna, low effort) with 12/12 written both times, at a quarter of the cost
+# and energy. There is deliberately no `min_cost_tier` floor. One was added after an
+# economy model looped 22 web searches on 2026-11-04; it is removed because (a) the
+# per-run web_search cap (`TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN`, 12) now stops
+# that loop, (b) price tiers exclude almost every open-weight model regardless of
+# capability, and (c) routing evidence and exploration now decide which models earn
+# Collector runs.
 COLLECTION_HARNESS_MODEL_POLICY = {
     "mode": "auto",
-    "min_cost_tier": "standard",
     "max_cost_tier": "standard",
     "objective": "eco",
 }
@@ -400,6 +401,12 @@ COLLECTION_HARNESS_MODEL_POLICY = {
 _PREVIOUS_COLLECTION_MODEL_POLICIES = (
     {"mode": "auto", "max_cost_tier": "standard"},
     {"mode": "auto", "min_cost_tier": "standard", "max_cost_tier": "standard"},
+    {
+        "mode": "auto",
+        "min_cost_tier": "standard",
+        "max_cost_tier": "standard",
+        "objective": "eco",
+    },
 )
 # A 380-page annual report with an embedded sustainability statement needs more
 # than 24 iterations to locate, read and map; the seed is raised to 40, and a run

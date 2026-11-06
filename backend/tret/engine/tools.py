@@ -39,7 +39,9 @@ Trust-doctrine notes:
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
+import inspect
 import json
 import logging
 import random
@@ -4003,8 +4005,78 @@ def _cap_result_text(text: str) -> str:
     )
 
 
+def _accepted_parameters(spec: ToolSpec) -> tuple[list[str], set[str], set[str]] | None:
+    """(accepted names in order, required names, names the handler must get),
+    read from the handler signature (the source of truth for what the call
+    binds) and the JSON-schema `required`. None when the handler takes
+    **kwargs or cannot be introspected, so no pre-check applies."""
+    try:
+        params = list(inspect.signature(spec.handler).parameters.values())[1:]  # drop ctx
+    except (TypeError, ValueError):
+        return None
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):
+        return None
+    names = [p.name for p in params if p.kind is not inspect.Parameter.VAR_POSITIONAL]
+    must = {p.name for p in params if p.default is inspect.Parameter.empty}
+    schema_required = set((spec.parameters or {}).get("required") or []) & set(names)
+    return names, must | schema_required, must
+
+
+def _argument_error(spec: ToolSpec, arguments: dict) -> str | None:
+    """An actionable message when `arguments` cannot bind to the tool, else None.
+
+    Names the accepted parameters (required ones starred) and, for each unknown
+    name, the closest valid one — a bare `got an unexpected keyword argument`
+    did not stop a model repeating the same invented name 36 times."""
+    accepted = _accepted_parameters(spec)
+    if not isinstance(arguments, dict):
+        got = "null" if arguments is None else type(arguments).__name__
+        if accepted is None:
+            return f"{spec.name}: arguments must be a JSON object, got {got}."
+        names, required, _must = accepted
+        listing = ", ".join(f"{n}*" if n in required else n for n in names)
+        return (
+            f"{spec.name}: arguments must be a JSON object, got {got}. "
+            f"Accepted: {listing} (* required). Call it again with a JSON object."
+        )
+    if accepted is None:
+        return None
+    names, required, must = accepted
+    listing = ", ".join(f"{n}*" if n in required else n for n in names)
+    tail = f"Accepted: {listing} (* required)."
+    if "_raw" in arguments and "_raw" not in names:
+        return (
+            f"{spec.name}: the arguments were not valid JSON, so the call was not run. "
+            f"Send a single JSON object using only these names. {tail}"
+        )
+    problems: list[str] = []
+    for key in arguments:
+        if key in names:
+            continue
+        close = difflib.get_close_matches(str(key), names, n=1, cutoff=0.6)
+        hint = f" (did you mean '{close[0]}'?)" if close else ""
+        problems.append(f"unknown argument '{key}'{hint}")
+    missing = [n for n in names if n in must and n not in arguments]
+    if missing:
+        problems.append("missing required argument(s) " + ", ".join(f"'{m}'" for m in missing))
+    if not problems:
+        return None
+    return f"{spec.name}: " + "; ".join(problems) + f". {tail} Call it again with only these names."
+
+
 async def execute_tool(ctx: RunContext, spec: ToolSpec, arguments: dict) -> tuple[str, bool]:
     """Run one tool call. Returns (result_text, is_error)."""
+    try:
+        arg_error = _argument_error(spec, arguments)
+    except Exception as e:  # the pre-check is advisory; it must never kill the run
+        log.warning("argument pre-check failed for %s", spec.name, exc_info=True)
+        arg_error = None
+        if not isinstance(arguments, dict):
+            return f"Tool error: {spec.name}: invalid arguments — {type(e).__name__}: {e}", True
+    if arg_error:
+        return f"Tool error: {arg_error}", True
+    if not isinstance(arguments, dict):  # pre-check could not describe it (no signature)
+        return f"Tool error: {spec.name}: arguments must be a JSON object", True
     try:
         result = await spec.handler(ctx, **arguments)
         return _cap_result_text(result), False

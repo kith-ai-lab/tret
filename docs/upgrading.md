@@ -30,6 +30,36 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## 2026-11-06 · live model catalog and open-weight preference
+
+Behaviour change, no migration. Routing changes on an existing install:
+
+- **Open weights are preferred by default.** `TRET_ROUTER_OPEN_WEIGHTS` (default
+  `prefer`) and `model_policy.open_weights` (`prefer` | `require` | `any`). Under
+  `prefer`, recorded evidence still leads, then open-weight models sort ahead of
+  closed ones, then the harness objective decides. The router prompt marks each
+  candidate's weights. Set `TRET_ROUTER_OPEN_WEIGHTS=any` (or `open_weights: any`
+  on a harness) to keep the previous ordering exactly; the routing prompt version
+  is now `route-v7`.
+- **The live OpenRouter catalog can load without a global key.** Set
+  `TRET_OPENROUTER_CATALOG_PUBLIC_FETCH=true` (default false; with a global
+  `TRET_OPENROUTER_API_KEY` it loads as before) and tret fetches OpenRouter's public
+  model list and its zero-data-retention endpoint list in the background every
+  `TRET_OPENROUTER_CATALOG_TTL_SECONDS` (default 21600). Using a model still needs
+  an OpenRouter key. `TRET_ROUTER_OPEN_WEIGHTS` must be `prefer`, `require` or
+  `any`; any other value now stops startup. Under the default ZDR provider prefs a model with no ZDR
+  tool-capable endpoint is not routed to; an override or pin is unaffected.
+- **Uncurated models need a seat or a record.** A model that is not in
+  `models.yaml` reaches the router only through the new-model seats (now 6, newest
+  per lab, 120-day window, specialist variants skipped) or once it has a track
+  record that is not poor. Exploration now also runs under `eco` and on `freeform`
+  tasks.
+- **Disclosure Collector:** an unedited Collector loses its `min_cost_tier:
+  standard` floor at boot (eco objective, standard ceiling kept).
+- **Thinking models:** reasoning returned by OpenRouter (`reasoning_details`) is
+  stored on the assistant turn and replayed on later requests of the same run, as
+  Kimi K3 and DeepSeek V4 require for tool loops.
+
 ## 2026-10-20 · OpenRouter requests are zero-data-retention by default
 
 Behaviour change, no migration. With `TRET_OPENROUTER_PROVIDER_PREFS` unset or

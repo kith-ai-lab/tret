@@ -171,6 +171,9 @@ def estimate_message_tokens(msg: Msg) -> int:
     total = estimate_tokens(msg.content or "")
     for call in msg.tool_calls or []:
         total += estimate_tokens(call.name) + estimate_tokens(str(call.arguments))
+    if msg.reasoning:
+        # Replayed reasoning is on the wire too (when the provider takes it).
+        total += estimate_tokens(str({k: v for k, v in msg.reasoning.items() if k != "model"}))
     return total
 
 
@@ -426,6 +429,9 @@ def wire_view(messages: list[Msg], state: CompactionState) -> list[Msg]:
                     # result is what keeps the conversation replayable.
                     tool_calls=msg.tool_calls,
                     tool_call_id=msg.tool_call_id,
+                    # A kept turn keeps its reasoning; only the bulky result
+                    # text is replaced by the marker.
+                    reasoning=msg.reasoning,
                 )
             )
         else:

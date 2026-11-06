@@ -34,9 +34,16 @@ class Msg:
     tool_calls: list[ToolCall] = field(default_factory=list)  # assistant only
     tool_call_id: str | None = None  # tool only
     meta: dict = field(default_factory=dict)  # timing, iteration; never sent to providers
+    # Assistant only: the model's own reasoning for this turn, exactly as the
+    # provider returned it, to be replayed unmodified on later requests of the
+    # same run (thinking models that require it for tool loops: Kimi K3,
+    # DeepSeek V4; OpenRouter's `reasoning_details`). Shape:
+    # {"model": <slug it came from>, <wire field>: <value>, ...}. Never rendered
+    # as message text; only a provider whose wire format takes it replays it.
+    reasoning: dict | None = None
 
     def to_json(self) -> dict:
-        return {
+        out = {
             "role": self.role,
             "content": self.content,
             "tool_calls": [
@@ -45,6 +52,9 @@ class Msg:
             "tool_call_id": self.tool_call_id,
             "meta": self.meta,
         }
+        if self.reasoning:
+            out["reasoning"] = self.reasoning
+        return out
 
     @classmethod
     def from_json(cls, d: dict) -> "Msg":
@@ -56,6 +66,7 @@ class Msg:
             ],
             tool_call_id=d.get("tool_call_id"),
             meta=d.get("meta", {}),
+            reasoning=d.get("reasoning") or None,
         )
 
 
@@ -213,6 +224,9 @@ class TurnComplete:
     # path instead of the structured-completion one.
     served_by: str | None = None
     inference_geo: str | None = None
+    # The assistant turn's reasoning as the provider returned it (see
+    # `Msg.reasoning`); None when the provider returned none or does not use it.
+    reasoning: dict | None = None
 
 
 ProviderEvent = TextDelta | ToolCallComplete | TurnComplete

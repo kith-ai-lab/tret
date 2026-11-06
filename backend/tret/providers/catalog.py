@@ -3,9 +3,14 @@
 The catalog is the single source the router candidates, UI pickers, and cost
 accounting all read. Static curated entries (models.yaml) always win; the
 optional dynamic OpenRouter fetch adds clearly-marked "uncurated" entries.
+The OpenRouter model list is a public endpoint, so the dynamic fetch needs no API
+key: a deployment whose OpenRouter keys are all per-workspace (Tret Cloud) still
+sees the live catalog, and routing to those models still requires the workspace's
+own key (`ProviderRegistry.has_key`).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time
@@ -48,7 +53,12 @@ from tret.services.emissions import (
 log = logging.getLogger("tret")
 
 _MODELS_YAML = Path(__file__).parent / "models.yaml"
-_OPENROUTER_CACHE_TTL = 60 * 60 * 24  # 24h
+_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+_OPENROUTER_ZDR_URL = "https://openrouter.ai/api/v1/endpoints/zdr"
+# Default for `settings.openrouter_catalog_ttl_seconds` when a Settings-like
+# object does not define it; the setting itself is clamped to >= 300 s.
+_OPENROUTER_DEFAULT_TTL = 60 * 60 * 6
+_OPENROUTER_MIN_TTL = 300
 _LOCAL_CACHE_TTL = 60 * 5  # 5min — local models/servers change far more often
 _LOCAL_PROBE_TIMEOUT = 8.0
 
@@ -259,6 +269,22 @@ class ModelInfo:
     # call `prices_at()` (or `cost_usd`, which does this internally on every
     # call) for whichever price is actually in effect on a given date.
     price_changes: list[PriceChange] = field(default_factory=list)
+    # Are the weights published? True/False when known, None when not. Dynamic
+    # OpenRouter entries read it from `hugging_face_id`; local models are open by
+    # construction; models.yaml sets it by hand. Read by the router's
+    # `model_policy.open_weights` preference/requirement.
+    open_weights: bool | None = None
+    # Hugging Face repo id of the published weights (OpenRouter's
+    # `hugging_face_id`, or models.yaml's `hf_id`). Display/provenance only.
+    hf_id: str | None = None
+    # OpenRouter's `created` (unix seconds), kept raw so "newest" is not limited
+    # to `released`'s month resolution. None for static/local entries.
+    created_ts: int | None = None
+    # For provider == "openrouter": does at least one zero-data-retention
+    # endpoint serving this wire id support tool calling
+    # (`/api/v1/endpoints/zdr`)? True/False once that list was fetched, None when
+    # the fetch failed or never ran. None never excludes a model from routing.
+    zdr_tools_endpoint: bool | None = None
 
     def __post_init__(self) -> None:
         if self.energy_class not in ENERGY_CLASS_WH_PER_MTOK:
@@ -467,6 +493,9 @@ class ModelInfo:
             "supports_effort": self.supports_effort,
             "curated": self.curated,
             "released": self.released,
+            "open_weights": self.open_weights,
+            "hf_id": self.hf_id,
+            "zdr_tools_endpoint": self.zdr_tools_endpoint,
             "energy_class": self.energy_class,
             "energy_wh_per_mtok": float(self.energy_wh_per_mtok),
             "energy_wh_per_mtok_explicit": self.energy_wh_per_mtok_explicit,
@@ -543,6 +572,87 @@ def parse_reasoning_default(raw: object) -> tuple[bool | None, str | None]:
     )
 
 
+def _endpoint_provider_slug(row: dict) -> str | None:
+    """The provider slug of one `/endpoints/zdr` row: its `tag` up to any "/"
+    ("google-vertex/us-central1" -> "google-vertex"), lowercased; else a slug
+    of `provider_name` ("Google Vertex" -> "google-vertex"). None when the row
+    names neither."""
+    tag = row.get("tag")
+    if isinstance(tag, str) and tag.strip():
+        return tag.split("/", 1)[0].strip().lower() or None
+    name = row.get("provider_name")
+    if isinstance(name, str) and name.strip():
+        slug = "".join(c if c.isalnum() else "-" for c in name.strip().lower())
+        return "-".join(part for part in slug.split("-") if part) or None
+    return None
+
+
+def _prefs_slugs(prefs: dict | None, key: str) -> set[str]:
+    raw = (prefs or {}).get(key)
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return set()
+    return {str(x).split("/", 1)[0].strip().lower() for x in raw if str(x).strip()}
+
+
+def _zdr_tool_model_ids(
+    payload: object,
+    prefs: dict | None = None,
+    curated_wire_ids: set[str] | frozenset[str] | None = None,
+) -> set[str] | None:
+    """Wire ids with at least one zero-data-retention endpoint that supports
+    `tools`, from an `/api/v1/endpoints/zdr` payload. None when the payload is
+    not that shape or yields no usable rows at all: an empty set would read as
+    "no model has a ZDR endpoint" and, under the default ZDR-only provider
+    preferences, exclude every OpenRouter model, which is a worse failure than
+    treating the list as unknown.
+
+    `curated_wire_ids` is a format tripwire: if fewer than half of them appear
+    in the parsed set, the upstream format has probably changed, so the list is
+    unknown (None) rather than flagging every model False.
+
+    `prefs` (the effective OpenRouter provider preferences, read the way the
+    router reads them) then narrows which endpoints count: those whose provider
+    is in `ignore` are dropped, and with `only` set just those providers are
+    kept. A row that names no provider cannot be judged and is kept.
+    """
+    if not isinstance(payload, dict):
+        return None
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        return None
+    parsed: set[str] = set()
+    usable: set[str] = set()
+    ignore = _prefs_slugs(prefs, "ignore")
+    only = _prefs_slugs(prefs, "only")
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        model_id = row.get("model_id")
+        params = row.get("supported_parameters")
+        if not (isinstance(model_id, str) and model_id and isinstance(params, list)):
+            continue
+        if "tools" not in params:
+            continue
+        parsed.add(model_id)
+        provider = _endpoint_provider_slug(row)
+        if provider is not None and (provider in ignore or (only and provider not in only)):
+            continue
+        usable.add(model_id)
+    if not parsed:
+        return None
+    if curated_wire_ids and len(curated_wire_ids & parsed) * 2 < len(curated_wire_ids):
+        log.warning(
+            "OpenRouter ZDR endpoint list matched too few curated models (%d of %d); "
+            "treating it as unknown.",
+            len(curated_wire_ids & parsed),
+            len(curated_wire_ids),
+        )
+        return None
+    return usable
+
+
 def _tier_from_price(output_price: Decimal) -> str:
     if output_price >= Decimal("30"):
         return "premium"
@@ -606,11 +716,52 @@ def _parse_price_change_price(model_id: str, pc: dict, field: str) -> Decimal:
         ) from exc
 
 
+_REFRESH_LOOP_FLOOR = 5.0
+
+
+async def dynamic_refresh_loop(catalog: ModelCatalog) -> None:
+    """Keep the dynamic OpenRouter catalog fresh after boot: every TTL, refresh
+    it when the fetch is enabled. Never raises (a failure is logged and retried
+    next tick) and never blocks startup (the app schedules it as a task);
+    cancelling the task ends it."""
+    first = True
+    while True:
+        try:
+            interval = catalog.dynamic_ttl_seconds()
+        except Exception:  # noqa: BLE001 - never spin: always fall through to a sleep
+            interval = _OPENROUTER_DEFAULT_TTL
+        # Sleep until the cache goes stale (the boot warm-up fetches just after
+        # this loop starts), not a full TTL from now.
+        # Only the first tick is aligned this way; later ticks (and a boot with
+        # nothing fetched yet) wait a full TTL so a failing upstream is not
+        # hammered.
+        fetched_at = getattr(catalog, "_dynamic_fetched_at", 0.0)
+        if first and fetched_at:
+            age = time.monotonic() - fetched_at
+            await asyncio.sleep(max(_REFRESH_LOOP_FLOOR, interval - age) + 1.0)
+        else:
+            await asyncio.sleep(interval)
+        first = False
+        try:
+            if catalog.dynamic_fetch_enabled():
+                await catalog.refresh_dynamic()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the loop must survive a bad tick
+            log.warning("Background model catalog refresh failed; will retry", exc_info=True)
+
+
 class ModelCatalog:
     def __init__(self) -> None:
         self._static = self._load_static()
         self._dynamic: dict[str, ModelInfo] = {}
         self._dynamic_fetched_at: float = 0.0
+        # Wire ids with a tool-capable ZDR endpoint, from the last successful
+        # `/endpoints/zdr` fetch. None = never fetched / last fetch failed.
+        self._zdr_ids: set[str] | None = None
+        # Single-flight for `refresh_dynamic`: concurrent callers (the background
+        # loop, GET /api/models, a run's warm-up) share one download.
+        self._dynamic_lock_state: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
         self._local: dict[str, ModelInfo] = {}
         self._local_fetched_at: float = 0.0
         # Tool-support probe results, keyed by tret model id. Populated lazily
@@ -718,6 +869,8 @@ class ModelCatalog:
                 reasoning_default_enabled=m.get("reasoning_default_enabled"),
                 reasoning_default_effort=m.get("reasoning_default_effort"),
                 openrouter_id=m.get("openrouter_id"),
+                open_weights=m.get("open_weights"),
+                hf_id=m.get("hf_id"),
                 curated=True,
                 released=str(m["released"]) if m.get("released") else None,
                 # Unclassified curated entries fall back to their cost tier's
@@ -741,17 +894,80 @@ class ModelCatalog:
             out[info.id] = info
         return out
 
-    async def refresh_dynamic(self) -> None:
-        """Fetch the OpenRouter catalog (optional, cached 24h). Static wins."""
+    def _lock(self) -> asyncio.Lock:
+        """The single-flight lock for the running event loop (SDK/CLI callers
+        use a fresh `asyncio.run` per call, and a lock contended in one loop
+        cannot be reused in another)."""
+        loop = asyncio.get_running_loop()
+        state = self._dynamic_lock_state
+        if state is None or state[0] is not loop:
+            state = (loop, asyncio.Lock())
+            self._dynamic_lock_state = state
+        return state[1]
+
+    @staticmethod
+    def dynamic_fetch_enabled() -> bool:
+        """Does this deployment fetch the OpenRouter catalog at all? Only when
+        `openrouter_catalog` is on AND either a global OpenRouter key is set or
+        `openrouter_catalog_public_fetch` opts in to the keyless public fetch,
+        so a self-hosted install without a key never contacts openrouter.ai."""
         settings = get_settings()
-        if not settings.openrouter_catalog or not settings.openrouter_api_key:
+        if not getattr(settings, "openrouter_catalog", False):
+            return False
+        return bool(
+            getattr(settings, "openrouter_api_key", "")
+            or getattr(settings, "openrouter_catalog_public_fetch", False)
+        )
+
+    def dynamic_ttl_seconds(self) -> float:
+        return max(
+            _OPENROUTER_MIN_TTL,
+            getattr(get_settings(), "openrouter_catalog_ttl_seconds", _OPENROUTER_DEFAULT_TTL),
+        )
+
+    def _dynamic_fresh(self) -> bool:
+        return bool(self._dynamic) and (
+            time.monotonic() - self._dynamic_fetched_at < self.dynamic_ttl_seconds()
+        )
+
+    async def refresh_dynamic(self) -> None:
+        """Fetch the OpenRouter catalog (optional, cached for
+        `openrouter_catalog_ttl_seconds`). Static wins.
+
+        Runs only when `dynamic_fetch_enabled()`. `/api/v1/models` and
+        `/api/v1/endpoints/zdr` are public, but the keyless fetch is opt-in
+        (`openrouter_catalog_public_fetch`); whether a run may *use* an
+        OpenRouter model is still decided by the workspace registry's
+        `has_key("openrouter")`. The ZDR list is fetched in the same pass,
+        best-effort like the model list: on failure `zdr_tools_endpoint` keeps
+        its last known value (None if never fetched).
+
+        Single-flight: concurrent callers share one download.
+        """
+        if not self.dynamic_fetch_enabled() or self._dynamic_fresh():
             return
-        if time.monotonic() - self._dynamic_fetched_at < _OPENROUTER_CACHE_TTL and self._dynamic:
-            return
+        # A caller that arrives while a download is in flight waits for it and
+        # shares its outcome (success or failure) instead of starting another.
+        lock = self._lock()
+        waiting = lock.locked()
+        async with lock:
+            if waiting or self._dynamic_fresh():
+                return
+            await self._fetch_dynamic()
+
+    async def _fetch_dynamic(self) -> None:
+        settings = get_settings()
+        zdr_payload: object = None
         try:
             async with open_client(CLASS_CATALOG, timeout=20.0) as client:
-                resp = await client.get("https://openrouter.ai/api/v1/models")
-            resp.raise_for_status()
+                resp = await client.get(_OPENROUTER_MODELS_URL)
+                resp.raise_for_status()
+                try:
+                    zdr_resp = await client.get(_OPENROUTER_ZDR_URL)
+                    zdr_resp.raise_for_status()
+                    zdr_payload = zdr_resp.json()
+                except (httpx.HTTPError, ValueError, EgressDenied):
+                    zdr_payload = None  # unknown, not "none have one"
             # Parsed inside the try: a 200 that is not JSON (a captive portal or
             # proxy error page, an HTML maintenance notice) raises ValueError, and
             # outside the try that made the whole of GET /api/models fail — the
@@ -769,13 +985,31 @@ class ModelCatalog:
         entries = payload.get("data")
         if not isinstance(entries, list):
             return
+        zdr_ids = _zdr_tool_model_ids(
+            zdr_payload,
+            getattr(settings, "openrouter_provider_prefs", None),
+            {i.wire_id for i in self._static.values() if i.provider == "openrouter"},
+        )
+        if zdr_ids is not None:
+            self._zdr_ids = zdr_ids
+        zdr_ids = self._zdr_ids
         dynamic: dict[str, ModelInfo] = {}
         for m in entries:
             if not isinstance(m, dict):
                 continue
             wire_id = m.get("id", "")
             tret_id = f"openrouter/{wire_id}"
-            if not wire_id or tret_id in self._static:
+            hf_raw = m.get("hugging_face_id")
+            hf_id = hf_raw if isinstance(hf_raw, str) and hf_raw.strip() else None
+            static = self._static.get(tret_id)
+            if static is not None:
+                # A curated entry that does not state open_weights itself learns
+                # it from the live listing; an explicit yaml value always wins.
+                if static.open_weights is None and static.provider == "openrouter":
+                    static.open_weights = bool(hf_id)
+                    static.hf_id = static.hf_id or hf_id
+                continue
+            if not wire_id:
                 continue
             # 2026-09-23: OpenRouter lists async batch endpoints (e.g.
             # "openai/gpt-6-luna:batch") alongside the interactive base id.
@@ -806,10 +1040,12 @@ class ModelCatalog:
                 continue
             created = m.get("created")
             released = None
+            created_ts = None
             if created:
                 try:
                     released = datetime.fromtimestamp(int(created), tz=timezone.utc).strftime("%Y-%m")
-                except (ValueError, OSError):
+                    created_ts = int(created)
+                except (ValueError, OSError, TypeError, OverflowError):
                     pass
             # Cheap enrichment: OpenRouter publishes its own cache-read price per
             # entry (`pricing.input_cache_read`), so an uncurated model gets its
@@ -848,18 +1084,28 @@ class ModelCatalog:
                 reasoning_default_enabled=reasoning_default_enabled,
                 reasoning_default_effort=reasoning_default_effort,
                 released=released,
+                created_ts=created_ts,
+                open_weights=bool(hf_id),
+                hf_id=hf_id,
+                zdr_tools_endpoint=(wire_id in zdr_ids) if zdr_ids is not None else None,
                 # Nobody has classified these by hand: estimate from the price
                 # tier (economy→M, standard→L, premium→XL).
                 energy_class=energy_class_for_tier(_tier_from_price(out_price)),
                 **cache_kwargs,
             )
+        # Curated OpenRouter entries get the same ZDR verdict (same wire-id key).
+        for info in self._static.values():
+            if info.provider == "openrouter":
+                info.zdr_tools_endpoint = (
+                    (info.wire_id in zdr_ids) if zdr_ids is not None else None
+                )
         self._dynamic = dynamic
         self._dynamic_fetched_at = time.monotonic()
 
     async def refresh_local(self, *, force: bool = False) -> LocalDiscovery:
         """Discover models from a configured local OpenAI-compat server.
 
-        Best-effort and short-cached (5 min, vs. 24h for OpenRouter): local
+        Best-effort and short-cached (5 min, vs. hours for OpenRouter): local
         servers get models swapped in and out far more often than a cloud
         catalog, but polling them is also free and local, so a short TTL is
         cheap. An unreachable/misconfigured server yields an empty local
@@ -941,6 +1187,8 @@ class ModelCatalog:
                 supports_tools=supports_tools,
                 curated=False,
                 released=None,
+                # Weights on the user's own machine are open by construction.
+                open_weights=True,
                 # Local inference is free in dollars but never free in watts:
                 # S is the estimate for small quantized weights on end-user
                 # hardware, and it is still a positive number.
