@@ -3090,6 +3090,7 @@ export interface DisclosureBatchSettings {
   auto_write: boolean
   model_override: string | null
   max_iterations?: number | null
+  evaluation?: BatchEvaluationSettings | null
 }
 
 export interface PromptBatchSettings {
@@ -3107,6 +3108,7 @@ export interface PromptBatchSettings {
   model_override: string | null
   max_iterations?: number | null
   columns: string[]
+  evaluation?: BatchEvaluationSettings | null
 }
 
 export type BatchSettings = DisclosureBatchSettings | PromptBatchSettings
@@ -3153,6 +3155,13 @@ export interface Batch {
     by_market?: Record<string, BatchMarketCounts>
   }
   cost_usd: number
+  /** Evaluator spend (target spend stays in cost_usd). Absent on older servers. */
+  evaluation_cost_usd?: number
+  family_key?: string
+  /** Status of the current evaluation pass, or null/absent. */
+  evaluation_status?: BatchEvaluationStatus | null
+  /** Mean quality of the current pass, or null/absent. */
+  quality_mean?: number | null
   warnings: string[]
   finalize: { written_at: string; files: BatchFinalizeFile[]; error: string | null } | null
   /** Present on create and on GET /batches/{id}. */
@@ -3251,6 +3260,8 @@ export interface BatchTarget {
   iterations: number | null
   started_at: string | null
   finished_at: string | null
+  /** Compact view of the current evaluation pass's row; absent or null when unevaluated. */
+  evaluation?: BatchTargetEvaluationBrief | null
   // Disclosure-only keys (absent on prompt targets).
   company?: string
   market?: 'US' | 'UK' | 'EU' | (string & {})
@@ -3296,6 +3307,7 @@ export interface CreateDisclosureBatchBody {
   model_override: string | null
   /** Optional iteration cap (1–50) for every target run, in place of the harness value. */
   max_iterations?: number | null
+  evaluation?: BatchEvaluationBody | null
 }
 
 export interface CreatePromptBatchBody {
@@ -3318,6 +3330,7 @@ export interface CreatePromptBatchBody {
   write_root?: string | null
   model_override?: string | null
   max_iterations?: number | null
+  evaluation?: BatchEvaluationBody | null
 }
 
 export type CreateBatchBody = CreateDisclosureBatchBody | CreatePromptBatchBody
@@ -3334,6 +3347,255 @@ export interface BatchRecords {
 export type BatchDecideResult =
   | { id: string; ok: true; status: string }
   | { id: string; ok: false; error: string }
+
+// ── Batch evaluation (scorecard, comparison, evaluator) ─────────────────
+
+export type BatchEvaluationStatus = 'running' | 'completed' | 'cancelled' | 'failed'
+
+export type TargetEvaluationStatus =
+  | 'pending'
+  | 'running'
+  | 'scored'
+  | 'skipped'
+  | 'failed'
+  | 'not_evaluated_budget'
+
+export type RubricApplies = 'all' | 'written' | 'gap'
+
+export interface BatchRubricCriterion {
+  key: string
+  label: string
+  weight: number
+  applies: RubricApplies
+  five: string
+  one: string
+}
+
+export interface BatchRubric {
+  key: string
+  version: string
+  title: string
+  acceptable_quality: number
+  criteria: BatchRubricCriterion[]
+  flags: { key: string; label: string }[]
+}
+
+/** What a create body sends: a rubric without key/version/title is fine. */
+export type BatchRubricIn = Partial<Pick<BatchRubric, 'key' | 'version' | 'title'>> &
+  Pick<BatchRubric, 'acceptable_quality' | 'criteria' | 'flags'>
+
+export interface BatchEvaluationBody {
+  enabled: boolean
+  judge_model?: string | null
+  budget_usd?: number | null
+  rubric?: BatchRubricIn | null
+}
+
+/** settings.evaluation as stored on the batch. */
+export interface BatchEvaluationSettings {
+  enabled: boolean
+  judge_model?: string | null
+  budget_usd?: number | null
+  rubric_key?: string | null
+  rubric?: BatchRubric | null
+}
+
+export interface BatchEvaluationPass {
+  id: string
+  status: BatchEvaluationStatus
+  judge_model: string
+  rubric_key: string
+  rubric_version: string
+  budget_usd: number | null
+  cost_usd: number
+  estimated_cost_usd?: number | null
+  counts: Partial<Record<TargetEvaluationStatus, number>>
+  spot_checks: number
+  /** null when nothing was reviewed. */
+  agreement: number | null
+  summary: { narrative: string; consistency_notes: string[]; lessons: string[] } | null
+  error: string | null
+  created_at: string
+  finished_at: string | null
+}
+
+export type SpotVerdict = 'agree' | 'disagree' | 'adjust'
+
+export interface TargetEvaluationReview {
+  verdict: SpotVerdict
+  adjusted_quality: number | null
+  note: string | null
+  by?: string
+  by_name?: string | null
+  at?: string
+}
+
+export interface TargetEvaluationOutlier {
+  metric: string
+  value: number
+  median: number
+  z: number
+}
+
+export interface TargetEvaluationRelative {
+  rank: number
+  of: number
+  percentile: number
+  expected: number | null
+  expected_basis: string | null
+  residual: number | null
+  outliers: (TargetEvaluationOutlier | string)[]
+}
+
+export interface TargetEvaluation {
+  id: string
+  target_id: string
+  position: number
+  label: string
+  row_key: string
+  attempt: number
+  stale: boolean
+  status: TargetEvaluationStatus
+  skip_reason: string | null
+  error: string | null
+  scores: Record<string, { score: number | null; evidence: string }>
+  quality: number | null
+  difficulty: number | null
+  flags: string[]
+  confidence: 'low' | 'medium' | 'high' | null
+  rationale: string | null
+  relative: TargetEvaluationRelative | null
+  review: TargetEvaluationReview | null
+  cost_usd: number
+  evaluator_run_id: string | null
+  finished_at: string | null
+}
+
+export interface BatchTargetEvaluationBrief {
+  status: TargetEvaluationStatus
+  quality: number | null
+  rank: number | null
+  of: number | null
+  percentile: number | null
+  residual: number | null
+  flags: string[]
+  confidence: string | null
+  stale: boolean
+}
+
+export interface BatchEvaluationDetail {
+  evaluation: BatchEvaluationPass | null
+  rubric: BatchRubric | null
+  passes: { id: string; status: BatchEvaluationStatus; judge_model: string; created_at: string }[]
+  targets: TargetEvaluation[]
+}
+
+export interface ScorecardOutlier {
+  target_id: string
+  label: string
+  metric: string
+  value: number
+  median: number
+  z: number
+}
+
+export interface BatchScorecard {
+  batch_id: string
+  name: string
+  profile: string
+  status: string
+  family_key: string
+  family_label: string
+  targets: number
+  classes: Partial<
+    Record<'success' | 'gap' | 'rejected' | 'failed' | 'infra' | 'timeout' | 'unsettled', number>
+  >
+  acceptable: number
+  yield: number | null
+  written_share: number | null
+  cost_usd: number
+  cost_per_acceptable_usd: number | null
+  energy_wh: number | null
+  energy_per_acceptable_wh: number | null
+  wall_seconds: number | null
+  reliability: { infra_failures: number; timeouts: number; retries: number }
+  human: { decided_reviews: number; rejections: number }
+  models: { model: string; targets: number }[]
+  outliers: ScorecardOutlier[]
+  quality: {
+    mean: number | null
+    median: number | null
+    scored: number
+    mean_residual: number | null
+    flags: Record<string, number>
+  } | null
+  evaluation: BatchEvaluationPass | null
+}
+
+export interface ComparisonSide {
+  target_id: string
+  status: string
+  class: string
+  quality: number | null
+  flags: string[]
+  cost_usd: number | null
+  energy_wh: number | null
+  iterations: number | null
+  model_used: string | null
+  retained_pages: number | null
+  source_pages: number | null
+}
+
+export interface BatchComparisonRow {
+  row_key: string
+  label: string
+  a: ComparisonSide | null
+  b: ComparisonSide | null
+  delta: {
+    quality: number | null
+    cost_usd: number | null
+    energy_wh: number | null
+    retained_pages: number | null
+  } | null
+}
+
+export interface BatchComparison {
+  a: BatchScorecard
+  b: BatchScorecard
+  same_family: boolean
+  quality_comparable: boolean
+  quality_note: string | null
+  shared: number
+  only_a: number
+  only_b: number
+  rows: BatchComparisonRow[]
+  summary: {
+    wins_a: number | null
+    wins_b: number | null
+    ties: number | null
+    mean_quality_delta: number | null
+    interval90: [number, number] | null
+    cost_a: number | null
+    cost_b: number | null
+    energy_a: number | null
+    energy_b: number | null
+    acceptable_a: number | null
+    acceptable_b: number | null
+  }
+}
+
+export interface ReviewTargetEvaluationBody {
+  verdict: SpotVerdict
+  adjusted_quality?: number | null
+  note?: string | null
+}
+
+export interface StartBatchEvaluationBody {
+  judge_model?: string | null
+  budget_usd?: number | null
+  only_missing?: boolean
+  target_ids?: string[]
+}
 
 // ── API functions ────────────────────────────────────────────────────────
 
@@ -3472,6 +3734,23 @@ export const api = {
       (r) => r.batches ?? r.collections ?? [],
     ),
   getBatch: (id: string) => request<Batch>(`/batches/${id}`),
+  getBatchScorecard: (id: string) => request<BatchScorecard>(`/batches/${id}/scorecard`),
+  compareBatches: (a: string, b: string) =>
+    request<BatchComparison>(
+      `/batches/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`,
+    ),
+  getBatchEvaluation: (id: string) => request<BatchEvaluationDetail>(`/batches/${id}/evaluation`),
+  startBatchEvaluation: (id: string, body: StartBatchEvaluationBody) =>
+    request<BatchEvaluationPass>(`/batches/${id}/evaluate`, { method: 'POST', body }),
+  cancelBatchEvaluation: (id: string) =>
+    request<BatchEvaluationPass>(`/batches/${id}/evaluation/cancel`, { method: 'POST' }),
+  reviewTargetEvaluation: (id: string, targetId: string, body: ReviewTargetEvaluationBody) =>
+    request<TargetEvaluation>(`/batches/${id}/targets/${targetId}/evaluation/review`, {
+      method: 'POST',
+      body,
+    }),
+  getDefaultRubric: (profile: 'prompt' | 'disclosure') =>
+    request<BatchRubric>(`/batches/rubrics/default?profile=${profile}`),
   createBatch: (body: CreateBatchBody) => request<Batch>('/batches', { method: 'POST', body }),
   startBatch: (id: string) => request<Batch>(`/batches/${id}/start`, { method: 'POST' }),
   pauseBatch: (id: string) => request<Batch>(`/batches/${id}/pause`, { method: 'POST' }),

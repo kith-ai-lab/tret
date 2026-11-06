@@ -16,17 +16,19 @@ from __future__ import annotations
 
 import uuid
 from urllib.parse import quote
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import Discriminator, Tag
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
 from tret.api.findings import _finding_out
 from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_approver
+from tret.batches import evaluation, scoring
 from tret.batches.core import written_files_latest
+from tret.batches.rubrics import default_rubric
 from tret.batches.profiles.prompt import CreatePromptBatchBody
 from tret.db.engine import get_db
 from tret.db.models import Batch, BatchTarget, Document, Harness, User
@@ -100,9 +102,14 @@ async def _collection_detail(db: AsyncSession, c: Batch) -> dict:
     runs = await service.load_runs(db, targets)
     profile = service.profile_for(c)
     maps = await service.load_review_findings(db, profile, targets, c)
-    out = service.collection_out(c, targets, runs)
+    overview = await evaluation.evaluation_overview(db, [c.id])
+    out = service.collection_out(c, targets, runs, overview.get(c.id))
+    briefs = await evaluation.target_briefs(db, c, targets)
     out["targets"] = [
-        service.target_out(t, runs.get(t.run_id), maps.get(t.run_id, []) if t.run_id else [], profile)
+        {
+            **service.target_out(t, runs.get(t.run_id), maps.get(t.run_id, []) if t.run_id else [], profile),
+            "evaluation": briefs.get(str(t.id)),
+        }
         for t in targets
     ]
     pending = []
@@ -164,7 +171,8 @@ async def _list_rows(db: AsyncSession, ctx: WorkspaceContext) -> list[dict]:
     by_batch: dict[uuid.UUID, list[BatchTarget]] = {}
     for t in targets:
         by_batch.setdefault(t.collection_id, []).append(t)
-    rows = [service.collection_out(c, by_batch.get(c.id, []), runs) for c in batches]
+    overview = await evaluation.evaluation_overview(db, [c.id for c in batches])
+    rows = [service.collection_out(c, by_batch.get(c.id, []), runs, overview.get(c.id)) for c in batches]
     await _name_harnesses(db, rows)
     return rows
 
@@ -187,6 +195,49 @@ async def list_collections(
     return {"collections": await _list_rows(db, ctx)}
 
 
+class EvaluateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    judge_model: str | None = Field(default=None, max_length=200)
+    budget_usd: float | None = Field(default=None, gt=0, le=100_000)
+    only_missing: bool = True
+    target_ids: list[uuid.UUID] | None = None
+
+
+class ReviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["agree", "disagree", "adjust"]
+    adjusted_quality: float | None = Field(default=None, ge=0, le=100)
+    note: str | None = Field(default=None, max_length=500)
+
+
+# `/compare` and `/rubrics/default` are declared before the `/{collection_id}`
+# routes: a UUID path parameter would otherwise answer 422 for these words.
+@_both("get", "/compare")
+async def compare_batches(
+    a: uuid.UUID,
+    b: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    if a == b:
+        raise HTTPException(422, "Pick two different batches to compare")
+    batch_a = await service.get_collection(db, a, ctx.id)
+    batch_b = await service.get_collection(db, b, ctx.id)
+    return await scoring.compare_batches(db, batch_a, batch_b)
+
+
+@_both("get", "/rubrics/default")
+async def default_batch_rubric(
+    profile: Literal["prompt", "disclosure"] = "prompt",
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+):
+    return default_rubric(profile)
+
+
 @_both("get", "/{collection_id}")
 async def get_collection(
     collection_id: uuid.UUID,
@@ -196,6 +247,82 @@ async def get_collection(
 ):
     c = await service.get_collection(db, collection_id, ctx.id)
     return await _collection_detail(db, c)
+
+
+@_both("get", "/{collection_id}/scorecard")
+async def get_scorecard(
+    collection_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await service.get_collection(db, collection_id, ctx.id)
+    return await scoring.batch_scorecard(db, c)
+
+
+@_both("get", "/{collection_id}/evaluation")
+async def get_evaluation(
+    collection_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await service.get_collection(db, collection_id, ctx.id)
+    return await evaluation.evaluation_detail(db, c)
+
+
+@_both("post", "/{collection_id}/evaluate")
+async def evaluate_batch(
+    collection_id: uuid.UUID,
+    request: Request,
+    body: EvaluateBody | None = None,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    """Start an evaluation pass over the batch, whatever its status (a finalized
+    batch can be evaluated after the fact)."""
+    lifecycle.refuse_if_draining(request)
+    c = await service.get_collection(db, collection_id, ctx.id)
+    body = body or EvaluateBody()
+    ev = await evaluation.start_evaluation(
+        db,
+        c,
+        user_id=user.id,
+        judge_model=body.judge_model,
+        budget_usd=body.budget_usd,
+        only_missing=body.only_missing,
+        target_ids=body.target_ids,
+    )
+    return await evaluation.pass_summary(db, ev)
+
+
+@_both("post", "/{collection_id}/evaluation/cancel")
+async def cancel_evaluation(
+    collection_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await service.get_collection(db, collection_id, ctx.id)
+    ev = await evaluation.cancel_evaluation(db, c)
+    return await evaluation.pass_summary(db, ev)
+
+
+@_both("post", "/{collection_id}/targets/{target_id}/evaluation/review")
+async def review_target_evaluation(
+    collection_id: uuid.UUID,
+    target_id: uuid.UUID,
+    body: ReviewBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await service.get_collection(db, collection_id, ctx.id)
+    t = await _target_in(db, c, target_id)
+    return await evaluation.review_target(
+        db, c, t, user, verdict=body.verdict, adjusted_quality=body.adjusted_quality, note=body.note
+    )
 
 
 @_both("post", "/{collection_id}/start")
