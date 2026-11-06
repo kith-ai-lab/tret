@@ -2180,3 +2180,18 @@ summary:focus-visible {
 .delegation-panel .row a:hover {
   text-decoration: underline;
 }
+
+/* ── Batch evaluation ──────────────────────────────────────────────────── */
+
+.delta-pos { color: var(--green); }
+.delta-neg { color: var(--red); }
+.score-cell { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.score-bar { display: inline-block; width: 40px; height: 6px; border-radius: 3px; background: var(--gray-dim); overflow: hidden; }
+.score-bar > span { display: block; height: 100%; background: var(--accent); }
+.score-dots { letter-spacing: 2px; font-family: var(--mono); }
+.stat-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.stat-tile { background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 8px 10px; }
+.stat-tile .stat-value { font-family: var(--mono); font-size: 18px; font-variant-numeric: tabular-nums; }
+.stat-tile .stat-sub { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.chip-flag { color: var(--amber); border-color: var(--amber-border); background: var(--amber-dim); }
+.chip-check { color: var(--blue); border-color: var(--blue-border); background: var(--blue-dim); }

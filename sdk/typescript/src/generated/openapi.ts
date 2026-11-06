@@ -521,6 +521,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batches/compare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Compare Batches */
+        get: operations["compare_batches_api_batches_compare_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/rubrics/default": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Default Batch Rubric */
+        get: operations["default_batch_rubric_api_batches_rubrics_default_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/batches/{collection_id}": {
         parameters: {
             query?: never;
@@ -532,6 +566,61 @@ export interface paths {
         get: operations["get_collection_api_batches__collection_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Evaluate Batch
+         * @description Start an evaluation pass over the batch, whatever its status (a finalized
+         *     batch can be evaluated after the fact).
+         */
+        post: operations["evaluate_batch_api_batches__collection_id__evaluate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/evaluation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Evaluation */
+        get: operations["get_evaluation_api_batches__collection_id__evaluation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/evaluation/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Evaluation */
+        post: operations["cancel_evaluation_api_batches__collection_id__evaluation_cancel_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -643,6 +732,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batches/{collection_id}/scorecard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Scorecard */
+        get: operations["get_scorecard_api_batches__collection_id__scorecard_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/batches/{collection_id}/start": {
         parameters: {
             query?: never;
@@ -654,6 +760,23 @@ export interface paths {
         put?: never;
         /** Start Collection */
         post: operations["start_collection_api_batches__collection_id__start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/targets/{target_id}/evaluation/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Review Target Evaluation */
+        post: operations["review_target_evaluation_api_batches__collection_id__targets__target_id__evaluation_review_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -793,6 +916,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/collections/compare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Compare Batches
+         * @deprecated
+         */
+        get: operations["compare_batches_api_collections_compare_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/rubrics/default": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Default Batch Rubric
+         * @deprecated
+         */
+        get: operations["default_batch_rubric_api_collections_rubrics_default_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/collections/{collection_id}": {
         parameters: {
             query?: never;
@@ -807,6 +970,68 @@ export interface paths {
         get: operations["get_collection_api_collections__collection_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/{collection_id}/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Evaluate Batch
+         * @deprecated
+         * @description Start an evaluation pass over the batch, whatever its status (a finalized
+         *     batch can be evaluated after the fact).
+         */
+        post: operations["evaluate_batch_api_collections__collection_id__evaluate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/{collection_id}/evaluation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Evaluation
+         * @deprecated
+         */
+        get: operations["get_evaluation_api_collections__collection_id__evaluation_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/{collection_id}/evaluation/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Evaluation
+         * @deprecated
+         */
+        post: operations["cancel_evaluation_api_collections__collection_id__evaluation_cancel_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -934,6 +1159,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/collections/{collection_id}/scorecard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Scorecard
+         * @deprecated
+         */
+        get: operations["get_scorecard_api_collections__collection_id__scorecard_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/collections/{collection_id}/start": {
         parameters: {
             query?: never;
@@ -948,6 +1193,26 @@ export interface paths {
          * @deprecated
          */
         post: operations["start_collection_api_collections__collection_id__start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/{collection_id}/targets/{target_id}/evaluation/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Review Target Evaluation
+         * @deprecated
+         */
+        post: operations["review_target_evaluation_api_collections__collection_id__targets__target_id__evaluation_review_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2798,6 +3063,7 @@ export interface components {
              * @default 3
              */
             concurrency: number;
+            evaluation?: components["schemas"]["EvaluationIn"] | null;
             /**
              * First Batch Size
              * @default 0
@@ -2863,6 +3129,7 @@ export interface components {
             concurrency: number;
             /** Csv */
             csv?: string | null;
+            evaluation?: components["schemas"]["EvaluationIn"] | null;
             /**
              * First Batch Size
              * @default 0
@@ -3006,6 +3273,39 @@ export interface components {
             mode: "preserve_measured_energy" | "estimate_both_sides";
             /** Project Id */
             project_id?: string | null;
+        };
+        /** EvaluateBody */
+        EvaluateBody: {
+            /** Budget Usd */
+            budget_usd?: number | null;
+            /** Judge Model */
+            judge_model?: string | null;
+            /**
+             * Only Missing
+             * @default true
+             */
+            only_missing: boolean;
+            /** Target Ids */
+            target_ids?: string[] | null;
+        };
+        /**
+         * EvaluationIn
+         * @description The optional `evaluation` block of both create bodies and `start_batch`.
+         */
+        EvaluationIn: {
+            /** Budget Usd */
+            budget_usd?: number | null;
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /** Judge Model */
+            judge_model?: string | null;
+            /** Rubric */
+            rubric?: {
+                [key: string]: unknown;
+            } | null;
         };
         /** FinalizeBody */
         FinalizeBody: {
@@ -3229,6 +3529,18 @@ export interface components {
             read?: components["schemas"]["ResourceEntry"][] | null;
             /** Write */
             write?: components["schemas"]["WriteTargetEntry"][] | null;
+        };
+        /** ReviewBody */
+        ReviewBody: {
+            /** Adjusted Quality */
+            adjusted_quality?: number | null;
+            /** Note */
+            note?: string | null;
+            /**
+             * Verdict
+             * @enum {string}
+             */
+            verdict: "agree" | "disagree" | "adjust";
         };
         /** RoutingPreviewBody */
         RoutingPreviewBody: {
@@ -4134,7 +4446,167 @@ export interface operations {
             };
         };
     };
+    compare_batches_api_batches_compare_get: {
+        parameters: {
+            query: {
+                a: string;
+                b: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    default_batch_rubric_api_batches_rubrics_default_get: {
+        parameters: {
+            query?: {
+                profile?: "prompt" | "disclosure";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_collection_api_batches__collection_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    evaluate_batch_api_batches__collection_id__evaluate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["EvaluateBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_evaluation_api_batches__collection_id__evaluation_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_evaluation_api_batches__collection_id__evaluation_cancel_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4356,6 +4828,37 @@ export interface operations {
             };
         };
     };
+    get_scorecard_api_batches__collection_id__scorecard_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     start_collection_api_batches__collection_id__start_post: {
         parameters: {
             query?: never;
@@ -4366,6 +4869,42 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_target_evaluation_api_batches__collection_id__targets__target_id__evaluation_review_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+                target_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewBody"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -4658,7 +5197,167 @@ export interface operations {
             };
         };
     };
+    compare_batches_api_collections_compare_get: {
+        parameters: {
+            query: {
+                a: string;
+                b: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    default_batch_rubric_api_collections_rubrics_default_get: {
+        parameters: {
+            query?: {
+                profile?: "prompt" | "disclosure";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_collection_api_collections__collection_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    evaluate_batch_api_collections__collection_id__evaluate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["EvaluateBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_evaluation_api_collections__collection_id__evaluation_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_evaluation_api_collections__collection_id__evaluation_cancel_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -4880,6 +5579,37 @@ export interface operations {
             };
         };
     };
+    get_scorecard_api_collections__collection_id__scorecard_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     start_collection_api_collections__collection_id__start_post: {
         parameters: {
             query?: never;
@@ -4890,6 +5620,42 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_target_evaluation_api_collections__collection_id__targets__target_id__evaluation_review_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+                target_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewBody"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

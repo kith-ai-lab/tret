@@ -10,6 +10,7 @@ import {
   templateProblems,
   type ParsedCsv,
 } from './csv'
+import { useEvaluationForm } from './EvaluationSection'
 import { errText } from './shared'
 
 interface Shared {
@@ -52,6 +53,7 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
   const [writeRoot, setWriteRoot] = useState('runs')
   const [model, setModel] = useState('')
   const [maxIterations, setMaxIterations] = useState('')
+  const evaluation = useEvaluationForm(open, 'prompt')
 
   const effectiveHarness = harnessId || harnesses[0]?.id || ''
   const columns = csv?.columns ?? []
@@ -90,7 +92,8 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
     rows.length >= 1 &&
     rows.length <= MAX_ROWS &&
     missing.length === 0 &&
-    reviewOk
+    reviewOk &&
+    evaluation.valid
 
   const body: CreatePromptBatchBody | null = valid
     ? {
@@ -109,6 +112,7 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
         write_root: targetSlug ? writeRoot.trim() || 'runs' : null,
         model_override: model.trim() || null,
         max_iterations: maxIterations.trim() ? Number(maxIterations) : null,
+        ...(evaluation.value ? { evaluation: evaluation.value } : {}),
       }
     : null
 
@@ -318,6 +322,8 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
           </div>
         )}
       </div>
+
+      {evaluation.fields}
     </>
   )
 

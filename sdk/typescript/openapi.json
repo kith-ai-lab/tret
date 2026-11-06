@@ -131,6 +131,16 @@
             "title": "Concurrency",
             "type": "integer"
           },
+          "evaluation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvaluationIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "first_batch_size": {
             "default": 0,
             "minimum": 0.0,
@@ -298,6 +308,16 @@
               }
             ],
             "title": "Csv"
+          },
+          "evaluation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvaluationIn"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "first_batch_size": {
             "default": 0,
@@ -659,6 +679,108 @@
           }
         },
         "title": "EmissionsWhatIfRequest",
+        "type": "object"
+      },
+      "EvaluateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "judge_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge Model"
+          },
+          "only_missing": {
+            "default": true,
+            "title": "Only Missing",
+            "type": "boolean"
+          },
+          "target_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Ids"
+          }
+        },
+        "title": "EvaluateBody",
+        "type": "object"
+      },
+      "EvaluationIn": {
+        "additionalProperties": false,
+        "description": "The optional `evaluation` block of both create bodies and `start_batch`.",
+        "properties": {
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "judge_model": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Judge Model"
+          },
+          "rubric": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rubric"
+          }
+        },
+        "title": "EvaluationIn",
         "type": "object"
       },
       "FinalizeBody": {
@@ -1201,6 +1323,50 @@
           }
         },
         "title": "ResourcesBody",
+        "type": "object"
+      },
+      "ReviewBody": {
+        "additionalProperties": false,
+        "properties": {
+          "adjusted_quality": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adjusted Quality"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "verdict": {
+            "enum": [
+              "agree",
+              "disagree",
+              "adjust"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "verdict"
+        ],
+        "title": "ReviewBody",
         "type": "object"
       },
       "RoutingPreviewBody": {
@@ -2819,6 +2985,102 @@
         ]
       }
     },
+    "/api/batches/compare": {
+      "get": {
+        "operationId": "compare_batches_api_batches_compare_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "A",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "b",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "B",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Compare Batches",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/rubrics/default": {
+      "get": {
+        "operationId": "default_batch_rubric_api_batches_rubrics_default_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "profile",
+            "required": false,
+            "schema": {
+              "default": "prompt",
+              "enum": [
+                "prompt",
+                "disclosure"
+              ],
+              "title": "Profile",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Default Batch Rubric",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
     "/api/batches/{collection_id}": {
       "get": {
         "operationId": "get_collection_api_batches__collection_id__get",
@@ -2855,6 +3117,147 @@
           }
         },
         "summary": "Get Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/evaluate": {
+      "post": {
+        "description": "Start an evaluation pass over the batch, whatever its status (a finalized\nbatch can be evaluated after the fact).",
+        "operationId": "evaluate_batch_api_batches__collection_id__evaluate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/EvaluateBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Evaluate Batch",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/evaluation": {
+      "get": {
+        "operationId": "get_evaluation_api_batches__collection_id__evaluation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Evaluation",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/evaluation/cancel": {
+      "post": {
+        "operationId": "cancel_evaluation_api_batches__collection_id__evaluation_cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Evaluation",
         "tags": [
           "batches"
         ]
@@ -3133,6 +3536,47 @@
         ]
       }
     },
+    "/api/batches/{collection_id}/scorecard": {
+      "get": {
+        "operationId": "get_scorecard_api_batches__collection_id__scorecard_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Scorecard",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
     "/api/batches/{collection_id}/start": {
       "post": {
         "operationId": "start_collection_api_batches__collection_id__start_post",
@@ -3169,6 +3613,67 @@
           }
         },
         "summary": "Start Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/targets/{target_id}/evaluation/review": {
+      "post": {
+        "operationId": "review_target_evaluation_api_batches__collection_id__targets__target_id__evaluation_review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "target_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Target Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Target Evaluation",
         "tags": [
           "batches"
         ]
@@ -3561,6 +4066,104 @@
         ]
       }
     },
+    "/api/collections/compare": {
+      "get": {
+        "deprecated": true,
+        "operationId": "compare_batches_api_collections_compare_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "A",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "b",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "B",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Compare Batches",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/rubrics/default": {
+      "get": {
+        "deprecated": true,
+        "operationId": "default_batch_rubric_api_collections_rubrics_default_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "profile",
+            "required": false,
+            "schema": {
+              "default": "prompt",
+              "enum": [
+                "prompt",
+                "disclosure"
+              ],
+              "title": "Profile",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Default Batch Rubric",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
     "/api/collections/{collection_id}": {
       "get": {
         "deprecated": true,
@@ -3598,6 +4201,150 @@
           }
         },
         "summary": "Get Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/{collection_id}/evaluate": {
+      "post": {
+        "deprecated": true,
+        "description": "Start an evaluation pass over the batch, whatever its status (a finalized\nbatch can be evaluated after the fact).",
+        "operationId": "evaluate_batch_api_collections__collection_id__evaluate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/EvaluateBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Evaluate Batch",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/{collection_id}/evaluation": {
+      "get": {
+        "deprecated": true,
+        "operationId": "get_evaluation_api_collections__collection_id__evaluation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Evaluation",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/{collection_id}/evaluation/cancel": {
+      "post": {
+        "deprecated": true,
+        "operationId": "cancel_evaluation_api_collections__collection_id__evaluation_cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Evaluation",
         "tags": [
           "batches"
         ]
@@ -3882,6 +4629,48 @@
         ]
       }
     },
+    "/api/collections/{collection_id}/scorecard": {
+      "get": {
+        "deprecated": true,
+        "operationId": "get_scorecard_api_collections__collection_id__scorecard_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Scorecard",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
     "/api/collections/{collection_id}/start": {
       "post": {
         "deprecated": true,
@@ -3919,6 +4708,68 @@
           }
         },
         "summary": "Start Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/{collection_id}/targets/{target_id}/evaluation/review": {
+      "post": {
+        "deprecated": true,
+        "operationId": "review_target_evaluation_api_collections__collection_id__targets__target_id__evaluation_review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "target_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Target Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Target Evaluation",
         "tags": [
           "batches"
         ]

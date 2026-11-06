@@ -33,6 +33,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from tret.batches import core
+from tret.batches.rubrics import EvaluationIn
 from tret.batches.profiles.prompt import CreatePromptBatchBody, slugify
 from tret.db.models import Document, Harness, Project, Run, WorkspaceMember
 from tret.engine.collection_tools import COLLECTION_TARGET_KEY
@@ -156,7 +157,9 @@ def _estimate(harness: Harness | None, targets: int) -> float | None:
     "(a CSV document) or register_csv (inline text) instead of template/rows/document_id; "
     "template, rows, document_id, label_column, review_schema and harness_id are for the "
     "default 'prompt' profile only. If run_slug is taken, pass another. The result has "
-    "warnings (first 5) and warnings_count: stored warning lines, the last may be a summary line.",
+    "warnings (first 5) and warnings_count: stored warning lines, the last may be a summary line. "
+    "Pass evaluate=true to have a judge model score every finished target against a rubric "
+    "(see batch_status for the scorecard).",
     {
         "type": "object",
         "required": ["name"],
@@ -229,6 +232,11 @@ def _estimate(harness: Harness | None, targets: int) -> float | None:
             "auto_write": {"type": "boolean", "description": "disclosure profile: default true."},
             "model_override": {"type": "string"},
             "max_iterations": {"type": "integer", "minimum": 1, "maximum": 50},
+            "evaluate": {
+                "type": "boolean",
+                "default": False,
+                "description": "Score each finished target with the default judge and rubric.",
+            },
         },
     },
 )
@@ -253,6 +261,7 @@ async def start_batch(
     run_slug: str | None = None,
     fiscal_year: int | None = None,
     auto_write: bool | None = None,
+    evaluate: bool = False,
 ) -> str:
     if ctx.workspace_id is None:
         raise ToolError("Batches are not available in this run.")
@@ -285,6 +294,7 @@ async def start_batch(
                 "run_slug: must be 3-61 lowercase letters, digits or hyphens, starting with a "
                 "letter or digit"
             )
+    evaluation_in = EvaluationIn(enabled=True) if evaluate else None
     run = await ctx.db.get(Run, ctx.run_id)
     if run is None:
         raise ToolError("This run could not be found; no batch was started.")
@@ -332,6 +342,7 @@ async def start_batch(
                 model_override=model_override,
                 max_iterations=max_iterations,
                 parent_run_id=ctx.run_id,
+                evaluation=evaluation_in,
             )
         except ValidationError as e:
             first = e.errors()[0]
@@ -361,6 +372,7 @@ async def start_batch(
                 model_override=model_override,
                 max_iterations=max_iterations,
                 parent_run_id=ctx.run_id,
+                evaluation=evaluation_in,
                 **extra,
             )
         except ValidationError as e:
@@ -418,8 +430,9 @@ async def start_batch(
 
 @builtin(
     "batch_status",
-    "Where a batch stands: counts by status, cost so far, the review queue if it has one. "
-    "Cheap; call it when asked how a batch is going.",
+    "Where a batch stands: counts by status, cost so far, the review queue if it has one, and a "
+    "scorecard (yield, mean score, cost per acceptable result). Cheap; call it when asked how a "
+    "batch is going.",
     {
         "type": "object",
         "required": ["batch_id"],
@@ -437,11 +450,21 @@ async def batch_status(ctx: RunContext, batch_id: str) -> str:
         for f in found.get(t.run_id, []) if t.run_id else []:
             if f.status == "draft":
                 pending.append({"finding_id": str(f.id), "target_label": t.label, "schema_slug": f.schema_slug})
+    from tret.batches import scoring
+
+    card = await scoring.batch_scorecard(ctx.db, c)
     return json.dumps(
         {
             "batch_id": str(c.id),
             "name": c.name,
             "status": c.status,
+            "scorecard": {
+                "yield": card["yield"],
+                "acceptable": card["acceptable"],
+                "quality_mean": (card["quality"] or {}).get("mean"),
+                "cost_per_acceptable_usd": card["cost_per_acceptable_usd"],
+                "evaluation_status": (card["evaluation"] or {}).get("status"),
+            },
             "counts": core.collection_counts(targets, profile)["by_status"],
             "cost_usd": round(
                 sum(core.target_cost(t, runs.get(t.run_id) if t.run_id else None) for t in targets), 6

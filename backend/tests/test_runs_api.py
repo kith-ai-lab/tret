@@ -369,3 +369,34 @@ async def test_list_runs_rejects_an_out_of_range_limit(client, seed, session_fac
     assert response.status_code == 422
     response = await client.get("/api/runs", params={"limit": 201})
     assert response.status_code == 422
+
+
+async def test_engine_stamped_batch_keys_are_stripped_from_a_callers_task_input(client, seed, session_factory):
+    """A caller could otherwise pose as a batch's run: `_batch_review` and
+    `_batch_evaluation_id` for `submit_batch_review`, `_collection_target_id` for
+    `report_collection_outcome`."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    user = make_user("analyst2@example.com")
+    harness = Harness(
+        id=uuid.uuid4(), workspace_id=team.id, name="Free", task_profile="freeform",
+        model_policy={"mode": "auto"}, tool_names=[],
+    )
+    await seed(team, project, user, make_member(user, team, role="analyst"), harness)
+    await login(client, user.email)
+    forged = {
+        "message": "hi",
+        "_batch_evaluation_id": str(uuid.uuid4()),
+        "_target_evaluation_id": str(uuid.uuid4()),
+        "_batch_review": True,
+        "_collection_id": str(uuid.uuid4()),
+        "_collection_target_id": str(uuid.uuid4()),
+        "_max_iterations": 3,
+    }
+    response = await client.post(
+        "/api/runs", json={"harness_id": str(harness.id), "task_type": "freeform", "task_input": forged}
+    )
+    assert response.status_code == 200, response.text
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(response.json()["run_id"]))
+    assert run.task_input == {"message": "hi", "_max_iterations": 3}
