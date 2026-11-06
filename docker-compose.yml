@@ -194,6 +194,18 @@ services:
       # migrations as a separate deploy step — tret then assumes the database
       # is already at head (docs/upgrading.md).
       TRET_SKIP_MIGRATIONS: ${TRET_SKIP_MIGRATIONS:-false}
+      # Object storage (docs/storage.md): local = the storage volume below; s3 = any
+      # S3-compatible bucket (credentials from the standard AWS_* variables).
+      TRET_STORAGE_BACKEND: ${TRET_STORAGE_BACKEND:-local}
+      TRET_STORAGE_S3_BUCKET: ${TRET_STORAGE_S3_BUCKET:-}
+      TRET_STORAGE_S3_ENDPOINT_URL: ${TRET_STORAGE_S3_ENDPOINT_URL:-}
+      TRET_STORAGE_S3_REGION: ${TRET_STORAGE_S3_REGION:-}
+      TRET_STORAGE_CACHE_MAX_MB: ${TRET_STORAGE_CACHE_MAX_MB:-512}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_ENDPOINT_URL_S3: ${AWS_ENDPOINT_URL_S3:-}
+      AWS_REGION: ${AWS_REGION:-}
+      BUCKET_NAME: ${BUCKET_NAME:-}
       # Single-instance enforcement (docs/hardening.md): a Postgres advisory
       # lock at boot, held for the process lifetime, since the run event bus
       # is in-process. The lock connection also gets aggressive TCP keepalive

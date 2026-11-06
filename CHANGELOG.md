@@ -10,6 +10,13 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Object storage for document bytes.** `TRET_STORAGE_BACKEND=s3` keeps uploads,
+  fetched snapshots, imported SharePoint/Drive files and packaged page subsets in an
+  S3-compatible bucket (Fly Tigris, AWS S3, MinIO) with a bounded local cache, so
+  they survive a restart, a redeploy and a full volume. The default `local` backend
+  is unchanged on disk. New `documents.storage_key` column (migration backfills it),
+  `tret storage status` and the resumable `tret storage migrate --to s3`, and an
+  optional `tret[s3]` extra (boto3). See [docs/storage.md](docs/storage.md).
 - **Disclosure collection.** A run can now collect a public sustainability
   disclosure and keep a verified page subset of it, with a person approving every
   page decision. See [docs/disclosure-collection.md](docs/disclosure-collection.md).

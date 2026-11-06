@@ -236,7 +236,8 @@ see [eco-accounting.md](eco-accounting.md).
   it removes.
 - `TRET_STORAGE_DIR` holds uploaded documents in the clear. Put it on an
   encrypted volume with restrictive permissions, and back it up with the DB —
-  findings reference documents by id.
+  findings reference documents by id. With `TRET_STORAGE_BACKEND=s3` the bytes
+  live in a bucket instead (encrypt and scope it there) — see [storage.md](storage.md).
 - tret makes no outbound calls except to the LLM providers you configure (plus
   the optional OpenRouter catalog fetch, `TRET_OPENROUTER_CATALOG=false` to
   disable). No telemetry unless an admin turns it on — see §9 and

@@ -456,6 +456,7 @@ async def ingest_document(
     uploaded_by: uuid.UUID | None,
     source_kind: str = "upload",
     meta_extra: dict | None = None,
+    storage_key: str | None = None,
 ) -> Document:
     """Extract `data`'s text (bounded) and build the `Document` row for it.
 
@@ -466,6 +467,9 @@ async def ingest_document(
     session: the caller owns the transaction (the upload endpoint commits
     once; the import endpoint commits per item so one bad file in a batch
     cannot roll back the others).
+
+    `storage_key` is the BlobStore key the bytes were stored under (tret/storage);
+    `storage_path` stays the local file for readers that need one.
     """
     text, meta, status = await extract_bounded(filename, data)
     if meta_extra:
@@ -476,6 +480,7 @@ async def ingest_document(
         content_type=content_type,
         byte_size=byte_size,
         storage_path=str(storage_path),
+        storage_key=storage_key,
         extracted_text=text or None,  # None = nothing was extracted
         extraction_status=status,
         meta=meta,

@@ -333,6 +333,11 @@ class Document(Base):
     content_type: Mapped[str] = mapped_column(Text, nullable=False)
     byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    # The BlobStore key (tret/storage): `<sha256>-<filename>` for documents,
+    # `packages/<finding_id>/<name>` for packaged outputs. `storage_path` stays the
+    # local file (the local path, or the s3 cache path) for readers that need one.
+    # Nullable: rows from before the column derive it (`key_for_document`).
+    storage_key: Mapped[str | None] = mapped_column(Text)
     extracted_text: Mapped[str | None] = mapped_column(Text)
     extraction_status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

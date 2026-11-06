@@ -1,5 +1,5 @@
 """`tret` CLI — pack authoring utilities, outcome bookkeeping, egress,
-telemetry, and `run`."""
+telemetry, storage, and `run`."""
 from __future__ import annotations
 
 import argparse
@@ -199,6 +199,116 @@ def _egress_restore(egress_class: str) -> None:
     for line in _egress_rows(egress_status(), (egress_class,)):
         print(line)
     print(f"\nNOTE: {_PROCESS_LOCAL_WARNING}", file=sys.stderr)
+
+
+def _storage_status() -> None:
+    """`tret storage status` — which backend, what it holds, and how many Document
+    rows carry a storage key. Prints configuration problems instead of crashing."""
+    import asyncio
+
+    from tret.config import get_settings
+    from tret.storage import get_store
+
+    try:
+        store = get_store(get_settings())
+    except RuntimeError as e:
+        print(f"storage: misconfigured: {e}")
+        sys.exit(1)
+
+    async def run() -> dict:
+        from tret.storage.admin import status
+
+        factory = None
+        try:
+            from tret.db.engine import get_session_factory
+
+            factory = get_session_factory()
+        except Exception:  # noqa: BLE001 - a core install has no database layer
+            pass
+        try:
+            return await status(store, factory)
+        except Exception as e:  # noqa: BLE001 - blob listing is the point; the DB half is optional
+            if factory is None:
+                raise
+            out = await status(store, None)
+            out["documents_error"] = f"{type(e).__name__}: {str(e)[:160]}"
+            return out
+
+    result = asyncio.run(run())
+    _print_storage_status(result)
+
+
+def _fmt_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{n} B"
+
+
+def _print_storage_status(info: dict) -> None:
+    print(f"backend:   {info['backend']}")
+    if info["backend"] == "s3":
+        print(f"bucket:    {info['bucket']}")
+        print(f"endpoint:  {info['endpoint_url'] or '(aws default)'}")
+        if info.get("region"):
+            print(f"region:    {info['region']}")
+        print(f"cache:     {info['cache_dir']} ({_fmt_bytes(info.get('cache_bytes', 0))} of {info['cache_max_mb']} MB max)")
+    else:
+        print(f"directory: {info['root']}")
+    print(f"objects:   {info['objects']} ({_fmt_bytes(info['bytes'])})")
+    docs = info.get("documents")
+    if docs is not None:
+        print(
+            f"documents: {docs['with_storage_key']} with storage_key, "
+            f"{docs['without_storage_key']} without"
+        )
+    else:
+        print(f"documents: unavailable ({info.get('documents_error', 'no database layer installed')})")
+
+
+def _storage_migrate(args: argparse.Namespace) -> None:
+    """`tret storage migrate --to s3` — upload every Document's file to the bucket."""
+    import asyncio
+
+    from tret.config import get_settings
+
+    settings = get_settings().model_copy(update={"storage_backend": args.to})
+    try:
+        from tret.storage import get_store
+
+        store = get_store(settings)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    async def run() -> dict:
+        from tret.db.engine import get_session_factory
+        from tret.storage.admin import migrate
+
+        return await migrate(
+            store,
+            get_session_factory(),
+            dry_run=args.dry_run,
+            delete_local=args.delete_local,
+            verify_sample=args.verify_sample,
+        )
+
+    summary = asyncio.run(run())
+    verb = "would upload" if summary["dry_run"] else "uploaded"
+    print(f"{'dry run: ' if summary['dry_run'] else ''}scanned {summary['scanned']} document(s)")
+    print(f"  {verb}:     {summary['uploaded']} ({_fmt_bytes(summary['bytes_uploaded'])})")
+    print(f"  already there: {summary['skipped']}")
+    print(f"  storage_key {'to set' if summary['dry_run'] else 'set'}: {summary['keys_set']}")
+    print(f"  verified:      {summary['verified']} (re-downloaded and hashed)")
+    if args.delete_local:
+        print(f"  deleted local: {summary['deleted_local']}")
+    for line in summary["failures"]:
+        print(f"  FAILED {line}", file=sys.stderr)
+    if summary["failures"]:
+        print(f"{len(summary['failures'])} failure(s); re-run to retry them.", file=sys.stderr)
+        sys.exit(1)
 
 
 def _telemetry_status() -> None:
@@ -439,6 +549,40 @@ def main() -> None:
     telemetry_sub.add_parser("enable", help="Turn telemetry on (the admin DB toggle)")
     telemetry_sub.add_parser("disable", help="Turn telemetry off (the admin DB toggle)")
 
+    storage = sub.add_parser(
+        "storage", help="Where document bytes live: inspect it, or move it to object storage"
+    )
+    storage_sub = storage.add_subparsers(dest="storage_command", required=True)
+    storage_sub.add_parser(
+        "status", help="Show the storage backend, object count and size, and Document key coverage"
+    )
+    storage_migrate = storage_sub.add_parser(
+        "migrate",
+        help="Upload every stored document to the s3 bucket (resumable; safe to re-run)",
+        description=(
+            "Upload each Document's file to the S3-compatible bucket "
+            "(TRET_STORAGE_S3_BUCKET / BUCKET_NAME and the AWS_* credentials), record "
+            "its storage_key, and verify the upload. Objects already present at the "
+            "right size are skipped, so a re-run after success changes nothing. Run it "
+            "where the volume is mounted. storage_path is left untouched."
+        ),
+    )
+    storage_migrate.add_argument("--to", required=True, choices=("s3",), help="Target backend (only s3)")
+    storage_migrate.add_argument(
+        "--dry-run", action="store_true", help="Report what would be uploaded; change nothing"
+    )
+    storage_migrate.add_argument(
+        "--delete-local",
+        action="store_true",
+        help="After a verified upload, delete the volume copy (default: keep it)",
+    )
+    storage_migrate.add_argument(
+        "--verify-sample",
+        type=int,
+        default=20,
+        help="Re-download and hash the first N uploads, beyond every file under 8 MB (default 20)",
+    )
+
     run_cmd = sub.add_parser(
         "run", help="Route a task, run it (optionally over local files), print a receipt"
     )
@@ -518,6 +662,12 @@ def main() -> None:
             _telemetry_toggle(True)
         elif args.telemetry_command == "disable":
             _telemetry_toggle(False)
+        return
+    if args.command == "storage":
+        if args.storage_command == "status":
+            _storage_status()
+        elif args.storage_command == "migrate":
+            _storage_migrate(args)
         return
     if args.command == "run":
         _run_command(args)

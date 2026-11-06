@@ -42,6 +42,7 @@ from tret.services.connections import (
     record_connection_activity,
 )
 from tret.services.documents import MAX_DOCUMENT_BYTES, ingest_document
+from tret.storage import BlobStore, document_key, get_store
 
 log = logging.getLogger("tret.documents")
 
@@ -178,26 +179,39 @@ async def upload_document(
         raise HTTPException(500, "No project exists")
 
     filename = safe_filename(file.filename)
-    storage_dir = Path(get_settings().storage_dir).resolve()
+    settings = get_settings()
+    store = get_store(settings)
+    # The spool always lives on local disk (it bounds memory while hashing); the
+    # store then takes the file: a rename on the local backend, an upload plus a
+    # move into the cache on s3.
+    storage_dir = Path(settings.storage_dir).resolve()
     storage_dir.mkdir(parents=True, exist_ok=True)
     temp_path, sha, size = await _spool_upload(file, storage_dir)
     if size == 0:
         temp_path.unlink(missing_ok=True)
         raise HTTPException(422, "The uploaded file is empty")
 
-    storage_path = (storage_dir / f"{sha}-{filename}").resolve()
     # Belt and braces over safe_filename: if a name ever escapes it, the write
     # still refuses to land outside the storage directory.
-    if storage_path.parent != storage_dir:
+    try:
+        key = document_key(sha, filename)
+    except ValueError:
         temp_path.unlink(missing_ok=True)
-        raise HTTPException(400, "Invalid filename")
-    temp_path.replace(storage_path)
+        raise HTTPException(400, "Invalid filename") from None
+    content_type = safe_content_type(file.content_type)
+    try:
+        await store.put(key, temp_path, content_type=content_type, move=True)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    storage_path = await store.local_path(key)
 
     doc = await ingest_document(
         project_id=project.id,
         filename=filename,
-        content_type=safe_content_type(file.content_type),
+        content_type=content_type,
         storage_path=storage_path,
+        storage_key=key,
         sha256=sha,
         byte_size=size,
         data=storage_path.read_bytes(),
@@ -268,10 +282,10 @@ async def _import_one(
     project_id: uuid.UUID,
     workspace_id: uuid.UUID,
     uploaded_by: uuid.UUID,
-    storage_dir: Path,
+    store: BlobStore,
     imported_at: str,
     db: AsyncSession,
-) -> tuple[Document, Path | None, bool]:
+) -> tuple[Document, str | None, bool]:
     """Download one picked item and ingest it exactly like an upload.
 
     A metadata call precedes the download for both providers: it is where the
@@ -287,12 +301,12 @@ async def _import_one(
     the sort of caller-supplied string the rest of this module already
     treats as untrusted.
 
-    Returns `(doc, created_path, deduplicated)`: `created_path` is the file
-    this call itself wrote under `storage_dir`, or `None` if a file already
+    Returns `(doc, created_key, deduplicated)`: `created_key` is the store key
+    this call itself wrote, or `None` if an object already
     sat at that sha-named path (another Document row owns it) or nothing was
     written at all (the dedup branch below) — so a caller whose own
     `db.add`/`commit` fails afterward knows whether it is safe to unlink the
-    bytes on disk. `deduplicated` is True when this call resolved to a
+    bytes in the store. `deduplicated` is True when this call resolved to a
     document a previous import of this exact item already created, rather
     than ingesting a new one — see `_find_existing_imported_document`.
 
@@ -347,36 +361,27 @@ async def _import_one(
         )
         return existing, None, True
 
-    storage_path = (storage_dir / f"{sha}-{filename}").resolve()
-    if storage_path.parent != storage_dir:
-        raise ValueError("Invalid filename")
-    # Matching what `_spool_upload` does with its temp file: a file this
-    # import itself creates is cleaned up if ingestion fails, but a
-    # sha-named path that already existed belongs to another Document row
-    # (the sha collision *is* the reason that row's own import/upload
-    # succeeded) and must survive untouched. An `exists()` check followed by
-    # a separate `write_bytes` is not atomic — two concurrent imports of the
-    # same bytes could both see `exists() == False` and race each other's
-    # write, or one could see `exists() == True` only because the other's
-    # write is already in flight and commit a row over half-written bytes.
-    # `open(..., "xb")` makes the check-and-create one syscall: whichever
-    # caller gets there first creates the file, and every other caller sees
-    # `FileExistsError` only once bytes are actually on disk under that name.
-    # This narrows, but does not remove, every race here: the remaining
-    # window is A creates the file, B's `open("xb")` raises `FileExistsError`
-    # and B goes on to commit a row pointing at it, and then A's own
-    # ingest/commit fails and A unlinks a file B's row now references. That
-    # is strictly better than the always-orphan behaviour this replaced (the
-    # old exists()-then-write version could lose the write itself, not just
-    # race an unlink), so it is accepted rather than solved here.
+    key = document_key(sha, filename)  # ValueError("Invalid filename") if a name escapes
+    # Matching what the upload path does with its spool file: an object this
+    # import itself creates is deleted if ingestion fails, but a sha-named key
+    # that already existed belongs to another Document row (the sha collision
+    # *is* the reason that row's own import/upload succeeded) and must survive
+    # untouched. `put(exclusive=True)` is create-if-absent in one step (a hard
+    # link on disk, `If-None-Match: *` on s3), so of two racing imports exactly one
+    # sees `created`. The window that remains is the one the old exclusive-create
+    # already had: A creates, B sees it exists and commits a row over it, then A's
+    # own ingest fails and A deletes what B's row now references. That is accepted
+    # here rather than solved.
     try:
-        with storage_path.open("xb") as sink:
-            sink.write(data)
-        created = True
-    except FileExistsError:
-        # Same sha means the same bytes: another Document row already owns
-        # this file, and it must survive this import's own success or failure.
-        created = False
+        created = await store.put(key, data, content_type=content_type, exclusive=True)
+    except Exception as e:  # noqa: BLE001 - a storage failure fails this item, not the batch
+        raise RuntimeError(f"{name}: could not be stored: {e}") from e
+    try:
+        storage_path = await store.local_path(key)
+    except Exception as e:  # noqa: BLE001
+        if created:
+            await store.delete(key)
+        raise RuntimeError(f"{name}: could not be stored: {e}") from e
 
     try:
         doc = await ingest_document(
@@ -384,6 +389,7 @@ async def _import_one(
             filename=filename,
             content_type=content_type,
             storage_path=storage_path,
+            storage_key=key,
             sha256=sha,
             byte_size=len(data),
             data=data,
@@ -401,7 +407,7 @@ async def _import_one(
         )
     except BaseException:
         if created:
-            storage_path.unlink(missing_ok=True)
+            await store.delete(key)
         raise
     await record_connection_activity(
         db,
@@ -412,7 +418,7 @@ async def _import_one(
         bytes_count=len(data),
         actor_user_id=uploaded_by,
     )
-    return doc, (storage_path if created else None), False
+    return doc, (key if created else None), False
 
 
 @router.post("/projects/{project_id}/documents/import")
@@ -471,8 +477,7 @@ async def import_documents(
             409, f"the {body.provider} connection needs to be reconnected: {exc}"
         ) from exc
 
-    storage_dir = Path(get_settings().storage_dir).resolve()
-    storage_dir.mkdir(parents=True, exist_ok=True)
+    store = get_store(get_settings())
     imported_at = datetime.now(timezone.utc).isoformat()
 
     # Captured as plain values, not read off `project`/`user`/`ctx` inside the
@@ -490,16 +495,16 @@ async def import_documents(
     documents = []
     errors = []
     for item in body.items:
-        created_path: Path | None = None
+        created_key: str | None = None
         try:
-            doc, created_path, deduplicated = await _import_one(
+            doc, created_key, deduplicated = await _import_one(
                 access_token=access_token,
                 provider=body.provider,
                 item=item,
                 project_id=project_id,
                 workspace_id=workspace_id,
                 uploaded_by=uploaded_by,
-                storage_dir=storage_dir,
+                store=store,
                 imported_at=imported_at,
                 db=db,
             )
@@ -512,11 +517,11 @@ async def import_documents(
             # commit failure here (e.g. a per-item DB failure such as a
             # NOT NULL or FK violation on the row) must not leave this
             # import's bytes orphaned on disk. Only the
-            # file *this* call wrote — `created_path` is None whenever the
+            # object *this* call wrote — `created_key` is None whenever the
             # sha-named path already belonged to another Document row,
             # which must never be unlinked out from under it.
-            if created_path is not None:
-                created_path.unlink(missing_ok=True)
+            if created_key is not None:
+                await store.delete(created_key)
             errors.append({"id": item.id, "name": item.name, "detail": str(exc)})
             continue
         out = _doc_out(doc)

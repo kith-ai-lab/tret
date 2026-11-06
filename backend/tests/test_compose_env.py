@@ -36,7 +36,16 @@ NOT_BACKEND_SETTINGS = {
 # the ambient convention every tool checks the same way (docs/telemetry.md),
 # read straight from `os.environ` by `tret/services/telemetry.py`'s
 # `resolve_state` rather than through a `Settings` field.
-NON_SETTINGS_BACKEND_ENV = {"DO_NOT_TRACK"}
+# The AWS_* / BUCKET_NAME names are what `fly storage create` injects and boto3 reads
+# directly; `tret/storage` takes them as fallbacks for the TRET_STORAGE_S3_* settings.
+NON_SETTINGS_BACKEND_ENV = {
+    "DO_NOT_TRACK",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_ENDPOINT_URL_S3",
+    "AWS_REGION",
+    "BUCKET_NAME",
+}
 
 # Values compose deliberately fixes to container paths / service names, so they
 # must NOT match the code default (which is tuned for a bare local checkout).

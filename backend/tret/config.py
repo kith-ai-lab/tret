@@ -193,7 +193,18 @@ class Settings(BaseSettings):
     environment: str = "development"  # development | production (see boot checks)
     database_url: str = "postgresql+asyncpg://tret:tret@localhost:5432/tret"
     secret_key: str = DEFAULT_SECRET_KEY  # signs sessions, encrypts stored provider keys
-    storage_dir: str = "./storage"  # uploaded documents
+    storage_dir: str = "./storage"  # uploaded documents; also the spool and cache dir for s3
+    # Where document bytes live (docs/storage.md). `local` keeps them under
+    # `storage_dir`; `s3` puts them in an S3-compatible bucket (Fly Tigris) with a
+    # bounded local cache under `storage_dir/cache`. Credentials are the standard
+    # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY. The three s3 fields below fall
+    # back to what `fly storage create` injects: BUCKET_NAME, AWS_ENDPOINT_URL_S3
+    # and AWS_REGION.
+    storage_backend: str = "local"  # local | s3
+    storage_s3_bucket: str = ""
+    storage_s3_endpoint_url: str = ""
+    storage_s3_region: str = ""
+    storage_cache_max_mb: int = 512  # soft cap on the s3 local cache; 0 = unbounded
     cookie_secure: bool = False  # set true behind TLS (any real deployment)
     serve_frontend_dir: str = ""  # if set, serve the built SPA from this dir
     # Skip the boot-time `alembic upgrade head` step (tret/db/migrate.py), for
