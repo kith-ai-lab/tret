@@ -2522,6 +2522,11 @@ export interface components {
             model_override?: string | null;
             /** Name */
             name: string;
+            /**
+             * Profile
+             * @default disclosure
+             */
+            profile: string;
             /** Register */
             register?: components["schemas"]["TargetIn"][] | null;
             /** Register Csv */
@@ -2658,6 +2663,14 @@ export interface components {
             mode: "preserve_measured_energy" | "estimate_both_sides";
             /** Project Id */
             project_id?: string | null;
+        };
+        /** FinalizeBody */
+        FinalizeBody: {
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -3935,7 +3948,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["FinalizeBody"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
