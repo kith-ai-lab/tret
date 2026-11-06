@@ -10,6 +10,17 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Batches, with a generic prompt profile.** The Collections page and API are now
+  Batches (`/api/batches`; `/api/collections` stays as a deprecated alias for one
+  release). A new `prompt` profile runs any non-archived harness over the rows of a
+  CSV: a template with `{column}` placeholders, one run per row, review off by
+  default (or pause each target at its first draft finding of a chosen type), and
+  three record files (`manifest.json`, `results.jsonl`, `results_summary.md`) that go
+  to a SharePoint write target when one is set and are otherwise kept as Documents
+  with a download route. Starting or releasing a batch now checks free space on the
+  local capture store (`TRET_BATCHES_MIN_FREE_MB_PER_TARGET`, default 50 MB per
+  target; 0 disables). The disclosure collection behaves as before. See
+  [docs/batch-runs.md](docs/batch-runs.md).
 - **Object storage for document bytes.** `TRET_STORAGE_BACKEND=s3` keeps uploads,
   fetched snapshots, imported SharePoint/Drive files and packaged page subsets in an
   S3-compatible bucket (Fly Tigris, AWS S3, MinIO) with a bounded local cache, so

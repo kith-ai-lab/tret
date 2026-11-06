@@ -43,7 +43,7 @@ const NAV: { to: string; label: string; count?: NavCountKey }[] = [
   { to: '/workbench', label: 'Workbench' },
   { to: '/runs', label: 'Runs' },
   { to: '/approvals', label: 'Approvals', count: 'approvals' },
-  { to: '/collections', label: 'Collections' },
+  { to: '/batches', label: 'Batches' },
   { to: '/analytics', label: 'Analytics' },
   { to: '/emissions', label: 'Emissions' },
   { to: '/deliverables', label: 'Deliverables', count: 'deliverables' },

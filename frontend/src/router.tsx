@@ -1,9 +1,9 @@
-import { Navigate, Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 
 import { Analytics } from './views/Analytics'
 import { Approvals } from './views/Approvals'
+import { Batches } from './views/Batches'
 import { Chat } from './views/Chat'
-import { Collections } from './views/Collections'
 import { ConnectionsView } from './views/Connections'
 import { Deliverables } from './views/Deliverables'
 import { Documents } from './views/Documents'
@@ -17,6 +17,11 @@ import { Runs } from './views/Runs'
 import { SettingsView } from './views/SettingsView'
 import { Workbench } from './views/Workbench'
 
+function CollectionRedirect() {
+  const { id } = useParams<{ id: string }>()
+  return <Navigate to={id ? `/batches/${id}` : '/batches'} replace />
+}
+
 export function AppRoutes() {
   return (
     <Routes>
@@ -26,8 +31,10 @@ export function AppRoutes() {
       <Route path="/runs" element={<Runs />} />
       <Route path="/runs/:id" element={<RunDetailView />} />
       <Route path="/approvals" element={<Approvals />} />
-      <Route path="/collections" element={<Collections />} />
-      <Route path="/collections/:id" element={<Collections />} />
+      <Route path="/batches" element={<Batches />} />
+      <Route path="/batches/:id" element={<Batches />} />
+      <Route path="/collections" element={<CollectionRedirect />} />
+      <Route path="/collections/:id" element={<CollectionRedirect />} />
       <Route path="/analytics" element={<Analytics />} />
       <Route path="/emissions" element={<Emissions />} />
       <Route path="/deliverables" element={<Deliverables />} />

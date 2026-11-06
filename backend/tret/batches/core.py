@@ -41,6 +41,7 @@ import importlib
 import json
 import logging
 import re
+import shutil
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -65,6 +66,7 @@ from tret.net import policy as egress_policy
 from tret.packs.links import packs_for_harness, resolve_pack_for_task
 from tret.services import connections as connections_service
 from tret.services import lifecycle
+from tret.storage import batch_record_key, get_store
 
 log = logging.getLogger("tret.collections")
 
@@ -232,6 +234,65 @@ class FinalizeBody(BaseModel):
     force: bool = False
 
 
+def review_schema_of(profile: BatchProfile, batch: Any = None) -> str | None:
+    """The finding schema `profile` reviews for `batch`: `review_schema_for(batch)`
+    when the profile has it (the schema can depend on the batch's settings), else
+    the static `review_schema`."""
+    per_batch = getattr(profile, "review_schema_for", None)
+    if per_batch is not None:
+        return per_batch(batch)
+    return getattr(profile, "review_schema", None)
+
+
+_MB = 1024 * 1024
+# A review schema meaning "any draft finding the run proposes, whatever its type".
+ANY_REVIEW = "any"
+
+
+def schema_matches(review_schema: str | None, schema_slug: str | None) -> bool:
+    """Is a finding of `schema_slug` one the batch reviews?"""
+    if review_schema is None:
+        return False
+    return review_schema == ANY_REVIEW or review_schema == schema_slug
+
+
+def free_storage_mb(settings: Any = None) -> int | None:
+    """Free space, in MB, on the volume holding `storage_dir` (the nearest
+    existing parent when the directory is not created yet); None when it cannot
+    be read."""
+    from pathlib import Path
+
+    settings = settings or get_settings()
+    path = Path(settings.storage_dir).resolve()
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    try:
+        return int(shutil.disk_usage(path).free // _MB)
+    except OSError:
+        return None
+
+
+def check_headroom(targets: Iterable[BatchTarget]) -> None:
+    """409 when the local capture store has less free space than
+    `batches_min_free_mb_per_target` x the targets still to run (pending or
+    held). Skipped when the setting is 0 or the storage backend is not local."""
+    settings = get_settings()
+    per_target = int(settings.batches_min_free_mb_per_target or 0)
+    if per_target <= 0 or get_store(settings).backend != "local":
+        return
+    remaining = sum(1 for t in targets if t.status in ("pending", "held"))
+    if remaining <= 0:
+        return
+    free = free_storage_mb(settings)
+    needed = remaining * per_target
+    if free is not None and free < needed:
+        raise HTTPException(
+            409,
+            f"Not enough free space on the capture store: {free} MB free, {needed} MB needed "
+            f"for {remaining} targets at {per_target} MB each (TRET_BATCHES_MIN_FREE_MB_PER_TARGET)",
+        )
+
+
 def derive_collection_status(current: str, target_statuses: Iterable[str]) -> str:
     """The collection's status from its targets'. `draft`, `paused`,
     `finalized` and `failed` are the operator's (or reserved) and stay put."""
@@ -366,18 +427,20 @@ async def load_runs(db: AsyncSession, targets: list[BatchTarget]) -> dict[uuid.U
 
 
 async def load_review_findings(
-    db: AsyncSession, profile: BatchProfile, targets: list[BatchTarget]
+    db: AsyncSession, profile: BatchProfile, targets: list[BatchTarget], batch: Any = None
 ) -> dict[uuid.UUID, list[Finding]]:
-    """The profile's review findings (`profile.review_schema`) by run id, oldest
-    first. Empty for a profile with no review step."""
+    """The profile's review findings (its review schema for `batch`) by run id,
+    oldest first. Empty for a profile or a batch with no review step."""
     run_ids = [t.run_id for t in targets if t.run_id]
-    if not run_ids or profile.review_schema is None:
+    schema = review_schema_of(profile, batch)
+    if not run_ids or schema is None:
         return {}
+    query = select(Finding).where(Finding.run_id.in_(run_ids))
+    if schema != ANY_REVIEW:
+        query = query.where(Finding.schema_slug == schema)
     rows = (
         await db.execute(
-            select(Finding)
-            .where(Finding.run_id.in_(run_ids), Finding.schema_slug == profile.review_schema)
-            .order_by(Finding.created_at)
+            query.order_by(Finding.created_at)
             .execution_options(populate_existing=True)
         )
     ).scalars()
@@ -408,6 +471,7 @@ async def start(db: AsyncSession, c: Batch) -> None:
     profile = profile_for(c)
     if await profile.harness_for(db, c) is None:
         raise HTTPException(409, profile.no_harness_error)
+    check_headroom(await load_targets(db, [c.id]))
     c.status = "running"
     c.started_at = _now()
     await db.commit()
@@ -434,6 +498,7 @@ async def release(db: AsyncSession, c: Batch) -> None:
     held = [t for t in await load_targets(db, [c.id]) if t.status == "held"]
     if not held:
         raise HTTPException(409, "No held targets")
+    check_headroom(await load_targets(db, [c.id]))
     for t in held:
         t.status = "pending"
     if c.status != "paused":
@@ -531,9 +596,9 @@ async def _launch(collection_id: uuid.UUID) -> int:
                 return 0
             targets = await load_targets(db, [c.id])
             running = sum(1 for t in targets if t.status == "running")
-            slots = clamp_concurrency((c.settings or {}).get("concurrency")) - running
-            pending = [t for t in targets if t.status == "pending"][: max(0, slots)]
-            if not pending:
+            slots = max(0, clamp_concurrency((c.settings or {}).get("concurrency")) - running)
+            pending = [t for t in targets if t.status == "pending"]
+            if not pending or slots == 0:
                 return 0
             profile = profile_for(c)
             harness = await profile.harness_for(db, c)
@@ -548,10 +613,20 @@ async def _launch(collection_id: uuid.UUID) -> int:
             previous = await load_runs(db, pending)
             launched: list[tuple[uuid.UUID, uuid.UUID]] = []
             for t in pending:
+                if len(launched) >= slots:
+                    break
                 if t.run_id is not None:  # defensive: retry_target archives first
                     _archive_attempt(t, previous.get(t.run_id))
+                try:
+                    built = profile.task_input(c, t, len(targets))
+                except Exception as e:  # noqa: BLE001 - one bad row must not stop the batch
+                    log.warning("batch target %s could not build its task: %s", t.id, e)
+                    t.status = "failed"
+                    t.error = summarise_run_error(f"task could not be built: {type(e).__name__}: {e}")
+                    t.finished_at = _now()
+                    continue  # a failed target takes no slot
                 task_input = {
-                    **profile.task_input(c, t, len(targets)),
+                    **built,
                     COLLECTION_ID_KEY: str(c.id),
                     COLLECTION_TARGET_KEY: str(t.id),
                 }
@@ -697,8 +772,13 @@ async def _settle_target(
         await db.refresh(c)
         run = await db.get(Run, t.run_id, populate_existing=True) if t.run_id else None
         profile = profile_for(c)
-        maps = (await load_review_findings(db, profile, [t])).get(t.run_id, []) if t.run_id else []
+        maps = (await load_review_findings(db, profile, [t], c)).get(t.run_id, []) if t.run_id else []
         t.finding_ids = [str(f.id) for f in maps]
+        settle = getattr(profile, "settle_outcome", None)
+        if settle is not None and run is not None:
+            outcome = await settle(db, c, t, run, maps)
+            if outcome is not None:
+                t.outcome = outcome
         auto_write = bool((c.settings or {}).get("auto_write"))
         status, error = profile.derive_status(
             run.status if run else None,
@@ -868,7 +948,10 @@ async def _targets_for_findings(db: AsyncSession, finding_ids: Iterable[uuid.UUI
     out = []
     for t in candidates:
         c = await db.get(Batch, t.collection_id)
-        if c is not None and profile_for(c).review_schema in schemas_by_run.get(t.run_id, ()):
+        if c is not None and any(
+            schema_matches(review_schema_of(profile_for(c), c), slug)
+            for slug in schemas_by_run.get(t.run_id, ())
+        ):
             out.append(t)
     return out
 
@@ -910,7 +993,8 @@ async def _after_approve(db: AsyncSession, finding_ids: Iterable[uuid.UUID]) -> 
             if c is None:
                 continue
             profile = profile_for(c)
-            if profile.review_schema is not None and f.schema_slug == profile.review_schema:
+            schema = review_schema_of(profile, c)
+            if schema_matches(schema, f.schema_slug):
                 await profile.after_approve(db, f)
         except Exception:  # noqa: BLE001
             log.exception("after_approve failed for finding %s", fid)
@@ -1013,7 +1097,8 @@ async def sweep_orphaned_collections(db: AsyncSession) -> int:
 
 
 async def finalize(db: AsyncSession, c: Batch, *, force: bool = False) -> None:
-    """Write the profile's run-level records to `<write_root>/<run_slug>/`,
+    """Write the profile's run-level records to `<write_root>/<run_slug>/` on the
+    SharePoint target, or keep them as Documents when the batch has no target,
     replacing any earlier finalize's files. Allowed once nothing is executing,
     packaging or waiting for a decision; a finalized batch may be finalized again
     (after a retry-write, say). Targets that failed on an I/O or storage error
@@ -1036,21 +1121,40 @@ async def finalize(db: AsyncSession, c: Batch, *, force: bool = False) -> None:
             f"(first: {infra[0].slug}: {infra[0].error}); fix the cause and retry them, "
             "or finalize with force=true",
         )
-    maps = await load_review_findings(db, profile, targets)
+    maps = await load_review_findings(db, profile, targets, c)
     blockers = profile.finalize_blockers(targets, maps)
     if blockers:
         raise HTTPException(409, blockers[0])
     settings = c.settings or {}
-    if not settings.get("target_slug"):
-        # TODO(P1): batches without a SharePoint write target store their
-        # records as Documents instead; until then there is nowhere to put them.
-        raise HTTPException(409, "This batch has no write target; its records cannot be written yet")
     now = _now()
     records = await profile.records(db, c, finalized_at=now)
+    record_files = profile.record_files(records)
+    if settings.get("target_slug"):
+        files, error = await _upload_records(db, c, settings, record_files)
+    else:
+        count = int(settings.get("finalize_count") or 0) + 1
+        files, error = await _store_records(db, c, record_files, count)
+        c.settings = {**(c.settings or {}), "finalize_count": count}
+        if error is not None:
+            # Keep the previous finalize's files: their Documents are intact.
+            previous = c.finalize or {}
+            c.finalize = {**previous, "files": list(previous.get("files") or []), "error": error}
+            await db.commit()
+            return
+    c.finalize = {"written_at": now.isoformat(), "files": files, "error": error}
+    if error is None:
+        c.status = "finalized"
+        c.finalized_at = now
+    await db.commit()
+
+
+async def _upload_records(
+    db: AsyncSession, c: Batch, settings: dict, record_files: dict[str, tuple[bytes, str]]
+) -> tuple[list[dict], str | None]:
+    """The record files to `<write_root>/<run_slug>/` on the SharePoint target."""
     root = f"{settings.get('write_root') or 'runs'}/{c.run_slug}"
     files: list[dict] = []
-    error: str | None = None
-    for name, (data, content_type) in profile.record_files(records).items():
+    for name, (data, content_type) in record_files.items():
         try:
             result = await connections_service.upload_connected_file(
                 db,
@@ -1063,18 +1167,53 @@ async def finalize(db: AsyncSession, c: Batch, *, force: bool = False) -> None:
                 conflict="replace",
             )
         except (connections_service.ConnectionWriteError, connections_service.ConnectionUnavailable) as e:
-            error = f"{name}: {e.reason}"
-            break
+            return files, f"{name}: {e.reason}"
         except Exception as e:  # noqa: BLE001 - recorded, finalize can be retried
             log.exception("finalize upload failed for %s", name)
-            error = f"{name}: {type(e).__name__}: {e}"
-            break
+            return files, f"{name}: {type(e).__name__}: {e}"
         files.append({"name": name, "web_url": result.web_url, "sha256": hashlib.sha256(data).hexdigest()})
-    c.finalize = {"written_at": now.isoformat(), "files": files, "error": error}
-    if error is None:
-        c.status = "finalized"
-        c.finalized_at = now
-    await db.commit()
+    return files, None
+
+
+async def _store_records(
+    db: AsyncSession, c: Batch, record_files: dict[str, tuple[bytes, str]], count: int
+) -> tuple[list[dict], str | None]:
+    """The record files as Documents (`source_kind="batch_record"`) in the
+    capture store, for a batch with no write target. Each finalize stores under its
+    own key prefix (`batches/<id>/<count>/<name>`), so a re-finalize adds new
+    Document rows and never changes bytes an older row points at; the batch
+    points at the latest."""
+    from tret.services.documents import ingest_document  # lazy: heavy imports
+
+    store = get_store(get_settings())
+    files: list[dict] = []
+    for name, (data, content_type) in record_files.items():
+        sha = hashlib.sha256(data).hexdigest()
+        try:
+            key = batch_record_key(c.id, f"{count}/{name}")
+            await store.put(key, data, content_type=content_type)
+            doc = await ingest_document(
+                project_id=c.project_id,
+                filename=name,
+                content_type=content_type,
+                storage_path=await store.local_path(key),
+                storage_key=key,
+                sha256=sha,
+                byte_size=len(data),
+                data=data,
+                uploaded_by=c.created_by,
+                source_kind="batch_record",
+                meta_extra={"batch_id": str(c.id), "record": name},
+            )
+            db.add(doc)
+            await db.flush()
+        except Exception as e:  # noqa: BLE001 - recorded, finalize can be retried
+            log.exception("finalize could not store %s", name)
+            await db.rollback()  # drops this finalize's Documents, so none are listed
+            await db.refresh(c)
+            return [], f"{name}: {type(e).__name__}: {e}"
+        files.append({"name": name, "sha256": sha, "document_id": str(doc.id), "byte_size": len(data)})
+    return files, None
 
 
 # Generic aliases for the batch names; the collection names above stay the

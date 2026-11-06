@@ -13,9 +13,9 @@ from tret import __version__
 from tret.api import (
     analytics,
     auth,
+    batches as batches_api,
     budgets as budgets_api,
     chat,
-    collections as collections_api,
     connections as connections_api,
     docs,
     documents,
@@ -437,9 +437,10 @@ def create_app() -> FastAPI:
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)
     app.include_router(findings.router)
-    # Collection runs (tret/api/collections.py): one engine run per register
-    # target, tracked through the approvals and packaging above.
-    app.include_router(collections_api.router)
+    # Batches (tret/api/batches.py): one engine run per target, tracked through
+    # the approvals and packaging above. The one router serves /api/batches and
+    # the deprecated /api/collections alias.
+    app.include_router(batches_api.router)
     # Pack lessons (tret/api/lessons.py): list/review/retire, the same
     # blessing-gate shape as findings above, applied to a pack's own
     # per-workspace memory instead of a run's output.

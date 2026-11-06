@@ -28,7 +28,9 @@ class RegisterError(ValueError):
 class BatchProfile(Protocol):
     slug: str
     # What a `Finding.schema_slug` must be for the finding to be one this
-    # profile reviews; None = the profile has no review step.
+    # profile reviews; None = the profile has no review step. A profile whose
+    # schema depends on the batch also defines `review_schema_for(batch)`, which
+    # core prefers (`core.review_schema_of`).
     review_schema: str | None
     # `start` answers 409 with this when no harness can be found.
     no_harness_error: str
@@ -40,6 +42,10 @@ class BatchProfile(Protocol):
         `position`, `slug`, `label`, `task_input`) plus warnings. Raises
         `RegisterError`, answered as 422."""
 
+    def review_schema_for(self, batch: Any) -> str | None:
+        """The finding schema that batch's targets are reviewed on; None = no
+        review. `batch` may be None (the profile's default)."""
+
     async def validate_settings(self, db: AsyncSession, workspace_id: Any, body: Any) -> dict:
         """The settings dict stored on the batch; raises HTTPException."""
 
@@ -49,6 +55,13 @@ class BatchProfile(Protocol):
     def task_input(self, batch: Any, target: Any, total: int) -> dict:
         """`{"message": ..., "_label": ...}`; core adds the batch/target keys
         and the model/iteration overrides."""
+
+    async def settle_outcome(
+        self, db: AsyncSession, batch: Any, target: Any, run: Any, findings: list[Any]
+    ) -> dict | None:
+        """Called by `_settle_target` before `derive_status`. A dict becomes
+        `target.outcome`; None leaves it alone (a profile whose outcome comes
+        from a run tool, like disclosure's, returns None)."""
 
     def derive_status(
         self,
@@ -92,7 +105,10 @@ class BatchProfile(Protocol):
 
 _REGISTRY: dict[str, BatchProfile] = {}
 # Built-ins are imported lazily: they import `core`, which imports this module.
-_BUILTIN = {"disclosure": "tret.batches.profiles.disclosure"}
+_BUILTIN = {
+    "disclosure": "tret.batches.profiles.disclosure",
+    "prompt": "tret.batches.profiles.prompt",
+}
 
 
 def register_profile(profile: BatchProfile) -> None:

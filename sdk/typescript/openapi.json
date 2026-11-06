@@ -176,6 +176,7 @@
             "type": "string"
           },
           "profile": {
+            "const": "disclosure",
             "default": "disclosure",
             "title": "Profile",
             "type": "string"
@@ -276,6 +277,166 @@
           "email"
         ],
         "title": "CreateInviteBody",
+        "type": "object"
+      },
+      "CreatePromptBatchBody": {
+        "additionalProperties": false,
+        "properties": {
+          "concurrency": {
+            "default": 3,
+            "title": "Concurrency",
+            "type": "integer"
+          },
+          "csv": {
+            "anyOf": [
+              {
+                "maxLength": 2000000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Csv"
+          },
+          "first_batch_size": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "First Batch Size",
+            "type": "integer"
+          },
+          "harness_id": {
+            "format": "uuid",
+            "title": "Harness Id",
+            "type": "string"
+          },
+          "label_column": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label Column"
+          },
+          "max_iterations": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Iterations"
+          },
+          "model_override": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Override"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "profile": {
+            "const": "prompt",
+            "default": "prompt",
+            "title": "Profile",
+            "type": "string"
+          },
+          "review_schema": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Schema"
+          },
+          "rows": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "maxItems": 500,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rows"
+          },
+          "run_slug": {
+            "title": "Run Slug",
+            "type": "string"
+          },
+          "slug_column": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug Column"
+          },
+          "target_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Slug"
+          },
+          "template": {
+            "maxLength": 50000,
+            "minLength": 1,
+            "title": "Template",
+            "type": "string"
+          },
+          "write_root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Write Root"
+          }
+        },
+        "required": [
+          "name",
+          "run_slug",
+          "harness_id",
+          "template"
+        ],
+        "title": "CreatePromptBatchBody",
         "type": "object"
       },
       "CreateRunBody": {
@@ -2586,6 +2747,527 @@
         ]
       }
     },
+    "/api/batches": {
+      "get": {
+        "operationId": "list_batches_api_batches_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Batches",
+        "tags": [
+          "batches"
+        ]
+      },
+      "post": {
+        "operationId": "create_batch_api_batches_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateCollectionBody"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CreatePromptBatchBody"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Batch",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}": {
+      "get": {
+        "operationId": "get_collection_api_batches__collection_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/finalize": {
+      "post": {
+        "operationId": "finalize_collection_api_batches__collection_id__finalize_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/FinalizeBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Finalize Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/pause": {
+      "post": {
+        "operationId": "pause_collection_api_batches__collection_id__pause_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pause Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/records": {
+      "get": {
+        "operationId": "preview_records_api_batches__collection_id__records_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Records",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/records/{name}": {
+      "get": {
+        "description": "A finalized record file kept as a Document (a batch with no write target).",
+        "operationId": "download_record_api_batches__collection_id__records__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Record",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/release": {
+      "post": {
+        "operationId": "release_collection_api_batches__collection_id__release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/resume": {
+      "post": {
+        "operationId": "resume_collection_api_batches__collection_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/start": {
+      "post": {
+        "operationId": "start_collection_api_batches__collection_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Collection",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/targets/{target_id}/retry": {
+      "post": {
+        "operationId": "retry_target_api_batches__collection_id__targets__target_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "target_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Target Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Target",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/{collection_id}/targets/{target_id}/retry-write": {
+      "post": {
+        "operationId": "retry_target_write_api_batches__collection_id__targets__target_id__retry_write_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "target_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Target Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Target Write",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
     "/api/chat": {
       "get": {
         "operationId": "list_conversations_api_chat_get",
@@ -2736,6 +3418,7 @@
     },
     "/api/collections": {
       "get": {
+        "deprecated": true,
         "operationId": "list_collections_api_collections_get",
         "responses": {
           "200": {
@@ -2749,16 +3432,25 @@
         },
         "summary": "List Collections",
         "tags": [
-          "collections"
+          "batches"
         ]
       },
       "post": {
-        "operationId": "create_collection_api_collections_post",
+        "deprecated": true,
+        "operationId": "create_batch_api_collections_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateCollectionBody"
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateCollectionBody"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CreatePromptBatchBody"
+                  }
+                ],
+                "title": "Body"
               }
             }
           },
@@ -2784,14 +3476,15 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Create Collection",
+        "summary": "Create Batch",
         "tags": [
-          "collections"
+          "batches"
         ]
       }
     },
     "/api/collections/{collection_id}": {
       "get": {
+        "deprecated": true,
         "operationId": "get_collection_api_collections__collection_id__get",
         "parameters": [
           {
@@ -2827,12 +3520,13 @@
         },
         "summary": "Get Collection",
         "tags": [
-          "collections"
+          "batches"
         ]
       }
     },
     "/api/collections/{collection_id}/finalize": {
       "post": {
+        "deprecated": true,
         "operationId": "finalize_collection_api_collections__collection_id__finalize_post",
         "parameters": [
           {
@@ -2885,12 +3579,13 @@
         },
         "summary": "Finalize Collection",
         "tags": [
-          "collections"
+          "batches"
         ]
       }
     },
     "/api/collections/{collection_id}/pause": {
       "post": {
+        "deprecated": true,
         "operationId": "pause_collection_api_collections__collection_id__pause_post",
         "parameters": [
           {
@@ -2926,12 +3621,13 @@
         },
         "summary": "Pause Collection",
         "tags": [
-          "collections"
+          "batches"
         ]
       }
     },
     "/api/collections/{collection_id}/records": {
       "get": {
+        "deprecated": true,
         "operationId": "preview_records_api_collections__collection_id__records_get",
         "parameters": [
           {
@@ -2967,12 +3663,65 @@
         },
         "summary": "Preview Records",
         "tags": [
-          "collections"
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/{collection_id}/records/{name}": {
+      "get": {
+        "deprecated": true,
+        "description": "A finalized record file kept as a Document (a batch with no write target).",
+        "operationId": "download_record_api_collections__collection_id__records__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "collection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Collection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Record",
+        "tags": [
+          "batches"
         ]
       }
     },
     "/api/collections/{collection_id}/release": {
       "post": {
+        "deprecated": true,
         "operationId": "release_collection_api_collections__collection_id__release_post",
         "parameters": [
           {
@@ -3008,12 +3757,13 @@
         },
         "summary": "Release Collection",
         "tags": [
-          "collections"
+          "batches"
         ]
       }
     },
     "/api/collections/{collection_id}/resume": {
       "post": {
+        "deprecated": true,
         "operationId": "resume_collection_api_collections__collection_id__resume_post",
         "parameters": [
           {
@@ -3049,12 +3799,13 @@
         },
         "summary": "Resume Collection",
         "tags": [
-          "collections"
+          "batches"
         ]
       }
     },
     "/api/collections/{collection_id}/start": {
       "post": {
+        "deprecated": true,
         "operationId": "start_collection_api_collections__collection_id__start_post",
         "parameters": [
           {
@@ -3090,12 +3841,13 @@
         },
         "summary": "Start Collection",
         "tags": [
-          "collections"
+          "batches"
         ]
       }
     },
     "/api/collections/{collection_id}/targets/{target_id}/retry": {
       "post": {
+        "deprecated": true,
         "operationId": "retry_target_api_collections__collection_id__targets__target_id__retry_post",
         "parameters": [
           {
@@ -3141,12 +3893,13 @@
         },
         "summary": "Retry Target",
         "tags": [
-          "collections"
+          "batches"
         ]
       }
     },
     "/api/collections/{collection_id}/targets/{target_id}/retry-write": {
       "post": {
+        "deprecated": true,
         "operationId": "retry_target_write_api_collections__collection_id__targets__target_id__retry_write_post",
         "parameters": [
           {
@@ -3192,7 +3945,7 @@
         },
         "summary": "Retry Target Write",
         "tags": [
-          "collections"
+          "batches"
         ]
       }
     },

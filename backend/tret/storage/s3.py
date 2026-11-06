@@ -11,7 +11,6 @@ so the local backend and the CLI never load it.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import tempfile

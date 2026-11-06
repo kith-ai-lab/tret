@@ -503,6 +503,197 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Batches */
+        get: operations["list_batches_api_batches_get"];
+        put?: never;
+        /** Create Batch */
+        post: operations["create_batch_api_batches_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Collection */
+        get: operations["get_collection_api_batches__collection_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/finalize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Finalize Collection */
+        post: operations["finalize_collection_api_batches__collection_id__finalize_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pause Collection */
+        post: operations["pause_collection_api_batches__collection_id__pause_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/records": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Preview Records */
+        get: operations["preview_records_api_batches__collection_id__records_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/records/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Record
+         * @description A finalized record file kept as a Document (a batch with no write target).
+         */
+        get: operations["download_record_api_batches__collection_id__records__name__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Release Collection */
+        post: operations["release_collection_api_batches__collection_id__release_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Collection */
+        post: operations["resume_collection_api_batches__collection_id__resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Collection */
+        post: operations["start_collection_api_batches__collection_id__start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/targets/{target_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry Target */
+        post: operations["retry_target_api_batches__collection_id__targets__target_id__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/{collection_id}/targets/{target_id}/retry-write": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry Target Write */
+        post: operations["retry_target_write_api_batches__collection_id__targets__target_id__retry_write_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/chat": {
         parameters: {
             query?: never;
@@ -562,11 +753,17 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List Collections */
+        /**
+         * List Collections
+         * @deprecated
+         */
         get: operations["list_collections_api_collections_get"];
         put?: never;
-        /** Create Collection */
-        post: operations["create_collection_api_collections_post"];
+        /**
+         * Create Batch
+         * @deprecated
+         */
+        post: operations["create_batch_api_collections_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -580,7 +777,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get Collection */
+        /**
+         * Get Collection
+         * @deprecated
+         */
         get: operations["get_collection_api_collections__collection_id__get"];
         put?: never;
         post?: never;
@@ -599,7 +799,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Finalize Collection */
+        /**
+         * Finalize Collection
+         * @deprecated
+         */
         post: operations["finalize_collection_api_collections__collection_id__finalize_post"];
         delete?: never;
         options?: never;
@@ -616,7 +819,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Pause Collection */
+        /**
+         * Pause Collection
+         * @deprecated
+         */
         post: operations["pause_collection_api_collections__collection_id__pause_post"];
         delete?: never;
         options?: never;
@@ -631,8 +837,32 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Preview Records */
+        /**
+         * Preview Records
+         * @deprecated
+         */
         get: operations["preview_records_api_collections__collection_id__records_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/collections/{collection_id}/records/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download Record
+         * @deprecated
+         * @description A finalized record file kept as a Document (a batch with no write target).
+         */
+        get: operations["download_record_api_collections__collection_id__records__name__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -650,7 +880,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Release Collection */
+        /**
+         * Release Collection
+         * @deprecated
+         */
         post: operations["release_collection_api_collections__collection_id__release_post"];
         delete?: never;
         options?: never;
@@ -667,7 +900,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Resume Collection */
+        /**
+         * Resume Collection
+         * @deprecated
+         */
         post: operations["resume_collection_api_collections__collection_id__resume_post"];
         delete?: never;
         options?: never;
@@ -684,7 +920,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Start Collection */
+        /**
+         * Start Collection
+         * @deprecated
+         */
         post: operations["start_collection_api_collections__collection_id__start_post"];
         delete?: never;
         options?: never;
@@ -701,7 +940,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Retry Target */
+        /**
+         * Retry Target
+         * @deprecated
+         */
         post: operations["retry_target_api_collections__collection_id__targets__target_id__retry_post"];
         delete?: never;
         options?: never;
@@ -718,7 +960,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Retry Target Write */
+        /**
+         * Retry Target Write
+         * @deprecated
+         */
         post: operations["retry_target_write_api_collections__collection_id__targets__target_id__retry_write_post"];
         delete?: never;
         options?: never;
@@ -2525,8 +2770,9 @@ export interface components {
             /**
              * Profile
              * @default disclosure
+             * @constant
              */
-            profile: string;
+            profile: "disclosure";
             /** Register */
             register?: components["schemas"]["TargetIn"][] | null;
             /** Register Csv */
@@ -2560,6 +2806,56 @@ export interface components {
              * @default analyst
              */
             role: string;
+        };
+        /** CreatePromptBatchBody */
+        CreatePromptBatchBody: {
+            /**
+             * Concurrency
+             * @default 3
+             */
+            concurrency: number;
+            /** Csv */
+            csv?: string | null;
+            /**
+             * First Batch Size
+             * @default 0
+             */
+            first_batch_size: number;
+            /**
+             * Harness Id
+             * Format: uuid
+             */
+            harness_id: string;
+            /** Label Column */
+            label_column?: string | null;
+            /** Max Iterations */
+            max_iterations?: number | null;
+            /** Model Override */
+            model_override?: string | null;
+            /** Name */
+            name: string;
+            /**
+             * Profile
+             * @default prompt
+             * @constant
+             */
+            profile: "prompt";
+            /** Review Schema */
+            review_schema?: string | null;
+            /** Rows */
+            rows?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Run Slug */
+            run_slug: string;
+            /** Slug Column */
+            slug_column?: string | null;
+            /** Target Slug */
+            target_slug?: string | null;
+            /** Template */
+            template: string;
+            /** Write Root */
+            write_root?: string | null;
         };
         /** CreateRunBody */
         CreateRunBody: {
@@ -3736,6 +4032,376 @@ export interface operations {
             };
         };
     };
+    list_batches_api_batches_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    create_batch_api_batches_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateCollectionBody"] | components["schemas"]["CreatePromptBatchBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_collection_api_batches__collection_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    finalize_collection_api_batches__collection_id__finalize_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["FinalizeBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pause_collection_api_batches__collection_id__pause_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_records_api_batches__collection_id__records_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_record_api_batches__collection_id__records__name__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    release_collection_api_batches__collection_id__release_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_collection_api_batches__collection_id__resume_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_collection_api_batches__collection_id__start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_target_api_batches__collection_id__targets__target_id__retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+                target_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_target_write_api_batches__collection_id__targets__target_id__retry_write_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+                target_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_conversations_api_chat_get: {
         parameters: {
             query?: never;
@@ -3875,7 +4541,7 @@ export interface operations {
             };
         };
     };
-    create_collection_api_collections_post: {
+    create_batch_api_collections_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -3884,7 +4550,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateCollectionBody"];
+                "application/json": components["schemas"]["CreateCollectionBody"] | components["schemas"]["CreatePromptBatchBody"];
             };
         };
         responses: {
@@ -4011,6 +4677,38 @@ export interface operations {
             header?: never;
             path: {
                 collection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    download_record_api_collections__collection_id__records__name__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                collection_id: string;
+                name: string;
             };
             cookie?: never;
         };
