@@ -83,11 +83,13 @@ async def test_seeded_when_research_is_on(db, monkeypatch):
     (h,) = await _collectors(db, ws.id)
     assert h.task_profile == "freeform"
     assert h.tool_names == COLLECTION_HARNESS_TOOLS
-    # A hard routing floor: weak models loop on tool-heavy collection runs.
+    # A hard routing floor: weak models loop on tool-heavy collection runs. Within
+    # the tier, `eco` (2026-11-06: same output as `balanced` at a quarter of the cost).
     assert h.model_policy == {
         "mode": "auto",
         "min_cost_tier": "standard",
         "max_cost_tier": "standard",
+        "objective": "eco",
     }
     assert h.loop_config == {
         "max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3, "max_cost_usd": 8.0,
@@ -169,14 +171,21 @@ async def test_chat_front_door_selection_is_unchanged(db, monkeypatch):
     assert collector.task_profile != "chat"
 
 
-async def test_backfills_the_old_seed_policy_to_the_routing_floor(db, monkeypatch):
+@pytest.mark.parametrize(
+    "previous_seed",
+    [
+        {"mode": "auto", "max_cost_tier": "standard"},
+        {"mode": "auto", "min_cost_tier": "standard", "max_cost_tier": "standard"},
+    ],
+)
+async def test_backfills_an_unedited_seed_policy_to_the_current_seed(db, monkeypatch, previous_seed):
     _research(monkeypatch, "off")  # backfill is not gated on the egress mode
     ws = await _workspace(db)
     existing = Harness(
         workspace_id=ws.id,
         name=COLLECTION_HARNESS_NAME,
         task_profile="freeform",
-        model_policy={"mode": "auto", "max_cost_tier": "standard"},
+        model_policy=dict(previous_seed),
         tool_names=list(COLLECTION_HARNESS_TOOLS),
     )
     db.add(existing)
@@ -189,6 +198,7 @@ async def test_backfills_the_old_seed_policy_to_the_routing_floor(db, monkeypatc
         "mode": "auto",
         "min_cost_tier": "standard",
         "max_cost_tier": "standard",
+        "objective": "eco",
     }
 
 

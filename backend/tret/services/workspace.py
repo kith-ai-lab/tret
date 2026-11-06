@@ -385,15 +385,22 @@ COLLECTION_HARNESS_TOOLS = [
 # therefore held to exactly the standard tier: `min_cost_tier` is a hard routing floor
 # (the `quality` objective only reorders candidates, it excludes none), and the
 # ceiling stays at standard so a collection run cannot silently climb to premium spend.
+# Within that tier the objective is `eco`: on 2026-11-06 the same 12 registers ran
+# under `balanced` (GPT-5.6 Terra, prior-driven) and `eco` (GPT-5.6 Luna, low
+# effort) with 12/12 written both times, at a quarter of the cost and energy.
 COLLECTION_HARNESS_MODEL_POLICY = {
     "mode": "auto",
     "min_cost_tier": "standard",
     "max_cost_tier": "standard",
+    "objective": "eco",
 }
-# What every collector seeded before the floor existed carries. A harness whose
-# policy equals this exactly was never edited, so boot upgrades it; any other
-# policy is an operator's and is left alone.
-_LEGACY_COLLECTION_MODEL_POLICY = {"mode": "auto", "max_cost_tier": "standard"}
+# What collectors seeded by earlier releases carry. A harness whose policy equals
+# any of these exactly was never edited, so boot upgrades it; any other policy is
+# an operator's and is left alone.
+_PREVIOUS_COLLECTION_MODEL_POLICIES = (
+    {"mode": "auto", "max_cost_tier": "standard"},
+    {"mode": "auto", "min_cost_tier": "standard", "max_cost_tier": "standard"},
+)
 # A 380-page annual report with an embedded sustainability statement needs more
 # than 24 iterations to locate, read and map; the seed is raised to 40, and a run
 # is capped at $8 (the engine default of $5 stopped long reports mid-map). A
@@ -441,7 +448,7 @@ async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
 
     The seeded `model_policy` carries a routing floor
     (`COLLECTION_HARNESS_MODEL_POLICY`). An existing harness whose policy is
-    still exactly the previous seed value is moved to it; an edited policy is
+    still exactly a previous seed value is moved to it; an edited policy is
     never touched. The same holds, independently, for `loop_config`
     (`COLLECTION_HARNESS_LOOP_CONFIG`, 40 iterations, $8 cap).
     """
@@ -456,7 +463,7 @@ async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
         missing = [n for n in COLLECTION_HARNESS_TOOLS if n not in (existing.tool_names or [])]
         if missing:
             existing.tool_names = [*(existing.tool_names or []), *missing]
-        if existing.model_policy == _LEGACY_COLLECTION_MODEL_POLICY:
+        if existing.model_policy in _PREVIOUS_COLLECTION_MODEL_POLICIES:
             existing.model_policy = dict(COLLECTION_HARNESS_MODEL_POLICY)
         if existing.loop_config in _PREVIOUS_COLLECTION_HARNESS_LOOP_CONFIGS:
             existing.loop_config = dict(COLLECTION_HARNESS_LOOP_CONFIG)

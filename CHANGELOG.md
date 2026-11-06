@@ -8,6 +8,10 @@ one that needs action on an existing install.
 
 ## [Unreleased]
 
+### Changed
+
+- The Disclosure Collector harness now seeds routing objective `eco` within its standard-tier floor (an unedited harness is upgraded at boot): on the same 12 registers, `eco` (GPT-5.6 Luna, low effort) wrote 12/12 like `balanced` (GPT-5.6 Terra) at about a quarter of the cost and energy.
+
 ### Added
 
 - **Attach documents from the chat composer.** A paperclip button and drag-and-drop
