@@ -25,11 +25,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
-import tempfile
 import uuid
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from sqlalchemy import select
@@ -40,6 +37,7 @@ from tret.db.models import Document
 from tret.net.fetch.extract import html_to_text
 from tret.net.fetch.fetch import FetchedPage
 from tret.services.documents import extract_text, extraction_budget_seconds, pdf_budget
+from tret.storage import document_key, get_store
 
 log = logging.getLogger("tret.net")
 
@@ -64,31 +62,6 @@ CAPTURE_PDF_THRESHOLD_BYTES = 2_000_000
 CAPTURE_PDF_EXTRACTION_TIMEOUT_SECONDS = 180.0
 
 _UNSAFE = re.compile(r"[^a-z0-9._-]+")
-
-
-def _write_content_addressed(storage_dir: Path, storage_path: Path, body: bytes) -> None:
-    """Write `body` to its `<sha256>-<name>` path, atomically.
-
-    The name carries the hash, so an existing readable file of the same size
-    already holds these bytes; it is kept as is (it may belong to another OS user
-    and be unwritable). Otherwise a temp file is renamed into place, which needs
-    only write permission on the directory.
-    """
-    try:
-        if storage_path.stat().st_size == len(body) and os.access(storage_path, os.R_OK):
-            return
-    except FileNotFoundError:
-        pass
-    tmp = tempfile.NamedTemporaryFile(dir=storage_dir, delete=False)
-    try:
-        with tmp:
-            tmp.write(body)
-        # NamedTemporaryFile is 0600; other service users must still read it.
-        os.chmod(tmp.name, 0o644)
-        os.replace(tmp.name, storage_path)
-    except BaseException:
-        Path(tmp.name).unlink(missing_ok=True)
-        raise
 
 
 def snapshot_filename(url: str, extension: str) -> str:
@@ -151,13 +124,14 @@ async def store_snapshot(
     `extra_meta` is merged last: a caller collecting an original adds its record
     (hash check, headers, operator note) to the row without a second write.
     """
-    storage_dir = Path(get_settings().storage_dir).resolve()
-    storage_dir.mkdir(parents=True, exist_ok=True)
+    store = get_store(get_settings())
     filename = snapshot_filename(page.url, page.extension)
-    storage_path = (storage_dir / f"{page.sha256}-{filename}").resolve()
-    if storage_path.parent != storage_dir:  # belt and braces over snapshot_filename
-        raise ValueError("refusing to write a snapshot outside the storage directory")
-    await asyncio.to_thread(_write_content_addressed, storage_dir, storage_path, page.body)
+    try:
+        key = document_key(page.sha256, filename)  # belt and braces over snapshot_filename
+    except ValueError as e:
+        raise ValueError("refusing to write a snapshot outside the storage directory") from e
+    await store.put(key, page.body, content_type=page.content_type)
+    storage_path = await store.local_path(key)
 
     text, meta, status = await _extract(page, filename)
     truncated_text = len(text) > MAX_EXTRACTED_CHARS
@@ -170,6 +144,7 @@ async def store_snapshot(
         content_type=page.content_type,
         byte_size=len(page.body),
         storage_path=str(storage_path),
+        storage_key=key,
         extracted_text=text,
         extraction_status=status,
         sha256=page.sha256,

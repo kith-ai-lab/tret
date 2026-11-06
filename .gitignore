@@ -9,6 +9,8 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 storage/
+# the runtime document store above, not the storage backend package
+!backend/tret/storage/
 # Generated on first boot of the `search` compose profile and persisted
 # across restarts — see searxng/inject-secret-entrypoint.sh.
 searxng/.secret/

@@ -78,6 +78,7 @@ from tret.services import lessons as lessons_service
 from tret.services import packaging as packaging_service
 from tret.services import retrieval as retrieval_service
 from tret.services.emissions import energy_wh_field
+from tret.storage import document_local_path
 
 log = logging.getLogger("tret.tools")
 
@@ -1442,7 +1443,10 @@ async def _connected_write_document_source(
         raise ToolError("Document not found in this project")
     if not doc.storage_path:
         raise ToolError("This document has no stored file to upload.")
-    path = Path(doc.storage_path)
+    try:
+        path = await document_local_path(doc)
+    except FileNotFoundError:
+        raise ToolError("The stored file for this document is missing, so it cannot be uploaded.") from None
     if not path.is_file():
         raise ToolError("The stored file for this document is missing, so it cannot be uploaded.")
     if doc.byte_size > CONNECTED_WRITE_DOCUMENT_MAX_BYTES:
@@ -1905,7 +1909,10 @@ async def propose_package_map(
         raise ToolError("Document not found in this project")
     if not doc.storage_path:
         raise ToolError("This document has no stored file to package.")
-    path = Path(doc.storage_path)
+    try:
+        path = await document_local_path(doc)
+    except FileNotFoundError:
+        raise ToolError("The stored file for this document is missing, so it cannot be packaged.") from None
     if not path.is_file():
         raise ToolError("The stored file for this document is missing, so it cannot be packaged.")
     try:

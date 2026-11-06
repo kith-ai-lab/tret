@@ -14,7 +14,6 @@ at call time (`_compat()`), because the existing tests patch it there.
 """
 from __future__ import annotations
 
-import asyncio
 import csv
 import hashlib
 import io
@@ -24,7 +23,6 @@ import re
 import unicodedata
 import uuid
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Iterable
 
 from fastapi import HTTPException
@@ -67,6 +65,7 @@ from tret.db.models import (
 )
 from tret.services import connections as connections_service
 from tret.services.packaging import PACKAGING_VERSION, ROLES
+from tret.storage import document_bytes
 from tret.services.workspace import COLLECTION_HARNESS_NAME
 
 log = logging.getLogger("tret.collections")
@@ -638,7 +637,7 @@ async def _document_bytes(db: AsyncSession, c: Batch, entry: dict) -> bytes:
     doc = await db.get(Document, doc_id)
     if doc is None or doc.project_id != c.project_id or not doc.storage_path:
         raise ValueError("the package document no longer exists")
-    data = await asyncio.to_thread(Path(doc.storage_path).read_bytes)
+    data = await document_bytes(doc)
     expected = entry.get("sha256")
     if expected and hashlib.sha256(data).hexdigest() != expected:
         raise ValueError("the stored package file no longer matches its recorded sha256")
@@ -672,7 +671,7 @@ async def _package_record(db: AsyncSession, package: dict) -> dict | None:
         doc = await db.get(Document, uuid.UUID(str(entry.get("document_id"))))
         if doc is None or not doc.storage_path:
             return None
-        raw = await asyncio.to_thread(Path(doc.storage_path).read_text, encoding="utf-8")
+        raw = (await document_bytes(doc)).decode("utf-8")
         data = json.loads(raw)
         return data if isinstance(data, dict) else None
     except Exception:  # noqa: BLE001

@@ -48,7 +48,7 @@ COPY backend/constraints.txt ./
 # everything tret depends on, and the stub's own install is then removed, leaving
 # the third-party tree behind.
 RUN mkdir -p tret && touch tret/__init__.py \
-    && pip install --no-cache-dir ".[server]" -c constraints.txt \
+    && pip install --no-cache-dir ".[server,s3]" -c constraints.txt \
     && pip uninstall -y tret \
     && rm -rf tret
 

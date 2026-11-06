@@ -41,6 +41,7 @@ from tret.providers.catalog import get_catalog
 from tret.services import collections as collections_service
 from tret.services import lifecycle
 from tret.services.telemetry import sender_loop as telemetry_sender_loop
+from tret.storage import describe_line, get_store
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("tret")
@@ -322,6 +323,9 @@ async def lifespan(app: FastAPI):
     # operator reads as success. A deployment with egress off looks exactly like
     # a deployment with a bad API key; this is the difference.
     log_egress_at_boot(logger=log)
+    # Where document bytes live (docs/storage.md). Resolved here so a misconfigured
+    # s3 backend (no bucket) stops the boot instead of failing the first upload.
+    log.info("%s", describe_line(get_store(get_settings())))
     log.info("tret is ready")
     try:
         yield

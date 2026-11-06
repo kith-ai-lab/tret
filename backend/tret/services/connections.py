@@ -48,7 +48,7 @@ import unicodedata
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
@@ -64,6 +64,7 @@ from tret.net import EgressDenied, build_client
 from tret.net.policy import MODE_OFF, VERIFY_NONE, VERIFY_PUBLIC, ClassPolicy, master_mode
 from tret.services.credentials import get_fernet
 from tret.services.documents import MAX_DOCUMENT_BYTES, ingest_document
+from tret.storage import document_key, get_store
 
 log = logging.getLogger("tret.connections")
 
@@ -1880,22 +1881,20 @@ async def materialize_connected_file(
     filename = _safe_connected_filename(name)
     content_type = _safe_connected_content_type((metadata.get("file") or {}).get("mimeType"))
     sha = hashlib.sha256(data).hexdigest()
-    storage_dir = Path(get_settings().storage_dir).resolve()
-    storage_dir.mkdir(parents=True, exist_ok=True)
-    storage_path = (storage_dir / f"{sha}-{filename}").resolve()
-    if storage_path.parent != storage_dir:
-        raise ValueError("Invalid filename")
+    store = get_store(get_settings())
+    key = document_key(sha, filename)  # ValueError("Invalid filename") if a name escapes
 
-    # Same "xb" check-and-create race handling as `api/documents.py::
-    # _import_one` — see that function's own comment for the full reasoning.
-    # Same bytes (same sha) means another Document row already owns this
-    # file on disk; this call must not touch it either way.
+    # Same "did this call create it" handling as `api/documents.py::_import_one`
+    # — see that function's own comment for the full reasoning. Same bytes (same
+    # sha) means another Document row may already own this object; this call must
+    # not delete it either way.
+    created = await store.put(key, data, content_type=content_type, exclusive=True)
     try:
-        with storage_path.open("xb") as sink:
-            sink.write(data)
-        created = True
-    except FileExistsError:
-        created = False
+        storage_path = await store.local_path(key)
+    except BaseException:
+        if created:
+            await store.delete(key)
+        raise
 
     try:
         doc = await ingest_document(
@@ -1903,6 +1902,7 @@ async def materialize_connected_file(
             filename=filename,
             content_type=content_type,
             storage_path=storage_path,
+            storage_key=key,
             sha256=sha,
             byte_size=len(data),
             data=data,
@@ -1941,7 +1941,7 @@ async def materialize_connected_file(
         return doc
     except BaseException:
         if created:
-            storage_path.unlink(missing_ok=True)
+            await store.delete(key)
         raise
 
 

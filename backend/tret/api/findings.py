@@ -38,6 +38,7 @@ from tret.services import connections as connections_service
 from tret.services import packaging as packaging_service
 from tret.services.documents import ingest_document
 from tret.services.export import strip_draft_status_banner
+from tret.storage import document_local_path, get_store, package_key
 from tret.services.outcomes import record_outcome_for_finding
 
 router = APIRouter(prefix="/api", tags=["findings"])
@@ -390,7 +391,10 @@ async def _stored_document_path(db: AsyncSession, project_id: uuid.UUID, source:
     doc = await db.get(Document, document_id)
     if doc is None or doc.project_id != project_id or not doc.storage_path:
         raise ValueError("The document behind this proposal no longer exists.")
-    path = Path(doc.storage_path)
+    try:
+        path = await document_local_path(doc, get_settings())
+    except FileNotFoundError:
+        raise ValueError("The stored file for this document is missing; nothing was uploaded.") from None
     if not path.is_file():
         raise ValueError("The stored file for this document is missing; nothing was uploaded.")
     return path
@@ -673,6 +677,9 @@ async def _package_approved_map(
     started = time.monotonic()
     payload = dict(finding.payload)
     published = False  # True once THIS attempt's run_packaging has returned
+    pinned_source: tuple[object, Path] | None = None  # (store, path) kept out of cache eviction
+    put_keys: list[str] = []  # objects THIS attempt put in the store, for debris cleanup
+    pf_keys: dict[Path, str] = {}
     out_dir: Path | None = None
     result: dict
     try:
@@ -685,9 +692,18 @@ async def _package_approved_map(
         src_doc = await db.get(Document, source_id)
         if src_doc is None or src_doc.project_id != finding.project_id or not src_doc.storage_path:
             raise ValueError("The source document behind this map no longer exists in this project.")
-        source_path = Path(src_doc.storage_path)
+        settings = get_settings()
+        store = get_store(settings)
+        try:
+            source_path = await document_local_path(src_doc, settings)
+        except FileNotFoundError:
+            raise ValueError("The stored source file is missing; nothing was packaged.") from None
         if not source_path.is_file():
             raise ValueError("The stored source file is missing; nothing was packaged.")
+        # A packaging run reads the source for minutes (up to PACKAGING_TIMEOUT_SECONDS);
+        # on s3 it is a cache file and must not be evicted underneath the subprocesses.
+        store.pin(source_path)
+        pinned_source = (store, source_path)
         expected = source.get("sha256")
         actual = await asyncio.to_thread(_hash_file, source_path)
         if not expected or actual != expected:
@@ -695,11 +711,16 @@ async def _package_approved_map(
                 "source bytes changed since the map was reviewed; recapture and re-review"
             )
 
-        storage_dir = Path(get_settings().storage_dir).resolve()
-        target_dir = (storage_dir / "packages" / str(finding.id)).resolve()
-        if not target_dir.is_relative_to(storage_dir):
-            raise ValueError("The package directory is outside storage; nothing was packaged.")
-        if target_dir.exists():
+        # The packager writes real files. On the local backend this directory IS
+        # `storage_dir/packages/<id>`; on s3 it is the cache's copy, and each output is
+        # uploaded below once the packager has returned.
+        try:
+            target_dir = store.staging_dir(f"packages/{finding.id}")
+        except ValueError:
+            raise ValueError("The package directory is outside storage; nothing was packaged.") from None
+        # Off the local backend the staging copy can be evicted while the bucket still
+        # holds the evidence, so the registered-package check cannot hinge on the directory.
+        if target_dir.exists() or store.backend != "local":
             # The packager refuses to overwrite evidence. A directory with
             # registered package Documents is evidence; one without is the debris
             # of an attempt that died before registering anything (the "running"
@@ -721,12 +742,13 @@ async def _package_approved_map(
             )
             if any((d.meta or {}).get("package_finding_id") == str(finding.id) for d in registered):
                 raise ValueError("A package directory already exists for this finding; nothing was packaged.")
-            log.warning(
-                "removing unregistered package directory %s left by an earlier attempt at finding %s",
-                target_dir,
-                finding.id,
-            )
-            await asyncio.to_thread(shutil.rmtree, target_dir, True)
+            if target_dir.exists():
+                log.warning(
+                    "removing unregistered package directory %s left by an earlier attempt at finding %s",
+                    target_dir,
+                    finding.id,
+                )
+                await asyncio.to_thread(shutil.rmtree, target_dir, True)
         out_dir = target_dir
         keep = raw_map.get("keep_ranges")
         mapping = packaging_service.PackageMap(
@@ -749,6 +771,15 @@ async def _package_approved_map(
             deadline_seconds=PACKAGING_TIMEOUT_SECONDS,
         )
         published = True
+        for pf in output.files:
+            try:
+                name = pf.path.resolve().relative_to(target_dir).as_posix()
+            except ValueError:
+                name = pf.path.name
+            pf_key = package_key(finding.id, name)
+            await store.put(pf_key, pf.path, content_type=pf.content_type)
+            put_keys.append(pf_key)
+            pf_keys[pf.path] = pf_key
 
         meta_common = {
             "provenance": "package",
@@ -772,7 +803,8 @@ async def _package_approved_map(
                 project_id=finding.project_id,
                 filename=pf.filename,
                 content_type=pf.content_type,
-                storage_path=pf.path,
+                storage_path=await store.local_path(pf_keys[pf.path]),
+                storage_key=pf_keys[pf.path],
                 sha256=pf.sha256,
                 byte_size=pf.byte_size,
                 data=data,
@@ -819,6 +851,8 @@ async def _package_approved_map(
         result = _package_failed(
             f"Unexpected error: {type(e).__name__}: {e}", approver_user_id=approver_user_id, started=started
         )
+    if pinned_source is not None:
+        pinned_source[0].unpin(pinned_source[1])  # type: ignore[attr-defined]
     if result["status"] == "failed" and published and out_dir is not None:
         # The runner leaves nothing behind when it fails or is killed, so there is
         # nothing to clean up for those. This is only for a package THIS attempt
@@ -826,6 +860,9 @@ async def _package_approved_map(
         # so an attempt that failed earlier never deletes a directory it did not
         # create.
         await asyncio.to_thread(shutil.rmtree, out_dir, True)
+        for stale in put_keys:
+            with contextlib.suppress(Exception):
+                await store.delete(stale)
     payload["package"] = result
     finding.payload = payload  # a new dict, so SQLAlchemy sees the JSONB change
     await db.commit()
