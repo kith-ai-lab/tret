@@ -198,6 +198,12 @@ def test_the_prompt_names_only_real_packaging_roles_and_the_target_year():
         slug="shell",
     )
     prompt = build_prompt(c, t, 5)
+    # The first sentence is what the deployed collector sees; a rename must not
+    # reach it (the "Batch" rename did once, caught in review).
+    assert prompt.startswith(
+        "You are collecting one company's sustainability disclosure for the Kith Climate "
+        'disclosure repository. Collection run "'
+    )
     for role in ROLES:
         assert role in prompt
     assert "embedded_sustainability_section" not in prompt and "incorporated_section" not in prompt

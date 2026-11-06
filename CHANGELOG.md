@@ -94,6 +94,13 @@ one that needs action on an existing install.
 
 ### Changed
 
+- **Collection runs now sit on a generic batch orchestrator** (`tret/batches/`,
+  with a `BatchProfile` seam; the disclosure code moved to `profiles/disclosure.py`).
+  `/api/collections`, prompts and record files are unchanged; a migration adds
+  `profile`, `harness_id`, `parent_run_id` and per-target `label` / `task_input`.
+  Finalize now returns 409 while a target failed on an I/O or storage error (send
+  `{"force": true}` to override), and create warns about known-URL hosts the
+  research allowlist would make `fetch_url` refuse.
 - **Collection runs stop searching when they cannot fetch.** `web_search` is capped
   per run (`TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN`, default 12), and a fetch or
   capture refused by the research allowlist now says the host is not allowlisted,

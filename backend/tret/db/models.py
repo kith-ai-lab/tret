@@ -1003,16 +1003,20 @@ class InstanceState(Base):
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
 
 
-class Collection(Base):
-    """A collection run: one register of target companies, each collected by its
-    own engine run on the "Disclosure Collector" harness, tracked from proposal
-    through approval, packaging and SharePoint upload
-    (`tret/services/collections.py`).
+class Batch(Base):
+    """A batch: one register of targets, each handled by its own engine run,
+    orchestrated by `tret/batches/core.py`. `profile` names the kind of batch
+    (`tret/batches/profiles/`); the first is "disclosure": a register of target
+    companies collected on the "Disclosure Collector" harness, tracked from
+    proposal through approval, packaging and SharePoint upload. The table keeps
+    its original name `collections`; `Collection` is an alias of this class.
 
-    `settings` is the run's own configuration (write target, concurrency, the
+    `settings` is the batch's own configuration (write target, concurrency, the
     first-batch gate, fiscal year, auto-write, model override); `warnings` are
     the register validation warnings set at creation; `finalize` records the
-    run-level files written by `POST /collections/{id}/finalize`.
+    run-level files written by `POST /collections/{id}/finalize`. `harness_id`
+    pins the harness (null = the profile's default); `parent_run_id` is the
+    run a batch was started from, if any.
     """
 
     __tablename__ = "collections"
@@ -1030,6 +1034,15 @@ class Collection(Base):
     run_slug: Mapped[str] = mapped_column(Text, nullable=False)
     # draft | running | paused | gate | review | completed | finalized | failed
     status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    profile: Mapped[str] = mapped_column(
+        Text, nullable=False, default="disclosure", server_default="disclosure"
+    )
+    harness_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("harnesses.id", ondelete="SET NULL")
+    )
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL")
+    )
     settings: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     warnings: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     finalize: Mapped[dict | None] = mapped_column(JSONB)
@@ -1041,12 +1054,19 @@ class Collection(Base):
     finalized_at: Mapped[datetime | None] = mapped_column()
 
 
-class CollectionTarget(Base):
-    """One company in a collection's register, and where its collection stands.
+Collection = Batch  # the disclosure collection's original name
+
+
+class BatchTarget(Base):
+    """One target in a batch's register (for the disclosure profile, a company),
+    and where its run stands. `label` is the display name (the company for the
+    disclosure profile) and `task_input` the profile's variables for the run; the
+    typed company columns below are the disclosure profile's.
+    `CollectionTarget` is an alias of this class.
 
     `status`: pending | held | running | review | packaging | written |
     completed | gap | failed | rejected | write_failed (see
-    `services/collections.py::derive_target_status`). `outcome` is what the
+    `tret/batches/profiles/disclosure.py::derive_target_status`). `outcome` is what the
     target's run reported through `report_collection_outcome`; `finding_ids`
     are the run's `package_map` findings; `written_files` the package files
     uploaded to SharePoint; `history` the earlier attempts. Cost, model and
@@ -1072,9 +1092,13 @@ class CollectionTarget(Base):
     sector: Mapped[str | None] = mapped_column(Text)
     category: Mapped[str | None] = mapped_column(Text)
     expected_form: Mapped[str] = mapped_column(Text, nullable=False, default="unknown")
-    fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    fiscal_year: Mapped[int | None] = mapped_column(Integer)
     known_urls: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     notes: Mapped[str | None] = mapped_column(Text)
+    label: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    task_input: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
     finding_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
@@ -1087,3 +1111,6 @@ class CollectionTarget(Base):
     history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     started_at: Mapped[datetime | None] = mapped_column()
     finished_at: Mapped[datetime | None] = mapped_column()
+
+
+CollectionTarget = BatchTarget  # the disclosure collection's original name

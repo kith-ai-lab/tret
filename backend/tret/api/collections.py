@@ -1,7 +1,8 @@
 """Collection runs: a register of target companies collected one engine run per
 target, with a review gate, batch approval, retry and a finalize step that
 writes run-level records to SharePoint. The orchestration lives in
-`tret/services/collections.py`; this module is its HTTP surface.
+`tret/batches/` (re-exported by `tret/services/collections.py`); this module is
+its HTTP surface.
 
 Reads are open to any workspace member; every state change needs the approver
 role, like the approvals it drives.
@@ -18,23 +19,24 @@ from tret.api.auth import current_user
 from tret.api.findings import _finding_out
 from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_approver
 from tret.db.engine import get_db
-from tret.db.models import Collection, CollectionTarget, User
+from tret.db.models import Batch, BatchTarget, User
 from tret.services import collections as service
 from tret.services import lifecycle
 
 router = APIRouter(prefix="/api", tags=["collections"])
 
 
-async def _collection_detail(db: AsyncSession, c: Collection) -> dict:
+async def _collection_detail(db: AsyncSession, c: Batch) -> dict:
     """`Collection` + `targets` + `pending_maps` (draft package_map findings of
     this collection, each with its `target_id`)."""
     await db.refresh(c)
     targets = await service.load_targets(db, [c.id])
     runs = await service.load_runs(db, targets)
-    maps = await service.load_maps(db, targets)
+    profile = service.profile_for(c)
+    maps = await service.load_review_findings(db, profile, targets)
     out = service.collection_out(c, targets, runs)
     out["targets"] = [
-        service.target_out(t, runs.get(t.run_id), maps.get(t.run_id, []) if t.run_id else [])
+        service.target_out(t, runs.get(t.run_id), maps.get(t.run_id, []) if t.run_id else [], profile)
         for t in targets
     ]
     pending = []
@@ -46,15 +48,19 @@ async def _collection_detail(db: AsyncSession, c: Collection) -> dict:
     return out
 
 
-async def _target_detail(db: AsyncSession, t: CollectionTarget) -> dict:
+async def _target_detail(db: AsyncSession, t: BatchTarget) -> dict:
     await db.refresh(t)
     runs = await service.load_runs(db, [t])
-    maps = await service.load_maps(db, [t])
-    return service.target_out(t, runs.get(t.run_id), maps.get(t.run_id, []) if t.run_id else [])
+    c = await db.get(Batch, t.collection_id)
+    profile = service.profile_for(c)
+    maps = await service.load_review_findings(db, profile, [t])
+    return service.target_out(
+        t, runs.get(t.run_id), maps.get(t.run_id, []) if t.run_id else [], profile
+    )
 
 
-async def _target_in(db: AsyncSession, c: Collection, target_id: uuid.UUID) -> CollectionTarget:
-    t = await db.get(CollectionTarget, target_id)
+async def _target_in(db: AsyncSession, c: Batch, target_id: uuid.UUID) -> BatchTarget:
+    t = await db.get(BatchTarget, target_id)
     if t is None or t.collection_id != c.id:
         raise HTTPException(404, "Target not found")
     return t
@@ -69,7 +75,9 @@ async def create_collection(
     db: AsyncSession = Depends(get_db),
 ):
     lifecycle.refuse_if_draining(request)
-    c, _ = await service.create_collection(db, workspace_id=ctx.id, user_id=user.id, body=body)
+    c, _ = await service.create_batch(
+        db, workspace_id=ctx.id, user_id=user.id, body=body, profile_slug=body.profile
+    )
     return await _collection_detail(db, c)
 
 
@@ -82,15 +90,15 @@ async def list_collections(
     collections = list(
         (
             await db.execute(
-                select(Collection)
-                .where(Collection.workspace_id == ctx.id)
-                .order_by(Collection.created_at.desc())
+                select(Batch)
+                .where(Batch.workspace_id == ctx.id)
+                .order_by(Batch.created_at.desc())
             )
         ).scalars()
     )
     targets = await service.load_targets(db, [c.id for c in collections])
     runs = await service.load_runs(db, targets)
-    by_collection: dict[uuid.UUID, list[CollectionTarget]] = {}
+    by_collection: dict[uuid.UUID, list[BatchTarget]] = {}
     for t in targets:
         by_collection.setdefault(t.collection_id, []).append(t)
     return {
@@ -203,16 +211,17 @@ async def preview_records(
     db: AsyncSession = Depends(get_db),
 ):
     c = await service.get_collection(db, collection_id, ctx.id)
-    return await service.build_records(db, c)
+    return await service.profile_for(c).records(db, c)
 
 
 @router.post("/collections/{collection_id}/finalize")
 async def finalize_collection(
     collection_id: uuid.UUID,
+    body: service.FinalizeBody | None = None,
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(require_workspace_approver),
     db: AsyncSession = Depends(get_db),
 ):
     c = await service.get_collection(db, collection_id, ctx.id)
-    await service.finalize(db, c)
+    await service.finalize(db, c, force=bool(body and body.force))
     return await _collection_detail(db, c)
