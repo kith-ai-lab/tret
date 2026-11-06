@@ -10,6 +10,15 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Batches from chat and the command line.** The chat harness gains `start_batch`,
+  `batch_status` and `batch_results`: a turn can start a durable prompt batch over
+  inline rows or a CSV document, read how it is going and synthesise its results later,
+  with a card in the chat linking to the batch. The batch's spend is added to the
+  starting run's `delegated_cost_usd` as its targets settle; starting one from a chat
+  needs the approver role. `tret batch create | start | status [--watch] | release |
+  approve | finalize | list` drives the same API from a shell
+  (`--url`/`TRET_URL`, `--token` or `--email`/`--password`, `--workspace`, `--json`). See
+  [docs/batch-runs.md](docs/batch-runs.md).
 - **Batches, with a generic prompt profile.** The Collections page and API are now
   Batches (`/api/batches`; `/api/collections` stays as a deprecated alias for one
   release). A new `prompt` profile runs any non-archived harness over the rows of a

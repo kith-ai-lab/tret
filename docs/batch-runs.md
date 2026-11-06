@@ -254,3 +254,148 @@ await fetch(`${baseUrl}/api/batches/${batch.id}/start`, { method: 'POST', header
 await fetch(`${baseUrl}/api/batches/${batch.id}/finalize`, { method: 'POST', headers })
 const results = await (await fetch(`${baseUrl}/api/batches/${batch.id}/records/results.jsonl`, { headers })).text()
 ```
+
+## From a chat or harness
+
+A chat turn can start a batch itself. Three builtin tools (`engine/batch_tools.py`)
+ride along with `run_harness_task` on the seeded chat harness. They are added once per
+workspace (`settings.batch_tools_seeded`), so an operator who removed delegation, or
+removed `start_batch` itself, keeps them out; add them to another harness by name if you
+want them there:
+
+| Tool | Does |
+|---|---|
+| `start_batch` | creates and starts a prompt batch and returns at once: `{"batch_id", "name", "targets", "status", "estimated_cost_usd", "page": "/batches/<id>"}` |
+| `batch_status` | counts by status, cost so far and the review queue: `{"batch_id", "name", "status", "counts", "cost_usd", "pending_reviews": [{"finding_id", "target_label", "schema_slug"}], "page"}` |
+| `batch_results` | one row per target, paged (`offset`, `limit` up to 200; optional `status` filter): `{"total", "offset", "rows": [{"position", "label", "status", "answer", "finding", "cost_usd", "error"}]}`; `answer` is cut to 2000 characters |
+
+`start_batch` takes `name`, `template` (`{column}` placeholders), the rows either inline
+(`rows`, 1-500 objects) or as a CSV document of the workspace (`document_id`), and the
+create options of the API (`label_column`, `review_schema`, `concurrency`,
+`first_batch_size`, `model_override`, `max_iterations`). The harness that runs each row
+defaults to the calling run's own harness (`harness_id` overrides it). The batch records
+that run as its `parent_run_id`. Validation errors come back as the tool error with the
+API's 422 text; a start refused by the free-space guard leaves a draft batch, which the
+tool error names. The person whose turn calls `start_batch` needs the approver role in
+the workspace, the same as creating a batch on the page; a CSV `document_id` must be a
+`text/csv`, `text/plain` or `.csv` document of at most 2 MB; while the server is draining
+for a deploy the tool asks for a retry in a minute.
+
+**Batch or delegation.** The tool descriptions give the model the rule: a batch is for
+work that is large (tens to hundreds of rows), unattended, must be reviewable or
+auditable later, or whose answers nobody needs in this turn. For a few independent items
+whose results the turn needs now, `delegate_parallel` is still the tool. A batch's own
+runs cannot start another batch, and subagents are never offered these tools.
+
+**Cost.** Each time a target settles, the batch's total spend (every target, retries
+included) is compared with what it has already reported (`settings.rolled_up_cost_usd`)
+and the difference is added to the parent run's `delegated_cost_usd`, in one commit under
+the launch lock. It is idempotent, so a re-settle changes nothing, and it never fails a
+settle. While the parent run is still running the roll-up waits, so a batch cannot trip
+the turn's own cost cap; it catches up on the next settle (or recompute) once the parent
+has finished.
+
+In the chat, a successful `start_batch` shows a card under the reply (name, target count,
+status, cost, a link to the batch page) that refreshes while the batch is running.
+
+## From the command line
+
+`tret batch` is an HTTP client of a running server (the batch executes inside the
+server, so there is no database mode).
+
+```
+tret batch [--url URL] [--token T | --email E --password P] [--workspace ID] [--json] <command>
+```
+
+| Option | Meaning |
+|---|---|
+| `--url`, `TRET_URL` | server base URL, default `http://localhost:8000` |
+| `--token`, `TRET_TOKEN` | bearer access token (the server needs `TRET_OIDC_API_AUDIENCE`) |
+| `--email`/`--password`, `TRET_EMAIL`/`TRET_PASSWORD` | log in once at `/api/auth/login`; the session cookie is kept for the command. Prefer the environment variables: an argument is visible in `ps`. Use an https URL when the server marks its cookie secure |
+| `--workspace` | workspace id, sent as `X-Tret-Workspace` (and switched with `POST /api/auth/workspace` after a password login) |
+| `--json` | print the raw JSON; with `status --watch`, one JSON object per poll |
+
+The options may come before or after the command. Commands: `create` (both profiles),
+`start ID`, `status ID [--watch] [--targets] [--interval S]`, `release ID`,
+`approve ID (--all | --finding ID ...) [--reject] [--note TEXT]`, `finalize ID [--force]`,
+`list`. Exit codes: 0 ok, 1 the server refused (its detail is printed) or was unreachable
+(or a watched batch ended `failed`), 2 usage or configuration. Neither the token nor the
+password is ever printed.
+
+```sh
+export TRET_URL=https://tret.example.org TRET_TOKEN=...   # or TRET_EMAIL / TRET_PASSWORD
+tret batch create --name "Supplier screening Q4" --slug supplier-screen-q4 \
+    --harness 6d1c0c1e-... --template @prompt.txt --csv suppliers.csv \
+    --review any --gate 5 --concurrency 4
+tret batch start <id>
+tret batch status <id> --watch          # polls every 10 s until completed/finalized/failed/paused, or gate/review (waiting for a person)
+tret batch release <id>                 # after checking the first 5 targets
+tret batch approve <id> --all           # when review is on and findings are waiting
+tret batch finalize <id>
+```
+
+A disclosure batch is `tret batch create --profile disclosure --name ... --register
+register.csv --target disclosures [--write-root runs] [--fiscal-year 2025]
+[--no-auto-write]`.
+
+## Agentic test probes
+
+For the agentic test protocol (id, level, identity, steps, oracle, expected cost). All
+run on a dev or staging workspace with the chat harness and a small harness with the web
+tools off as the batch harness.
+
+**BATCH-01. start_batch from chat.** Level: L2 (chat to engine to batch). Identity:
+approver. Steps: in a fresh chat say "Run this on each row: assess {company}'s climate
+disclosure in one paragraph" and attach or paste a 5-row CSV. Oracle: the model calls
+`start_batch` (not `delegate_parallel`); the result has `batch_id` and `targets` 5;
+`GET /api/batches/<id>` shows `profile` prompt and `parent_run_id` equal to the chat
+turn's run id; a card with the batch name and a working link appears under the reply and
+survives a page reload. Expected cost: about $0.05-0.20.
+
+**BATCH-02. The model chooses between batch and delegation.** Level: L3. Identity:
+approver. Steps: (a) "Compare these 3 sites' flood exposure now, I need the answers in
+this reply" with 3 short items; (b) in a new chat, "Screen these 40 suppliers, I will look
+tomorrow" with 40 rows. Oracle: (a) calls `delegate_parallel` and no `start_batch`; (b)
+calls `start_batch` and no `delegate_parallel`. Repeat each three times; at least 5 of 6
+correct. Expected cost: about $0.60 including the 40-row batch on an economy model.
+
+**BATCH-03. Status and results after completion.** Level: L2. Identity: approver. Steps:
+after BATCH-01 completes, ask "how did that batch go?" then "summarise the answers".
+Oracle: the model calls `batch_status` then `batch_results`; counts match the Batches
+page; every claim in the summary cites a row label that exists in the batch; a failed
+target, if any, is reported as failed rather than summarised. Expected cost: under $0.05.
+
+**BATCH-04. Review on, bulk approve.** Level: L3. Identity: approver. Steps: start a batch
+with `review_schema` "any" over a harness that proposes a finding for each row (or a
+`connected_write` request); open the batch page. Oracle: targets stop at `review`
+and `pending_reviews` lists them (`batch_status` agrees); bulk approve from the Batches
+page (or `tret batch approve <id> --all`) moves them on; the batch reaches `completed`.
+Expected cost: about $0.10.
+
+**BATCH-05. Finalize without a write target.** Level: L2. Identity: approver. Steps:
+finalize a completed batch that has no `target_slug`. Oracle: `finalize.files` lists
+`manifest.json`, `results.jsonl`, `results_summary.md`, each with a `document_id`; each
+downloads from `GET /api/batches/<id>/records/<name>`; `results.jsonl` has one line per
+target. Expected cost: none.
+
+**BATCH-06. Parent cost to the cent.** Level: L3. Identity: approver and (Tret Cloud) an
+admin. Steps: after BATCH-01 completes, compare the parent run's `delegated_cost_usd` with
+the batch's `cost_usd`; retry one failed target if there is one and compare again. Oracle:
+the two agree to the cent after each settle (a retry adds only its new spend); on Tret
+Cloud the ledger shows one charge per batch run and none for the roll-up itself. Expected
+cost: none beyond the batch.
+
+**BATCH-07. Guards.** Level: L2. Identity: approver. Steps: on a local-storage dev server
+set `TRET_BATCHES_MIN_FREE_MB_PER_TARGET` above the free space and start a batch (from
+chat and with `tret batch start`); separately, with research egress on and an allowlist,
+create a batch whose CSV carries a URL host outside it. Oracle: the start is refused with
+the "Not enough free space on the capture store" text (the chat tool error says the batch
+was created but not started, and the draft is on the Batches page); the create response
+carries the allowlist warning. Expected cost: none.
+
+**BATCH-08. CLI end to end.** Level: L2. Identity: approver with a token or password.
+Steps: `tret batch create`, `start`, `status --watch`, `approve --all` if review is on,
+`finalize`, `list` against a dev server, with `--json` on one of them. Oracle: exit code 0
+for each; the watch returns when the batch is completed; the records exist as in
+BATCH-05; a wrong password prints `login failed: 401` and exits 1 without echoing the
+password; a missing `--harness` exits 2. Expected cost: about $0.05.

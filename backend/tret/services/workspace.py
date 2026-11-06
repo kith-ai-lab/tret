@@ -36,6 +36,8 @@ from tret.db.models import Harness, Project, User, Workspace, WorkspaceMember
 from tret.engine.delegation import SUBAGENT_ALLOWED_TOOLS, SUBAGENT_TASK_PROFILE
 from tret.engine.extensions import GateResult, get_extension_registry
 import tret.engine.collection_tools  # noqa: F401 - registers report_collection_outcome
+import tret.engine.batch_tools  # noqa: F401 - registers start_batch, batch_status, batch_results
+from tret.engine.batch_tools import BATCH_TOOLS, BATCH_TOOLS_SEEDED_KEY
 from tret.net.policy import CLASS_RESEARCH, MODE_OFF, effective_mode
 from tret.packs.links import link_all_workspace_packs
 from tret.packs.loader import PackValidationError, install_pack
@@ -285,6 +287,19 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
             chat_harness.tool_names or []
         ):
             chat_harness.tool_names = [*chat_harness.tool_names, "spawn_subagent"]
+        # The batch tools ride along with `run_harness_task` too (same rule as
+        # above), but ONCE per workspace: `Workspace.settings[BATCH_TOOLS_SEEDED_KEY]`
+        # is the marker, so an operator who removes one stays removed at the next boot.
+        workspace = await db.get(Workspace, workspace_id)
+        if (
+            workspace is not None
+            and not (workspace.settings or {}).get(BATCH_TOOLS_SEEDED_KEY)
+            and "run_harness_task" in (chat_harness.tool_names or [])
+        ):
+            missing_batch_tools = [n for n in BATCH_TOOLS if n not in (chat_harness.tool_names or [])]
+            if missing_batch_tools:
+                chat_harness.tool_names = [*chat_harness.tool_names, *missing_batch_tools]
+            workspace.settings = {**(workspace.settings or {}), BATCH_TOOLS_SEEDED_KEY: True}
         missing_connector_tools = [
             n
             for n in ("list_connected_sources", "search_connected_files", "read_connected_file")
@@ -314,6 +329,7 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
             "run_harness_task",
             "delegate_parallel",
             "spawn_subagent",
+            *BATCH_TOOLS,
             "run_method",
             "read_document",
             "search_documents",
@@ -330,6 +346,9 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
     await db.flush()  # populate new_chat_harness.id for the pack links below
     await link_all_workspace_packs(db, new_chat_harness)
     new_chat_harness.packs_linked_at = datetime.now(timezone.utc)
+    workspace = await db.get(Workspace, workspace_id)
+    if workspace is not None:
+        workspace.settings = {**(workspace.settings or {}), BATCH_TOOLS_SEEDED_KEY: True}
 
 
 COLLECTION_HARNESS_NAME = "Disclosure Collector"

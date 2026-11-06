@@ -1,0 +1,521 @@
+"""`start_batch` / `batch_status` / `batch_results` (engine/batch_tools.py), the
+parent-run cost roll-up (`core.rollup_parent_cost`) and the harness seeding that
+offers the tools. Built on the world/client fixtures of `test_collections_api.py`
+and the `PromptEngine` of `test_batches_prompt.py`; the tools are called with a
+`RunContext` over a fresh session on the client's loop."""
+# ruff: noqa: F811 - the imported fixtures are used by name as test arguments
+from __future__ import annotations
+
+import json
+import uuid
+from decimal import Decimal
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
+
+from tests.evals.golden_world import install_sqlite_type_shims
+from tests.test_batches_prompt import PromptEngine, engine  # noqa: F401 - fixtures
+from tests.test_collections_api import client, run_db, settle, world  # noqa: F401 - fixtures
+from tret.batches import core
+from tret.config import get_settings
+from tret.db.models import Base, Batch, Document, Harness, Project, Run, User, Workspace, WorkspaceMember
+from tret.engine import delegation
+from tret.engine.batch_tools import BATCH_TOOLS, batch_results, batch_status, start_batch
+from tret.engine.harness import _subagent_tool_names
+from tret.engine.tools import RunContext, ToolError, get_builtin_tools
+from tret.services import collections as service
+from tret.services.workspace import seed_chat_harness
+
+ROWS = [{"company": "Acme", "country": "DE"}, {"company": "Globex", "country": "FR"}]
+TEMPLATE = "Assess {company} in {country}."
+
+
+class CostEngine(PromptEngine):
+    """PromptEngine plus a per-label cost on the run."""
+
+    def __init__(self, factory):
+        super().__init__(factory)
+        self.costs: dict[str, str] = {}
+
+    async def execute(self, run_id):
+        await super().execute(run_id)
+        async with self.factory() as db:
+            run = await db.get(Run, run_id)
+            label = run.task_input["_label"].split(":", 1)[1]
+            run.cost_usd = Decimal(self.costs.get(label, "0"))
+            await db.commit()
+
+
+@pytest.fixture
+def cost_engine(world, monkeypatch, tmp_path):
+    monkeypatch.setattr(get_settings(), "storage_dir", str(tmp_path / "storage"))
+    eng = CostEngine(world.factory)
+    monkeypatch.setattr(service, "get_harness_engine", lambda: eng)
+    return eng
+
+
+async def _parent(db, world, *, role="approver", user=None, **task_input) -> Run:
+    user = user or world.user
+    await db.merge(WorkspaceMember(user_id=user.id, workspace_id=world.ws.id, role=role))
+    run = Run(
+        id=uuid.uuid4(), project_id=world.project.id, harness_id=world.harness.id, task_type="chat",
+        task_input={"message": "go", **task_input}, document_ids=[], created_by=user.id,
+        status="running",
+    )
+    db.add(run)
+    await db.commit()
+    return run
+
+
+def _ctx(db, world, run, workspace_id=None) -> RunContext:
+    return RunContext(
+        db=db, run_id=run.id, project_id=world.project.id, pack_id=None, doctrine_sha=None,
+        model_used=None, document_ids=[], output_schemas={},
+        workspace_id=workspace_id or world.ws.id,
+    )
+
+
+def call(client, world, tool, *, workspace_id=None, parent=None, **kwargs):
+    """Run `tool(ctx, **kwargs)` inside the client's loop; returns (result, parent_id)."""
+
+    async def go(db):
+        run = parent or await _parent(db, world)
+        out = await tool(_ctx(db, world, run, workspace_id), **kwargs)
+        return out, run.id
+
+    return run_db(client, world, go)
+
+
+def start(client, world, **over):
+    kwargs = {"name": "Supplier screen", "template": TEMPLATE, "rows": ROWS, **over}
+    out, parent_id = call(client, world, start_batch, **kwargs)
+    return json.loads(out), parent_id
+
+
+# ── start_batch ──────────────────────────────────────────────────────────────
+def test_start_batch_creates_and_starts_a_prompt_batch_for_the_calling_run(client, world, engine):
+    out, parent_id = start(client, world)
+    assert set(out) == {"batch_id", "name", "targets", "status", "estimated_cost_usd", "page"}
+    assert out["targets"] == 2 and out["status"] == "running" and out["name"] == "Supplier screen"
+    assert out["page"] == f"/batches/{out['batch_id']}" and out["estimated_cost_usd"] is None
+    settle(client)
+    d = client.get(f"/api/batches/{out['batch_id']}").json()
+    assert d["profile"] == "prompt" and d["status"] == "completed"
+    assert d["parent_run_id"] == str(parent_id)
+    assert d["harness_id"] == str(world.harness.id)  # the caller's own harness
+    assert d["settings"]["concurrency"] == 3 and d["settings"]["review_schema"] is None
+    # Two targets launch concurrently; which one reaches the engine first is
+    # scheduling, not behaviour.
+    assert sorted(engine.messages) == ["Assess Acme in DE.", "Assess Globex in FR."]
+    assert d["created_by"] == str(world.user.id)
+
+
+def test_start_batch_estimates_from_the_harness_cap_and_passes_options(client, world, engine):
+    async def cap(db):
+        h = await db.get(Harness, world.harness.id)
+        h.loop_config = {**(h.loop_config or {}), "max_cost_usd": 0.5}
+        await db.commit()
+
+    run_db(client, world, cap)
+    out, _ = start(client, world, review_schema="any", concurrency=1, first_batch_size=1, label_column="country")
+    assert out["estimated_cost_usd"] == pytest.approx(1.0)
+    settle(client)
+    d = client.get(f"/api/batches/{out['batch_id']}").json()
+    assert d["settings"]["review_schema"] == "any" and d["settings"]["label_column"] == "country"
+    assert d["status"] == "gate"  # first_batch_size=1 holds the second row
+
+
+def test_start_batch_reads_a_csv_document(client, world, engine, tmp_path):
+    path = tmp_path / "rows.csv"
+    path.write_bytes("company,country\nAcme,DE\nGlobex,FR\nInitech,US\n".encode())
+
+    async def add_doc(db):
+        doc = Document(
+            id=uuid.uuid4(), project_id=world.project.id, filename="rows.csv", content_type="text/csv",
+            byte_size=path.stat().st_size, storage_path=str(path), sha256="0" * 64,
+        )
+        db.add(doc)
+        await db.commit()
+        return str(doc.id)
+
+    doc_id = run_db(client, world, add_doc)
+    out, _ = start(client, world, rows=None, document_id=doc_id)
+    assert out["targets"] == 3
+    settle(client)
+    assert len(engine.messages) == 3
+
+
+def test_start_batch_document_from_another_workspace_or_missing_is_refused(client, world, engine, tmp_path):
+    path = tmp_path / "x.csv"
+    path.write_bytes(b"company\nA\n")
+
+    async def add_foreign(db):
+        other = Project(id=uuid.uuid4(), workspace_id=world.other_ws.id, name="O")
+        db.add(other)
+        await db.flush()
+        doc = Document(
+            id=uuid.uuid4(), project_id=other.id, filename="x.csv", content_type="text/csv",
+            byte_size=10, storage_path=str(path), sha256="0" * 64,
+        )
+        db.add(doc)
+        await db.commit()
+        return str(doc.id)
+
+    foreign = run_db(client, world, add_foreign)
+    for doc_id in (foreign, str(uuid.uuid4())):
+        with pytest.raises(ToolError, match="Document not found"):
+            start(client, world, rows=None, document_id=doc_id)
+
+
+@pytest.mark.parametrize(
+    ("over", "fragment"),
+    [
+        ({"template": "Hi {company} {region}"}, "region"),
+        ({"rows": None}, "exactly one of rows or document_id"),
+        ({"document_id": str(uuid.uuid4())}, "exactly one of rows or document_id"),
+        ({"rows": []}, "rows"),
+        ({"harness_id": str(uuid.uuid4())}, "harness_id"),
+        ({"harness_id": "nope"}, "not a valid harness id"),
+        ({"label_column": "nope"}, "label_column"),
+        ({"review_schema": "has space"}, "review_schema"),
+        ({"max_iterations": 0}, "max_iterations"),
+    ],
+)
+def test_start_batch_validation_errors_become_tool_errors(client, world, engine, over, fragment):
+    with pytest.raises(ToolError) as e:
+        start(client, world, **over)
+    assert fragment in str(e.value)
+    assert client.get("/api/batches").json()["batches"] == []
+
+
+def test_start_batch_refuses_inside_a_batch_run(client, world, engine):
+    async def go(db):
+        parent = await _parent(db, world, _collection_target_id=str(uuid.uuid4()))
+        return await start_batch(_ctx(db, world, parent), name="Nested", template=TEMPLATE, rows=ROWS)
+
+    with pytest.raises(ToolError, match="cannot start another batch"):
+        run_db(client, world, go)
+
+
+def test_a_headroom_409_leaves_a_draft_and_says_so(client, world, engine, monkeypatch):
+    monkeypatch.setattr(get_settings(), "batches_min_free_mb_per_target", 10**9)
+    with pytest.raises(ToolError) as e:
+        start(client, world)
+    assert "was created" in str(e.value) and "not started" in str(e.value)
+    assert "Not enough free space" in str(e.value)
+    (row,) = client.get("/api/batches").json()["batches"]
+    assert row["status"] == "draft"
+
+
+# ── batch_status / batch_results ─────────────────────────────────────────────
+def test_batch_status_and_results_shapes(client, world, engine):
+    engine.behaviour["row-2"] = "fail"
+    out, _ = start(client, world)
+    settle(client)
+    bid = out["batch_id"]
+    status = json.loads(call(client, world, batch_status, batch_id=bid)[0])
+    assert status["batch_id"] == bid and status["name"] == "Supplier screen"
+    assert status["status"] == "completed"
+    assert status["counts"]["completed"] == 1 and status["counts"]["failed"] == 1
+    assert status["cost_usd"] == 0 and status["pending_reviews"] == []
+    assert status["page"] == f"/batches/{bid}"
+
+    res = json.loads(call(client, world, batch_results, batch_id=bid)[0])
+    assert res["total"] == 2 and res["offset"] == 0
+    first, second = res["rows"]
+    assert set(first) == {"position", "label", "status", "answer", "finding", "cost_usd", "error"}
+    assert first["label"] == "Acme" and first["status"] == "completed"
+    assert first["answer"].startswith("Answer for row-1")
+    assert second["status"] == "failed" and second["error"]
+
+    failed = json.loads(call(client, world, batch_results, batch_id=bid, status="failed")[0])
+    assert failed["total"] == 1 and failed["rows"][0]["label"] == "Globex"
+    paged = json.loads(call(client, world, batch_results, batch_id=bid, offset=1, limit=1)[0])
+    assert paged["total"] == 2 and [r["label"] for r in paged["rows"]] == ["Globex"]
+
+
+def test_batch_status_lists_pending_reviews_and_results_truncate_answers(client, world, engine):
+    engine.behaviour["row-1"] = "finding"
+    out, _ = start(client, world, review_schema="any")
+    settle(client)
+    bid = out["batch_id"]
+    status = json.loads(call(client, world, batch_status, batch_id=bid)[0])
+    assert status["status"] == "review"
+    (pending,) = status["pending_reviews"]
+    assert pending["target_label"] == "Acme" and pending["schema_slug"] == "connected_write"
+    assert pending["finding_id"]
+
+    async def long_answer(db):
+        t = (await core.load_targets(db, [uuid.UUID(bid)]))[0]
+        t.outcome = {**(t.outcome or {}), "answer": "y" * 5000}
+        await db.commit()
+
+    run_db(client, world, long_answer)
+    res = json.loads(call(client, world, batch_results, batch_id=bid)[0])
+    assert len(res["rows"][0]["answer"]) == 2000
+    assert res["rows"][0]["finding"]["schema_slug"] == "connected_write"
+
+
+def test_other_workspaces_and_bad_ids_are_not_found(client, world, engine):
+    out, _ = start(client, world)
+    settle(client)
+    for tool in (batch_status, batch_results):
+        with pytest.raises(ToolError, match="Batch not found"):
+            call(client, world, tool, workspace_id=world.other_ws.id, batch_id=out["batch_id"])
+        with pytest.raises(ToolError, match="not a valid batch id"):
+            call(client, world, tool, batch_id="nope")
+        with pytest.raises(ToolError, match="Batch not found"):
+            call(client, world, tool, batch_id=str(uuid.uuid4()))
+
+
+# ── registration and who is offered the tools ────────────────────────────────
+def test_the_tools_are_registered_and_never_offered_to_subagents():
+    assert set(BATCH_TOOLS) <= set(get_builtin_tools())
+    assert not set(BATCH_TOOLS) & delegation.SUBAGENT_ALLOWED_TOOLS
+    assert not set(BATCH_TOOLS) & delegation.DELEGATION_TOOLS
+    narrowed = _subagent_tool_names(
+        [*BATCH_TOOLS, "read_document"], {delegation.ALLOWED_TOOLS_KEY: [*BATCH_TOOLS, "read_document"]},
+        delegated=True,
+    )
+    assert narrowed == ["read_document"]
+    assert _subagent_tool_names([*BATCH_TOOLS, "read_document"], {}, delegated=False) == ["read_document"]
+
+
+def test_the_descriptions_carry_the_batch_vs_delegation_guidance():
+    spec = get_builtin_tools()["start_batch"]
+    assert "For a few independent items whose results you need now, use delegate_parallel instead." in spec.description
+    assert "outlives this run" in spec.description and "batch_status and batch_results" in spec.description
+    assert "2000" in get_builtin_tools()["batch_results"].description
+
+
+@pytest_asyncio.fixture
+async def seed_db():
+    install_sqlite_type_shims()
+    eng = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with async_sessionmaker(eng, expire_on_commit=False)() as session:
+        yield session
+    await eng.dispose()
+
+
+@pytest.fixture(autouse=False)
+def _no_packs(monkeypatch):
+    monkeypatch.setenv("TRET_SEED_DEFAULT_PACKS", "false")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+async def _chat_harness(db, tools) -> Harness:
+    ws = Workspace(id=uuid.uuid4(), name="Acme", kind="team")
+    db.add(ws)
+    await db.flush()
+    h = Harness(workspace_id=ws.id, name="Chat Assistant", task_profile="chat", tool_names=list(tools))
+    db.add(h)
+    await db.flush()
+    return h
+
+
+async def test_seeding_offers_batch_tools_with_delegation_and_not_without(seed_db, _no_packs):
+    with_delegation = await _chat_harness(seed_db, ["run_harness_task", "read_document"])
+    await seed_chat_harness(seed_db, with_delegation.workspace_id)
+    await seed_db.refresh(with_delegation)
+    assert set(BATCH_TOOLS) <= set(with_delegation.tool_names)
+
+    again = len(with_delegation.tool_names)
+    await seed_chat_harness(seed_db, with_delegation.workspace_id)
+    await seed_db.refresh(with_delegation)
+    assert len(with_delegation.tool_names) == again  # idempotent
+
+    without = await _chat_harness(seed_db, ["read_document"])
+    await seed_chat_harness(seed_db, without.workspace_id)
+    await seed_db.refresh(without)
+    assert not set(BATCH_TOOLS) & set(without.tool_names)
+
+
+async def test_a_fresh_chat_harness_lists_the_batch_tools(seed_db, _no_packs):
+    ws = Workspace(id=uuid.uuid4(), name="Fresh", kind="team")
+    seed_db.add(ws)
+    await seed_db.flush()
+    await seed_chat_harness(seed_db, ws.id)
+    chat = (await seed_db.execute(select(Harness).where(Harness.workspace_id == ws.id))).scalars().one()
+    assert set(BATCH_TOOLS) <= set(chat.tool_names)
+    assert len(chat.tool_names) == len(set(chat.tool_names))
+
+
+# ── parent-run cost roll-up ──────────────────────────────────────────────────
+def _parent_cost(client, world, parent_id) -> Decimal:
+    async def go(db):
+        run = await db.get(Run, parent_id, populate_existing=True)
+        return run.delegated_cost_usd
+
+    return Decimal(str(run_db(client, world, go)))
+
+
+def _settings(client, world, bid):
+    async def go(db):
+        return dict((await db.get(Batch, uuid.UUID(bid), populate_existing=True)).settings)
+
+    return run_db(client, world, go)
+
+
+def _finish_parent(client, world, parent_id, bid):
+    """The parent turn ends; the next recompute (or settle) catches the roll-up up."""
+
+    async def go(db):
+        (await db.get(Run, parent_id)).status = "completed"
+        await db.commit()
+        await core._recompute(db, await db.get(Batch, uuid.UUID(bid)))
+
+    run_db(client, world, go)
+
+
+def test_rollup_waits_for_the_parent_then_catches_up_once(client, world, cost_engine):
+    cost_engine.costs = {"row-1": "0.10", "row-2": "0.25"}
+    out, parent_id = start(client, world)
+    settle(client)
+    bid = out["batch_id"]
+    # Parent still running: its own cost cap must not see the batch's spend yet.
+    assert _parent_cost(client, world, parent_id) == Decimal("0")
+    assert "rolled_up_cost_usd" not in _settings(client, world, bid)
+
+    _finish_parent(client, world, parent_id, bid)
+    assert _parent_cost(client, world, parent_id) == Decimal("0.35")  # 0.10 + 0.25
+    assert _settings(client, world, bid)["rolled_up_cost_usd"] == pytest.approx(0.35)
+
+    async def again(db):
+        c = await db.get(Batch, uuid.UUID(bid))
+        await core.rollup_parent_cost(db, c)
+        await core.rollup_parent_cost(db, c)
+
+    run_db(client, world, again)  # idempotent
+    assert _parent_cost(client, world, parent_id) == Decimal("0.35")
+    assert client.get(f"/api/batches/{bid}").json()["cost_usd"] == pytest.approx(0.35)
+
+
+def test_a_retry_rolls_up_only_the_new_spend(client, world, cost_engine):
+    cost_engine.costs = {"row-1": "0.10", "row-2": "0.25"}
+    cost_engine.behaviour["row-2"] = "fail"
+    out, parent_id = start(client, world)
+    settle(client)
+    bid = out["batch_id"]
+    _finish_parent(client, world, parent_id, bid)
+    assert _parent_cost(client, world, parent_id) == Decimal("0.35")
+    cost_engine.behaviour.pop("row-2")
+    cost_engine.costs["row-2"] = "0.07"
+    d = client.get(f"/api/batches/{bid}").json()
+    tid = d["targets"][1]["id"]
+    assert client.post(f"/api/batches/{bid}/targets/{tid}/retry").status_code == 200
+    settle(client)
+    # 0.10 + 0.25 (archived attempt) + 0.07 = 0.42; only the 0.07 is added.
+    assert _parent_cost(client, world, parent_id) == Decimal("0.42")
+    assert _settings(client, world, bid)["rolled_up_cost_usd"] == pytest.approx(0.42)
+
+
+def test_a_batch_without_a_parent_and_a_rollup_failure_never_break_a_settle(client, world, cost_engine, monkeypatch):
+    cost_engine.costs = {"row-1": "0.10", "row-2": "0.25"}
+    out, parent_id = start(client, world)
+    settle(client)
+    bid = out["batch_id"]
+    _finish_parent(client, world, parent_id, bid)
+
+    async def no_parent(db):
+        c = await db.get(Batch, uuid.UUID(bid))
+        c.parent_run_id = None
+        await db.commit()
+        await core.rollup_parent_cost(db, c)
+
+    run_db(client, world, no_parent)
+    assert _parent_cost(client, world, parent_id) == Decimal("0.35")
+
+    async def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(core, "load_targets", boom)
+
+    async def failing(db):
+        c = await db.get(Batch, uuid.UUID(bid))
+        c.parent_run_id = parent_id
+        await core.rollup_parent_cost(db, c)  # must not raise
+
+    run_db(client, world, failing)
+
+
+# ── guards: role, CSV document, draining, once-only seeding ───────────────────
+def test_start_batch_needs_the_approver_role_of_the_runs_creator(client, world, engine):
+    analyst = User(id=uuid.uuid4(), email="an@example.com", display_name="An Analyst", role="analyst")
+
+    async def go(db):
+        db.add(analyst)
+        await db.commit()
+        parent = await _parent(db, world, role="analyst", user=analyst)
+        return await start_batch(_ctx(db, world, parent), name="X", template=TEMPLATE, rows=ROWS)
+
+    with pytest.raises(ToolError, match="needs the approver role"):
+        run_db(client, world, go)
+    assert client.get("/api/batches").json()["batches"] == []
+
+    async def stranger(db):  # no membership row at all
+        parent = await _parent(db, world)
+        await db.delete(await db.get(WorkspaceMember, (world.user.id, world.ws.id)))
+        await db.commit()
+        return await start_batch(_ctx(db, world, parent), name="X", template=TEMPLATE, rows=ROWS)
+
+    with pytest.raises(ToolError, match="needs the approver role"):
+        run_db(client, world, stranger)
+
+
+def test_start_batch_refuses_a_non_csv_or_oversized_document(client, world, engine, tmp_path):
+    path = tmp_path / "f.bin"
+    path.write_bytes(b"company\nA\n")
+
+    async def add(db, filename, ctype, size):
+        doc = Document(
+            id=uuid.uuid4(), project_id=world.project.id, filename=filename, content_type=ctype,
+            byte_size=size, storage_path=str(path), sha256="0" * 64,
+        )
+        db.add(doc)
+        await db.commit()
+        return str(doc.id)
+
+    async def make(db):
+        return (
+            await add(db, "report.pdf", "application/pdf", 10),
+            await add(db, "big.csv", "text/csv", 2_000_001),
+            await add(db, "ok.txt", "text/plain", 10),
+        )
+
+    pdf, big, ok = run_db(client, world, make)
+    with pytest.raises(ToolError, match="does not look like a CSV"):
+        start(client, world, rows=None, document_id=pdf)
+    with pytest.raises(ToolError, match="at most 2000000 bytes"):
+        start(client, world, rows=None, document_id=big)
+    out, _ = start(client, world, rows=None, document_id=ok, template="Assess {company}.")  # text/plain is accepted
+    assert out["targets"] == 1
+
+
+def test_start_batch_refuses_while_the_server_is_draining(client, world, engine, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(core, "_app", SimpleNamespace(state=SimpleNamespace(draining=True)))
+    with pytest.raises(ToolError, match="retry in a minute"):
+        start(client, world)
+    assert client.get("/api/batches").json()["batches"] == []
+
+
+async def test_a_removed_batch_tool_stays_removed_after_reseeding(seed_db, _no_packs):
+    h = await _chat_harness(seed_db, ["run_harness_task", "read_document"])
+    await seed_chat_harness(seed_db, h.workspace_id)
+    await seed_db.refresh(h)
+    assert set(BATCH_TOOLS) <= set(h.tool_names)
+    h.tool_names = [n for n in h.tool_names if n != "start_batch"]  # a deliberate removal
+    await seed_db.flush()
+    await seed_chat_harness(seed_db, h.workspace_id)
+    await seed_db.refresh(h)
+    assert "start_batch" not in h.tool_names
