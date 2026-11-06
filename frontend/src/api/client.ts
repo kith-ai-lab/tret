@@ -3044,9 +3044,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return (await res.json()) as T
 }
 
-// ── Collections (batch disclosure-collection runs) ───────────────────────
+// ── Batches (batch runs: disclosure collection and prompt profiles) ──────
 
-export type CollectionStatus =
+export type BatchProfile = 'disclosure' | 'prompt'
+
+export type BatchStatus =
   | 'draft'
   | 'running'
   | 'paused'
@@ -3056,7 +3058,7 @@ export type CollectionStatus =
   | 'finalized'
   | 'failed'
 
-export type CollectionTargetStatus =
+export type BatchTargetStatus =
   | 'pending'
   | 'held'
   | 'running'
@@ -3069,7 +3071,7 @@ export type CollectionTargetStatus =
   | 'rejected'
   | 'write_failed'
 
-export interface CollectionSettings {
+export interface DisclosureBatchSettings {
   target_slug: string
   write_root: string
   concurrency: number
@@ -3080,45 +3082,78 @@ export interface CollectionSettings {
   max_iterations?: number | null
 }
 
-export interface CollectionMarketCounts {
+export interface PromptBatchSettings {
+  harness_id: string
+  harness_name?: string | null
+  template: string
+  label_column: string | null
+  slug_column: string | null
+  /** null = review off. */
+  review_schema: string | null
+  concurrency: number
+  first_batch_size: number
+  target_slug: string | null
+  write_root: string | null
+  model_override: string | null
+  max_iterations?: number | null
+  columns: string[]
+}
+
+export type BatchSettings = DisclosureBatchSettings | PromptBatchSettings
+
+export function isPromptSettings(s: BatchSettings): s is PromptBatchSettings {
+  return 'template' in s
+}
+
+export interface BatchMarketCounts {
   total: number
   done: number
   gap: number
   failed: number
 }
 
-export interface CollectionFinalizeFile {
+export interface BatchFinalizeFile {
   name: string
-  web_url: string | null
   sha256: string
+  /** Set when written to SharePoint. */
+  web_url?: string | null
+  /** Set when kept as a Document (download via the records route). */
+  document_id?: string | null
+  byte_size?: number
 }
 
-export interface Collection {
+export interface Batch {
   id: string
   workspace_id: string
   name: string
   run_slug: string
-  status: CollectionStatus
-  settings: CollectionSettings
+  profile: BatchProfile
+  harness_id: string | null
+  parent_run_id: string | null
+  status: BatchStatus
+  settings: BatchSettings
   created_by: string | null
   created_at: string
   started_at: string | null
   finalized_at: string | null
   counts: {
     total: number
-    by_status: Partial<Record<CollectionTargetStatus, number>>
-    by_market: Record<string, CollectionMarketCounts>
+    by_status: Partial<Record<BatchTargetStatus, number>>
+    /** Disclosure only. */
+    by_market?: Record<string, BatchMarketCounts>
   }
   cost_usd: number
   warnings: string[]
-  finalize: { written_at: string; files: CollectionFinalizeFile[]; error: string | null } | null
-  /** Present on create and on GET /collections/{id}. */
-  targets?: CollectionTarget[]
-  /** Present on GET /collections/{id}: draft package_map findings awaiting a decision. */
-  pending_maps?: CollectionPendingMap[]
+  finalize: { written_at: string; files: BatchFinalizeFile[]; error: string | null } | null
+  /** Present on create and on GET /batches/{id}. */
+  targets?: BatchTarget[]
+  /** Present on GET /batches/{id}: draft review findings awaiting a decision. */
+  pending_reviews?: BatchPendingReview[]
+  /** Alias of pending_reviews for one release. */
+  pending_maps?: BatchPendingReview[]
 }
 
-export interface CollectionTargetOutcome {
+export interface DisclosureTargetOutcome {
   status: 'captured' | 'substituted' | 'gap' | 'blocked' | (string & {})
   summary: string | null
   reporting_period_label?: string | null
@@ -3135,7 +3170,24 @@ export interface CollectionTargetOutcome {
   candidate_urls?: string[]
 }
 
-export interface CollectionTargetPackage {
+export interface PromptTargetOutcome {
+  answer: string
+  finding: {
+    id: string
+    schema_slug: string
+    status: string
+    payload: Record<string, unknown>
+  } | null
+  reported_at: string | null
+}
+
+export type BatchTargetOutcome = DisclosureTargetOutcome | PromptTargetOutcome
+
+export function isPromptOutcome(o: BatchTargetOutcome | null | undefined): o is PromptTargetOutcome {
+  return !!o && 'answer' in o
+}
+
+export interface BatchTargetPackage {
   finding_id: string
   stem?: string
   role: string
@@ -3147,7 +3199,7 @@ export interface CollectionTargetPackage {
   wall_seconds: number | null
 }
 
-export interface CollectionWrittenFile {
+export interface BatchWrittenFile {
   filename: string
   web_url: string | null
   sha256: string
@@ -3155,53 +3207,57 @@ export interface CollectionWrittenFile {
   uploaded_at: string
 }
 
-export interface CollectionTargetAttempt {
+export interface BatchTargetAttempt {
   attempt: number
   run_id: string | null
   status: string
   error: string | null
-  outcome: CollectionTargetOutcome | null
+  outcome: BatchTargetOutcome | null
   cost_usd: number | null
   model_used: string | null
   started_at: string | null
   finished_at: string | null
 }
 
-export interface CollectionTarget {
+export interface BatchTarget {
   id: string
   collection_id: string
   position: number
   slug: string
-  company: string
-  market: 'US' | 'UK' | 'EU' | (string & {})
-  domicile_country: string | null
-  sector: string | null
-  category: 'financial' | 'industrial' | 'other' | null
-  expected_form: 'standalone' | 'embedded' | 'unknown' | (string & {})
-  fiscal_year: number
-  known_urls: string[]
-  notes: string | null
-  status: CollectionTargetStatus
+  label: string
+  status: BatchTargetStatus
   run_id: string | null
   finding_ids: string[]
   attempts: number
   error: string | null
-  outcome: CollectionTargetOutcome | null
-  packages: CollectionTargetPackage[]
-  written_files: CollectionWrittenFile[]
+  outcome: BatchTargetOutcome | null
+  /** Prompt: the row's variables. Disclosure: the register row. */
+  task_input?: Record<string, unknown> | null
+  written_files: BatchWrittenFile[]
   /** Earlier attempts; cost_usd above includes them. */
-  history: CollectionTargetAttempt[]
+  history: BatchTargetAttempt[]
   cost_usd: number
   model_used: string | null
   iterations: number | null
   started_at: string | null
   finished_at: string | null
+  // Disclosure-only keys (absent on prompt targets).
+  company?: string
+  market?: 'US' | 'UK' | 'EU' | (string & {})
+  domicile_country?: string | null
+  sector?: string | null
+  category?: 'financial' | 'industrial' | 'other' | null
+  expected_form?: 'standalone' | 'embedded' | 'unknown' | (string & {})
+  fiscal_year?: number
+  known_urls?: string[]
+  notes?: string | null
+  packages?: BatchTargetPackage[]
 }
 
-/** A draft package_map finding of a collection, plus the target it belongs to. */
-export type CollectionPendingMap = Finding & { target_id: string }
+/** A draft review finding of a batch, plus the target it belongs to. */
+export type BatchPendingReview = Finding & { target_id: string }
 
-export interface CollectionTargetIn {
+export interface BatchTargetIn {
   company: string
   market: string
   domicile_country?: string | null
@@ -3214,11 +3270,12 @@ export interface CollectionTargetIn {
   slug?: string | null
 }
 
-export interface CreateCollectionBody {
+export interface CreateDisclosureBatchBody {
+  profile?: 'disclosure'
   name: string
   run_slug: string
   /** Exactly one of `register` / `register_csv`. */
-  register?: CollectionTargetIn[] | null
+  register?: BatchTargetIn[] | null
   register_csv?: string | null
   target_slug: string
   write_root: string
@@ -3231,14 +3288,37 @@ export interface CreateCollectionBody {
   max_iterations?: number | null
 }
 
-/** GET /collections/{id}/records: a preview of what finalize writes. */
-export interface CollectionRecords {
+export interface CreatePromptBatchBody {
+  profile: 'prompt'
+  name: string
+  run_slug: string
+  harness_id: string
+  /** `{column}` placeholders; `{{` / `}}` are literal braces. */
+  template: string
+  /** Exactly one of `rows` / `csv`. */
+  rows?: Record<string, string>[] | null
+  csv?: string | null
+  label_column?: string | null
+  slug_column?: string | null
+  /** null = review off. */
+  review_schema?: string | null
+  concurrency: number
+  first_batch_size: number
+  target_slug?: string | null
+  write_root?: string | null
+  model_override?: string | null
+  max_iterations?: number | null
+}
+
+export type CreateBatchBody = CreateDisclosureBatchBody | CreatePromptBatchBody
+
+/** GET /batches/{id}/records: a preview of what finalize writes. The disclosure
+ *  profile returns the full record set, the prompt profile manifest, results
+ *  and results_summary. */
+export interface BatchRecords {
   manifest: Record<string, unknown>
-  execution: Record<string, unknown>
-  exception_log: Record<string, unknown>
-  target_register: Record<string, unknown>
-  sha256sums: string
   results_summary: string
+  [key: string]: unknown
 }
 
 export type BatchDecideResult =
@@ -3374,31 +3454,31 @@ export const api = {
   retryFindingPackage: (id: string) =>
     request<Finding>(`/findings/${id}/package-retry`, { method: 'POST' }),
 
-  // collections (batch disclosure collection). Mutations are approver-only
-  // (403 otherwise); 409 carries a `detail` worth showing; create 422s name
-  // the offending register row.
-  listCollections: () =>
-    request<{ collections: Collection[] }>('/collections').then((r) => r.collections),
-  getCollection: (id: string) => request<Collection>(`/collections/${id}`),
-  createCollection: (body: CreateCollectionBody) =>
-    request<Collection>('/collections', { method: 'POST', body }),
-  startCollection: (id: string) =>
-    request<Collection>(`/collections/${id}/start`, { method: 'POST' }),
-  pauseCollection: (id: string) =>
-    request<Collection>(`/collections/${id}/pause`, { method: 'POST' }),
-  resumeCollection: (id: string) =>
-    request<Collection>(`/collections/${id}/resume`, { method: 'POST' }),
-  releaseCollection: (id: string) =>
-    request<Collection>(`/collections/${id}/release`, { method: 'POST' }),
-  retryCollectionTarget: (id: string, tid: string) =>
-    request<CollectionTarget>(`/collections/${id}/targets/${tid}/retry`, { method: 'POST' }),
-  retryCollectionTargetWrite: (id: string, tid: string) =>
-    request<CollectionTarget>(`/collections/${id}/targets/${tid}/retry-write`, {
+  // batches (disclosure collection and prompt profiles). Mutations are
+  // approver-only (403 otherwise); 409 carries a `detail` worth showing; create
+  // 422s name the offending field or register row.
+  listBatches: () =>
+    request<{ batches?: Batch[]; collections?: Batch[] }>('/batches').then(
+      (r) => r.batches ?? r.collections ?? [],
+    ),
+  getBatch: (id: string) => request<Batch>(`/batches/${id}`),
+  createBatch: (body: CreateBatchBody) => request<Batch>('/batches', { method: 'POST', body }),
+  startBatch: (id: string) => request<Batch>(`/batches/${id}/start`, { method: 'POST' }),
+  pauseBatch: (id: string) => request<Batch>(`/batches/${id}/pause`, { method: 'POST' }),
+  resumeBatch: (id: string) => request<Batch>(`/batches/${id}/resume`, { method: 'POST' }),
+  releaseBatch: (id: string) => request<Batch>(`/batches/${id}/release`, { method: 'POST' }),
+  retryBatchTarget: (id: string, tid: string) =>
+    request<BatchTarget>(`/batches/${id}/targets/${tid}/retry`, { method: 'POST' }),
+  retryBatchTargetWrite: (id: string, tid: string) =>
+    request<BatchTarget>(`/batches/${id}/targets/${tid}/retry-write`, { method: 'POST' }),
+  batchRecords: (id: string) => request<BatchRecords>(`/batches/${id}/records`),
+  finalizeBatch: (id: string, opts?: { force?: boolean }) =>
+    request<Batch>(`/batches/${id}/finalize`, {
       method: 'POST',
+      ...(opts?.force ? { body: { force: true } } : {}),
     }),
-  collectionRecords: (id: string) => request<CollectionRecords>(`/collections/${id}/records`),
-  finalizeCollection: (id: string) =>
-    request<Collection>(`/collections/${id}/finalize`, { method: 'POST' }),
+  batchRecordUrl: (id: string, name: string) =>
+    `/api/batches/${id}/records/${encodeURIComponent(name)}`,
   decideFindingsBatch: (ids: string[], action: 'approve' | 'reject', note?: string) =>
     request<{ results: BatchDecideResult[] }>('/findings/decide-batch', {
       method: 'POST',

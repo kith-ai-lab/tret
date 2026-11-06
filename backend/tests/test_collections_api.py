@@ -1117,7 +1117,7 @@ def test_main_wires_the_router_sweep_and_drain():
     source = inspect.getsource(main)
     assert "sweep_orphaned_collections" in source
     assert "collections_service._collection_tasks" in source
-    assert "collections_api.router" in source
+    assert "batches_api.router" in source  # serves /api/batches and /api/collections
 
 
 def test_max_iterations_is_stored_and_stamped_on_every_run(client, world):

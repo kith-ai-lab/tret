@@ -23,7 +23,7 @@ import re
 import unicodedata
 import uuid
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -137,7 +137,7 @@ class CreateCollectionBody(BaseModel):
 
     name: str = Field(min_length=1, max_length=200)
     run_slug: str
-    profile: str = "disclosure"
+    profile: Literal["disclosure"] = "disclosure"
     # `register` on the wire; renamed here because it shadows a BaseModel attribute.
     register_rows: list[TargetIn] | None = Field(
         default=None, max_length=MAX_TARGETS, alias="register"
@@ -1050,6 +1050,15 @@ class DisclosureProfile:
     missing_harness_message = (
         f"No '{COLLECTION_HARNESS_NAME}' harness in this workspace; launching stopped."
     )
+
+    def review_schema_for(self, batch: Any) -> str | None:
+        return self.review_schema
+
+    async def settle_outcome(
+        self, db: AsyncSession, batch: Batch, target: BatchTarget, run: Run, findings: list[Finding]
+    ) -> dict | None:
+        """The outcome comes from the run's `report_collection_outcome` call."""
+        return None
 
     async def parse_targets(self, body: CreateCollectionBody) -> tuple[list[dict], list[str]]:
         write_root = body.write_root.strip().strip("/")

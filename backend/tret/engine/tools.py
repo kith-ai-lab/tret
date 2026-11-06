@@ -287,6 +287,9 @@ CONNECTED_SOURCE_KIND = "connected"
 # text, page map, link audit, stats and package record. Derived from another
 # Document, never a source of numbers (see `_document_banner`).
 PACKAGE_SOURCE_KIND = "package"
+# A batch's run-level record file (manifest, results, summary) kept as a
+# Document: model output, not something a person uploaded.
+BATCH_RECORD_SOURCE_KIND = "batch_record"
 
 
 # ── document tools ────────────────────────────────────────────────────────────
@@ -297,6 +300,8 @@ def _document_tier_label(source_kind: str | None) -> str:
         return " CONNECTED SOURCE"
     if source_kind == PACKAGE_SOURCE_KIND:
         return " REVIEWED PACKAGE EXTRACT"
+    if source_kind == BATCH_RECORD_SOURCE_KIND:
+        return " BATCH RECORD"
     return ""
 
 
@@ -322,6 +327,13 @@ def _document_banner(doc: Document) -> str:
         return (
             f"[CONNECTED SOURCE: {_frame_safe(meta.get('path') or doc.filename)}, "
             f"from {_frame_safe(meta.get('source_slug'))}, modified {meta.get('modified')}]\n\n"
+        )
+    if doc.source_kind == BATCH_RECORD_SOURCE_KIND:
+        meta = doc.meta or {}
+        return (
+            f"[BATCH RECORD: {_frame_safe(meta.get('record') or doc.filename)} of batch "
+            f"{_frame_safe(meta.get('batch_id'))}. Model output compiled by a batch run, "
+            "not a user upload and not a source document; never a source of numbers.]\n\n"
         )
     if doc.source_kind == PACKAGE_SOURCE_KIND:
         meta = doc.meta or {}

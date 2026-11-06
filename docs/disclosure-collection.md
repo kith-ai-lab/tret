@@ -273,6 +273,9 @@ approver has approved, without a per-file proposal.
 
 ## 6. Collection runs (batches)
 
+> The Collections page is now **Batches**, and this workflow is its `disclosure` profile.
+> See [batch-runs.md](batch-runs.md) for batches in general, including the `prompt` profile.
+
 Sections 1 to 5 describe one disclosure. A **collection** is the same workflow run for
 a register of target companies, one engine run per company, with the approvals,
 packaging and SharePoint uploads tracked per target and a set of run-level records

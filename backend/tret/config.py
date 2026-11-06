@@ -304,6 +304,10 @@ class Settings(BaseSettings):
     # Wall-clock limit (seconds) for one target's engine run. A run still going
     # is cancelled and the target marked failed with error "timeout" (retryable).
     collections_run_timeout_seconds: int = 1200
+    # Free space (MB) the local capture store must have per target still to run
+    # before a batch starts or releases targets; 409 otherwise. 0 disables the
+    # check; it is skipped on the s3 backend (tret/batches/core.py).
+    batches_min_free_mb_per_target: int = 50
 
     # ── database pool (tret/db/engine.py) ─────────────────────────────────────
     # Stated rather than inherited from SQLAlchemy (whose default is 5 + 10

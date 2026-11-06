@@ -274,12 +274,31 @@ class EgressOverride(BaseModel):
     mode: str  # off | replay | on — but only ever narrowing; see below
 
 
+def _storage_status() -> dict:
+    """Where captured bytes live and, for the local backend, how much room is left
+    (the number batch start/release checks against)."""
+    from tret.config import get_settings
+    from tret.storage import get_store
+
+    settings = get_settings()
+    out: dict = {
+        "backend": get_store(settings).backend,
+        "min_free_mb_per_target": settings.batches_min_free_mb_per_target,
+    }
+    if out["backend"] == "local":
+        from tret.batches.core import free_storage_mb
+
+        out["free_mb"] = free_storage_mb(settings)
+    return out
+
+
 @router.get("/settings/egress")
 async def egress_settings(user: User = Depends(current_user)):
     """What this deployment can reach, and what a run would be allowed to do."""
     status = egress_status()
     status["search_backend"] = search_backend_name() or "none"
     status["web_tools"] = list(WEB_TOOL_NAMES)
+    status["storage"] = _storage_status()
     status["note"] = (
         "Modes narrow, never widen: the environment sets a ceiling, and an override "
         "here can only lower it. An override lives in memory and is dropped on "

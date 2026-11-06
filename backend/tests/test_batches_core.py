@@ -232,12 +232,25 @@ def test_a_stub_profile_drives_the_orchestrator(client, world):
     assert [u["filename"] for u in world.uploads] == ["runs/stub-run-1/manifest.json"]
 
 
-def test_finalize_without_a_write_target_is_refused_for_now(client, world):
+def test_finalize_without_a_write_target_keeps_the_records_as_documents(client, world, monkeypatch, tmp_path):
+    from tret.config import get_settings
+    from tret.db.models import Document
+
+    monkeypatch.setattr(get_settings(), "storage_dir", str(tmp_path / "storage"))
     cid, _ = make(client, world, target_slug=None)
     run_all(client, cid)
     r = client.post(f"/api/collections/{cid}/finalize")
-    assert r.status_code == 409 and "no write target" in r.json()["detail"]
+    assert r.status_code == 200, r.text
+    files = r.json()["finalize"]["files"]
+    assert [f["name"] for f in files] == ["manifest.json"] and files[0]["document_id"]
     assert world.uploads == []
+
+    async def docs():
+        async with world.factory() as db:
+            return (await db.execute(select(Document))).scalars().all()
+
+    [doc] = client.portal.call(docs)
+    assert doc.source_kind == "batch_record" and doc.meta["batch_id"] == cid
 
 
 @pytest.mark.parametrize(

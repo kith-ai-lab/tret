@@ -1,0 +1,322 @@
+"""Batches: a table of targets run one engine run per target, with an optional
+review gate, retry and a finalize step that writes run-level records. The
+orchestration lives in `tret/batches/` (re-exported by
+`tret/services/collections.py`); this module is its HTTP surface.
+
+Two profiles: `disclosure` (the Kith Climate disclosure collection: a register
+of companies, package maps reviewed, SharePoint write-back) and `prompt` (any
+harness over the rows of a CSV). Every route is served under `/api/batches` and,
+for one release, under `/api/collections` (marked deprecated); the only
+difference is the list key (`batches` vs `collections`).
+
+Reads are open to any workspace member; every state change needs the approver
+role, like the approvals it drives.
+"""
+from __future__ import annotations
+
+import uuid
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from pydantic import Discriminator, Tag
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from tret.api.auth import current_user
+from tret.api.findings import _finding_out
+from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_approver
+from tret.batches.profiles.prompt import CreatePromptBatchBody
+from tret.db.engine import get_db
+from tret.db.models import Batch, BatchTarget, Document, Harness, User
+from tret.services import collections as service
+from tret.services import lifecycle
+from tret.storage import document_bytes
+
+router = APIRouter(prefix="/api", tags=["batches"])
+
+
+def _both(method: str, path: str):
+    """Register a handler under `/batches{path}` and, deprecated, under
+    `/collections{path}`."""
+
+    def deco(fn):
+        getattr(router, method)(f"/batches{path}")(fn)
+        getattr(router, method)(f"/collections{path}", deprecated=True)(fn)
+        return fn
+
+    return deco
+
+
+def _profile_tag(value: Any) -> str:
+    """The create body's discriminator: `profile`, defaulting to "disclosure" so
+    a body without it is today's collection body."""
+    raw = value.get("profile") if isinstance(value, dict) else getattr(value, "profile", None)
+    return raw or "disclosure"
+
+
+CreateBatchBody = Annotated[
+    Annotated[service.CreateCollectionBody, Tag("disclosure")]
+    | Annotated[CreatePromptBatchBody, Tag("prompt")],
+    Discriminator(_profile_tag),
+]
+
+
+async def _name_harnesses(db: AsyncSession, items: list[dict]) -> None:
+    """Fill `settings.harness_name` of prompt batches with the harness's current
+    name (one query for the whole response)."""
+    wanted: dict[str, list[dict]] = {}
+    for item in items:
+        hid = (item.get("settings") or {}).get("harness_id")
+        if item.get("profile") == "prompt" and hid:
+            wanted.setdefault(hid, []).append(item)
+    if not wanted:
+        return
+    rows = (
+        await db.execute(select(Harness.id, Harness.name).where(Harness.id.in_([uuid.UUID(h) for h in wanted])))
+    ).all()
+    for hid, name in rows:
+        for item in wanted.get(str(hid), []):
+            item["settings"]["harness_name"] = name
+
+
+async def _collection_detail(db: AsyncSession, c: Batch) -> dict:
+    """The batch + `targets` + `pending_reviews` (draft review findings of this
+    batch, each with its `target_id`) + `pending_maps`, the same list under its
+    old name."""
+    await db.refresh(c)
+    targets = await service.load_targets(db, [c.id])
+    runs = await service.load_runs(db, targets)
+    profile = service.profile_for(c)
+    maps = await service.load_review_findings(db, profile, targets, c)
+    out = service.collection_out(c, targets, runs)
+    out["targets"] = [
+        service.target_out(t, runs.get(t.run_id), maps.get(t.run_id, []) if t.run_id else [], profile)
+        for t in targets
+    ]
+    pending = []
+    for t in targets:
+        for f in maps.get(t.run_id, []) if t.run_id else []:
+            if f.status == "draft":
+                pending.append({**_finding_out(f), "target_id": str(t.id)})
+    out["pending_reviews"] = pending
+    out["pending_maps"] = pending
+    await _name_harnesses(db, [out])
+    return out
+
+
+async def _target_detail(db: AsyncSession, t: BatchTarget) -> dict:
+    await db.refresh(t)
+    runs = await service.load_runs(db, [t])
+    c = await db.get(Batch, t.collection_id)
+    profile = service.profile_for(c)
+    maps = await service.load_review_findings(db, profile, [t], c)
+    return service.target_out(
+        t, runs.get(t.run_id), maps.get(t.run_id, []) if t.run_id else [], profile
+    )
+
+
+async def _target_in(db: AsyncSession, c: Batch, target_id: uuid.UUID) -> BatchTarget:
+    t = await db.get(BatchTarget, target_id)
+    if t is None or t.collection_id != c.id:
+        raise HTTPException(404, "Target not found")
+    return t
+
+
+@_both("post", "")
+async def create_batch(
+    body: CreateBatchBody,
+    request: Request,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    lifecycle.refuse_if_draining(request)
+    c, _ = await service.create_batch(
+        db, workspace_id=ctx.id, user_id=user.id, body=body, profile_slug=body.profile
+    )
+    return await _collection_detail(db, c)
+
+
+async def _list_rows(db: AsyncSession, ctx: WorkspaceContext) -> list[dict]:
+    batches = list(
+        (
+            await db.execute(
+                select(Batch)
+                .where(Batch.workspace_id == ctx.id)
+                .order_by(Batch.created_at.desc())
+            )
+        ).scalars()
+    )
+    targets = await service.load_targets(db, [c.id for c in batches])
+    runs = await service.load_runs(db, targets)
+    by_batch: dict[uuid.UUID, list[BatchTarget]] = {}
+    for t in targets:
+        by_batch.setdefault(t.collection_id, []).append(t)
+    rows = [service.collection_out(c, by_batch.get(c.id, []), runs) for c in batches]
+    await _name_harnesses(db, rows)
+    return rows
+
+
+@router.get("/batches")
+async def list_batches(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    return {"batches": await _list_rows(db, ctx)}
+
+
+@router.get("/collections", deprecated=True)
+async def list_collections(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    return {"collections": await _list_rows(db, ctx)}
+
+
+@_both("get", "/{collection_id}")
+async def get_collection(
+    collection_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await service.get_collection(db, collection_id, ctx.id)
+    return await _collection_detail(db, c)
+
+
+@_both("post", "/{collection_id}/start")
+async def start_collection(
+    collection_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    lifecycle.refuse_if_draining(request)
+    c = await service.get_collection(db, collection_id, ctx.id)
+    await service.start(db, c)
+    return await _collection_detail(db, c)
+
+
+@_both("post", "/{collection_id}/pause")
+async def pause_collection(
+    collection_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await service.get_collection(db, collection_id, ctx.id)
+    await service.pause(db, c)
+    return await _collection_detail(db, c)
+
+
+@_both("post", "/{collection_id}/resume")
+async def resume_collection(
+    collection_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    lifecycle.refuse_if_draining(request)
+    c = await service.get_collection(db, collection_id, ctx.id)
+    await service.resume(db, c)
+    return await _collection_detail(db, c)
+
+
+@_both("post", "/{collection_id}/release")
+async def release_collection(
+    collection_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    lifecycle.refuse_if_draining(request)
+    c = await service.get_collection(db, collection_id, ctx.id)
+    await service.release(db, c)
+    return await _collection_detail(db, c)
+
+
+@_both("post", "/{collection_id}/targets/{target_id}/retry")
+async def retry_target(
+    collection_id: uuid.UUID,
+    target_id: uuid.UUID,
+    request: Request,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    lifecycle.refuse_if_draining(request)
+    c = await service.get_collection(db, collection_id, ctx.id)
+    t = await _target_in(db, c, target_id)
+    await service.retry_target(db, c, t)
+    return await _target_detail(db, t)
+
+
+@_both("post", "/{collection_id}/targets/{target_id}/retry-write")
+async def retry_target_write(
+    collection_id: uuid.UUID,
+    target_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await service.get_collection(db, collection_id, ctx.id)
+    t = await _target_in(db, c, target_id)
+    await service.retry_write(db, c, t)
+    return await _target_detail(db, t)
+
+
+@_both("get", "/{collection_id}/records")
+async def preview_records(
+    collection_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await service.get_collection(db, collection_id, ctx.id)
+    return await service.profile_for(c).records(db, c)
+
+
+@_both("post", "/{collection_id}/finalize")
+async def finalize_collection(
+    collection_id: uuid.UUID,
+    body: service.FinalizeBody | None = None,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    c = await service.get_collection(db, collection_id, ctx.id)
+    await service.finalize(db, c, force=bool(body and body.force))
+    return await _collection_detail(db, c)
+
+
+@_both("get", "/{collection_id}/records/{name}")
+async def download_record(
+    collection_id: uuid.UUID,
+    name: str,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """A finalized record file kept as a Document (a batch with no write target)."""
+    c = await service.get_collection(db, collection_id, ctx.id)
+    entry = next(
+        (f for f in (c.finalize or {}).get("files") or [] if f.get("name") == name and f.get("document_id")),
+        None,
+    )
+    doc = await db.get(Document, uuid.UUID(entry["document_id"])) if entry else None
+    if doc is None or (doc.meta or {}).get("batch_id") != str(c.id):
+        raise HTTPException(404, "This batch has no stored record file with that name")
+    try:
+        data = await document_bytes(doc)
+    except FileNotFoundError as e:
+        raise HTTPException(404, "The record file is no longer in storage") from e
+    return Response(
+        content=data,
+        media_type=doc.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{doc.filename}"'},
+    )
