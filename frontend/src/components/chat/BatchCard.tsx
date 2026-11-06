@@ -17,6 +17,8 @@ export interface StartedBatch {
   name: string | null
   targets: number | null
   status: string | null
+  profile: string | null
+  warningsCount: number | null
 }
 
 /** `start_batch`'s result as a string or object -> the batch it started, or
@@ -38,6 +40,8 @@ export function parseStartBatchResult(raw: unknown): StartedBatch | null {
     name: typeof o.name === 'string' ? o.name : null,
     targets: typeof o.targets === 'number' ? o.targets : null,
     status: typeof o.status === 'string' ? o.status : null,
+    profile: typeof o.profile === 'string' ? o.profile : null,
+    warningsCount: typeof o.warnings_count === 'number' ? o.warnings_count : null,
   }
 }
 
@@ -53,6 +57,8 @@ export function BatchCard({ started }: { started: StartedBatch }) {
   const status = batch?.status ?? started.status ?? 'running'
   const name = batch?.name ?? started.name ?? 'Batch'
   const targets = batch?.counts.total ?? started.targets
+  const profile = batch?.profile ?? started.profile
+  const warnings = batch?.warnings?.length ?? started.warningsCount ?? 0
   return (
     <div className="bc-card">
       <div className="bc-head">
@@ -62,8 +68,14 @@ export function BatchCard({ started }: { started: StartedBatch }) {
         <StatusBadge status={status} />
       </div>
       <div className="bc-meta">
+        {profile && <span className="bc-profile">{profile}</span>}
         {targets !== null && <span>{targets} {targets === 1 ? 'target' : 'targets'}</span>}
         {batch && <span>{formatCost(batch.cost_usd)} so far</span>}
+        {warnings > 0 && (
+          <Link className="bc-link-warn" to={`/batches/${started.id}`}>
+            {warnings} {warnings === 1 ? 'warning' : 'warnings'}
+          </Link>
+        )}
         <Link className="bc-link" to={`/batches/${started.id}`}>
           Open batch →
         </Link>

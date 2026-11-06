@@ -121,6 +121,15 @@ one that needs action on an existing install.
 
 ### Changed
 
+- **Disclosure collections from chat; large-PDF extraction and packaging limits;
+  Disclosure Collector cap $8.** `start_batch` takes `profile: "disclosure"` with a
+  register CSV (inline or an attached document) and a write target, and the chat card
+  shows the profile and any register warnings. The text-extraction budget's cap rises to
+  600 s (a 600-page registration document is no longer cut off), and packaging's source
+  check reads only the retained page ranges and is skipped with a recorded warning when
+  Poppler fails on the source, instead of failing the target. The seeded Disclosure Collector's per-run
+  cost cap is now $8 (was the $5 engine default); an unedited harness is upgraded at boot,
+  an edited one keeps its own. See [docs/batch-runs.md](docs/batch-runs.md).
 - **Collection runs now sit on a generic batch orchestrator** (`tret/batches/`,
   with a `BatchProfile` seam; the disclosure code moved to `profiles/disclosure.py`).
   `/api/collections`, prompts and record files are unchanged; a migration adds

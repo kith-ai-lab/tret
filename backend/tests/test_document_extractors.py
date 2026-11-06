@@ -380,17 +380,26 @@ def test_the_pdftotext_budget_never_exceeds_the_callers_bound(monkeypatch):
     extract_text("a.pdf", data)  # no bound: the 120 s default
     extract_text("a.pdf", data, budget_seconds=5)
     extract_text("a.pdf", data, budget_seconds=200)  # a larger caller bound lifts the default
-    extract_text("a.pdf", data, budget_seconds=500)  # but never past the overall ceiling
+    extract_text("a.pdf", data, budget_seconds=600)  # up to the 600 s cap
+    extract_text("a.pdf", data, budget_seconds=900)  # but never past the overall ceiling
     with documents_service.pdf_budget(30):
         extract_text("a.pdf", data)
         extract_text("a.pdf", data, budget_seconds=9)  # an explicit bound wins over the context
 
-    assert seen == [120.0, 5, 200, 240.0, 30, 9]
+    assert seen == [120.0, 5, 200, 600.0, 600.0, 30, 9]
 
 
 @pytest.mark.parametrize(
     ("byte_size", "expected"),
-    [(0, 30.0), (2**20, 34.0), (48 * 2**20, 222.0), (100 * 2**20, 240.0)],
+    [
+        (0, 30.0),
+        (2**20, 34.0),
+        (30 * 2**20, 150.0),
+        (48 * 2**20, 222.0),
+        (100 * 2**20, 430.0),
+        (150 * 2**20, 600.0),
+        (400 * 2**20, 600.0),
+    ],
 )
 def test_the_extraction_budget_scales_with_size(byte_size, expected):
     assert documents_service.extraction_budget_seconds(byte_size) == pytest.approx(expected)

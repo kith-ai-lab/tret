@@ -89,7 +89,9 @@ async def test_seeded_when_research_is_on(db, monkeypatch):
         "min_cost_tier": "standard",
         "max_cost_tier": "standard",
     }
-    assert h.loop_config == {"max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3}
+    assert h.loop_config == {
+        "max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3, "max_cost_usd": 8.0,
+    }
     assert not h.is_archived
 
     # Idempotent: a second boot adds nothing.
@@ -218,7 +220,14 @@ async def test_an_operator_edited_policy_is_never_touched(db, monkeypatch, edite
     assert existing.model_policy == edited
 
 
-async def test_backfills_the_previous_loop_config(db, monkeypatch):
+@pytest.mark.parametrize(
+    "previous",
+    [
+        {"max_iterations": 24, "max_output_tokens": 4096, "temperature": 0.3},
+        {"max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3},
+    ],
+)
+async def test_backfills_each_previous_loop_config(db, monkeypatch, previous):
     _research(monkeypatch, "off")
     ws = await _workspace(db)
     existing = Harness(
@@ -226,7 +235,7 @@ async def test_backfills_the_previous_loop_config(db, monkeypatch):
         name=COLLECTION_HARNESS_NAME,
         task_profile="freeform",
         model_policy={"mode": "pinned", "model": "x/y"},  # edited: stays, independent
-        loop_config={"max_iterations": 24, "max_output_tokens": 4096, "temperature": 0.3},
+        loop_config=dict(previous),
         tool_names=list(COLLECTION_HARNESS_TOOLS),
     )
     db.add(existing)
@@ -235,7 +244,9 @@ async def test_backfills_the_previous_loop_config(db, monkeypatch):
     await ensure_collection_harness(db, ws.id)
     await db.flush()
 
-    assert existing.loop_config == {"max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3}
+    assert existing.loop_config == {
+        "max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3, "max_cost_usd": 8.0,
+    }
     assert existing.model_policy == {"mode": "pinned", "model": "x/y"}
 
 

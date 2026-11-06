@@ -45,7 +45,7 @@ EXTRACTION_TIMEOUT_SECONDS = 30.0
 # Captured annual reports run to tens of MB; on a loaded 1-vCPU machine 30 s
 # left them with no text at all, so a caller may scale the budget with size.
 EXTRACTION_SECONDS_PER_MIB = 4.0
-EXTRACTION_MAX_SECONDS = 240.0
+EXTRACTION_MAX_SECONDS = 600.0
 # One pdftotext run over a whole PDF. Poppler does a 117-page report in seconds
 # where pypdf takes minutes on a 1-vCPU machine, so it is the preferred reader.
 PDFTOTEXT_TIMEOUT_SECONDS = 120.0
@@ -56,7 +56,9 @@ PYPDF_HEADROOM_MIN_SECONDS = 10.0
 
 
 def extraction_budget_seconds(byte_size: int) -> float:
-    """The wall-clock extraction budget for a document of `byte_size` bytes."""
+    """The wall-clock extraction budget for a document of `byte_size` bytes:
+    30 s plus 4 s per MiB, never below 30 s nor above EXTRACTION_MAX_SECONDS
+    (600 s, reached at about 142 MiB; 30 MiB gets 150 s)."""
     scaled = EXTRACTION_TIMEOUT_SECONDS + byte_size / 2**20 * EXTRACTION_SECONDS_PER_MIB
     return min(EXTRACTION_MAX_SECONDS, max(EXTRACTION_TIMEOUT_SECONDS, scaled))
 

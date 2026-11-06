@@ -608,8 +608,8 @@ def test_poppler_content_verification_failure_is_a_packaging_error(src, tmp_path
     # The oracle is Poppler: the retained layout pass must equal the source pass.
     real = packaging._pdftotext_pages
 
-    def tampered(exe, pdf, mode, count, timeout=None):
-        texts, err = real(exe, pdf, mode, count, timeout=timeout)
+    def tampered(exe, pdf, mode, count, timeout=None, **kw):
+        texts, err = real(exe, pdf, mode, count, timeout=timeout, **kw)
         if mode == "layout" and Path(pdf).name.endswith(".pdf") and pdf != src:
             texts = ["different"] * count
         return texts, err
@@ -783,7 +783,7 @@ def test_poppler_stderr_is_capped_in_stats(src, tmp_path, monkeypatch):
     huge = "W" * (packaging.MAX_POPPLER_STDERR_BYTES + 5000)
     seen = {}
 
-    def fake(exe, pdf, mode, count, timeout=None):
+    def fake(exe, pdf, mode, count, timeout=None, **kw):
         seen[mode] = timeout
         return ["page"] * count, huge if mode == "layout" else "short"
 
@@ -1296,9 +1296,9 @@ def counters(monkeypatch):
         count["pypdf_extract"] += 1
         return real_extract(self, *a, **k)
 
-    def pdftotext(exe, pdf, mode, n, timeout=None):
+    def pdftotext(exe, pdf, mode, n, timeout=None, **kw):
         count["pdftotext"].append((Path(pdf).name, mode))
-        return real_pdftotext(exe, pdf, mode, n, timeout=timeout)
+        return real_pdftotext(exe, pdf, mode, n, timeout=timeout, **kw)
 
     monkeypatch.setattr(PageObject, "extract_text", extract)
     monkeypatch.setattr(packaging, "_pdftotext_pages", pdftotext)
@@ -1333,18 +1333,106 @@ def test_byte_copy_skips_text_verification_without_poppler_too(src, tmp_path, mo
 
 
 @needs_poppler
-def test_subset_verifies_with_one_poppler_pass_over_the_source(src, tmp_path, counters):
+def test_subset_verifies_with_poppler_over_the_source_page_ranges(src, tmp_path, counters):
     out = package_pdf(src, embedded(), tmp_path / "pkg", stem="stmt")
 
     assert counters["pypdf_extract"] == 0
     assert sorted(counters["pdftotext"]) == sorted(
-        [("stmt.pdf", "layout"), ("stmt.pdf", "raw"), ("source.pdf", "layout")]
+        # one run per contiguous range of the subset (2-4 and 6), not one over the whole source
+        [("stmt.pdf", "layout"), ("stmt.pdf", "raw"), ("source.pdf", "layout"), ("source.pdf", "layout")]
     )
     ver = out.record["verification"]
     assert ver["oracle"] == "pdftotext"
     assert any("pdftotext -layout equality" in c for c in ver["checked"])
     assert not any("byte equality" in c for c in ver["checked"])
     assert "pdftotext -layout" in out.stats["content_verification"]
+
+
+def _fake_poppler(monkeypatch, calls, fail_source=None, retained_pages=(2, 3, 4, 6)):
+    """A pdftotext that records argv. Source runs read `page N` for each page of the
+    `-f/-l` range; runs over the retained PDF read the `retained_pages`.
+    `fail_source` makes source runs time out or exit non-zero."""
+    real_run = subprocess.run
+
+    def run(cmd, **kw):
+        if not str(cmd[0]).endswith("fake-pdftotext"):
+            return real_run(cmd, **kw)
+        calls.append(list(cmd))
+        if Path(cmd[-2]).name == "source.pdf":
+            if fail_source == "timeout":
+                raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+            if fail_source == "exit":
+                return subprocess.CompletedProcess(cmd, 1, b"", b"Syntax Error: couldn't read /data/captures/x/source.pdf")
+            a, b = int(cmd[cmd.index("-f") + 1]), int(cmd[cmd.index("-l") + 1])
+            nums = range(a, b + 1)
+        else:
+            nums = retained_pages
+        return subprocess.CompletedProcess(cmd, 0, "".join(f"page {i}\f" for i in nums).encode(), b"")
+
+    real_which = shutil.which
+    monkeypatch.setattr(
+        packaging.shutil,
+        "which",
+        lambda name, *a, **k: "/fake/fake-pdftotext" if name == "pdftotext" else real_which(name, *a, **k),
+    )
+    monkeypatch.setattr(packaging, "_poppler_version", lambda exe: "fake 1.0")
+    monkeypatch.setattr(packaging.subprocess, "run", run)
+
+
+def test_oracle_extracts_only_the_contiguous_ranges_of_the_subset(tmp_path, monkeypatch):
+    # A 600-page source with a 12-page subset in two runs: the source is never read whole.
+    assert packaging._contiguous_ranges([10, 11, 12, 13, 14, 15, 300, 301, 302, 303, 304, 305]) == [
+        (10, 15),
+        (300, 305),
+    ]
+    assert packaging._contiguous_ranges([7]) == [(7, 7)]
+    pages = [*range(10, 16), *range(300, 306)]
+    calls: list[list[str]] = []
+    _fake_poppler(monkeypatch, calls, retained_pages=pages)
+    path = tmp_path / "source.pdf"
+    path.write_bytes(make_pdf(600, links=False))
+
+    out = package_pdf(path, embedded(ranges=((10, 15), (300, 305))), tmp_path / "pkg", stem="stmt")
+
+    source_calls = [c for c in calls if Path(c[-2]).name == "source.pdf"]
+    assert [(c[c.index("-f") + 1], c[c.index("-l") + 1]) for c in source_calls] == [("10", "15"), ("300", "305")]
+    assert all(c[1] == "-layout" for c in source_calls)
+    retained_calls = [c for c in calls if Path(c[-2]).name == "stmt.pdf"]
+    assert len(retained_calls) == 2 and not any("-f" in c for c in retained_calls)  # whole file, both modes
+    assert out.record["verification"]["oracle"] == "pdftotext"
+
+
+def test_a_failed_oracle_is_skipped_and_recorded_not_fatal(src, tmp_path, monkeypatch, caplog):
+    for mode, text in (("timeout", "timed out"), ("exit", "exited 1")):
+        calls: list[list[str]] = []
+        with monkeypatch.context() as m:
+            _fake_poppler(m, calls, fail_source=mode)
+            out = package_pdf(src, embedded(), tmp_path / mode, stem="stmt")
+        ver = out.record["verification"]
+        assert ver["oracle"]["status"] == "skipped" and text in ver["oracle"]["reason"]
+        assert any("Source-page text verification was skipped" in x for x in out.record["limitations"])
+        assert out.stats["content_verification"].startswith("source text comparison skipped")
+        assert not any("equality" in c for c in ver["checked"])
+        # No command line or server path leaks into anything that is uploaded.
+        blob = json.dumps([out.record, out.stats])
+        assert str(src) not in blob and "fake-pdftotext" not in blob and "/fake/" not in blob
+        assert str(tmp_path) not in blob and "/data/captures" not in blob
+    assert "oracle skipped" in caplog.text
+
+
+def test_a_failure_on_the_retained_subset_still_fails_packaging(src, tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+    _fake_poppler(monkeypatch, calls)
+    real_run = packaging.subprocess.run
+
+    def run(cmd, **kw):
+        if str(cmd[0]).endswith("fake-pdftotext") and Path(cmd[-2]).name != "source.pdf":
+            raise subprocess.TimeoutExpired(cmd, 1)
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(packaging.subprocess, "run", run)
+    with pytest.raises(PackagingError, match="pdftotext -layout failed"):
+        package_pdf(src, embedded(), tmp_path / "pkg", stem="stmt")
 
 
 def test_subset_falls_back_to_pypdf_equality_without_poppler(src, tmp_path, monkeypatch, counters):

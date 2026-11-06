@@ -146,6 +146,7 @@ _CONTENT_VERIFICATION = {
     "sha256": "SHA-256 byte equality of the whole original; per-page text equality skipped as redundant",
     "pdftotext": "exact pdftotext -layout equality for each selected source page against its retained page",
     "pypdf": "exact pypdf extract_text equality for each selected source page against its retained page",
+    "skipped": "source text comparison skipped: the Poppler pass over the source pages failed",
 }
 
 _VERIFICATION_NOT_ESTABLISHED = (
@@ -650,28 +651,74 @@ def _poppler_version(exe: str) -> str:
     return first.strip()
 
 
+_ABSOLUTE_PATH_RE = re.compile(r"/\S*")
+
+
+def _exit_reason(returncode: int, stderr: str) -> str:
+    """A recordable summary of a failed pdftotext run: no server paths."""
+    detail = _ABSOLUTE_PATH_RE.sub("", stderr).strip()[:300].strip()
+    return f"pdftotext exited {returncode}" + (f": {detail}" if detail else "")
+
+
+class _PdftotextToolError(PackagingError):
+    """pdftotext could not run, timed out or exited non-zero (not a content mismatch).
+
+    `reason` is safe to record in uploaded files: no command line, no server paths."""
+
+    def __init__(self, message: str, reason: str):
+        super().__init__(message)
+        self.reason = reason
+
+
 def _pdftotext_pages(
-    exe: str, pdf: Path, mode: str, count: int, timeout: float = _PDFTOTEXT_TIMEOUT_SECONDS
+    exe: str,
+    pdf: Path,
+    mode: str,
+    count: int,
+    timeout: float = _PDFTOTEXT_TIMEOUT_SECONDS,
+    first: int | None = None,
+    last: int | None = None,
 ) -> tuple[list[str], str]:
+    """Per-page text; `first`/`last` (1-based, inclusive) limit the run to a page
+    range, in which case `count` is the length of that range."""
     flag = "-layout" if mode == "layout" else "-raw"
+    span = [] if first is None or last is None else ["-f", str(first), "-l", str(last)]
     try:
         run = subprocess.run(
-            [exe, flag, "-enc", "UTF-8", str(pdf), "-"],
+            [exe, flag, *span, "-enc", "UTF-8", str(pdf), "-"],
             capture_output=True,
             timeout=timeout,
             env=_tool_env(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise PackagingError(f"pdftotext {flag} failed: {exc}") from exc
+        if isinstance(exc, subprocess.TimeoutExpired):
+            reason = f"pdftotext timed out after {int(exc.timeout or timeout)} s"
+        else:
+            reason = "pdftotext could not be run"
+        raise _PdftotextToolError(f"pdftotext {flag} failed: {exc}", reason) from exc
     stderr = run.stderr.decode("utf-8", errors="replace")
     if run.returncode != 0:
-        raise PackagingError(f"pdftotext {flag} exited {run.returncode}: {stderr.strip()[:300]}")
+        raise _PdftotextToolError(
+            f"pdftotext {flag} exited {run.returncode}: {stderr.strip()[:300]}",
+            _exit_reason(run.returncode, stderr),
+        )
     pieces = run.stdout.decode("utf-8", errors="replace").split("\f")
     if pieces and not pieces[-1].strip():
         pieces.pop()
     if len(pieces) != count:
         raise PackagingError(f"pdftotext produced {len(pieces)} page segments for {count} pages")
     return pieces, stderr
+
+
+def _contiguous_ranges(pages: list[int]) -> list[tuple[int, int]]:
+    """Runs of consecutive page numbers, e.g. [3, 4, 5, 9] -> [(3, 5), (9, 9)]."""
+    ranges: list[tuple[int, int]] = []
+    for p in sorted(set(pages)):
+        if ranges and p == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], p)
+        else:
+            ranges.append((p, p))
+    return ranges
 
 
 def _capped_stderr(stderr: str) -> dict[str, Any]:
@@ -1100,17 +1147,38 @@ def package_pdf(
         # -layout` pass over the source, compared page by page with the retained
         # layout pass above (pypdf's extract_text costs seconds per page on a small
         # machine). Without Poppler it is pypdf equality, page by page.
+        oracle_skipped_reason = ""
         with _timed(timings, "verify"):
             if full:
                 oracle = "sha256"
             elif exe:
                 oracle = "pdftotext"
-                source_layout, _ = _pdftotext_pages(
-                    exe, source_path, "layout", source_count, timeout=tool_budget()
-                )
-                for idx, p in enumerate(pages):
-                    if source_layout[p - 1] != layout_texts[idx]:
-                        raise PackagingError(f"text changed on source page {p}")
+                # Only the retained pages are extracted from the source (`-f A -l B`
+                # per contiguous run): a whole-file pass over a 600-page report
+                # timed out at 300 s while the pages compared are a dozen.
+                source_text: dict[int, str] = {}
+                try:
+                    for first, last in _contiguous_ranges(pages):
+                        segments, _ = _pdftotext_pages(
+                            exe,
+                            source_path,
+                            "layout",
+                            last - first + 1,
+                            timeout=tool_budget(),
+                            first=first,
+                            last=last,
+                        )
+                        source_text.update(zip(range(first, last + 1), segments))
+                except _PdftotextToolError as exc:
+                    # The retained subset is already extracted and written; the oracle
+                    # is a second opinion, so losing it is recorded, not fatal.
+                    log.warning("source pdftotext oracle skipped: %s", exc)
+                    oracle = "skipped"
+                    oracle_skipped_reason = exc.reason
+                if oracle == "pdftotext":
+                    for idx, p in enumerate(pages):
+                        if source_text[p] != layout_texts[idx]:
+                            raise PackagingError(f"text changed on source page {p}")
             else:
                 oracle = "pypdf"
                 with _parser_warning_capture(parser_warnings, "retained_content_verification"):
@@ -1124,6 +1192,8 @@ def package_pdf(
                         if not same:
                             raise PackagingError(f"text changed on source page {p}")
         stats["content_verification"] = _CONTENT_VERIFICATION[oracle]
+        if oracle == "skipped":
+            stats["content_verification"] = _CONTENT_VERIFICATION["skipped"] + f" ({oracle_skipped_reason})"
 
         ocr_stats: dict[str, Any] | None = None
         ocr_started = time.monotonic()
@@ -1214,6 +1284,12 @@ def package_pdf(
             ),
             "External linked documents are audited, not automatically crawled.",
         ]
+        if oracle == "skipped":
+            limitations.append(
+                "Source-page text verification was skipped because pdftotext could not read the source "
+                f"pages ({oracle_skipped_reason}); the retained pages are unverified against the source "
+                "text, though the page count and SHA-256 checks still held."
+            )
         if text_mode == "pypdf":
             limitations.append(
                 "Poppler (pdftotext) was unavailable; text was extracted with pypdf for both the layout "
@@ -1244,18 +1320,23 @@ def package_pdf(
                 "byte equality between the source and the retained PDF (whole original retained); "
                 "this is stronger than per-page text equality, so that check was skipped"
             )
+        elif oracle == "skipped":
+            pass  # nothing was compared; the limitation above says so
         else:
             checked.append(
                 f"{_CONTENT_VERIFICATION[oracle]}"
                 if oracle == "pypdf"
                 else "exact pdftotext -layout equality for each selected source page against its retained "
-                "page (one Poppler pass over the source, compared with the retained layout pass)"
+                "page (Poppler run over only the selected source page ranges, compared with the retained "
+                "layout pass)"
             )
         if text_mode == "pdftotext":
             checked.append("pdftotext produced exactly one text segment per retained page, in both modes")
         verification = {
             "checked": checked,
-            "oracle": oracle,
+            "oracle": {"status": "skipped", "reason": oracle_skipped_reason}
+            if oracle == "skipped"
+            else oracle,
             "establishes": "content extraction and page retention",
             "does_not_establish": _VERIFICATION_NOT_ESTABLISHED,
         }

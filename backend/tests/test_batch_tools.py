@@ -18,7 +18,7 @@ from sqlalchemy.pool import StaticPool
 
 from tests.evals.golden_world import install_sqlite_type_shims
 from tests.test_batches_prompt import PromptEngine, engine  # noqa: F401 - fixtures
-from tests.test_collections_api import client, run_db, settle, world  # noqa: F401 - fixtures
+from tests.test_collections_api import REGISTER, client, run_db, settle, world  # noqa: F401 - fixtures
 from tret.batches import core
 from tret.config import get_settings
 from tret.db.models import Base, Batch, Document, Harness, Project, Run, User, Workspace, WorkspaceMember
@@ -27,7 +27,7 @@ from tret.engine.batch_tools import BATCH_TOOLS, batch_results, batch_status, st
 from tret.engine.harness import _subagent_tool_names
 from tret.engine.tools import RunContext, ToolError, get_builtin_tools
 from tret.services import collections as service
-from tret.services.workspace import seed_chat_harness
+from tret.services.workspace import COLLECTION_HARNESS_LOOP_CONFIG, seed_chat_harness
 
 ROWS = [{"company": "Acme", "country": "DE"}, {"company": "Globex", "country": "FR"}]
 TEMPLATE = "Assess {company} in {country}."
@@ -98,7 +98,8 @@ def start(client, world, **over):
 # ── start_batch ──────────────────────────────────────────────────────────────
 def test_start_batch_creates_and_starts_a_prompt_batch_for_the_calling_run(client, world, engine):
     out, parent_id = start(client, world)
-    assert set(out) == {"batch_id", "name", "targets", "status", "estimated_cost_usd", "page"}
+    assert set(out) == {"batch_id", "name", "profile", "targets", "status", "estimated_cost_usd", "page"}
+    assert out["profile"] == "prompt"
     assert out["targets"] == 2 and out["status"] == "running" and out["name"] == "Supplier screen"
     assert out["page"] == f"/batches/{out['batch_id']}" and out["estimated_cost_usd"] is None
     settle(client)
@@ -208,6 +209,143 @@ def test_a_headroom_409_leaves_a_draft_and_says_so(client, world, engine, monkey
     assert "Not enough free space" in str(e.value)
     (row,) = client.get("/api/batches").json()["batches"]
     assert row["status"] == "draft"
+
+
+# ── start_batch, disclosure profile ─────────────────────────────────────────
+def start_disclosure(client, world, **over):
+    kwargs = {
+        "name": "Stage one", "profile": "disclosure", "register_csv": REGISTER,
+        "target_slug": "test-output", "run_slug": "2026-11-06-stage-one", **over,
+    }
+    out, parent_id = call(client, world, start_batch, **kwargs)
+    return json.loads(out), parent_id
+
+
+def test_disclosure_from_register_csv_creates_a_collector_batch_for_the_calling_run(client, world, engine):
+    async def cap(db):
+        h = await db.get(Harness, world.harness.id)
+        h.loop_config = dict(COLLECTION_HARNESS_LOOP_CONFIG)
+        await db.commit()
+
+    run_db(client, world, cap)
+    out, parent_id = start_disclosure(client, world)
+    assert out["profile"] == "disclosure" and out["targets"] == 5
+    assert out["estimated_cost_usd"] == pytest.approx(8.0 * 5)
+    d = client.get(f"/api/batches/{out['batch_id']}").json()
+    assert d["profile"] == "disclosure" and d["parent_run_id"] == str(parent_id)
+    assert d["run_slug"] == "2026-11-06-stage-one"
+    assert d["settings"]["target_slug"] == "test-output" and d["settings"]["write_root"] == "runs"
+    assert d["settings"]["fiscal_year"] == 2025 and d["settings"]["auto_write"] is True
+    assert d["settings"]["concurrency"] == 3
+    # The register breaks the briefing shape: the count equals what the batch stored.
+    assert out["warnings_count"] == len(d["warnings"]) > 0
+    assert out["warnings"] == d["warnings"][:5]
+    settle(client)
+
+
+def test_disclosure_without_a_collector_harness_leaves_no_batch(client, world, engine):
+    async def archive(db):
+        h = await db.get(Harness, world.harness.id)
+        h.is_archived = True
+        await db.commit()
+
+    run_db(client, world, archive)
+    with pytest.raises(ToolError, match="no Disclosure Collector harness"):
+        start_disclosure(client, world)
+    assert client.get("/api/batches").json()["batches"] == []
+
+
+def test_disclosure_defaults_the_run_slug_and_passes_options(client, world, engine):
+    out, _ = start_disclosure(
+        client, world, run_slug=None, name="Stage 1: 48 Companies!", write_root="out",
+        fiscal_year=2024, auto_write=False, concurrency=2,
+    )
+    d = client.get(f"/api/batches/{out['batch_id']}").json()
+    assert d["run_slug"].endswith("-stage-1-48-companies")
+    assert len(d["run_slug"].split("-")[0]) == 4
+    assert d["settings"]["write_root"] == "out" and d["settings"]["fiscal_year"] == 2024
+    assert d["settings"]["auto_write"] is False and d["settings"]["concurrency"] == 2
+    settle(client)
+
+
+def test_disclosure_from_a_register_document(client, world, engine, tmp_path):
+    path = tmp_path / "register.csv"
+    path.write_bytes(REGISTER.encode())
+
+    async def add_doc(db):
+        doc = Document(
+            id=uuid.uuid4(), project_id=world.project.id, filename="register.csv", content_type="text/csv",
+            byte_size=path.stat().st_size, storage_path=str(path), sha256="0" * 64,
+        )
+        db.add(doc)
+        await db.commit()
+        return str(doc.id)
+
+    doc_id = run_db(client, world, add_doc)
+    out, _ = start_disclosure(client, world, register_csv=None, register_document_id=doc_id)
+    assert out["targets"] == 5 and out["profile"] == "disclosure"
+    settle(client)
+
+
+@pytest.mark.parametrize(
+    ("over", "fragment"),
+    [
+        ({"target_slug": None}, "target_slug: required"),
+        ({"register_csv": None}, "exactly one of register_document_id or register_csv"),
+        ({"register_document_id": str(uuid.uuid4())}, "exactly one of register_document_id or register_csv"),
+        ({"register_csv": None, "register_document_id": str(uuid.uuid4())}, "Document not found"),
+        ({"target_slug": "elsewhere"}, "allowed: test-output, disclosures"),
+        ({"run_slug": "Bad Slug"}, "run_slug"),
+        ({"template": TEMPLATE}, "template belongs to the 'prompt' profile"),
+        ({"rows": ROWS}, "rows belongs to the 'prompt' profile"),
+        ({"review_schema": "any"}, "review_schema belongs to the 'prompt' profile"),
+    ],
+)
+def test_disclosure_validation_errors_are_tool_errors_before_any_write(client, world, engine, over, fragment):
+    with pytest.raises(ToolError) as e:
+        start_disclosure(client, world, **over)
+    assert fragment in str(e.value)
+    assert client.get("/api/batches").json()["batches"] == []
+
+
+def test_disclosure_only_params_are_refused_for_a_prompt_batch(client, world, engine):
+    for over, fragment in (
+        ({"target_slug": "test-output"}, "target_slug belongs to the 'disclosure' profile"),
+        ({"register_csv": REGISTER}, "register_csv belongs to the 'disclosure' profile"),
+        ({"run_slug": "abc-def"}, "run_slug belongs to the 'disclosure' profile"),
+        ({"auto_write": True}, "auto_write belongs to the 'disclosure' profile"),
+    ):
+        with pytest.raises(ToolError) as e:
+            start(client, world, **over)
+        assert fragment in str(e.value)
+    assert client.get("/api/batches").json()["batches"] == []
+
+
+def test_a_duplicate_disclosure_run_slug_says_to_pass_another(client, world, engine):
+    start_disclosure(client, world)
+    with pytest.raises(ToolError) as e:
+        start_disclosure(client, world)
+    assert "already exists" in str(e.value) and "Pass another run_slug" in str(e.value)
+    settle(client)
+
+
+def test_an_analyst_cannot_start_a_disclosure_batch(client, world, engine):
+    async def go(db):
+        parent = await _parent(db, world, role="analyst")
+        return await start_batch(
+            _ctx(db, world, parent), name="X", profile="disclosure", register_csv=REGISTER,
+            target_slug="test-output",
+        )
+
+    with pytest.raises(ToolError, match="approver role"):
+        run_db(client, world, go)
+    assert client.get("/api/batches").json()["batches"] == []
+
+
+def test_the_spec_describes_the_disclosure_profile():
+    spec = get_builtin_tools()["start_batch"]
+    assert "profile 'disclosure' is the Kith disclosure collection" in spec.description
+    assert "ask for its slug if the user does not name one" in spec.description
 
 
 # ── batch_status / batch_results ─────────────────────────────────────────────
