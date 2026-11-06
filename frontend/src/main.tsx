@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 
 import App from './App'
+import { ConfirmProvider } from './components/shared/ConfirmDialog'
 import { ErrorBoundary } from './components/shared/ErrorBoundary'
 // Self-hosted fonts: the product's network-isolation doctrine forbids a
 // Google Fonts CDN link, so these ship as woff2 assets in the build instead.
@@ -36,7 +37,9 @@ createRoot(document.getElementById('root')!).render(
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
-          <App />
+          <ConfirmProvider>
+            <App />
+          </ConfirmProvider>
         </BrowserRouter>
       </QueryClientProvider>
     </ErrorBoundary>

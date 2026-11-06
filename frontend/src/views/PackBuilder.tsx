@@ -17,6 +17,7 @@ import {
 } from '../api/client'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { formatDateTime } from '../components/shared/format'
+import { useConfirm } from '../components/shared/ConfirmDialog'
 import { MarkdownDoc } from '../components/shared/MarkdownDoc'
 import { Modal } from '../components/shared/Modal'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
@@ -586,6 +587,7 @@ function DoctrineEditor({
   files: Record<string, DraftFileContent>
   setFiles: (f: Record<string, DraftFileContent>) => void
 }) {
+  const askConfirm = useConfirm()
   const [active, setActive] = useState<string | null>(manifest.doctrine[0] ?? null)
   const [preview, setPreview] = useState(false)
 
@@ -625,8 +627,8 @@ function DoctrineEditor({
     if (active === relpath) setActive(next)
   }
 
-  const remove = (relpath: string) => {
-    if (!window.confirm(`Delete ${relpath}? This cannot be undone.`)) return
+  const remove = async (relpath: string) => {
+    if (!(await askConfirm({ message: `Delete ${relpath}? This cannot be undone.`, confirmLabel: 'Delete', destructive: true }))) return
     const nextFiles = { ...files }
     delete nextFiles[relpath]
     setFiles(nextFiles)
@@ -771,6 +773,7 @@ function TaskTypesEditor({
   setManifest: (m: DraftManifest) => void
   files: Record<string, DraftFileContent>
 }) {
+  const askConfirm = useConfirm()
   const [activeIdx, setActiveIdx] = useState(0)
   // The live, canonical tool roster — GET /api/tools already reads exactly
   // what `packs/schema.py`'s own validation checks task tools against
@@ -806,8 +809,8 @@ function TaskTypesEditor({
     setActiveIdx(taskTypes.length)
   }
 
-  const removeTaskType = (idx: number) => {
-    if (!window.confirm(`Delete task type "${taskTypes[idx].slug}"?`)) return
+  const removeTaskType = async (idx: number) => {
+    if (!(await askConfirm({ message: `Delete task type "${taskTypes[idx].slug}"?`, confirmLabel: 'Delete', destructive: true }))) return
     setTaskTypes(taskTypes.filter((_, i) => i !== idx))
     setActiveIdx(0)
   }
@@ -1093,6 +1096,7 @@ function HarnessesEditor({
   manifest: DraftManifest
   setManifest: (m: DraftManifest) => void
 }) {
+  const askConfirm = useConfirm()
   const [activeIdx, setActiveIdx] = useState(0)
   // Same live tool roster the Task types tab reads from — one source of
   // truth for "what tools exist", not a second hardcoded list that could drift.
@@ -1115,8 +1119,8 @@ function HarnessesEditor({
     setActiveIdx(presets.length)
   }
 
-  const removePreset = (idx: number) => {
-    if (!window.confirm(`Delete harness preset "${presets[idx].name}"?`)) return
+  const removePreset = async (idx: number) => {
+    if (!(await askConfirm({ message: `Delete harness preset "${presets[idx].name}"?`, confirmLabel: 'Delete', destructive: true }))) return
     setPresets(presets.filter((_, i) => i !== idx))
     setActiveIdx(0)
   }
@@ -1262,6 +1266,7 @@ function SchemasEditor({
   files: Record<string, DraftFileContent>
   setFiles: (f: Record<string, DraftFileContent>) => void
 }) {
+  const askConfirm = useConfirm()
   const schemaPaths = Object.keys(files)
     .filter((p) => p.startsWith('schemas/') && p.endsWith('.json'))
     .sort()
@@ -1289,8 +1294,8 @@ function SchemasEditor({
     setActive(relpath)
   }
 
-  const remove = (relpath: string) => {
-    if (!window.confirm(`Delete ${relpath}?`)) return
+  const remove = async (relpath: string) => {
+    if (!(await askConfirm({ message: `Delete ${relpath}?`, confirmLabel: 'Delete', destructive: true }))) return
     const next = { ...files }
     delete next[relpath]
     setFiles(next)
@@ -1370,6 +1375,7 @@ function DatasetsEditor({
   files: Record<string, DraftFileContent>
   setFiles: (f: Record<string, DraftFileContent>) => void
 }) {
+  const askConfirm = useConfirm()
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const onFile = (file: File) => {
@@ -1395,10 +1401,10 @@ function DatasetsEditor({
     reader.readAsText(file)
   }
 
-  const removeDataset = (name: string) => {
+  const removeDataset = async (name: string) => {
     const ds = manifest.datasets.find((d) => d.name === name)
     if (!ds) return
-    if (!window.confirm(`Remove dataset "${name}"?`)) return
+    if (!(await askConfirm({ message: `Remove dataset "${name}"?`, confirmLabel: 'Remove', destructive: true }))) return
     const nextFiles = { ...files }
     delete nextFiles[ds.file]
     setFiles(nextFiles)
@@ -1502,6 +1508,7 @@ function TemplatesEditor({
   files: Record<string, DraftFileContent>
   setFiles: (f: Record<string, DraftFileContent>) => void
 }) {
+  const askConfirm = useConfirm()
   const paths = Object.keys(files)
     .filter((p) => p.startsWith('templates/'))
     .sort()
@@ -1525,8 +1532,8 @@ function TemplatesEditor({
     setActive(relpath)
   }
 
-  const remove = (relpath: string) => {
-    if (!window.confirm(`Delete ${relpath}?`)) return
+  const remove = async (relpath: string) => {
+    if (!(await askConfirm({ message: `Delete ${relpath}?`, confirmLabel: 'Delete', destructive: true }))) return
     const next = { ...files }
     delete next[relpath]
     setFiles(next)

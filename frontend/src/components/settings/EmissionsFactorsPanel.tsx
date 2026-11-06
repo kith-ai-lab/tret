@@ -66,6 +66,7 @@ import {
   TABLE_MISS_NOTE,
 } from '../shared/emissions'
 import { formatDateTime } from '../shared/format'
+import { useConfirm } from '../shared/ConfirmDialog'
 import { MethodologyLink } from '../shared/MethodologyDialog'
 import { QueryError } from '../shared/MonoTable'
 import { EmissionsHistory } from './EmissionsHistory'
@@ -774,6 +775,7 @@ function GridRowFields({
 // ── the panel ────────────────────────────────────────────────────────────
 
 export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
+  const askConfirm = useConfirm()
   const queryClient = useQueryClient()
   const settingsQuery = useQuery({ queryKey: ['emissions-settings'], queryFn: api.getEmissionsSettings })
 
@@ -845,8 +847,16 @@ export function EmissionsFactorsPanel({ canEdit }: { canEdit: boolean }) {
     saveMutation.mutate(overridesFromDraft(draft, overrides))
   }
 
-  const clear = () => {
-    if (!window.confirm('Clear every emissions override for this workspace? Runs will fall back to the managed/env/global defaults.')) return
+  const clear = async () => {
+    if (
+      !(await askConfirm({
+        message:
+          'Clear every emissions override for this workspace? Runs will fall back to the managed/env/global defaults.',
+        confirmLabel: 'Clear overrides',
+        destructive: true,
+      }))
+    )
+      return
     clearMutation.mutate()
   }
 

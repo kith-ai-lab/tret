@@ -20,6 +20,7 @@ import { usePromptBatchForm } from '../components/batches/PromptBatchForm'
 import { slugify } from '../components/batches/csv'
 import { errText, ExtLink, safeHref, shorten, WarningsBox } from '../components/batches/shared'
 import { formatCost, formatDateTime } from '../components/shared/format'
+import { useConfirm } from '../components/shared/ConfirmDialog'
 import { MarkdownDoc } from '../components/shared/MarkdownDoc'
 import { Modal } from '../components/shared/Modal'
 import { QueryError } from '../components/shared/MonoTable'
@@ -500,6 +501,7 @@ function isInfraConflict(e: unknown): boolean {
 }
 
 function BatchDetail({ id }: { id: string }) {
+  const askConfirm = useConfirm()
   const queryClient = useQueryClient()
   const [previewing, setPreviewing] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -571,7 +573,7 @@ function BatchDetail({ id }: { id: string }) {
   const canFinalize = ['gate', 'review', 'completed', 'paused', 'finalized'].includes(c.status)
   const canRelease = held > 0 && ['gate', 'review', 'completed', 'paused'].includes(c.status)
 
-  const finalize = (force: boolean) => {
+  const finalize = async (force: boolean) => {
     let message: string
     if (force) {
       message =
@@ -589,7 +591,13 @@ function BatchDetail({ id }: { id: string }) {
         : 'manifest, execution, exception log, register, SHA256SUMS and results summary'
       message = `Writes ${files} to ${slug}/tret/${root}/${c.run_slug}/`
     }
-    if (window.confirm(message)) finalizeMutation.mutate(force)
+    const ok = await askConfirm({
+      message,
+      title: force ? 'Finalize anyway' : 'Finalize batch',
+      confirmLabel: force ? 'Finalize anyway' : 'Finalize',
+      destructive: force,
+    })
+    if (ok) finalizeMutation.mutate(force)
   }
 
   return (

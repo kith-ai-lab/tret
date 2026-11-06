@@ -17,7 +17,7 @@
  *  Rendered inline rather than through a portal: the app has a single root and no
  *  transformed ancestors, and `position: fixed` on the backdrop is enough.
  */
-import { type ReactNode, useCallback, useEffect, useId, useRef } from 'react'
+import { type ReactNode, type RefObject, useCallback, useEffect, useId, useRef } from 'react'
 
 /** Everything focusable we might contain. `[href]` matters here — the provenance
  *  and methodology content is full of links. */
@@ -33,6 +33,8 @@ export function Modal({
   children,
   footer,
   width = 900,
+  initialFocusRef,
+  describedBy,
 }: {
   open: boolean
   onClose: () => void
@@ -44,6 +46,12 @@ export function Modal({
   children: ReactNode
   footer?: ReactNode
   width?: number
+  /** Element to focus on open instead of the first focusable one (e.g. the
+   *  confirm button of a confirmation prompt). */
+  initialFocusRef?: RefObject<HTMLElement | null>
+  /** Id of an element inside the dialog that describes it, when there is no
+   *  subtitle doing that job. */
+  describedBy?: string
 }) {
   const panelRef = useRef<HTMLDivElement | null>(null)
   const titleId = useId()
@@ -66,12 +74,12 @@ export function Modal({
     // The panel itself is focusable (tabIndex -1), so focus lands somewhere
     // sensible even when the dialog contains nothing focusable at all.
     const panel = panelRef.current
-    const first = focusables()[0]
+    const first = initialFocusRef?.current ?? focusables()[0]
     ;(first ?? panel)?.focus()
     return () => {
       returnFocusTo.current?.focus?.()
     }
-  }, [open, focusables])
+  }, [open, focusables, initialFocusRef])
 
   // Escape to close, Tab to cycle. Bound on the document so it works regardless
   // of where focus currently is inside the panel.
@@ -126,7 +134,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        aria-describedby={subtitle ? descId : undefined}
+        aria-describedby={subtitle ? descId : describedBy}
         tabIndex={-1}
         ref={panelRef}
         // Stop a drag/click inside the panel from reaching the backdrop.
