@@ -678,6 +678,7 @@ async def _package_approved_map(
     payload = dict(finding.payload)
     published = False  # True once THIS attempt's run_packaging has returned
     pinned_source: tuple[object, Path] | None = None  # (store, path) kept out of cache eviction
+    pinned_dir: tuple[object, Path] | None = None  # the working directory, pinned the same way
     put_keys: list[str] = []  # objects THIS attempt put in the store, for debris cleanup
     pf_keys: dict[Path, str] = {}
     out_dir: Path | None = None
@@ -718,6 +719,10 @@ async def _package_approved_map(
             target_dir = store.staging_dir(f"packages/{finding.id}")
         except ValueError:
             raise ValueError("The package directory is outside storage; nothing was packaged.") from None
+        # Working files stay out of cache eviction while this run lasts; afterwards the
+        # directory is ordinary cache (the bucket holds every output).
+        store.pin(target_dir)
+        pinned_dir = (store, target_dir)
         # Off the local backend the staging copy can be evicted while the bucket still
         # holds the evidence, so the registered-package check cannot hinge on the directory.
         if target_dir.exists() or store.backend != "local":
@@ -851,8 +856,12 @@ async def _package_approved_map(
         result = _package_failed(
             f"Unexpected error: {type(e).__name__}: {e}", approver_user_id=approver_user_id, started=started
         )
-    if pinned_source is not None:
-        pinned_source[0].unpin(pinned_source[1])  # type: ignore[attr-defined]
+    finally:
+        # A finally so a cancelled run (CancelledError) releases its pins too.
+        if pinned_source is not None:
+            pinned_source[0].unpin(pinned_source[1])  # type: ignore[attr-defined]
+        if pinned_dir is not None:
+            pinned_dir[0].unpin(pinned_dir[1])  # type: ignore[attr-defined]
     if result["status"] == "failed" and published and out_dir is not None:
         # The runner leaves nothing behind when it fails or is killed, so there is
         # nothing to clean up for those. This is only for a package THIS attempt

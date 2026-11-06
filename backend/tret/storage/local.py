@@ -43,32 +43,53 @@ def write_atomic(target: Path, body: bytes, *, keep_if_same_size: bool = False) 
                 return
         except FileNotFoundError:
             pass
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(dir=target.parent, prefix=_TMP_PREFIX, delete=False)
-    try:
-        with tmp:
-            tmp.write(body)
-        # NamedTemporaryFile is 0600; other service users must still read it.
-        os.chmod(tmp.name, 0o644)
-        os.replace(tmp.name, target)
-    except BaseException:
-        Path(tmp.name).unlink(missing_ok=True)
-        raise
+    for attempt in (0, 1):
+        # A concurrent cache prune can rmdir the emptied directory between mkdir and
+        # the rename; recreate it and retry once.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(dir=target.parent, prefix=_TMP_PREFIX, delete=False)
+            with tmp:
+                tmp.write(body)
+            # NamedTemporaryFile is 0600; other service users must still read it.
+            os.chmod(tmp.name, 0o644)
+            os.replace(tmp.name, target)
+            return
+        except FileNotFoundError:
+            if tmp is not None:
+                Path(tmp.name).unlink(missing_ok=True)
+            if attempt:
+                raise
+        except BaseException:
+            if tmp is not None:
+                Path(tmp.name).unlink(missing_ok=True)
+            raise
 
 
 def copy_atomic(target: Path, source: Path) -> None:
     """Copy `source` over `target` through a temp file in the target's directory."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(dir=target.parent, prefix=_TMP_PREFIX, delete=False)
-    try:
-        with tmp, source.open("rb") as src:
-            while chunk := src.read(1024 * 1024):
-                tmp.write(chunk)
-        os.chmod(tmp.name, 0o644)
-        os.replace(tmp.name, target)
-    except BaseException:
-        Path(tmp.name).unlink(missing_ok=True)
-        raise
+    for attempt in (0, 1):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(dir=target.parent, prefix=_TMP_PREFIX, delete=False)
+            with tmp, source.open("rb") as src:
+                while chunk := src.read(1024 * 1024):
+                    tmp.write(chunk)
+            os.chmod(tmp.name, 0o644)
+            os.replace(tmp.name, target)
+            return
+        except FileNotFoundError:
+            if tmp is not None:
+                Path(tmp.name).unlink(missing_ok=True)
+            # A missing source is a real error; only a pruned target directory is retried.
+            if attempt or not source.exists():
+                raise
+        except BaseException:
+            if tmp is not None:
+                Path(tmp.name).unlink(missing_ok=True)
+            raise
 
 
 @contextlib.asynccontextmanager
