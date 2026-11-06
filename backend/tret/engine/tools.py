@@ -3152,10 +3152,18 @@ async def _record_delegated_cost(ctx: RunContext, child_id: uuid.UUID) -> None:
     # carrying the zeros it was inserted with; the engine ran it in a session
     # of its own.
     await ctx.db.refresh(child)
-    parent.delegated_cost_usd = (parent.delegated_cost_usd or Decimal(0)) + (
-        (child.cost_usd or Decimal(0)) + (child.delegated_cost_usd or Decimal(0))
+    added = (child.cost_usd or Decimal(0)) + (child.delegated_cost_usd or Decimal(0))
+    # One atomic increment in SQL: a batch started by this run (`start_batch`)
+    # rolls its spend up onto the same column from another session, and a
+    # read-add-write here would lose whichever write came second.
+    await ctx.db.execute(
+        update(Run)
+        .where(Run.id == parent.id)
+        .values(delegated_cost_usd=Run.delegated_cost_usd + added)
+        .execution_options(synchronize_session=False)
     )
     await ctx.db.commit()
+    await ctx.db.refresh(parent, ["delegated_cost_usd"])  # the budget check reads this object
 
 
 # A subagent's report is re-sent as conversation input on every later

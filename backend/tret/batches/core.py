@@ -44,12 +44,13 @@ import re
 import shutil
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Iterable
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.batches.profiles import BatchProfile, RegisterError, get_profile, profile_for
@@ -115,6 +116,11 @@ _lock_state: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
 _target_locks: dict[uuid.UUID, tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
 # The app whose draining state gates launches (`bind_app`, from main's lifespan).
 _app: Any = None
+
+
+def draining() -> bool:
+    """True while the bound app is shutting down (no new batch may start)."""
+    return lifecycle.is_draining(_app)
 
 
 def bind_app(app: Any) -> None:
@@ -579,6 +585,7 @@ async def _recompute(db: AsyncSession, c: Batch) -> str:
     if new != c.status:
         c.status = new
     await db.commit()
+    await rollup_parent_cost(db, c)
     return new
 
 
@@ -801,7 +808,58 @@ async def _settle_target(
         else:
             t.finished_at = None
         await db.commit()
+        await rollup_parent_cost(db, c)
         return status
+
+
+async def rollup_parent_cost(db: AsyncSession, c: Batch) -> None:
+    """Fold the batch's spend into the run that started it (`parent_run_id`, set
+    by the `start_batch` tool) so the parent's `delegated_cost_usd` reflects the
+    work it caused. Delta-based and idempotent: `total` is every target's cost
+    (`target_cost`, retries included); `settings["rolled_up_cost_usd"]` is what
+    was already added, so only `total - already` goes onto the parent, in the
+    same commit that records the new `already`. Serialised by the launch lock so
+    concurrent settles never both add the same delta; a crash between the two
+    writes cannot happen (one commit), and a lost commit is corrected by the
+    next settle. Skipped while the parent run is still queued or running (its
+    own cost cap would see the spend); `_recompute` calls it too, so it catches
+    up after the parent finishes. Never raises: a roll-up failure must not fail
+    a settle."""
+    if c.parent_run_id is None:
+        return
+    try:
+        async with _launch_lock():
+            await db.refresh(c)
+            targets = await load_targets(db, [c.id])
+            runs = await load_runs(db, targets)
+            total = round(
+                sum(target_cost(t, runs.get(t.run_id) if t.run_id else None) for t in targets), 6
+            )
+            already = float((c.settings or {}).get("rolled_up_cost_usd") or 0)
+            delta = round(total - already, 6)
+            if delta == 0:
+                return
+            parent = await db.get(Run, c.parent_run_id, populate_existing=True)
+            if parent is None:
+                return
+            if parent.status in ("queued", "running"):
+                # The parent's own cost cap counts `delegated_cost_usd`; adding the
+                # batch's spend mid-turn could stop the turn that started it. The
+                # next settle or recompute after the parent finishes catches up.
+                return
+            # Atomic in SQL, so a concurrent `_record_delegated_cost` is not lost.
+            await db.execute(
+                update(Run)
+                .where(Run.id == parent.id)
+                .values(delegated_cost_usd=Run.delegated_cost_usd + Decimal(str(delta)))
+                .execution_options(synchronize_session=False)
+            )
+            c.settings = {**(c.settings or {}), "rolled_up_cost_usd": total}
+            await db.commit()
+    except Exception:  # noqa: BLE001 - see docstring
+        log.exception("batch %s could not roll its cost up to run %s", c.id, c.parent_run_id)
+        with contextlib.suppress(Exception):
+            await db.rollback()
 
 
 # ══════════════════════════════════════════════════════════════════════════

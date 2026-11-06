@@ -583,6 +583,10 @@ def main() -> None:
         help="Re-download and hash the first N uploads, beyond every file under 8 MB (default 20)",
     )
 
+    from tret import cli_batch  # argparse only; httpx is imported when a command runs
+
+    cli_batch.register(sub)
+
     run_cmd = sub.add_parser(
         "run", help="Route a task, run it (optionally over local files), print a receipt"
     )
@@ -668,6 +672,11 @@ def main() -> None:
             _storage_status()
         elif args.storage_command == "migrate":
             _storage_migrate(args)
+        return
+    if args.command == "batch":
+        code = cli_batch.run(args)
+        if code:
+            sys.exit(code)
         return
     if args.command == "run":
         _run_command(args)

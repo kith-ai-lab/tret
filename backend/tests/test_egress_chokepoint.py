@@ -71,6 +71,12 @@ FORBIDDEN_HTTPX_ATTRS = frozenset(
 )
 
 
+# The `tret batch` operator CLI talks to the operator's OWN server from their shell:
+# that is not model-chosen egress and never runs inside the server, so it may build
+# its httpx client directly. Exactly this one file; the imports scan still applies.
+HTTPX_CLIENT_ALLOWLIST = frozenset({TRET / "cli_batch.py"})
+
+
 def _source_files() -> list[Path]:
     return sorted(p for p in TRET.rglob("*.py") if NET not in p.parents)
 
@@ -95,7 +101,8 @@ def _violations(path: Path) -> list[str]:
         if isinstance(node, ast.Call):
             func = node.func
             if (
-                isinstance(func, ast.Attribute)
+                path not in HTTPX_CLIENT_ALLOWLIST
+                and isinstance(func, ast.Attribute)
                 and isinstance(func.value, ast.Name)
                 and func.value.id == "httpx"
                 and func.attr in FORBIDDEN_HTTPX_ATTRS
@@ -120,6 +127,13 @@ def test_the_scan_would_actually_catch_something(tmp_path):
     found = _violations(bad)
     assert any("socket" in v for v in found)
     assert any("httpx.AsyncClient" in v for v in found)
+
+
+def test_the_httpx_allowlist_is_one_file_and_covers_nothing_else(tmp_path):
+    assert HTTPX_CLIENT_ALLOWLIST == {TRET / "cli_batch.py"} and all(p.is_file() for p in HTTPX_CLIENT_ALLOWLIST)
+    other = tmp_path / "cli_batch.py"  # same name elsewhere is not the allowlisted path
+    other.write_text("import httpx\n\nc = httpx.Client()\n")
+    assert any("httpx.Client" in v for v in _violations(other))
 
 
 def test_the_anthropic_sdk_is_handed_a_tret_client():

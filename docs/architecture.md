@@ -503,6 +503,15 @@ or policy under every ad-hoc subagent in the workspace. The seeded Subagent
 harness is found by its `task_profile`, not its name; archiving it turns ad-hoc
 subagents off for that workspace.
 
+Three more builtin tools, `start_batch`, `batch_status` and `batch_results`
+(`engine/batch_tools.py`), let a chat turn hand large, unattended or auditable work
+to a durable batch ([batch-runs.md](batch-runs.md)) instead of delegating it. They
+ride along with `run_harness_task` on the seeded chat harness, as `delegate_parallel`
+does, and are not in `DELEGATION_TOOLS` (a batch is not a child of the turn).
+Subagents never see them: the subagent narrowing keeps only the read-only
+`SUBAGENT_ALLOWED_TOOLS`. The batch records the calling run as `parent_run_id` and
+adds its spend to that run's `delegated_cost_usd` as targets settle.
+
 ## SDK and CLI
 
 `tret.sdk.Router` and the `tret run` CLI (`tret/local_run.py`) are a second,

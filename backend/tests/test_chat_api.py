@@ -989,3 +989,26 @@ async def test_a_live_run_older_than_the_cutoff_does_not_count(client, seed, ses
     # ...and the 409 clears too, so a wedged run cannot lock the conversation.
     again = await client.post(f"/api/chat/{conversation_id}/messages", json={"text": "Two"})
     assert again.status_code == 200, again.text
+
+
+def test_assistant_message_keeps_start_batch_result_only():
+    big = '{"batch_id": "b1", "pad": "' + "x" * 3000 + '"}'
+    run = _run(
+        messages=[
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "started",
+                "tool_calls": [
+                    {"id": "c1", "name": "start_batch", "arguments": {}},
+                    {"id": "c2", "name": "lookup_dataset", "arguments": {}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": big},
+            {"role": "tool", "tool_call_id": "c2", "content": "rows"},
+        ],
+    )
+    activity = _assistant_message(run)["activity"]
+    assert activity[0]["tool"] == "start_batch"
+    assert activity[0]["result"] == big[:2000]
+    assert activity[1]["tool"] == "lookup_dataset" and "result" not in activity[1]

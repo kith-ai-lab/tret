@@ -77,6 +77,10 @@ ELIDABLE_TOOLS = frozenset(
         # block every iteration (engine/context.py), so an elided read here
         # costs nothing a re-call couldn't recover cheaply.
         "list_pack_lessons",
+        # Re-readable on demand from the batch itself: a status snapshot and a
+        # page of results the model can call again.
+        "batch_status",
+        "batch_results",
     }
     # `run_harness_task`, and any future sibling delegation tool, by name —
     # see `DELEGATION_TOOLS`'s own comment in engine/delegation.py for why they're kept
@@ -113,6 +117,9 @@ PROTECTED_TOOLS = frozenset(
         # A recording tool too: the collection target's outcome. A run that can
         # no longer see it is one that might report a second, different one.
         "report_collection_outcome",
+        # Starts a durable batch: a turn that can no longer see it has started
+        # one might start the same batch again.
+        "start_batch",
     }
 )
 

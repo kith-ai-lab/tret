@@ -491,6 +491,11 @@ def _assistant_message(run: Run) -> dict:
                         entry["summary"] = f"delegated {args.get('task_type', '?')}"
                 else:
                     entry["summary"] = _tool_result_summary(result)
+                if tc.get("name") == "start_batch" and result is not None:
+                    # The chat's batch card is built from this call's result
+                    # JSON (`batch_id`); no other tool's result is persisted here.
+                    content = result.get("content")
+                    entry["result"] = (content if isinstance(content, str) else "")[:2000]
                 activity.append(entry)
     if run.status == "completed_without_output" and not assistant_text:
         # The engine's empty-reply guard: the model finished its tool calls and

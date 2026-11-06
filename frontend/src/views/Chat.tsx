@@ -13,6 +13,7 @@ import {
   ROUTING_OBJECTIVES,
 } from '../api/client'
 import { useRunStream } from '../api/useRunStream'
+import { BatchCards } from '../components/chat/BatchCard'
 import { DelegatedWork, DelegatedWorkDisclosure } from '../components/chat/DelegatedWork'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
 import { WaterPanel } from '../components/shared/WaterFootprint'
@@ -634,6 +635,14 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
           </div>
         )}
         {hasDelegation && <DelegatedWorkDisclosure runId={message.run_id!} />}
+        {/* Persisted activity only carries a summary today; the card renders
+            when an entry also carries the tool's result text. */}
+        <BatchCards
+          results={activity.map((a) => ({
+            tool: a.tool,
+            result: (a as { result?: unknown }).result,
+          }))}
+        />
         {/* MarkdownDoc renders its own wrapper, so it *is* the prose element —
             nesting it inside another `.chat-prose.md` would leave the
             first-child/last-child margin rules pointing at the wrapper instead of
@@ -825,6 +834,11 @@ function LiveTurn({ runId, stream }: { runId: string; stream: ReturnType<typeof 
           </div>
         )}
         <DelegatedWork items={stream.delegations} />
+        <BatchCards
+          results={stream.items.flatMap((i) =>
+            i.kind === 'tool_result' && !i.error ? [{ tool: i.tool, result: i.result }] : [],
+          )}
+        />
         {stream.text ? (
           <div className="chat-prose">
             <span style={{ whiteSpace: 'pre-wrap' }}>{stream.text}</span>
