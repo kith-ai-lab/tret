@@ -37,7 +37,7 @@ from tret.db.engine import get_engine, get_session_factory
 from tret.db.migrate import ensure_schema
 from tret.engine.extensions import get_extension_registry, load_extensions
 from tret.net import log_egress_at_boot
-from tret.providers.catalog import get_catalog
+from tret.providers.catalog import dynamic_refresh_loop, get_catalog
 from tret.services import collections as collections_service
 from tret.services import lifecycle
 from tret.services.telemetry import sender_loop as telemetry_sender_loop
@@ -314,6 +314,9 @@ async def lifespan(app: FastAPI):
     # first (the router also calls `warm_once()` as a backstop, for the run that
     # arrives before this task finishes).
     warm_task = asyncio.create_task(get_catalog().warm())
+    # After boot the dynamic catalog would otherwise refresh only when someone
+    # calls GET /api/models; this keeps it (and the ZDR list) current every TTL.
+    catalog_refresh_task = asyncio.create_task(dynamic_refresh_loop(get_catalog()))
     # Opt-in anonymous telemetry (tret/services/telemetry.py) — same shape as
     # warm_task above: created here, cancelled on shutdown below. Off by
     # default; the task itself resolves whether it is actually allowed to
@@ -338,6 +341,9 @@ async def lifespan(app: FastAPI):
         warm_task.cancel()
         with suppress(asyncio.CancelledError):
             await warm_task
+        catalog_refresh_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await catalog_refresh_task
         telemetry_task.cancel()
         with suppress(asyncio.CancelledError):
             await telemetry_task

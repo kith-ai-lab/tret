@@ -47,6 +47,8 @@ services:
       # would otherwise arrive as an empty string, and "" is not a valid int,
       # float or bool, so the backend would refuse to boot.
       TRET_OPENROUTER_CATALOG: ${TRET_OPENROUTER_CATALOG:-true}
+      TRET_OPENROUTER_CATALOG_PUBLIC_FETCH: ${TRET_OPENROUTER_CATALOG_PUBLIC_FETCH:-false}
+      TRET_OPENROUTER_CATALOG_TTL_SECONDS: ${TRET_OPENROUTER_CATALOG_TTL_SECONDS:-21600}
       # Attribution headers OpenRouter shows on its dashboard. Overridable here
       # so a fork or a private deployment is not announcing this repo's URL.
       TRET_OPENROUTER_REFERER: ${TRET_OPENROUTER_REFERER:-https://github.com/kith-ai-lab/tret}
@@ -55,8 +57,9 @@ services:
       # (the default) reads as "not set" rather than a JSON parse error.
       TRET_OPENROUTER_PROVIDER_PREFS: ${TRET_OPENROUTER_PROVIDER_PREFS:-}
       TRET_ROUTER_COOLDOWN_MINUTES: ${TRET_ROUTER_COOLDOWN_MINUTES:-30.0}
-      TRET_ROUTER_NEW_MODEL_SLOTS: ${TRET_ROUTER_NEW_MODEL_SLOTS:-3}
-      TRET_ROUTER_NEW_MODEL_WINDOW_DAYS: ${TRET_ROUTER_NEW_MODEL_WINDOW_DAYS:-60}
+      TRET_ROUTER_NEW_MODEL_SLOTS: ${TRET_ROUTER_NEW_MODEL_SLOTS:-6}
+      TRET_ROUTER_NEW_MODEL_WINDOW_DAYS: ${TRET_ROUTER_NEW_MODEL_WINDOW_DAYS:-120}
+      TRET_ROUTER_OPEN_WEIGHTS: ${TRET_ROUTER_OPEN_WEIGHTS:-prefer}
       TRET_LOGIN_MAX_ATTEMPTS: ${TRET_LOGIN_MAX_ATTEMPTS:-10}
       TRET_LOGIN_WINDOW_SECONDS: ${TRET_LOGIN_WINDOW_SECONDS:-300.0}
       TRET_METHODS_NETWORK_ISOLATION: ${TRET_METHODS_NETWORK_ISOLATION:-true}

@@ -155,7 +155,7 @@ prefix shown in the model picker and settings UI.
 
 Once the base URL is set, tret discovers models by calling `GET
 {base_url}/models` the first time the model catalog or settings UI asks for
-the list. Discovery is cached for 5 minutes (much shorter than the 24h
+the list. Discovery is cached for 5 minutes (much shorter than the 6h
 OpenRouter cache) because local model availability changes far more often —
 you'll `ollama pull` or `ollama rm` things mid-session. If the server is down
 or unreachable, discovery just returns an empty local model list; it never

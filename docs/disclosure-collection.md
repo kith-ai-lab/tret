@@ -246,14 +246,18 @@ every boot: there is no marker for a tool an operator removed on purpose, so a r
 tool comes back at the next restart. To turn the harness off, archive it. (Renaming
 it makes the seeder look for a new one.)
 
-Its routing policy is `{"mode": "auto", "min_cost_tier": "standard", "max_cost_tier":
-"standard"}`. Collection runs are tool-heavy, and a weak model loops (a live run on an
-economy-tier model spent 22 of 24 iterations on `web_search`), so the router may only
-pick a standard-tier model. `min_cost_tier` is a hard floor, honoured wherever
-`max_cost_tier` is; it needs a standard-tier model whose provider has a key, or the run
-fails with "No candidate models". A harness still carrying the previous seed policy
-(`{"mode": "auto", "max_cost_tier": "standard"}`, exactly) is upgraded at boot; a policy
-an operator has edited is left alone.
+Its routing policy is `{"mode": "auto", "max_cost_tier": "standard", "objective": "eco"}`.
+Collection runs are tool-heavy, so the router may not climb past the standard tier, and
+within it prefers the cheapest, lowest-energy candidate (the same 12 registers written
+12/12 under `balanced` and `eco`, at a quarter of the cost). There is no `min_cost_tier`
+floor. One was added after a live run on an economy-tier model spent 22 of 24 iterations
+on `web_search` (4 Nov 2026); it was removed because a per-run `web_search` cap
+(`TRET_EGRESS_RESEARCH_MAX_SEARCHES_PER_RUN`, 12) now stops that loop, because price tiers
+exclude almost every open-weight model regardless of capability, and because routing
+evidence and exploration now decide which models earn Collector runs. A harness still
+carrying a previous seed policy (`{"mode": "auto", "max_cost_tier": "standard"}`, the same
+with `"min_cost_tier": "standard"`, or that plus `"objective": "eco"`, exactly) is upgraded
+at boot; a policy an operator has edited is left alone.
 
 The seeded `loop_config` is 40 iterations, 4096 output tokens, temperature 0.3 and a
 `max_cost_usd` of 8.0: each run is capped at $8 (the engine default of $5 stopped long

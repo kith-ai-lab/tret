@@ -23,6 +23,15 @@ from tret.router_llm.priors_base import ModelPrior
 OBJECTIVES = ("quality", "balanced", "token_conservation", "eco")
 DEFAULT_OBJECTIVE = "balanced"
 
+# `model_policy["open_weights"]`: "prefer" orders open-weight models ahead of
+# closed ones (recorded evidence still leads), "require" excludes closed ones,
+# "any" ignores weights and reproduces the historical ordering exactly.
+OPEN_WEIGHTS_MODES = ("prefer", "require", "any")
+
+
+def favours_open_weights(open_weights: str | None) -> bool:
+    return open_weights in ("prefer", "require")
+
 # Provider-neutral reasoning-effort levels. Every provider tret speaks to
 # exposes its own effort control on a different wire shape (Anthropic's
 # `output_config.effort`, OpenRouter's unified `reasoning.effort`) but the same
@@ -252,7 +261,9 @@ def evidence_tier(prior: ModelPrior | None) -> int:
 
 
 def candidate_sort_key(
-    objective: str, priors: dict[str, ModelPrior] | None = None
+    objective: str,
+    priors: dict[str, ModelPrior] | None = None,
+    open_weights: str | None = "any",
 ) -> Callable[[ModelInfo], tuple]:
     """How an objective orders models, best-first.
 
@@ -266,6 +277,14 @@ def candidate_sort_key(
     model, and what a lab charges is the most honest proxy on hand.
     """
     inner = _OBJECTIVE_KEYS.get(objective, _balanced_key)
+    if favours_open_weights(open_weights):
+        # Open before closed, below evidence and above the objective's own key.
+        # An unknown (None) counts as closed: it has not shown it is open.
+        objective_key = inner
+
+        def inner(m: ModelInfo) -> tuple:  # noqa: F811 - deliberate wrap
+            return (m.open_weights is not True, *objective_key(m))
+
     if not priors:
         # No evidence: byte-for-byte the ordering tret has always produced. This
         # is the cold-start guarantee — an install with no history routes exactly

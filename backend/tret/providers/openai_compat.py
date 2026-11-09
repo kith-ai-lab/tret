@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from decimal import Decimal, InvalidOperation
@@ -61,7 +62,91 @@ class _StreamFailure(Exception):
         super().__init__(message)
 
 
-def _to_openai_messages(system: str, messages: list[Msg]) -> list[dict]:
+# Wire fields an assistant message may carry its reasoning in.
+_REASONING_WIRE_FIELDS = ("reasoning_details", "reasoning", "reasoning_content")
+
+
+log = logging.getLogger("tret.providers.openai_compat")
+
+_REDACTED = "[REDACTED]"
+# Words in a 400 body that say the provider rejected replayed reasoning.
+_REASONING_REJECT_WORDS = ("reasoning", "signature", "encrypted", "thought", "thinking")
+
+
+def _merge_reasoning_details(details: list[dict]) -> list[dict]:
+    """Reassemble streamed `reasoning_details` chunks into the full array.
+
+    OpenRouter streams the array in pieces ("The complete reasoning sequence is
+    built by concatenating all chunks in order"). Consecutive fragments of the
+    same block (same `type` and `index`, and the same `id` when both carry one)
+    have their text-like fields joined; everything else is appended in arrival
+    order, untouched. Encrypted blocks whose `data` is the `[REDACTED]`
+    streaming placeholder are dropped: the docs say encrypted content "may
+    appear as [REDACTED] in streaming responses", and replaying the
+    placeholder would send the provider something it never produced.
+    """
+    merged: list[dict] = []
+    for item in details:
+        if not isinstance(item, dict):
+            merged.append(item)
+            continue
+        last = merged[-1] if merged else None
+        if (
+            isinstance(last, dict)
+            and item.get("index") is not None
+            and last.get("index") == item.get("index")
+            and last.get("type") == item.get("type")
+            and (
+                last.get("id") is None
+                or item.get("id") is None
+                or last.get("id") == item.get("id")
+            )
+        ):
+            for key, value in item.items():
+                if key in ("text", "summary", "data") and isinstance(value, str):
+                    last[key] = (last.get(key) or "") + value
+                elif value is not None:
+                    last[key] = value
+        else:
+            merged.append(dict(item))
+    return [
+        b
+        for b in merged
+        if not (
+            isinstance(b, dict)
+            and str(b.get("type", "")).endswith("encrypted")
+            and isinstance(b.get("data"), str)
+            and b["data"].strip() == _REDACTED
+        )
+    ]
+
+
+def _strip_replayed_reasoning(body: dict) -> bool:
+    """Remove replayed reasoning from `body["messages"]` in place; True if any."""
+    found = False
+    for m in body.get("messages", []):
+        if m.get("role") == "assistant":
+            for key in _REASONING_WIRE_FIELDS:
+                if key in m:
+                    del m[key]
+                    found = True
+    return found
+
+
+def _to_openai_messages(
+    system: str,
+    messages: list[Msg],
+    *,
+    replay_reasoning: bool = False,
+    model: str | None = None,
+) -> list[dict]:
+    """Translate to the chat-completions wire format.
+
+    `replay_reasoning` sends each assistant turn's stored reasoning back
+    unmodified (thinking models require it in tool loops). It is only replayed
+    to the model it came from: after a mid-run model switch the old blocks
+    would be foreign (and, for signed/encrypted reasoning, invalid).
+    """
     out: list[dict] = [{"role": "system", "content": system}]
     for m in messages:
         if m.role == "user":
@@ -77,6 +162,10 @@ def _to_openai_messages(system: str, messages: list[Msg]) -> list[dict]:
                     }
                     for tc in m.tool_calls
                 ]
+            if replay_reasoning and m.reasoning and m.reasoning.get("model") == model:
+                for key in _REASONING_WIRE_FIELDS:
+                    if m.reasoning.get(key):
+                        entry[key] = m.reasoning[key]
             out.append(entry)
         elif m.role == "tool":
             out.append(
@@ -269,6 +358,15 @@ class OpenAICompatProvider(Provider):
     # reasoning in completion_tokens. A provider with a pinned contract may
     # narrow this (OpenRouter below); otherwise explicit values remain unknown.
     reasoning_accounting: Literal["counted_in_output", "additional", "unknown"] = "unknown"
+    # Reasoning preservation across tool turns (see `Msg.reasoning`). Off for
+    # generic OpenAI-compatible servers (local models may reject unknown
+    # message fields); a subclass whose API documents the field turns it on.
+    # `reasoning_text_field` is the plain-string field name on the wire;
+    # `reasoning_details_field` says the provider also uses OpenRouter's
+    # structured `reasoning_details` array.
+    preserve_reasoning = False
+    reasoning_text_field = "reasoning"
+    reasoning_details_field = False
 
     def __init__(
         self,
@@ -375,7 +473,9 @@ class OpenAICompatProvider(Provider):
     ) -> AsyncIterator[ProviderEvent]:
         body: dict = {
             "model": model,
-            "messages": _to_openai_messages(system, messages),
+            "messages": _to_openai_messages(
+                system, messages, replay_reasoning=self.preserve_reasoning, model=model
+            ),
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
@@ -408,6 +508,7 @@ class OpenAICompatProvider(Provider):
         # 1 + 1 + RATE_LIMIT_MAX_RETRIES attempts on this loop.
         rate_limit_attempts = 0
         retried_5xx = False
+        retried_without_reasoning = False
         while True:
             yielded_any = False
             try:
@@ -416,6 +517,24 @@ class OpenAICompatProvider(Provider):
                     yield event
                 return
             except _StreamFailure as exc:
+                if (
+                    not yielded_any
+                    and not retried_without_reasoning
+                    and exc.status == 400
+                    and self.preserve_reasoning
+                    and any(w in exc.message.lower() for w in _REASONING_REJECT_WORDS)
+                ):
+                    # A provider rejected the replayed reasoning (one bad block
+                    # would otherwise 400 every later turn). Retry once with it
+                    # stripped from this request only.
+                    stripped = _strip_replayed_reasoning(body)
+                    if stripped:
+                        log.warning(
+                            "%s rejected replayed reasoning (HTTP 400); retrying once without it: %s",
+                            self.name, exc.message[:300],
+                        )
+                        retried_without_reasoning = True
+                        continue
                 if (
                     not yielded_any
                     and exc.status == RATE_LIMIT_STATUS
@@ -454,6 +573,8 @@ class OpenAICompatProvider(Provider):
         # an earlier chunk arrives before the decision is final.
         served_by: str | None = None
         inference_geo: str | None = None
+        reasoning_details: list[dict] = []
+        reasoning_text: list[str] = []
 
         async with open_client(
             self.egress_class, timeout=httpx.Timeout(300.0, connect=15.0)
@@ -510,6 +631,15 @@ class OpenAICompatProvider(Provider):
                             delta = choice.get("delta") or {}
                             if delta.get("content"):
                                 yield TextDelta(delta["content"])
+                            if self.preserve_reasoning:
+                                if self.reasoning_details_field and isinstance(
+                                    delta.get("reasoning_details"), list
+                                ):
+                                    reasoning_details.extend(delta["reasoning_details"])
+                                # `reasoning_content` is OpenRouter's alias of `reasoning`.
+                                text = delta.get("reasoning") or delta.get("reasoning_content")
+                                if isinstance(text, str) and text:
+                                    reasoning_text.append(text)
                             for tc in delta.get("tool_calls") or []:
                                 idx = _index_of(tc)
                                 slot = pending.setdefault(
@@ -552,7 +682,24 @@ class OpenAICompatProvider(Provider):
             stop_reason=stop,
             served_by=served_by,
             inference_geo=inference_geo,
+            reasoning=self._reasoning_record(model, reasoning_details, reasoning_text),
         )
+
+    def _reasoning_record(
+        self, model: str, details: list[dict], text_chunks: list[str]
+    ) -> dict | None:
+        """What to persist for replay: the structured array when the provider
+        sent one (it is the superset: "special reasoning types (such as
+        encrypted or summarized)"), otherwise the plain reasoning string."""
+        if details:
+            merged = _merge_reasoning_details(details)
+            if merged:
+                return {"model": model, "reasoning_details": merged}
+            return None
+        text = "".join(text_chunks)
+        if text:
+            return {"model": model, self.reasoning_text_field: text}
+        return None
 
     async def complete_json(
         self,
@@ -695,6 +842,11 @@ class OpenAICompatProvider(Provider):
 
 class KimiProvider(OpenAICompatProvider):
     name = "kimi"
+    # Moonshot's thinking models return `reasoning_content` and require the
+    # complete assistant message (reasoning_content + tool_calls) to be passed
+    # back as-is in multi-turn tool calls.
+    preserve_reasoning = True
+    reasoning_text_field = "reasoning_content"
 
     def __init__(self, api_key: str):
         super().__init__(api_key, base_url="https://api.moonshot.ai/v1")
@@ -742,6 +894,12 @@ class OpenRouterProvider(OpenAICompatProvider):
 
     name = "openrouter"
     reasoning_accounting = "counted_in_output"
+    # https://openrouter.ai/docs/use-cases/reasoning-tokens (chat completions):
+    # pass `message.reasoning_details` (or the `reasoning` string) back on the
+    # assistant message, unmodified and in order.
+    preserve_reasoning = True
+    reasoning_text_field = "reasoning"
+    reasoning_details_field = True
     max_cache_breakpoints = 4  # Anthropic's per-request limit, which OpenRouter inherits
 
     def __init__(

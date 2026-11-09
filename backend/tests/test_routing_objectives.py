@@ -48,7 +48,10 @@ class _Registry(ProviderRegistry):
 
 
 def _policy(**over) -> dict:
-    base = {"mode": "auto", "max_cost_tier": "premium"}
+    # open_weights "any": these tests pin the objectives' own historical
+    # orderings; the open-weights preference has its own tests
+    # (test_open_weights_routing.py).
+    base = {"mode": "auto", "max_cost_tier": "premium", "open_weights": "any"}
     base.update(over)
     return base
 
@@ -205,12 +208,32 @@ def test_thrift_objectives_let_an_uncurated_model_outrank_curated_ones():
             energy_class="S",
         )
     }
-    assert _candidates("eco", catalog)[0] == "openrouter/vendor/tiny"
-    assert _candidates("token_conservation", catalog)[0] == "openrouter/vendor/tiny"
+    # An uncurated model only joins the general pool once it has a record
+    # (2026-11-06); give this one a middling, non-poor one.
+    from tret.router_llm.priors_base import ModelPrior
+
+    tiny_prior = ModelPrior(
+        model_id="openrouter/vendor/tiny", runs=20, effective_n=15.0, quality_mean=0.6,
+        quality_raw=0.6, quality_ci_low=0.5, delivered_rate=0.8, failure_rate=0.2,
+        mean_cost_usd=0.001, mean_output_tokens=300, mean_iterations=2.0, mean_energy_wh=0.1,
+        approvals=0, rejections=0,
+    )
+    router = ModelRouter(catalog, _all_keys())
+
+    def ids_for(objective: str) -> list[str]:
+        return [
+            m.id
+            for m in router._candidates(_policy(objective=objective), {tiny_prior.model_id: tiny_prior})
+        ]
+
+    # (the prior is TIER_UNKNOWN, so the objective's own key still decides.)
+    assert ids_for("eco")[0] == "openrouter/vendor/tiny"
+    assert ids_for("token_conservation")[0] == "openrouter/vendor/tiny"
     # ...while the capability objectives keep the curated-first preference.
     for objective in ("balanced", "quality"):
-        ids = _candidates(objective, catalog)
-        assert ids[-1] == "openrouter/vendor/tiny"
+        assert ids_for(objective)[-1] == "openrouter/vendor/tiny"
+    # And without a record it is not a candidate at all.
+    assert "openrouter/vendor/tiny" not in _candidates("eco", catalog)
 
 
 def test_eco_prefers_the_local_tier_over_equally_classed_cloud_models():
@@ -253,7 +276,7 @@ def _prompt(objective: str | None = None, n: int = 3) -> str:
 
 
 def test_prompt_version_was_bumped():
-    assert ROUTING_PROMPT_VERSION == "route-v6"
+    assert ROUTING_PROMPT_VERSION == "route-v7"
 
 
 def test_the_default_objective_renders_the_historical_prompt_plus_effort():

@@ -101,6 +101,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.db.models import Document, DocumentChunk
@@ -536,14 +537,31 @@ async def ensure_chunks(db: AsyncSession, document: Document) -> list[DocumentCh
             # are write-once, so this can never go stale the way a hand-set
             # column on a mutable row could.
             row.search_vector = func.to_tsvector("english", f"{draft.context} {draft.body}")
-        db.add(row)
         rows.append(row)
+    # The insert runs in a SAVEPOINT, never a session-wide rollback. Two runs
+    # in one project can lazily chunk the same document at once; the loser
+    # trips UNIQUE(document_id, ordinal). Sessions use expire_on_commit=False,
+    # so the engine depends on loaded ORM instances (the Run the harness
+    # holds) staying loaded — a plain `db.rollback()` here would expire all of
+    # them and the next synchronous attribute read would hit an async lazy
+    # load (MissingGreenlet). Rolling back only the savepoint leaves the outer
+    # transaction and every loaded instance untouched.
+    #
+    # `begin_nested()` flushes whatever is already pending before it opens the
+    # savepoint. Do that here, outside the swallowing `try`: a failure there
+    # belongs to the caller's own state, not to this backfill, and must reach
+    # the caller rather than be logged away leaving the session unusable.
+    await db.flush()
     try:
-        await db.commit()
+        async with db.begin_nested():
+            db.add_all(rows)
+    except IntegrityError:
+        log.info("document %s was chunked concurrently by another worker", document.id)
+        return []
     except Exception:
-        await db.rollback()
         log.warning("failed to persist chunks for document %s", document.id, exc_info=True)
         return []
+    await db.commit()
     return rows
 
 

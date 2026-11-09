@@ -8,7 +8,12 @@ from datetime import date, datetime, timezone
 
 from tret.config import get_settings
 from tret.providers.catalog import ModelInfo
-from tret.router_llm.objectives import DEFAULT_OBJECTIVE, default_effort, is_new_model
+from tret.router_llm.objectives import (
+    DEFAULT_OBJECTIVE,
+    default_effort,
+    favours_open_weights,
+    is_new_model,
+)
 
 
 def _today() -> date:
@@ -36,7 +41,13 @@ def _today() -> date:
 # Byte-identical to v5 whenever no candidate is new — no uncurated dynamic
 # catalog, `router_new_model_slots=0`, or simply no recent releases — which is
 # the common case for most installs most of the time.
-ROUTING_PROMPT_VERSION = "route-v6"
+#
+# route-v7 (2026-11-06) adds `weights: open|closed` to each candidate line and
+# an OPEN WEIGHTS line to CONSTRAINTS when the harness policy is prefer/require
+# (`model_policy.open_weights`; default "prefer"). Byte-identical to v6 under
+# "any". Nothing keys learned priors or run outcomes by this version string, so
+# the bump does not reset or split them.
+ROUTING_PROMPT_VERSION = "route-v7"
 
 ROUTER_SYSTEM = """\
 You are a model-selection router for an analyst workbench. Pick the single best \
@@ -217,6 +228,7 @@ def render_router_prompt(
     candidates: list[ModelInfo],
     objective: str = DEFAULT_OBJECTIVE,
     priors: dict | None = None,
+    open_weights: str | None = "any",
 ) -> str:
     lines = [
         "TASK",
@@ -233,7 +245,7 @@ def render_router_prompt(
     # (`router_llm.router._reserve_new_model_slots`) — an unreviewed model the
     # reservation surfaced should read as unreviewed to the router model too,
     # not silently blend in among the curated entries it is now sitting beside.
-    new_window_days = getattr(get_settings(), "router_new_model_window_days", 60)
+    new_window_days = getattr(get_settings(), "router_new_model_window_days", 120)
     today = _today()
     for m in candidates:
         strengths = ", ".join(m.strengths) if m.strengths else "(uncurated)"
@@ -250,11 +262,23 @@ def render_router_prompt(
             if not m.curated and is_new_model(m.released, today, new_window_days)
             else ""
         )
+        weights = (
+            f" | weights: {'open' if m.open_weights else 'closed'}"
+            if favours_open_weights(open_weights) and m.open_weights is not None
+            else ""
+        )
         lines.append(
             f"  - id: {m.id} | released: {released} | tier: {m.cost_tier} | "
-            f"ctx: {m.context_window} | strengths: {strengths}{energy}{new_marker}"
+            f"ctx: {m.context_window} | strengths: {strengths}{energy}{weights}{new_marker}"
         )
     lines += ["", "CONSTRAINTS", f"  max_cost_tier: {max_cost_tier}"]
+    if open_weights == "prefer":
+        lines.append(
+            "  OPEN WEIGHTS: preferred. Choose an open-weight candidate whenever one can "
+            "do the job; choose a closed model only when the task clearly needs it, and say why."
+        )
+    elif open_weights == "require":
+        lines.append("  OPEN WEIGHTS: required; every candidate is open-weight.")
     lines += effort_block(objective, task_shape, max_cost_tier)
     lines += objective_block(objective)
 

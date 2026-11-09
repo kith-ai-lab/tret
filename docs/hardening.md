@@ -239,8 +239,10 @@ see [eco-accounting.md](eco-accounting.md).
   findings reference documents by id. With `TRET_STORAGE_BACKEND=s3` the bytes
   live in a bucket instead (encrypt and scope it there) — see [storage.md](storage.md).
 - tret makes no outbound calls except to the LLM providers you configure (plus
-  the optional OpenRouter catalog fetch, `TRET_OPENROUTER_CATALOG=false` to
-  disable). No telemetry unless an admin turns it on — see §9 and
+  the optional OpenRouter catalog and zero-data-retention endpoint list fetches,
+  which run only when a global `TRET_OPENROUTER_API_KEY` is set or
+  `TRET_OPENROUTER_CATALOG_PUBLIC_FETCH=true` opts in to the keyless fetch;
+  `TRET_OPENROUTER_CATALOG=false` to disable). No telemetry unless an admin turns it on — see §9 and
   [telemetry.md](telemetry.md).
 - **Single-instance enforcement.** The run event bus is in-process
   (`fly.toml.example`'s "Do NOT scale horizontally" comment; `docs/architecture.md`),

@@ -83,14 +83,13 @@ async def test_seeded_when_research_is_on(db, monkeypatch):
     (h,) = await _collectors(db, ws.id)
     assert h.task_profile == "freeform"
     assert h.tool_names == COLLECTION_HARNESS_TOOLS
-    # A hard routing floor: weak models loop on tool-heavy collection runs. Within
-    # the tier, `eco` (2026-11-06: same output as `balanced` at a quarter of the cost).
+    # Standard ceiling, `eco` objective, and no `min_cost_tier` floor.
     assert h.model_policy == {
         "mode": "auto",
-        "min_cost_tier": "standard",
         "max_cost_tier": "standard",
         "objective": "eco",
     }
+    assert "min_cost_tier" not in h.model_policy
     assert h.loop_config == {
         "max_iterations": 40, "max_output_tokens": 4096, "temperature": 0.3, "max_cost_usd": 8.0,
     }
@@ -176,6 +175,12 @@ async def test_chat_front_door_selection_is_unchanged(db, monkeypatch):
     [
         {"mode": "auto", "max_cost_tier": "standard"},
         {"mode": "auto", "min_cost_tier": "standard", "max_cost_tier": "standard"},
+        {
+            "mode": "auto",
+            "min_cost_tier": "standard",
+            "max_cost_tier": "standard",
+            "objective": "eco",
+        },
     ],
 )
 async def test_backfills_an_unedited_seed_policy_to_the_current_seed(db, monkeypatch, previous_seed):
@@ -196,7 +201,6 @@ async def test_backfills_an_unedited_seed_policy_to_the_current_seed(db, monkeyp
 
     assert existing.model_policy == {
         "mode": "auto",
-        "min_cost_tier": "standard",
         "max_cost_tier": "standard",
         "objective": "eco",
     }
@@ -209,6 +213,19 @@ async def test_backfills_an_unedited_seed_policy_to_the_current_seed(db, monkeyp
         {"mode": "auto", "max_cost_tier": "premium"},
         {"mode": "auto", "max_cost_tier": "standard", "objective": "quality"},
         {"mode": "pinned", "model": "anthropic/claude-sonnet"},
+        {
+            "mode": "auto",
+            "min_cost_tier": "standard",
+            "max_cost_tier": "standard",
+            "objective": "eco",
+            "allowed": ["openai/gpt-5.6-luna"],
+        },
+        {
+            "mode": "auto",
+            "min_cost_tier": "standard",
+            "max_cost_tier": "standard",
+            "objective": "quality",
+        },
     ],
 )
 async def test_an_operator_edited_policy_is_never_touched(db, monkeypatch, edited):
@@ -279,4 +296,5 @@ async def test_an_edited_loop_config_is_kept(db, monkeypatch):
     await db.flush()
 
     assert existing.loop_config == edited
-    assert existing.model_policy["min_cost_tier"] == "standard"  # the other upgrade still applied
+    assert existing.model_policy["objective"] == "eco"  # the other upgrade still applied
+    assert "min_cost_tier" not in existing.model_policy

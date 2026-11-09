@@ -90,6 +90,7 @@ models:
     input_price_per_mtok: 10.0
     output_price_per_mtok: 50.0
     cost_tier: premium
+    open_weights: false
     # R (reasoning): billed as a thinking-first flagship — "deep reasoning" and
     # "hardest verdicts" are its stated strengths, and it is priced 5x Sonnet 5's
     # output. Judgment call: Anthropic publishes no energy data and no active
@@ -120,6 +121,7 @@ models:
     cache_read_multiplier: 0.025
     cache_write_multiplier: 1.25
     cost_tier: premium
+    open_weights: false
     # R (reasoning): same thinking-first positioning as claude-fable-5, one
     # point release on, at the same $10/$50 price point. Anthropic still
     # publishes no energy data or active parameter count for it — this is
@@ -141,6 +143,7 @@ models:
     input_price_per_mtok: 5.0
     output_price_per_mtok: 25.0
     cost_tier: premium
+    open_weights: false
     # XL: a largest-class frontier model, but positioned below Fable 5 and not
     # sold as thinking-first, so it stays out of the reasoning tier. XL is the
     # one class with no measured anchor, which makes this the least defensible
@@ -164,6 +167,7 @@ models:
     input_price_per_mtok: 5.0
     output_price_per_mtok: 25.0
     cost_tier: premium
+    open_weights: false
     # XL: the same non-reasoning frontier tier as Opus 4.8 — its direct
     # successor at the same price point, not sold as thinking-first. Same
     # "least defensible number in the catalog" caveat as Opus 4.8: XL has no
@@ -200,6 +204,7 @@ models:
     # model's product positioning (Opus line, same tier as Opus 5/Fable 5.1)
     # better than its raw price band would suggest.
     cost_tier: premium
+    open_weights: false
     # XL: same reasoning as Opus 5 — the next non-thinking-first entry in the
     # Opus line, no measured anchor. Bias note: thinking cannot be disabled on
     # this model, so its real generation work (hidden reasoning tokens) is
@@ -221,6 +226,7 @@ models:
     input_price_per_mtok: 2.0
     output_price_per_mtok: 10.0
     cost_tier: standard
+    open_weights: false
     # L: the class anchored directly on measured Claude 3.7 Sonnet data
     # (b = 2634.7 Wh/Mtok). The closest thing to a grounded assignment here —
     # same vendor, same product line, one generation on.
@@ -245,6 +251,7 @@ models:
     input_price_per_mtok: 1.0
     output_price_per_mtok: 5.0
     cost_tier: economy
+    open_weights: false
     # M: a small fast sibling of the Sonnet line, priced at half Sonnet 5's
     # input. Sits between the nano-class anchor (S) and the Sonnet-class anchor
     # (L); M is the GPT-4o-anchored middle.
@@ -265,6 +272,9 @@ models:
     input_price_per_mtok: 0.6
     output_price_per_mtok: 2.5
     cost_tier: economy
+    # Open weights (published on Hugging Face); feeds the router's open-weights policy.
+    open_weights: true
+    hf_id: moonshotai/Kimi-K2-Instruct
     # M: a large MoE with a modest *active* parameter count — the total-vs-active
     # distinction is exactly what price cannot see, and MoE serving energy tracks
     # active params. M rather than L on that basis, not on price.
@@ -302,6 +312,9 @@ models:
     input_price_per_mtok: 3.0
     output_price_per_mtok: 15.0
     cost_tier: standard
+    # Open weights (published on Hugging Face); feeds the router's open-weights policy.
+    open_weights: true
+    hf_id: moonshotai/Kimi-K3
     # L, not R: "strong reasoning" describes output quality, and it is not sold
     # as spending a separate thinking pass. A borderline call — if it does emit
     # thinking tokens by default it belongs in R, which would raise it ~8x.
@@ -327,6 +340,7 @@ models:
     input_price_per_mtok: 2.5
     output_price_per_mtok: 15.0
     cost_tier: standard
+    open_weights: false
     # L: frontier-scale, priced level with Kimi K3 output, no thinking-first
     # positioning. Price-as-size proxy, stated plainly.
     energy_class: L
@@ -347,6 +361,7 @@ models:
     input_price_per_mtok: 1.0
     output_price_per_mtok: 6.0
     cost_tier: standard
+    open_weights: false
     # M: the fast/cheap half of the same generation as Terra, at ~40% of its
     # output price — a smaller served model in the GPT-4o-anchored band.
     energy_class: M
@@ -366,6 +381,7 @@ models:
     input_price_per_mtok: 1.5
     output_price_per_mtok: 7.5
     cost_tier: standard
+    open_weights: false
     # M: a Flash-tier model. Sanity check against Google's own published median
     # text prompt (0.24 Wh, arXiv:2508.15734): M puts a 1k-in/300-out prompt at
     # ~0.42 Wh compute, ~0.5 Wh with PUE — roughly 2x Google's market-based,
@@ -387,6 +403,7 @@ models:
     input_price_per_mtok: 0.3
     output_price_per_mtok: 2.5
     cost_tier: economy
+    open_weights: false
     # S: an explicitly lite/distilled model, the closest catalog entry to the
     # GPT-4.1 nano fit (b = 271.9 Wh/Mtok) that anchors S.
     energy_class: S
@@ -406,6 +423,7 @@ models:
     input_price_per_mtok: 2.0
     output_price_per_mtok: 6.0
     cost_tier: standard
+    open_weights: false
     # L, not R: "reasoning" here is a capability claim, and its output price ($6)
     # is a third of the premium tier. Same borderline caveat as Kimi K3 — the
     # reasoning tier is 8x L, so getting this wrong matters.
@@ -430,6 +448,9 @@ models:
     input_price_per_mtok: 0.43
     output_price_per_mtok: 0.87
     cost_tier: economy
+    # Open weights (published on Hugging Face); feeds the router's open-weights policy.
+    open_weights: true
+    hf_id: deepseek-ai/DeepSeek-V4-Pro
     # R (reasoning) despite being the CHEAPEST model in this catalog — and that
     # inversion is the point. DeepSeek's own R1 is one of the two heaviest models
     # in the reference dataset (29.00 Wh at the medium prompt shape, against 2.78
@@ -477,6 +498,7 @@ models:
         input_multiplier: 2.0
         output_multiplier: 1.5
     cost_tier: premium
+    open_weights: false
     # R (reasoning): OpenRouter marks `reasoning.mandatory: true` and
     # `default_enabled: true` for this model, with real effort levels
     # (max/xhigh/high/medium/low) — a thinking-first flagship, same tier as
@@ -516,6 +538,7 @@ models:
         input_price_per_mtok: 1.5
         output_price_per_mtok: 7.5
     cost_tier: standard
+    open_weights: false
     # M: Flash-tier successor to gemini-3.6-flash at the same price point —
     # same size-class reasoning as the existing Flash entries above.
     energy_class: M
