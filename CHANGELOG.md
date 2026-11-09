@@ -56,6 +56,17 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Batch scorecards, comparison and an evaluator.** Every batch gets a scorecard (yield,
+  cost and Wh per acceptable result, reliability, outliers; infrastructure failures and
+  timeouts never count against the model) and two batches of the same task can be compared
+  row by row (`GET /api/batches/{id}/scorecard`, `GET /api/batches/compare`). Optionally a
+  judge model scores each finished target against a rubric from a blind evidence pack, with
+  a budget, relative scores, a batch review and human spot checks (`evaluation` on create,
+  `POST /api/batches/{id}/evaluate`). The judge is named per batch or is the first entry of
+  `TRET_BATCH_EVALUATOR_JUDGE` whose provider has a key (default Claude Opus 5.5, then
+  Gemini 3.8 Flash for installs with only an OpenRouter key). See
+  [docs/batch-runs.md](docs/batch-runs.md#scorecards-comparison-and-the-evaluator).
+
 - **View a batch target's written files in the app.** On the Batches page, each file under
   a target's **Written files** opens in a large in-app viewer (previous/next across the
   target's files, Download, link to SharePoint): Markdown rendered with a source toggle,

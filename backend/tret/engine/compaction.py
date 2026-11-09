@@ -117,6 +117,10 @@ PROTECTED_TOOLS = frozenset(
         # A recording tool too: the collection target's outcome. A run that can
         # no longer see it is one that might report a second, different one.
         "report_collection_outcome",
+        # Recording tools of the batch evaluator: a score or review the run can no
+        # longer see is one it might submit a second time.
+        "submit_evaluation",
+        "submit_batch_review",
         # Starts a durable batch: a turn that can no longer see it has started
         # one might start the same batch again.
         "start_batch",

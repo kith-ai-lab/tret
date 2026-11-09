@@ -28,6 +28,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tret.batches.rubrics import EVALUATION_ID_KEY
 from tret.db.models import Finding, Harness, Pack, Run, RunOutcome
 from tret.engine.context import task_config
 from tret.router_llm.objectives import DEFAULT_MAX_COST_TIER, DEFAULT_OBJECTIVE
@@ -126,6 +127,17 @@ async def build_outcomes(db: AsyncSession, run: Run) -> list[RunOutcome]:
     Not persisted here — `record_outcome` owns the write, and the backfill reuses
     this to build rows in bulk.
     """
+    if (run.task_input or {}).get(EVALUATION_ID_KEY):
+        # A batch evaluator run (judging another run, `batches/evaluation.py`): the
+        # judge's performance at judging says nothing about how it does the task
+        # the router is learning, and its rows would skew those priors.
+        #
+        # The engine reads the run's harness again right after this call, and a tool
+        # error earlier in the run (its rollback) expired it. Building outcomes
+        # normally reloads the harness (`_max_iterations`); returning early must not
+        # skip that, or the engine's next attribute read crashes with MissingGreenlet.
+        await _max_iterations(db, run)
+        return []
     if run.model_used is None:
         # Never routed: failed before the first token (unknown task type, no
         # candidates). Real failures, but not this model's — there wasn't one.

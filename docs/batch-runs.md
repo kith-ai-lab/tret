@@ -374,6 +374,88 @@ A disclosure batch is `tret batch create --profile disclosure --name ... --regis
 register.csv --target disclosures [--write-root runs] [--fiscal-year 2025]
 [--no-auto-write]`.
 
+## Scorecards, comparison and the evaluator
+
+Every batch has a **scorecard** (`GET /api/batches/{id}/scorecard`), computed from rows
+it already has; no model is called. Every target falls into one class: `success`
+(written or completed), `gap`, `rejected`, `failed`, `infra`, `timeout` or `unsettled`.
+A failed or gap target whose error or outcome summary reads as a storage or I/O fault
+("insufficient storage space", `ENOSPC`, a read-only file system) is `infra`, and one
+that hit the run time limit is `timeout`: both count against **reliability**, never
+against the model, and leave the yield denominator. The scorecard reports:
+
+- **yield**: acceptable results / (targets - infra - timeout - unsettled). Without an
+  evaluation a result is acceptable when it is a `success`; with a scored evaluation
+  it is acceptable when its quality reaches the rubric's `acceptable_quality` (60),
+  so an honest gap can be acceptable. A target with no fresh score falls back to its
+  class. `written_share` is the same ratio over successes only.
+- **cost and Wh per acceptable result** (target spend only; energy is null when no run
+  recorded it, and a retried target's earlier attempts' energy is not counted), **wall time** (batch start to the last target finishing), **retries**,
+  human review counts, the model mix and **outliers**: robust z-scores (0.6745 x
+  (x - median) / MAD) for cost, iteration ratio, retained pages and retained/source
+  page ratio, flagged at |z| >= 3.5 when at least five targets and a non-zero MAD.
+
+`GET /api/batches/compare?a=<id>&b=<id>` puts two scorecards side by side and matches
+rows by **row key** (the target slug for a disclosure batch; for a prompt batch the
+slug column, else the label as ascii letters, digits and hyphens). Only rows present in
+both batches appear in `rows`; `only_a` / `only_b` count the rest. Quality is compared
+only when both batches are the same **family** (`disclosure:fy<year>`, or the same
+harness and template for a prompt batch), both have an evaluation and the two used the
+same rubric version and judge model; otherwise `quality_note` says why. Wins, ties
+(under 5 points) and the mean quality delta come with a 90% bootstrap interval (2,000
+resamples, fixed seed, at least three pairs). Cost and energy are summed over shared
+rows only.
+
+### Evaluating a batch
+
+Pass `evaluation: {"enabled": true, "judge_model": null, "budget_usd": null, "rubric": null}`
+when creating a batch (or `evaluate: true` to `start_batch`), or `POST /api/batches/{id}/evaluate`
+at any time, including after the batch is finalized. A judge model scores each target as
+it settles, using the seeded **Batch Evaluator** harness (workspace-wide, read-only,
+tools `read_document`, `search_documents`, `submit_evaluation`, `submit_batch_review`).
+
+- **Judge and budget.** One judge per pass. `TRET_BATCH_EVALUATOR_JUDGE` is an ordered,
+  comma-separated preference list (default `anthropic/claude-opus-5-5,openrouter/google/gemini-3.8-flash`):
+  a pass uses the first entry that is in the catalog and whose provider has a key. A
+  Claude judge needs an Anthropic key; with only an OpenRouter key (Tret Cloud) the pass
+  falls back to the Gemini Flash entry, a different model family from the usual OpenAI
+  collection runs, at a low price. A judge named in the request or on the batch must be
+  usable: an unknown model or one whose provider has no key is a 422, and so is a list
+  with nothing usable. The batch stores a judge only if its creator named one; the
+  pass records the resolved judge, and Re-evaluate resolves again. If the auto pass of
+  a starting batch finds no judge, the batch still starts and the pass is `failed`
+  with the reason. The budget defaults to 1.5 x
+  the estimate (25,000 input and 1,500 output tokens per target at the judge's catalog
+  price), at least $1. When the next judge run would exceed it, the remaining targets
+  become `not_evaluated_budget`. Evaluation spend is the pass's (`evaluation_cost_usd`),
+  never the targets', and is added to the parent run's `delegated_cost_usd` with them.
+- **Rubric.** A disclosure batch is always judged on `disclosure-v1` (right document,
+  coverage, page-map precision, provenance, gap honesty); a prompt batch on
+  `prompt-default-v1` (correctness, completeness, instruction following, grounding) or
+  its own validated rubric (2-8 criteria, weights 1-100, anchors for a 5 and a 1, up to
+  15 flags). `GET /api/batches/rubrics/default?profile=` returns the built-in ones. The
+  rubric is frozen onto the batch and onto each pass. Quality is the weighted mean of
+  (score - 1) / 4 x 100 over the criteria that apply to the target and have a score.
+- **Blind evidence pack.** The judge sees the rubric, the task, the result, the page
+  maps and excerpts (disclosure) and a trail of tool calls, with the run's documents
+  attached; never the model, provider, spend, tokens, energy, iteration count or routing.
+  Infrastructure failures and timeouts are `skipped`, not judged.
+- **Relative scores.** Each scored row gets a rank, a percentile and an expected score:
+  the same row's history in other batches of the family (shrunk toward the batch mean),
+  else the batch mean moved 5 points per difficulty step. `residual` = quality - expected.
+- **Batch review.** When every target is judged, one more run reviews the whole batch
+  (inconsistent scoring, patterns, up to five lessons). A release or a retry later
+  re-opens the pass and replaces the review at the end.
+- **Spot checks.** An approver can mark a scored row agree, disagree or adjust
+  (`POST /api/batches/{id}/targets/{target_id}/evaluation/review`). The pass reports
+  `spot_checks` and `agreement` (agree, or adjust within 15 points).
+- **Records.** With a scored pass, finalize adds an `evaluation` block to each result
+  (or company) and to the manifest, and a Score column to the summary; with none,
+  the records are exactly as before.
+- **Environment.** `TRET_BATCH_EVALUATOR_JUDGE`, `TRET_BATCH_EVALUATOR_CONCURRENCY`
+  (evaluator runs at once, 1-4, default 2) and `TRET_BATCH_EVALUATOR_RUN_TIMEOUT_SECONDS`
+  (default 300). `POST .../evaluation/cancel` stops a running pass.
+
 ## Agentic test probes
 
 For the agentic test protocol (id, level, identity, steps, oracle, expected cost). All
@@ -435,3 +517,38 @@ Steps: `tret batch create`, `start`, `status --watch`, `approve --all` if review
 for each; the watch returns when the batch is completed; the records exist as in
 BATCH-05; a wrong password prints `login failed: 401` and exits 1 without echoing the
 password; a missing `--harness` exits 2. Expected cost: about $0.05.
+
+**BATCH-EVAL-01. Scorecard and compare.** Level: L2. Identity: member. Steps: run two
+disclosure batches over registers that share companies (same fiscal year), then open
+`GET /api/batches/<a>/scorecard` and `GET /api/batches/compare?a=<a>&b=<b>`. Oracle: the
+class counts sum to the target count; yield, cost and energy per acceptable result match
+the targets by hand; `shared` equals the number of common slugs; without evaluations
+`quality_comparable` is false with a note. Expected cost: the two batches only.
+
+**BATCH-EVAL-02. Evaluation on create.** Level: L2. Identity: approver. Steps: create a
+5-row prompt batch with `evaluation: {"enabled": true}` and start it. Oracle: all five rows
+reach `scored` with a quality, flags, rank and residual; the pass completes with a batch
+review (narrative and lessons); the batch's `cost_usd` excludes `evaluation_cost_usd`;
+the parent run's `delegated_cost_usd` includes both. Expected cost: about $0.50.
+
+**BATCH-EVAL-03. Retroactive evaluation.** Level: L2. Identity: approver. Steps: finalize
+a disclosure batch, `POST /evaluate`, then `POST /evaluate` again with `only_missing` true.
+Oracle: the first pass scores every settled non-infra target; infra targets are skipped;
+the second pass re-judges nothing (same scores, no new evaluator runs); finalize again
+adds the evaluation block to the records. Expected cost: about $0.10 per target.
+
+**BATCH-EVAL-04. A wrong row is flagged.** Level: L3. Identity: approver. Steps: in a
+disclosure batch, include a company whose run collected the wrong fiscal year (or retry a
+target with a wrong known URL). Oracle: that row carries `wrong_year` (or `wrong_entity`),
+a low `right_document` score, the lowest rank and a negative residual. Expected cost:
+about $0.10 per target.
+
+**BATCH-EVAL-05. Budget stop.** Level: L2. Identity: approver. Steps: evaluate a batch with
+`budget_usd` set to about 1.5 x one judge run. Oracle: one or two rows are `scored`, the
+rest `not_evaluated_budget`; the pass cost stays within one judge run of the budget and
+the pass completes. Expected cost: about $0.30.
+
+**BATCH-EVAL-06. Spot checks.** Level: L2. Identity: approver. Steps: after
+BATCH-EVAL-02, mark one row agree, one adjust within 15 points of its score and one
+disagree. Oracle: `spot_checks` is 3 and `agreement` is 2/3; an analyst gets 403; a
+non-scored row is a 409. Expected cost: none.

@@ -379,8 +379,20 @@ def collection_counts(targets: list[BatchTarget], profile: BatchProfile | None =
     return {"total": len(targets), "by_status": by_status, **profile.counts_extra(targets)}
 
 
-def collection_out(c: Batch, targets: list[BatchTarget], runs: dict[uuid.UUID, Run]) -> dict:
+def collection_out(
+    c: Batch,
+    targets: list[BatchTarget],
+    runs: dict[uuid.UUID, Run],
+    evaluation: dict | None = None,
+) -> dict:
+    """The batch as the API serves it. `evaluation` is this batch's entry of
+    `evaluation.evaluation_overview` (its pass cost, status and mean score);
+    omitted, the batch reads as never evaluated."""
+    from tret.batches.scoring import family_key
+
     profile = profile_for(c)
+    evaluation = evaluation or {}
+    batch_settings = c.settings or {}
     return {
         "id": str(c.id),
         "workspace_id": str(c.workspace_id),
@@ -390,7 +402,13 @@ def collection_out(c: Batch, targets: list[BatchTarget], runs: dict[uuid.UUID, R
         "harness_id": str(c.harness_id) if c.harness_id else None,
         "parent_run_id": str(c.parent_run_id) if c.parent_run_id else None,
         "status": c.status,
-        "settings": {k: (c.settings or {}).get(k) for k in profile.settings_keys()},
+        # `evaluation` is echoed only for a batch that has it, so the settings of
+        # every other batch read exactly as they did before evaluation existed.
+        "settings": {
+            k: batch_settings.get(k)
+            for k in profile.settings_keys()
+            if k != "evaluation" or "evaluation" in batch_settings
+        },
         "created_by": str(c.created_by) if c.created_by else None,
         "created_at": _iso(c.created_at),
         "started_at": _iso(c.started_at),
@@ -402,6 +420,10 @@ def collection_out(c: Batch, targets: list[BatchTarget], runs: dict[uuid.UUID, R
         "warnings": list(c.warnings or []),
         "finalize": c.finalize,
         "last_error": (c.settings or {}).get("last_error"),
+        "family_key": family_key(c),
+        "evaluation_cost_usd": float(evaluation.get("cost") or 0),
+        "evaluation_status": evaluation.get("status"),
+        "quality_mean": evaluation.get("quality_mean"),
     }
 
 
@@ -478,10 +500,32 @@ async def start(db: AsyncSession, c: Batch) -> None:
     if await profile.harness_for(db, c) is None:
         raise HTTPException(409, profile.no_harness_error)
     check_headroom(await load_targets(db, [c.id]))
+    batch_id = c.id  # the auto pass may roll the session back, which expires `c`
     c.status = "running"
     c.started_at = _now()
     await db.commit()
-    await _advance(c.id)
+    await _auto_evaluate(db, c)
+    await _advance(batch_id)
+
+
+async def _auto_evaluate(db: AsyncSession, c: Batch) -> None:
+    """A batch created with `evaluation.enabled` gets its pass as it starts, so
+    every target is judged as it settles. A failure here (an unknown judge, say)
+    never stops the batch: it is logged, and the pass can be started by hand."""
+    if not ((c.settings or {}).get("evaluation") or {}).get("enabled"):
+        return
+    from tret.batches import evaluation
+
+    batch_id, user_id = c.id, c.created_by  # captured: a rollback below expires `c`
+    try:
+        # A pass someone already started on the draft batch is the batch's pass.
+        if await evaluation.has_running_pass(db, batch_id):
+            return
+        await evaluation.start_evaluation(db, c, user_id=user_id, record_judge_failure=True)
+    except Exception:  # noqa: BLE001 - evaluation is the extra, the batch is the work
+        log.exception("batch %s could not start its evaluation pass", batch_id)
+        with contextlib.suppress(Exception):
+            await db.rollback()
 
 
 async def pause(db: AsyncSession, c: Batch) -> None:
@@ -809,14 +853,29 @@ async def _settle_target(
             t.finished_at = None
         await db.commit()
         await rollup_parent_cost(db, c)
+        if status in TERMINAL_TARGET_STATUSES:
+            await _notify_evaluation(db, c, t)
         return status
+
+
+async def _notify_evaluation(db: AsyncSession, c: Batch, t: BatchTarget) -> None:
+    """Tell the batch's open evaluation pass, if it has one, that `t` settled.
+    Never blocks or raises into the settle: the pass hears about it in a task."""
+    try:
+        from tret.batches import evaluation
+
+        if await evaluation.pass_is_open(db, c.id):
+            _spawn(evaluation.on_target_settled(c.id, t.id))
+    except Exception:  # noqa: BLE001 - a settle must not fail on evaluation
+        log.exception("could not tell the evaluation about target %s", t.id)
 
 
 async def rollup_parent_cost(db: AsyncSession, c: Batch) -> None:
     """Fold the batch's spend into the run that started it (`parent_run_id`, set
     by the `start_batch` tool) so the parent's `delegated_cost_usd` reflects the
     work it caused. Delta-based and idempotent: `total` is every target's cost
-    (`target_cost`, retries included); `settings["rolled_up_cost_usd"]` is what
+    (`target_cost`, retries included) plus every evaluation pass's
+    (`evaluation.evaluation_cost`); `settings["rolled_up_cost_usd"]` is what
     was already added, so only `total - already` goes onto the parent, in the
     same commit that records the new `already`. Serialised by the launch lock so
     concurrent settles never both add the same delta; a crash between the two
@@ -835,6 +894,10 @@ async def rollup_parent_cost(db: AsyncSession, c: Batch) -> None:
             total = round(
                 sum(target_cost(t, runs.get(t.run_id) if t.run_id else None) for t in targets), 6
             )
+            # The judge's spend is part of what the batch caused.
+            from tret.batches import evaluation
+
+            total = round(total + await evaluation.evaluation_cost(db, c.id), 6)
             already = float((c.settings or {}).get("rolled_up_cost_usd") or 0)
             delta = round(total - already, 6)
             if delta == 0:
@@ -926,6 +989,11 @@ async def create_batch(
     if existing is not None:
         raise HTTPException(409, f"A collection with run_slug '{body.run_slug}' already exists")
     settings = await profile.validate_settings(db, workspace_id, body)
+    from tret.batches import evaluation
+
+    evaluation_settings = evaluation.build_settings(profile.slug, getattr(body, "evaluation", None))
+    if evaluation_settings is not None:
+        settings = {**settings, "evaluation": evaluation_settings}
     project = (
         await db.execute(
             select(Project).where(Project.workspace_id == workspace_id).order_by(Project.created_at)
@@ -1151,6 +1219,14 @@ async def sweep_orphaned_collections(db: AsyncSession) -> int:
                 "last_error": "The server restarted during this collection; resume to continue.",
             }
             await db.commit()
+    try:
+        from tret.batches import evaluation
+
+        await evaluation.sweep_orphaned_evaluations(db)
+    except Exception:  # noqa: BLE001 - boot must not depend on the evaluator
+        log.warning("orphaned-evaluation sweep skipped", exc_info=True)
+        with contextlib.suppress(Exception):
+            await db.rollback()
     return len(to_settle)
 
 

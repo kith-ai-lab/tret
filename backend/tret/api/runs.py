@@ -18,6 +18,7 @@ from tret.api.workspace import WorkspaceContext, current_project, current_worksp
 from tret.db.engine import get_db
 from tret.db.models import Document, Harness, Project, Run, User
 from tret.engine.delegation import COST_CAP_KEY, DELEGATION_DEPTH_KEY, LABEL_KEY
+from tret.engine.evaluation_tools import ENGINE_STAMPED_KEYS
 from tret.engine.events import RunEvent, get_event_bus
 from tret.engine.extensions import get_extension_registry
 from tret.engine.harness import get_harness_engine
@@ -152,10 +153,12 @@ async def create_run(
     # extension's pre-run gate reads as "the parent already holds credit for this" — a
     # negative one would buy extra hops, and a hand-set `_label` would let a
     # caller forge a delegation label onto a run nothing actually delegated to.
+    # The batch keys are the same class: they tell `report_collection_outcome`,
+    # `submit_evaluation` and `submit_batch_review` which row a run belongs to.
     task_input = {
         k: v
         for k, v in body.task_input.items()
-        if k not in (DELEGATION_DEPTH_KEY, COST_CAP_KEY, LABEL_KEY)
+        if k not in (DELEGATION_DEPTH_KEY, COST_CAP_KEY, LABEL_KEY, *ENGINE_STAMPED_KEYS)
     }
     if body.model_override:
         task_input["_model_override"] = body.model_override

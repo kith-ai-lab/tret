@@ -36,6 +36,7 @@ from tret.db.models import Harness, Project, User, Workspace, WorkspaceMember
 from tret.engine.delegation import SUBAGENT_ALLOWED_TOOLS, SUBAGENT_TASK_PROFILE
 from tret.engine.extensions import GateResult, get_extension_registry
 import tret.engine.collection_tools  # noqa: F401 - registers report_collection_outcome
+import tret.engine.evaluation_tools  # noqa: F401 - registers submit_evaluation, submit_batch_review
 import tret.engine.batch_tools  # noqa: F401 - registers start_batch, batch_status, batch_results
 from tret.engine.batch_tools import BATCH_TOOLS, BATCH_TOOLS_SEEDED_KEY
 from tret.net.policy import CLASS_RESEARCH, MODE_OFF, effective_mode
@@ -182,6 +183,7 @@ async def seed_workspace_content(db: AsyncSession, workspace_id, project_id) -> 
     await _seed_default_harnesses(db, workspace_id)
     await seed_subagent_harness(db, workspace_id)
     await ensure_collection_harness(db, workspace_id)
+    await ensure_evaluator_harness(db, workspace_id)
 
 
 async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) -> None:
@@ -490,6 +492,100 @@ async def ensure_collection_harness(db: AsyncSession, workspace_id) -> None:
             loop_config=dict(COLLECTION_HARNESS_LOOP_CONFIG),
         )
     )
+
+
+EVALUATOR_HARNESS_NAME = "Batch Evaluator"
+
+# The Batch Evaluator's tools. `submit_evaluation` and `submit_batch_review`
+# (engine/evaluation_tools.py) refuse in any run that is not an evaluator run, and
+# are on no other harness; it reads attached documents but never reaches the web.
+EVALUATOR_HARNESS_TOOLS = [
+    "read_document",
+    "search_documents",
+    "submit_evaluation",
+    "submit_batch_review",
+]
+
+# Premium on the ceiling so a judge chosen per pass (an Opus-class model by
+# default) passes `_assert_override_within_policy`; the objective only orders the
+# candidates when no judge is named. Every pass names its judge (a pinned
+# override), so the objective's real effect is the reasoning effort the run
+# gets: `quality` means "high", and on 2026-11-06 a Gemini 3.8 Flash judge at
+# "high" spent its whole 4096-token output budget reasoning about ambiguous rows
+# and never called submit_evaluation. `balanced` gives "medium" on standard-tier
+# models, and the output cap leaves room for reasoning plus the tool call.
+EVALUATOR_HARNESS_MODEL_POLICY = {
+    "mode": "auto",
+    "objective": "balanced",
+    "min_cost_tier": "standard",
+    "max_cost_tier": "premium",
+}
+EVALUATOR_HARNESS_LOOP_CONFIG = {
+    "max_iterations": 6,
+    "max_output_tokens": 8192,
+    "temperature": 0.0,
+    "max_cost_usd": 0.5,
+}
+EVALUATOR_DOCTRINE = (
+    "You are the Batch Evaluator. You score one finished run of a batch against a fixed rubric, "
+    "using the evidence pack in the task message and the documents attached to this run.\n"
+    "1. Score only what the evidence shows. Every score cites its evidence: page numbers, a short "
+    "quote, or the field of the evidence pack it rests on. If you cannot tell, give your best "
+    "estimate and set confidence to low.\n"
+    "2. Use the anchors. A 5 and a 1 are defined in the rubric; a 3 is a usable result with a clear "
+    "shortcoming. Do not reward length or effort: a short, precise result beats a long, padded one.\n"
+    "3. An honest gap is a good result. If the task could not be done (the document does not exist, "
+    "or the site refused access) and the run said so specifically, with the URLs it tried, it scores "
+    "well on the criteria that apply. Criteria that do not apply get a null score.\n"
+    "4. You are not told which model produced the run or what it cost, and you must not guess. Judge "
+    "the result, not the writing style.\n"
+    "5. Rate the row's difficulty from 1 to 5, separately from quality: how hard this task is for any "
+    "competent run (1: a standalone report at a known URL; 5: the disclosure is buried in a very long "
+    "filing, or the site blocks automated access).\n"
+    "6. Use only the flags listed in the rubric, and only when the evidence shows them.\n"
+    "7. Open attached documents only to check a specific doubt, such as whether the retained pages "
+    "contain the emissions tables. Use at most four tool calls before submitting.\n"
+    "8. Finish by calling submit_evaluation exactly once. Do not write a report in the chat; the tool "
+    "call is the result."
+)
+
+
+async def ensure_evaluator_harness(db: AsyncSession, workspace_id) -> Harness:
+    """Seed the "Batch Evaluator" harness (`tret/batches/evaluation.py` runs every
+    evaluation pass on it) and return it. Looked up by name like the collector;
+    an existing one is backfilled with any listed tool it lacks and otherwise left
+    as the operator has it. Unlike the collector it is not gated on research
+    egress: it never leaves the deployment. Flushes, does not commit."""
+    existing = (
+        await db.execute(
+            select(Harness)
+            .where(
+                Harness.workspace_id == workspace_id,
+                Harness.name == EVALUATOR_HARNESS_NAME,
+                Harness.is_archived.is_(False),
+            )
+            .order_by(Harness.created_at)
+        )
+    ).scalars().first()
+    if existing is not None:
+        missing = [n for n in EVALUATOR_HARNESS_TOOLS if n not in (existing.tool_names or [])]
+        if missing:
+            existing.tool_names = [*(existing.tool_names or []), *missing]
+            await db.flush()
+        return existing
+    harness = Harness(
+        workspace_id=workspace_id,
+        name=EVALUATOR_HARNESS_NAME,
+        description="Scores finished batch runs against the batch's rubric. Used by Batches; read-only.",
+        task_profile="freeform",
+        model_policy=dict(EVALUATOR_HARNESS_MODEL_POLICY),
+        tool_names=list(EVALUATOR_HARNESS_TOOLS),
+        loop_config=dict(EVALUATOR_HARNESS_LOOP_CONFIG),
+        system_prompt_extra=EVALUATOR_DOCTRINE,
+    )
+    db.add(harness)
+    await db.flush()
+    return harness
 
 
 async def _seed_default_harnesses(db: AsyncSession, workspace_id) -> None:
