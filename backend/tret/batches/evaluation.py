@@ -76,13 +76,26 @@ OUTPUT_TOKENS_PER_TARGET = 1_500
 BUDGET_HEADROOM = 1.5
 BUDGET_FLOOR_USD = 1.0
 CONCURRENCY_MIN, CONCURRENCY_MAX = 1, 4
-EVALUATOR_MAX_ITERATIONS = 6
+# Eight, not six: on cloud (2026-11-09) Gemini 3.8 Flash judges of large embedded
+# annual reports (Barclays, NatWest) spent all six turns checking page-map
+# boundaries with read_document/search_documents and never scored. The evidence
+# pack now caps document reads at three, and a judge that still runs out of turns
+# gets one relaunch that scores from the pack alone (OUT_OF_TURNS_INSTRUCTION).
+EVALUATOR_MAX_ITERATIONS = 8
 # Stamped on the one relaunch of an evaluator run whose judge answered in text.
 RETRY_KEY = "_evaluator_retry"
 RETRY_INSTRUCTION = (
     "\n\nYour previous reply did not call submit_evaluation, so no score was recorded. Call "
     "submit_evaluation now with your scores, difficulty, flags, confidence and rationale, and write "
     "no other reply. Call no other tool first: everything you need is in the evidence pack above."
+)
+# Stamped instead on the one relaunch of an evaluator run that used every turn on
+# document tools without scoring.
+OUT_OF_TURNS_INSTRUCTION = (
+    "\n\nYour previous attempt used all its turns opening documents and recorded no score. Score "
+    "from the evidence pack above now: call submit_evaluation with your scores, difficulty, flags, "
+    "confidence and rationale, and write no other reply. Call no other tool first; where the pack "
+    "leaves a doubt, give your best estimate and set confidence to low."
 )
 REVIEW_MAX_ITERATIONS = 3
 AGREE_WITHIN_POINTS = 15.0
@@ -898,8 +911,9 @@ async def _after_evaluator_run(
 ) -> uuid.UUID | None:
     """Settle a finished evaluator run: book its cost, fail the row when it never
     scored. A judge that finished cleanly but answered in text (no
-    `submit_evaluation`) gets one relaunch with the instruction appended (if the
-    budget has room for it); the id of that run is returned for the caller to start.
+    `submit_evaluation`), or that ran out of turns before scoring, gets one relaunch
+    with an instruction appended (if the budget has room for it); the id of that run
+    is returned for the caller to start.
 
     The row's fate is decided under the pass lock on a fresh read, and only if the
     row still belongs to this run: a retry re-arm or a cancel that committed while the
@@ -922,6 +936,7 @@ async def _after_evaluator_run(
                 and row.evaluated_run_id == target.run_id
             )
             first_try = not (run.task_input or {}).get(RETRY_KEY)
+            out_of_turns = run.status == "failed" and str(run.error or "").startswith("max_iterations")
             if not current:
                 # The target moved on (a retry is under way): hand the row back to the
                 # pump, which arms it for the target's current run once it settles.
@@ -930,7 +945,7 @@ async def _after_evaluator_run(
                     row.attempt, row.evaluated_run_id = target.attempts or 0, target.run_id
             elif (
                 first_try and ev.status == "running" and not core.draining()
-                and run.status in core.SUCCESS_RUN_STATUSES
+                and (run.status in core.SUCCESS_RUN_STATUSES or out_of_turns)
             ):
                 per_target = estimate_evaluation_cost(ev.judge_model, 1)
                 others = len(_state()["unbooked"].get(evaluation_id, set()) - {run_id})
@@ -947,7 +962,8 @@ async def _after_evaluator_run(
                         task_type=run.task_type,
                         task_input={
                             **run.task_input,
-                            "message": str(run.task_input.get("message") or "") + RETRY_INSTRUCTION,
+                            "message": str(run.task_input.get("message") or "")
+                            + (OUT_OF_TURNS_INSTRUCTION if out_of_turns else RETRY_INSTRUCTION),
                             RETRY_KEY: True,
                         },
                         document_ids=list(run.document_ids or []),

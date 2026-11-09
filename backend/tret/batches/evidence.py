@@ -168,7 +168,15 @@ def attached_documents(entries: list[tuple[Any, str]]) -> str:
             "None. No documents are attached to this run, so read_document and "
             "search_documents will fail: score from this pack alone and call submit_evaluation."
         )
-    return "\n".join(f"- {doc.id}: {doc.filename} ({purpose})" for doc, purpose in entries)
+    listed = "\n".join(f"- {doc.id}: {doc.filename} ({purpose})" for doc, purpose in entries)
+    # A turn budget in the task itself: the harness doctrine says the same, but a
+    # seeded harness keeps the doctrine it was created with, and a judge left to
+    # verify every page-map boundary of a 300-page annual report used all its turns
+    # and never scored (cloud, 2026-11-09).
+    return (
+        f"{listed}\n\nOpen these only to check a specific doubt, with at most three reads or searches "
+        "in all, then call submit_evaluation. A run that ends without submit_evaluation records no score."
+    )
 
 
 def assemble(sections: list[tuple[str, str]], *, limit: int = PACK_MAX_CHARS) -> str:

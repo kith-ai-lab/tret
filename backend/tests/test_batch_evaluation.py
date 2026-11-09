@@ -66,7 +66,7 @@ class EvalEngine(PromptEngine):
         self.bad_first: list[dict] = []
         self.tool_errors: list[str] = []
         self.judge_cost = "0.02"
-        self.judge_mode = "ok"  # ok | silent | text_first | hang | review_fails
+        self.judge_mode = "ok"  # ok | silent | text_first | loop_first | hang | review_fails
         self.cancelled: list[uuid.UUID] = []
         self.review_calls = 0
         self.tool_error_text: dict[str, str] = {}
@@ -131,6 +131,10 @@ class EvalEngine(PromptEngine):
             self.docs[label] = list(run.document_ids or [])
             if self.judge_mode == "silent" or (self.judge_mode == "text_first" and not ti.get("_evaluator_retry")):
                 self.retry_messages.append(ti["message"])
+                return
+            if self.judge_mode == "loop_first" and not ti.get("_evaluator_retry"):
+                run.status, run.error = "failed", "max_iterations (8) reached without completion"
+                await db.commit()
                 return
             score = self.scores.get(label, 4)
             good = {
@@ -261,7 +265,7 @@ def test_evaluator_runs_use_the_seeded_harness_and_leave_no_outcomes(client, wor
     assert len(harness) == 1 and len(runs) == 4
     assert all(o == [] for o in outcomes) and stored == []
     assert harness[0].tool_names == list(EVALUATOR_HARNESS_TOOLS)
-    assert harness[0].loop_config["max_iterations"] == 6 and harness[0].model_policy["max_cost_tier"] == "premium"
+    assert harness[0].loop_config["max_iterations"] == 8 and harness[0].model_policy["max_cost_tier"] == "premium"
 
 
 def test_tool_validation_and_refusals(client, world, eng):
@@ -796,6 +800,50 @@ def test_a_judge_that_answers_in_text_is_relaunched_once_and_the_cost_counts(cli
     assert d["evaluation_cost_usd"] == pytest.approx(0.02 * 7)
     first = next(t for t in detail["targets"] if t["label"] == "Acme Ltd")
     assert first["cost_usd"] == pytest.approx(0.04)
+
+
+def test_a_judge_that_runs_out_of_turns_is_relaunched_once_to_score_from_the_pack(client, world, eng):
+    eng.judge_mode = "loop_first"
+    b = make(client, world)
+    d = run_batch(client, b["id"])
+    detail = ev_detail(client, b["id"])
+    assert detail["evaluation"]["counts"]["scored"] == 3 and detail["evaluation"]["counts"]["failed"] == 0
+    assert len(eng.judged) == 6 and sorted(set(eng.judged)) == ["row-1", "row-2", "row-3"]
+    retry = eng.packs["row-1"]
+    assert "used all its turns opening documents" in retry and "Call submit_evaluation now" not in retry
+    assert d["evaluation_cost_usd"] == pytest.approx(0.02 * 7)
+
+
+def test_a_judge_that_runs_out_of_turns_twice_fails_the_row(client, world, eng):
+    eng.judge_mode = "loop_first"
+    real = eng._judge
+
+    async def always_loops(run_id, ti):
+        if ti.get("_batch_review"):
+            return await real(run_id, ti)
+        eng.judged.append(ti["_label"].split(":", 1)[1])
+        async with eng.factory() as db:
+            run = await db.get(Run, run_id)
+            run.status, run.error = "failed", "max_iterations (8) reached without completion"
+            run.cost_usd = Decimal(eng.judge_cost)
+            await db.commit()
+
+    eng._judge = always_loops
+    b = make(client, world)
+    run_batch(client, b["id"])
+    counts = ev_detail(client, b["id"])["evaluation"]["counts"]
+    assert len(eng.judged) == 6 and counts["failed"] == 3 and counts["scored"] == 0, counts
+
+
+def test_the_pack_caps_document_reads_when_documents_are_attached():
+    from tret.batches.evidence import attached_documents
+
+    class Doc:
+        id, filename = "d1", "report.pdf"
+
+    text = attached_documents([(Doc(), "captured source")])
+    assert text.startswith("- d1: report.pdf (captured source)")
+    assert "at most three reads or searches" in text and "call submit_evaluation" in text
 
 
 # ── second review round ──────────────────────────────────────────────────────
