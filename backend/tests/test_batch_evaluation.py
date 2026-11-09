@@ -71,6 +71,7 @@ class EvalEngine(PromptEngine):
         self.review_calls = 0
         self.tool_error_text: dict[str, str] = {}
         self.retry_messages: list[str] = []
+        self.iteration_caps: dict[str, list] = {}
         self.hang_review = False
 
     async def execute(self, run_id):
@@ -127,6 +128,7 @@ class EvalEngine(PromptEngine):
                 )
                 return
             self.judged.append(label)
+            self.iteration_caps.setdefault(label, []).append(ti.get("_max_iterations"))
             self.packs[label] = ti["message"]
             self.docs[label] = list(run.document_ids or [])
             if self.judge_mode == "silent" or (self.judge_mode == "text_first" and not ti.get("_evaluator_retry")):
@@ -810,7 +812,8 @@ def test_a_judge_that_runs_out_of_turns_is_relaunched_once_to_score_from_the_pac
     assert detail["evaluation"]["counts"]["scored"] == 3 and detail["evaluation"]["counts"]["failed"] == 0
     assert len(eng.judged) == 6 and sorted(set(eng.judged)) == ["row-1", "row-2", "row-3"]
     retry = eng.packs["row-1"]
-    assert "used all its turns opening documents" in retry and "Call submit_evaluation now" not in retry
+    assert "used all its turns and recorded no score" in retry and "Call submit_evaluation now" not in retry
+    assert eng.iteration_caps["row-1"] == [evaluation.EVALUATOR_MAX_ITERATIONS, evaluation.RELAUNCH_MAX_ITERATIONS]
     assert d["evaluation_cost_usd"] == pytest.approx(0.02 * 7)
 
 

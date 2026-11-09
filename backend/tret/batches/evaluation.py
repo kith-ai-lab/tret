@@ -92,11 +92,16 @@ RETRY_INSTRUCTION = (
 # Stamped instead on the one relaunch of an evaluator run that used every turn on
 # document tools without scoring.
 OUT_OF_TURNS_INSTRUCTION = (
-    "\n\nYour previous attempt used all its turns opening documents and recorded no score. Score "
+    "\n\nYour previous attempt used all its turns and recorded no score. Score "
     "from the evidence pack above now: call submit_evaluation with your scores, difficulty, flags, "
     "confidence and rationale, and write no other reply. Call no other tool first; where the pack "
     "leaves a doubt, give your best estimate and set confidence to low."
 )
+# Turn limit of a relaunch: room for the score and one stray call, no more. A
+# relaunch inherits the documents of the run it replaces, so without this a judge
+# that ignores "call no other tool first" could spend a second full run on exactly
+# the reports that are expensive to read, past what the budget projection counted.
+RELAUNCH_MAX_ITERATIONS = 3
 REVIEW_MAX_ITERATIONS = 3
 AGREE_WITHIN_POINTS = 15.0
 CARDS_MAX_CHARS = 12_000
@@ -965,6 +970,7 @@ async def _after_evaluator_run(
                             "message": str(run.task_input.get("message") or "")
                             + (OUT_OF_TURNS_INSTRUCTION if out_of_turns else RETRY_INSTRUCTION),
                             RETRY_KEY: True,
+                            "_max_iterations": RELAUNCH_MAX_ITERATIONS,
                         },
                         document_ids=list(run.document_ids or []),
                         created_by=run.created_by,
