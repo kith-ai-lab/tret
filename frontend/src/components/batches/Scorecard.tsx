@@ -6,7 +6,7 @@ import { useConfirm } from '../shared/ConfirmDialog'
 import { formatCost } from '../shared/format'
 import { Modal } from '../shared/Modal'
 import {
-  DEFAULT_JUDGE,
+  JUDGE_PLACEHOLDER,
   dash,
   fmtDuration,
   fmtPct,
@@ -275,7 +275,10 @@ function EvaluateDialog({
   const [budget, setBudget] = useState<string | null>(null)
   const [onlyMissing, setOnlyMissing] = useState(true)
 
-  const judgeValue = judge ?? pass?.judge_model ?? DEFAULT_JUDGE
+  // Blank means auto: the server resolves its preference list against this
+  // workspace's keys. A hardcoded fallback here sent a model the deployment may
+  // have no key for (cloud has no Anthropic key), which the server rejects.
+  const judgeValue = judge ?? pass?.judge_model ?? ''
   // No prefill: the previous pass's estimate leaves out the rows it skipped (a
   // stopped pass covers only what it judged), so a prefilled budget would stop
   // the new pass early. Blank lets the server size the budget for this pass.
@@ -321,7 +324,7 @@ function EvaluateDialog({
         <input
           type="text"
           value={judgeValue}
-          placeholder={DEFAULT_JUDGE}
+          placeholder={JUDGE_PLACEHOLDER}
           onChange={(e) => setJudge(e.target.value)}
         />
       </div>

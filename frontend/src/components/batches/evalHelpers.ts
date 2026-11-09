@@ -5,7 +5,9 @@ import type {
   TargetEvaluationOutlier,
 } from '../../api/client'
 
-export const DEFAULT_JUDGE = 'anthropic/claude-opus-5-5'
+/** Shown in an empty judge field. A blank judge is sent as null, and the server then
+ * takes the first model in TRET_BATCH_EVALUATOR_JUDGE whose provider has a key. */
+export const JUDGE_PLACEHOLDER = 'auto: first available judge'
 
 /** "—" for null/undefined/NaN. */
 export function dash(v: number | null | undefined, fmt: (n: number) => string): string {

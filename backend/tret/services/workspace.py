@@ -521,7 +521,7 @@ EVALUATOR_HARNESS_MODEL_POLICY = {
     "max_cost_tier": "premium",
 }
 EVALUATOR_HARNESS_LOOP_CONFIG = {
-    "max_iterations": 6,
+    "max_iterations": 8,
     "max_output_tokens": 8192,
     "temperature": 0.0,
     "max_cost_usd": 0.5,

@@ -8,7 +8,7 @@ import {
   type BatchRubricCriterion,
   type RubricApplies,
 } from '../../api/client'
-import { DEFAULT_JUDGE, keyFromLabel } from './evalHelpers'
+import { JUDGE_PLACEHOLDER, keyFromLabel } from './evalHelpers'
 
 const APPLIES: RubricApplies[] = ['all', 'written', 'gap']
 
@@ -96,7 +96,7 @@ export function useEvaluationForm(open: boolean, profile: 'disclosure' | 'prompt
               <input
                 type="text"
                 value={judge}
-                placeholder={DEFAULT_JUDGE}
+                placeholder={JUDGE_PLACEHOLDER}
                 onChange={(e) => setJudge(e.target.value)}
               />
             </div>
