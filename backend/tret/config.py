@@ -309,6 +309,16 @@ class Settings(BaseSettings):
     # check; it is skipped on the s3 backend (tret/batches/core.py).
     batches_min_free_mb_per_target: int = 50
 
+    # ── batch evaluator (tret/batches/evaluation.py) ──────────────────────────
+    # The judge model a batch's evaluation pass uses unless the request names one,
+    # as an ordered, comma-separated preference list: the first model in the catalog
+    # whose provider has a key. Fixed for the whole pass so scores are comparable.
+    batch_evaluator_judge: str = "anthropic/claude-opus-5-5,openrouter/google/gemini-3.8-flash"
+    # Evaluator runs executing at once, process-wide (clamped 1..4 in code).
+    batch_evaluator_concurrency: int = 2
+    # Wall-clock limit (seconds) for one evaluator run.
+    batch_evaluator_run_timeout_seconds: int = 300
+
     # ── database pool (tret/db/engine.py) ─────────────────────────────────────
     # Stated rather than inherited from SQLAlchemy (whose default is 5 + 10
     # overflow) because parallel delegation makes the pool load-bearing: every

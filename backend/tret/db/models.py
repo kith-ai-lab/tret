@@ -26,6 +26,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     false,
+    text,
 )
 from sqlalchemy import TIMESTAMP
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
@@ -1119,3 +1120,98 @@ class BatchTarget(Base):
 
 
 CollectionTarget = BatchTarget  # the disclosure collection's original name
+
+
+class BatchEvaluation(Base):
+    """One evaluation pass over a batch (`tret/batches/evaluation.py`): a frozen
+    rubric, a fixed judge model and a budget. The batch's current pass is its
+    latest one that was not cancelled or failed. `summary` is the batch review the
+    evaluator wrote over the whole pass (`narrative`, `consistency_notes`,
+    `lessons`); `cost_usd` is the evaluator runs' spend, never the targets'."""
+
+    __tablename__ = "batch_evaluations"
+    __table_args__ = (
+        Index("ix_batch_evaluations_collection_created", "collection_id", "created_at"),
+        # At most one running pass per batch, whatever races to start it.
+        Index(
+            "uq_batch_evaluations_one_running",
+            "collection_id",
+            unique=True,
+            postgresql_where=text("status = 'running'"),
+            sqlite_where=text("status = 'running'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    collection_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id"), nullable=False)
+    family_key: Mapped[str] = mapped_column(Text, nullable=False)
+    rubric_key: Mapped[str] = mapped_column(Text, nullable=False)
+    rubric_version: Mapped[str] = mapped_column(Text, nullable=False)
+    rubric: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    judge_model: Mapped[str] = mapped_column(Text, nullable=False)
+    # running | completed | cancelled | failed
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="running")
+    budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    summary: Mapped[dict | None] = mapped_column(JSONB)
+    # The batch-review run, recorded when it is launched: `submit_batch_review`
+    # accepts a call only from that run.
+    summary_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    # Ids of the evaluator runs whose cost is already on `cost_usd`, so booking
+    # (normal end, cancel, restart sweep) is idempotent.
+    booked_runs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = created_at_col()
+    finished_at: Mapped[datetime | None] = mapped_column()
+
+
+class TargetEvaluation(Base):
+    """One target's score within a `BatchEvaluation`. `attempt` and
+    `evaluated_run_id` say which run of the target was judged (a retry makes the
+    row stale until it is re-armed). `scores` is `{criterion: {score, evidence}}`;
+    `relative` and `review` are the pass-level standing and the human spot check."""
+
+    __tablename__ = "target_evaluations"
+    __table_args__ = (
+        UniqueConstraint("evaluation_id", "target_id"),
+        Index("ix_target_evaluations_history", "workspace_id", "row_key", "rubric_key", "family_key"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("batch_evaluations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    collection_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id"), nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collection_targets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    row_key: Mapped[str] = mapped_column(Text, nullable=False)
+    rubric_key: Mapped[str] = mapped_column(Text, nullable=False)
+    family_key: Mapped[str] = mapped_column(Text, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    evaluated_run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    evaluator_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), index=True
+    )
+    # pending | running | scored | skipped | failed | not_evaluated_budget
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    skip_reason: Mapped[str | None] = mapped_column(Text)
+    scores: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    quality: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    difficulty: Mapped[int | None] = mapped_column(SmallInteger)
+    flags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    confidence: Mapped[str | None] = mapped_column(Text)
+    rationale: Mapped[str | None] = mapped_column(Text)
+    relative: Mapped[dict | None] = mapped_column(JSONB)
+    review: Mapped[dict | None] = mapped_column(JSONB)
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+    finished_at: Mapped[datetime | None] = mapped_column()

@@ -47,7 +47,8 @@ from tret.batches.core import (
     target_cost,
 )
 from tret.batches.profiles import RegisterError, register_profile
-from tret.db.models import Batch, BatchTarget, Finding, Harness, Run
+from tret.batches.rubrics import EvaluationIn
+from tret.db.models import Batch, BatchTarget, Document, Finding, Harness, Run
 from tret.services import connections as connections_service
 
 RECORD_FILES = ("manifest.json", "results.jsonl", "results_summary.md")
@@ -58,6 +59,7 @@ MAX_CELL_CHARS = 20_000
 MAX_LABEL_CHARS = 200
 SLUG_MAX = 40
 ANSWER_CELL_CHARS = 160
+ANSWER_EVIDENCE_CHARS = 8000
 # `review_schema` value meaning "pause at a draft finding of any type".
 ANY_REVIEW = "any"
 DEFAULT_REVIEW_SCHEMA = ANY_REVIEW
@@ -84,6 +86,8 @@ class CreatePromptBatchBody(BaseModel):
     write_root: str | None = None
     model_override: str | None = Field(default=None, max_length=200)
     max_iterations: int | None = Field(default=None, ge=1, le=50)
+    # Optional batch evaluation (tret/batches/evaluation.py); absent = off.
+    evaluation: EvaluationIn | None = None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -509,7 +513,59 @@ class PromptProfile:
             "model_override",
             "max_iterations",
             "columns",
+            "evaluation",
         )
+
+    async def evaluation_evidence(
+        self,
+        db: AsyncSession,
+        batch: Batch,
+        target: BatchTarget,
+        run: Run | None,
+        findings: list[Finding],
+        *,
+        rubric: dict | None = None,
+    ) -> tuple[str, list[uuid.UUID]]:
+        """The blind evidence pack for one prompt target (`tret/batches/evidence.py`)
+        and the run's own documents to attach to the evaluator run."""
+        from tret.batches import evidence, scoring
+        from tret.batches.rubrics import default_rubric, rubric_text
+
+        rubric = rubric or default_rubric("prompt")
+        row_class = scoring.target_class(target)
+        template = (batch.settings or {}).get("template") or ""
+        task = render_template(template, target.task_input or {})
+        outcome = target.outcome or {}
+        answer = evidence.scrub(str(outcome.get("answer") or ""), run)
+        finding = outcome.get("finding")
+        error = evidence.clean_error(summarise_run_error(target.error), run) if target.error else "none"
+        result = [
+            f"Target status: {target.status} (class: {row_class})",
+            f"Error: {error}",
+            "Answer of the run:",
+            answer[:ANSWER_EVIDENCE_CHARS] + ("\n[answer cut]" if len(answer) > ANSWER_EVIDENCE_CHARS else "")
+            if answer
+            else "(no answer text)",
+        ]
+        if isinstance(finding, dict):
+            payload = json.dumps(finding.get("payload"), ensure_ascii=False, default=str)
+            result += [
+                f"Finding proposed by the run: {finding.get('schema_slug')} ({finding.get('status')})",
+                evidence.clip(evidence.scrub(payload, run), 1500),
+            ]
+        docs: list[Document] = []
+        for doc_id in (run.document_ids or [] if run is not None else [])[: evidence.MAX_ATTACHED_DOCUMENTS]:
+            doc = await db.get(Document, doc_id)
+            if doc is not None:
+                docs.append(doc)
+        sections = [
+            ("Rubric", rubric_text(rubric, row_class)),
+            ("Task", task),
+            ("Result", "\n".join(result)),
+            ("Tool-call trail", evidence.run_digest(run) if run is not None else "(no run)"),
+            ("Attached documents", evidence.attached_documents([(d, "given to the run") for d in docs])),
+        ]
+        return evidence.assemble(sections), [d.id for d in docs]
 
     # ── records ────────────────────────────────────────────────────────────
     async def records(
@@ -519,6 +575,9 @@ class PromptProfile:
         targets = await load_targets(db, [batch.id])
         runs = await load_runs(db, targets)
         settings = batch.settings or {}
+        from tret.batches import evaluation as evaluation_service
+
+        scored = await evaluation_service.records_context(db, batch)  # None without a scored pass
         results = [
             {
                 "position": t.position,
@@ -533,6 +592,7 @@ class PromptProfile:
                 "error": summarise_run_error(t.error),
                 "outcome": t.outcome,
                 "task_input": dict(t.task_input or {}),
+                **({"evaluation": scored.by_target.get(t.id)} if scored is not None else {}),
             }
             for t in targets
         ]
@@ -556,32 +616,44 @@ class PromptProfile:
             "files": list(self.RECORD_FILES),
             "counts": {"total": counts["total"], "by_status": {k: v for k, v in counts["by_status"].items() if v}},
             "totals": {"cost_usd": total_cost},
+            **({"evaluation": scored.manifest} if scored is not None else {}),
         }
         return {
             "manifest": manifest,
             "results": results,
-            "results_summary": self._summary(batch, results, counts, total_cost, generated),
+            "results_summary": self._summary(batch, results, counts, total_cost, generated, scored is not None),
         }
 
     @staticmethod
-    def _summary(batch: Batch, results: list[dict], counts: dict, total_cost: float, generated: datetime) -> str:
+    def _summary(
+        batch: Batch, results: list[dict], counts: dict, total_cost: float, generated: datetime,
+        scored: bool = False,
+    ) -> str:
         lines = [
             f"# {batch.name}",
             "",
             f"Batch run `{batch.run_slug}`, generated {generated.strftime('%Y-%m-%d %H:%M UTC')}.",
             "",
-            "| # | Label | Status | Cost | Answer |",
-            "|---:|---|---|---:|---|",
+            "| # | Label | Status | Cost | Score | Answer |" if scored else "| # | Label | Status | Cost | Answer |",
+            "|---:|---|---|---:|---:|---|" if scored else "|---:|---|---|---:|---|",
         ]
         for r in results:
             answer = ((r["outcome"] or {}).get("answer") or r["error"] or "")
             answer = _escape_cell(answer)
             if len(answer) > ANSWER_CELL_CHARS:
                 answer = answer[: ANSWER_CELL_CHARS - 3].rstrip() + "..."
-            lines.append(
-                f"| {r['position']} | {_escape_cell(r['label'])} | {r['status']} "
-                f"| ${r['cost_usd']:.4f} | {answer} |"
-            )
+            if scored:
+                quality = (r.get("evaluation") or {}).get("quality")
+                score = "" if quality is None else f"{quality:.0f}"
+                lines.append(
+                    f"| {r['position']} | {_escape_cell(r['label'])} | {r['status']} "
+                    f"| ${r['cost_usd']:.4f} | {score} | {answer} |"
+                )
+            else:
+                lines.append(
+                    f"| {r['position']} | {_escape_cell(r['label'])} | {r['status']} "
+                    f"| ${r['cost_usd']:.4f} | {answer} |"
+                )
         lines += [
             "",
             "## Totals",

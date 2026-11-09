@@ -52,6 +52,7 @@ from tret.batches.core import (
     written_files_latest,
 )
 from tret.batches.profiles import RegisterError, register_profile
+from tret.batches.rubrics import EvaluationIn
 from tret.config import get_settings
 from tret.db.models import (
     Approval,
@@ -151,6 +152,8 @@ class CreateCollectionBody(BaseModel):
     auto_write: bool = True
     model_override: str | None = Field(default=None, max_length=200)
     max_iterations: int | None = Field(default=None, ge=1, le=50)
+    # Optional batch evaluation (tret/batches/evaluation.py); absent = off.
+    evaluation: EvaluationIn | None = None
 
 
 
@@ -405,6 +408,16 @@ def parse_register(
 # ══════════════════════════════════════════════════════════════════════════
 # prompt
 # ══════════════════════════════════════════════════════════════════════════
+def doctrine_text(fy: Any) -> str:
+    """The five numbered doctrine points of the collection prompt (also what the
+    batch evaluator's evidence pack tells the judge the run was held to)."""
+    return f"""1. Collect the FY{fy} sustainability disclosure where it is published. If only an earlier period is available, collect the latest available period; report fy2025_gap=true when the period collected is not FY{fy}, with the period actually collected. Never switch to a later year because a live reporting hub has moved on.
+2. Prefer issuer sources, then official regulatory or report repositories (SEC EDGAR, FCA National Storage Mechanism, ESEF portals). A third-party copy is a last resort: report it as a substitution with the reason.
+3. Retain the actual disclosure (a standalone sustainability report, or the sustainability section of an annual or management report), the related assurance statement, substantive data appendices, and material explicitly incorporated by reference. General financial statements stay out. A marketing summary is not a disclosure. Distinguish an ESRS sustainability statement from voluntary reporting and record the issuer's stated framework without inferring mandatory status.
+4. Page ranges come only from pages you have read in the captured document; never infer them. For an embedded disclosure, map the physical PDF pages of the sustainability section, its assurance and incorporated sections, and exclude the rest.
+5. Record dates separately: reporting period start and end, publication date with its basis, assurance date. Unknown stays unknown."""
+
+
 def build_prompt(collection: Batch, target: BatchTarget, total: int) -> str:
     fy = target.fiscal_year
     urls = "\n".join(f"  {u}" for u in (target.known_urls or [])) if target.known_urls else "none"
@@ -424,11 +437,7 @@ TARGET
 - Notes: {target.notes or "none"}
 
 DOCTRINE (from the Kith Climate collection briefing; follow it exactly)
-1. Collect the FY{fy} sustainability disclosure where it is published. If only an earlier period is available, collect the latest available period; report fy2025_gap=true when the period collected is not FY{fy}, with the period actually collected. Never switch to a later year because a live reporting hub has moved on.
-2. Prefer issuer sources, then official regulatory or report repositories (SEC EDGAR, FCA National Storage Mechanism, ESEF portals). A third-party copy is a last resort: report it as a substitution with the reason.
-3. Retain the actual disclosure (a standalone sustainability report, or the sustainability section of an annual or management report), the related assurance statement, substantive data appendices, and material explicitly incorporated by reference. General financial statements stay out. A marketing summary is not a disclosure. Distinguish an ESRS sustainability statement from voluntary reporting and record the issuer's stated framework without inferring mandatory status.
-4. Page ranges come only from pages you have read in the captured document; never infer them. For an embedded disclosure, map the physical PDF pages of the sustainability section, its assurance and incorporated sections, and exclude the rest.
-5. Record dates separately: reporting period start and end, publication date with its basis, assurance date. Unknown stays unknown.
+{doctrine_text(fy)}
 
 PROCEDURE
 a. Open the known URLs, or search with a few precise queries ("{company} sustainability report {fy} pdf", "{company} annual report {fy} sustainability statement"). Do not loop on searches: if the document cannot be reached, report it.
@@ -702,6 +711,9 @@ async def build_records(
         for u in (await db.execute(select(User).where(User.id.in_(list(approver_ids))))).scalars():
             approvers[u.id] = u.display_name
     settings = c.settings or {}
+    from tret.batches import evaluation as evaluation_service
+
+    scored = await evaluation_service.records_context(db, c)  # None without a scored pass
 
     companies = []
     retained_docs = retained_pages = 0
@@ -798,6 +810,7 @@ async def build_records(
                 "attempts": t.attempts or 0,
                 "history": list(t.history or []),
                 "documents": documents,
+                **({"evaluation": scored.by_target.get(t.id)} if scored is not None else {}),
             }
         )
         packaging_rows.append(
@@ -832,6 +845,7 @@ async def build_records(
         "completeness_definition": COMPLETENESS_DEFINITION,
         "companies": companies,
         "additional_artifacts": [],
+        **({"evaluation": scored.manifest} if scored is not None else {}),
         "execution": "execution.json",
         "exception_log": "exception_log.json",
         "integrity": "SHA256SUMS.txt",
@@ -936,7 +950,7 @@ async def build_records(
         "execution": execution,
         "exception_log": exception_log,
         "target_register": target_register,
-        "results_summary": _results_summary(c, targets, maps_by_run, generated),
+        "results_summary": _results_summary(c, targets, maps_by_run, generated, scored),
     }
     # Pilot style: every written package file plus the other five record files
     # exactly as `record_files` serializes them, so the sums verify the upload.
@@ -978,6 +992,7 @@ def _results_summary(
     targets: list[BatchTarget],
     maps_by_run: dict[uuid.UUID, list[Finding]],
     generated: datetime,
+    scored: Any = None,
 ) -> str:
     lines = [
         f"# {c.name}",
@@ -994,7 +1009,10 @@ def _results_summary(
         if not in_market:
             lines += ["No targets.", ""]
             continue
-        lines += ["| Company | Status | Retained pages | Gap / note |", "|---|---|---:|---|"]
+        if scored is None:
+            lines += ["| Company | Status | Retained pages | Gap / note |", "|---|---|---:|---|"]
+        else:
+            lines += ["| Company | Status | Retained pages | Score | Gap / note |", "|---|---|---:|---:|---|"]
         for t in in_market:
             maps = _relevant_maps(maps_by_run.get(t.run_id, []) if t.run_id else [])
             pages = sum(
@@ -1013,7 +1031,12 @@ def _results_summary(
                 note = note[:200]
             note = note or ("FY gap" if outcome.get("fy2025_gap") else "")
             note = note.replace("|", "/").replace("\n", " ")
-            lines.append(f"| {t.company.replace('|', '/')} | {t.status} | {pages or ''} | {note} |")
+            if scored is None:
+                lines.append(f"| {t.company.replace('|', '/')} | {t.status} | {pages or ''} | {note} |")
+            else:
+                quality = (scored.by_target.get(t.id) or {}).get("quality")
+                score = "" if quality is None else f"{quality:.0f}"
+                lines.append(f"| {t.company.replace('|', '/')} | {t.status} | {pages or ''} | {score} | {note} |")
         lines.append("")
     by_status = counts["by_status"]
     lines += [
@@ -1024,6 +1047,154 @@ def _results_summary(
         "",
     ]
     return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# evaluation evidence
+# ══════════════════════════════════════════════════════════════════════════
+EXCERPT_HEAD_CHARS = 1200
+EXCERPT_BOUNDARY_CHARS = 400
+TEXT_ROLES = ("layout_text", "raw_text", "ocr_text")
+
+
+async def _document_text(db: AsyncSession, document_id: Any) -> tuple[Document | None, str | None]:
+    try:
+        doc = await db.get(Document, uuid.UUID(str(document_id)))
+    except (ValueError, TypeError):
+        return None, None
+    if doc is None:
+        return None, None
+    if doc.extracted_text is not None:
+        return doc, doc.extracted_text
+    if (doc.content_type or "").startswith("text/") or (doc.filename or "").endswith((".md", ".txt")):
+        try:
+            return doc, (await document_bytes(doc)).decode("utf-8", errors="replace")
+        except (OSError, FileNotFoundError):
+            return doc, None
+    return doc, None
+
+
+def _page_excerpt(text: str, page: Any, chars: int) -> str | None:
+    """The first `chars` characters after a `## Page N` marker, or None."""
+    try:
+        n = int(page)
+    except (TypeError, ValueError):
+        return None
+    match = re.search(rf"^## Page {n}\b[^\n]*\n", text, flags=re.MULTILINE)
+    if match is None:
+        return None
+    return " ".join(text[match.end() : match.end() + chars].split())
+
+
+async def build_evidence(
+    db: AsyncSession,
+    batch: Batch,
+    target: BatchTarget,
+    run: Run | None,
+    findings: list[Finding],
+    rubric: dict | None = None,
+) -> tuple[str, list[uuid.UUID]]:
+    """The blind evidence pack for one disclosure target (see
+    `tret/batches/evidence.py`) and the documents to attach to the evaluator run:
+    each map's source document and its retained-text package document."""
+    from tret.batches import evidence, scoring
+    from tret.batches.rubrics import default_rubric, rubric_text
+
+    rubric = rubric or default_rubric("disclosure")
+    row_class = scoring.target_class(target)
+    fy = target.fiscal_year
+    urls = "; ".join(target.known_urls or []) or "none"
+    task = "\n".join(
+        [
+            f"- Company: {target.company}",
+            f"- Market: {target.market}; domicile: {target.domicile_country or 'not recorded'}; "
+            f"sector: {target.sector or 'not recorded'}; category: {target.category or 'not recorded'}",
+            f"- Expected form: {target.expected_form}",
+            f"- Fiscal year wanted: FY{fy}",
+            f"- Known URLs: {urls}",
+            f"- Notes: {target.notes or 'none'}",
+            "",
+            f"The run was held to this doctrine:\n{doctrine_text(fy)}",
+        ]
+    )
+    error = evidence.clean_error(summarise_run_error(target.error), run) if target.error else "none"
+    result = "\n".join(
+        [
+            f"Target status: {target.status} (class: {row_class})",
+            f"Error: {error}",
+            "Outcome reported by the run:",
+            evidence.render_outcome(target.outcome),
+        ]
+    )
+
+    attached: list[tuple[Document, str]] = []
+    seen_docs: set[uuid.UUID] = set()
+    excerpts: list[str] = []
+    map_blocks: list[str] = []
+    for f in _relevant_maps(findings):
+        payload = f.payload or {}
+        m = payload.get("map") or {}
+        source = payload.get("source") or {}
+        package = _package_of(f) or {}
+        source_doc, source_text = await _document_text(db, source.get("document_id"))
+        meta = (source_doc.meta or {}) if source_doc is not None else {}
+        lines = [
+            f"### Map {payload.get('stem')}",
+            f"- role: {m.get('role')}; scope: {m.get('scope')}; decision: {f.status}",
+            f"- source file: {source.get('filename') or (source_doc.filename if source_doc else None)}; "
+            f"url: {meta.get('url') or source.get('url')}; "
+            f"sha256: {(source_doc.sha256 if source_doc else None) or source.get('sha256')}; "
+            f"source pages: {source.get('page_count')}",
+            f"- keep ranges (page numbers): {json.dumps(m.get('keep_ranges'))}",
+            f"- packaging: {package.get('status') or 'not packaged'}; "
+            f"retained pages: {package.get('retained_page_count')}",
+        ]
+        if m.get("review_note"):
+            lines.append(f"- proposer's note: {evidence.clip(m['review_note'], 400)}")
+        if package.get("limitations"):
+            lines.append(f"- limitations: {evidence.clip('; '.join(map(str, package['limitations'])), 500)}")
+        record = await _package_record(db, package) if package.get("status") == "packaged" else None
+        verification = (record or {}).get("verification") or {}
+        if verification.get("checked"):
+            lines.append(f"- verification: {evidence.clip('; '.join(map(str, verification['checked'])), 500)}")
+        map_blocks.append("\n".join(lines))
+
+        if source_doc is not None and source_doc.id not in seen_docs:
+            seen_docs.add(source_doc.id)
+            attached.append((source_doc, f"source of {payload.get('stem')}"))
+        retained_doc = retained_text = None
+        for role in TEXT_ROLES:
+            entry = next((d for d in package.get("documents") or [] if d.get("role") == role), None)
+            if entry is not None:
+                retained_doc, retained_text = await _document_text(db, entry.get("document_id"))
+                if retained_doc is not None:
+                    break
+        if retained_doc is not None and retained_doc.id not in seen_docs:
+            seen_docs.add(retained_doc.id)
+            attached.append((retained_doc, f"retained text of {payload.get('stem')}"))
+        if retained_text:
+            excerpts.append(
+                f"### Retained text of {payload.get('stem')} (first {EXCERPT_HEAD_CHARS} characters)\n"
+                + " ".join(retained_text[: EXCERPT_HEAD_CHARS * 2].split())[:EXCERPT_HEAD_CHARS]
+            )
+        if source_text:
+            for start_page, end_page in [r for r in (m.get("keep_ranges") or []) if isinstance(r, (list, tuple)) and len(r) == 2]:
+                for label, page in (("first retained page", start_page), ("last retained page", end_page)):
+                    snippet = _page_excerpt(source_text, page, EXCERPT_BOUNDARY_CHARS)
+                    if snippet:
+                        excerpts.append(f"### {payload.get('stem')}: {label} (page {page})\n{snippet}")
+    attached = attached[: evidence.MAX_ATTACHED_DOCUMENTS]
+
+    sections = [
+        ("Rubric", rubric_text(rubric, row_class)),
+        ("Task", task),
+        ("Result", result),
+        ("Page maps", "\n\n".join(map_blocks) or "(the run proposed no page map)"),
+        ("Tool-call trail", evidence.run_digest(run) if run is not None else "(no run)"),
+        ("Attached documents", evidence.attached_documents(attached)),
+        ("Excerpts", "\n\n".join(excerpts) or "(none)"),
+    ]
+    return evidence.assemble(sections), [d.id for d, _ in attached]
 
 
 async def _collector_harness(db: AsyncSession, workspace_id: uuid.UUID) -> Harness | None:
@@ -1158,6 +1329,18 @@ class DisclosureProfile:
                 m["failed"] += 1
         return {"by_market": by_market}
 
+    async def evaluation_evidence(
+        self,
+        db: AsyncSession,
+        batch: Batch,
+        target: BatchTarget,
+        run: Run | None,
+        findings: list[Finding],
+        *,
+        rubric: dict | None = None,
+    ) -> tuple[str, list[uuid.UUID]]:
+        return await build_evidence(db, batch, target, run, findings, rubric)
+
     def settings_keys(self) -> tuple[str, ...]:
         return (
             "target_slug",
@@ -1168,6 +1351,7 @@ class DisclosureProfile:
             "auto_write",
             "model_override",
             "max_iterations",
+            "evaluation",
         )
 
     async def records(self, db: AsyncSession, batch: Batch, *, finalized_at: datetime | None = None) -> dict:

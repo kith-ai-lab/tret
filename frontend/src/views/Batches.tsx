@@ -15,6 +15,16 @@ import {
   type DisclosureTargetOutcome,
 } from '../api/client'
 import { DisclosurePanels } from '../components/batches/DisclosurePanels'
+import { EvaluationDrawer } from '../components/batches/EvaluationDrawer'
+import { useEvaluationForm } from '../components/batches/EvaluationSection'
+import {
+  flagLabel,
+  fmtScore,
+  fmtSigned,
+  gateScoreSummary,
+  suggestedSpotChecks,
+} from '../components/batches/evalHelpers'
+import { Scorecard } from '../components/batches/Scorecard'
 import { PendingReviews } from '../components/batches/PendingReviews'
 import { WrittenFileViewer } from '../components/batches/WrittenFileViewer'
 import { usePromptBatchForm } from '../components/batches/PromptBatchForm'
@@ -37,7 +47,7 @@ const PROFILE_LABEL: Record<string, string> = {
 }
 
 function isLive(c: Batch): boolean {
-  if (c.status === 'running') return true
+  if (c.status === 'running' || c.evaluation_status === 'running') return true
   return (c.targets ?? []).some((t) => t.status === 'running' || t.status === 'packaging')
 }
 
@@ -55,6 +65,9 @@ function countOf(c: Batch, ...keys: (keyof Batch['counts']['by_status'])[]): num
 function BatchList() {
   const navigate = useNavigate()
   const [creating, setCreating] = useState(false)
+  const [selected, setSelected] = useState<string[]>([])
+  const toggleSelected = (id: string) =>
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   const listQuery = useQuery({
     queryKey: ['batches'],
     queryFn: api.listBatches,
@@ -74,9 +87,19 @@ function BatchList() {
             over the rows of a CSV.
           </div>
         </div>
-        <button className="btn btn-primary" onClick={() => setCreating(true)}>
-          New batch
-        </button>
+        <div className="row" style={{ gap: 8 }}>
+          <button
+            className="btn"
+            disabled={selected.length !== 2}
+            title={selected.length === 2 ? undefined : 'Select exactly two batches to compare'}
+            onClick={() => navigate(`/batches/compare?a=${selected[0]}&b=${selected[1]}`)}
+          >
+            Compare
+          </button>
+          <button className="btn btn-primary" onClick={() => setCreating(true)}>
+            New batch
+          </button>
+        </div>
       </div>
 
       {listQuery.isLoading ? (
@@ -92,6 +115,7 @@ function BatchList() {
           <table className="mono-table">
             <thead>
               <tr>
+                <th />
                 <th>Name</th>
                 <th>Profile</th>
                 <th>Run slug</th>
@@ -102,6 +126,7 @@ function BatchList() {
                 <th className="num">Gap</th>
                 <th className="num">Failed</th>
                 <th className="num">Cost</th>
+                <th className="num">Score</th>
                 <th>Created</th>
               </tr>
             </thead>
@@ -120,6 +145,14 @@ function BatchList() {
                     navigate(`/batches/${c.id}`)
                   }}
                 >
+                  <td onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${c.name} for comparison`}
+                      checked={selected.includes(c.id)}
+                      onChange={() => toggleSelected(c.id)}
+                    />
+                  </td>
                   <td>{c.name}</td>
                   <td>{PROFILE_LABEL[c.profile] ?? c.profile}</td>
                   <td>{c.run_slug}</td>
@@ -132,6 +165,7 @@ function BatchList() {
                   <td className="num">{countOf(c, 'gap')}</td>
                   <td className="num">{countOf(c, 'failed', 'write_failed')}</td>
                   <td className="num">{formatCost(c.cost_usd)}</td>
+                  <td className="num">{fmtScore(c.quality_mean)}</td>
                   <td>{formatDateTime(c.created_at)}</td>
                 </tr>
               ))}
@@ -180,6 +214,7 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
   const [fileError, setFileError] = useState<string | null>(null)
 
   const prompt = usePromptBatchForm(open && profile === 'prompt', { name, runSlug })
+  const disclosureEval = useEvaluationForm(open && profile === 'disclosure', 'disclosure')
 
   const effectiveTarget = targetSlug || targets[0]?.slug || ''
 
@@ -210,6 +245,7 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
       auto_write: autoWrite,
       model_override: model.trim() || null,
       max_iterations: maxIterations.trim() ? Number(maxIterations) : null,
+      ...(disclosureEval.value ? { evaluation: disclosureEval.value } : {}),
     }
     createMutation.mutate(body)
   }
@@ -229,7 +265,10 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
     !createMutation.isPending &&
     (profile === 'prompt'
       ? prompt.body !== null
-      : name.trim() !== '' && runSlug.trim() !== '' && effectiveTarget !== '')
+      : name.trim() !== '' &&
+        runSlug.trim() !== '' &&
+        effectiveTarget !== '' &&
+        disclosureEval.valid)
   const createError = createMutation.error
 
   if (created) {
@@ -457,6 +496,8 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
             />
             {fileError && <div className="error-text">{fileError}</div>}
           </div>
+
+          {disclosureEval.fields}
         </>
       )}
       {createError && <div className="error-text">{errText(createError)}</div>}
@@ -572,6 +613,7 @@ function BatchDetail({ id }: { id: string }) {
         ? 'Wait for running targets'
         : null
   const canFinalize = ['gate', 'review', 'completed', 'paused', 'finalized'].includes(c.status)
+  const gate = c.status === 'gate' ? gateScoreSummary(targets) : null
   const canRelease = held > 0 && ['gate', 'review', 'completed', 'paused'].includes(c.status)
 
   const finalize = async (force: boolean) => {
@@ -626,6 +668,8 @@ function BatchDetail({ id }: { id: string }) {
 
       <WarningsBox warnings={c.warnings} />
 
+      <Scorecard batchId={id} onChanged={refresh} />
+
       <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
         {c.status === 'draft' && (
           <button
@@ -654,6 +698,13 @@ function BatchDetail({ id }: { id: string }) {
           >
             Release remaining ({held} held)
           </button>
+        )}
+        {c.status === 'gate' && gate && (
+          <span className="fine-print">
+            First {gate.n}: mean score {fmtScore(gate.mean)}, {gate.flagged} flagged
+            {gate.flagNames.length > 0 &&
+              ` (${gate.flagNames.map((f) => flagLabel(null, f)).join(', ')})`}
+          </span>
         )}
         {canFinalize && (
           <button
@@ -737,6 +788,84 @@ function TargetsTable({
       return next
     })
   const isDisclosure = batch.profile === 'disclosure'
+  const [drawerTarget, setDrawerTarget] = useState<string | null>(null)
+  const anyEvaluation = targets.some((t) => t.evaluation)
+  const evalQuery = useQuery({
+    queryKey: ['batch-evaluation', batch.id],
+    queryFn: () => api.getBatchEvaluation(batch.id),
+    enabled: anyEvaluation,
+    retry: false,
+  })
+  const rubric = evalQuery.data?.rubric ?? null
+  const suggested = suggestedSpotChecks(targets)
+
+  const evalHeads = (
+    <>
+      <th className="num">Score</th>
+      <th className="num">Rank</th>
+      <th className="num">Resid.</th>
+      <th>Flags</th>
+    </>
+  )
+  const evalCells = (t: BatchTarget) => {
+    const e = t.evaluation
+    if (!e) {
+      return (
+        <>
+          <td className="num">—</td>
+          <td className="num">—</td>
+          <td className="num">—</td>
+          <td />
+        </>
+      )
+    }
+    const q = e.quality
+    const hasScore = typeof q === 'number'
+    return (
+      <>
+        <td className="num">
+          {hasScore || e.status !== 'pending' ? (
+            <button
+              type="button"
+              className="link-button"
+              aria-label={`Open evaluation for ${t.label}`}
+              onClick={() => setDrawerTarget(t.id)}
+            >
+              <span className="score-cell">
+                {hasScore ? (
+                  <>
+                    {fmtScore(q)}
+                    <span className="score-bar" aria-hidden="true">
+                      <span style={{ width: `${Math.max(0, Math.min(100, q))}%` }} />
+                    </span>
+                  </>
+                ) : (
+                  e.status.replace(/_/g, ' ')
+                )}
+              </span>
+            </button>
+          ) : (
+            '—'
+          )}
+          {e.stale && <span className="chip" style={{ marginLeft: 4 }}>stale</span>}
+          {suggested.has(t.id) && <span className="chip chip-check" style={{ marginLeft: 4 }}>check</span>}
+        </td>
+        <td className="num">{e.rank != null && e.of != null ? `${e.rank}/${e.of}` : '—'}</td>
+        <td className={`num ${(e.residual ?? 0) < 0 ? 'delta-neg' : (e.residual ?? 0) > 0 ? 'delta-pos' : ''}`}>
+          {fmtSigned(e.residual)}
+        </td>
+        <td>
+          <div className="row" style={{ gap: 4, flexWrap: 'wrap' }}>
+            {(e.flags ?? []).map((f) => (
+              <span key={f} className="chip chip-flag">
+                {flagLabel(rubric, f)}
+              </span>
+            ))}
+          </div>
+        </td>
+      </>
+    )
+  }
 
   const retryButtons = (t: BatchTarget) => (
     <>
@@ -800,6 +929,7 @@ function TargetsTable({
                 <th className="num">Tries</th>
                 <th>Packages</th>
                 <th>Outcome</th>
+                {evalHeads}
                 <th className="num">Cost</th>
                 <th>Model</th>
                 <th>Run</th>
@@ -813,6 +943,7 @@ function TargetsTable({
                 <th>Status</th>
                 <th className="num">Tries</th>
                 <th>Outcome</th>
+                {evalHeads}
                 <th className="num">Cost</th>
                 <th>Model</th>
                 <th>Run</th>
@@ -842,6 +973,7 @@ function TargetsTable({
                       <td style={{ maxWidth: 320, overflowWrap: 'anywhere' }}>
                         {o ? shorten(o.answer, 120) || '—' : '—'}
                       </td>
+                      {evalCells(t)}
                       <td className="num">{formatCost(t.cost_usd)}</td>
                       <td>{t.model_used ?? '—'}</td>
                       {runCell(t)}
@@ -853,7 +985,7 @@ function TargetsTable({
                     {expanded && (
                       <tr>
                         <td />
-                        <td colSpan={9}>
+                        <td colSpan={13}>
                           <PromptTargetExtras target={t} />
                         </td>
                       </tr>
@@ -902,6 +1034,7 @@ function TargetsTable({
                         '—'
                       )}
                     </td>
+                    {evalCells(t)}
                     <td className="num">{formatCost(t.cost_usd)}</td>
                     <td>{t.model_used ?? '—'}</td>
                     {runCell(t)}
@@ -913,7 +1046,7 @@ function TargetsTable({
                   {expanded && (
                     <tr>
                       <td />
-                      <td colSpan={12}>
+                      <td colSpan={16}>
                         <TargetExtras target={t} />
                       </td>
                     </tr>
@@ -924,6 +1057,13 @@ function TargetsTable({
           </tbody>
         </table>
       </div>
+      <EvaluationDrawer
+        batchId={batch.id}
+        targetId={drawerTarget}
+        open={drawerTarget !== null}
+        onClose={() => setDrawerTarget(null)}
+        suggested={drawerTarget !== null && suggested.has(drawerTarget)}
+      />
     </div>
   )
 }
