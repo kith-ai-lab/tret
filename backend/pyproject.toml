@@ -52,6 +52,8 @@ dev = [
     "tret[s3]",
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
+    # Per-test time limit (`timeout` under [tool.pytest.ini_options]).
+    "pytest-timeout>=2.3",
     "ruff>=0.5",
     "aiosqlite>=0.20",
     # Mocks the httpx calls tret/api/oidc.py makes to an OIDC issuer
@@ -75,6 +77,15 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# A hung or busy-looping test must end the run, not run until the machine runs
+# out of memory. Each test, fixtures included, gets `timeout` seconds; then the
+# whole run stops with exit code 1 and prints every thread's stack, so the
+# frame stuck in the loop is in the output. `thread` rather than the default
+# `signal` method: a signal-raised failure that lands in a background asyncio
+# task only ends that task, and the test goes on to pass, hiding the bug.
+# `--timeout=0` turns it off for one run (e.g. under a debugger).
+timeout = 120
+timeout_method = "thread"
 markers = [
     "live: eval that calls a real model over the network; skipped unless TRET_LIVE_EVALS=1",
 ]

@@ -43,6 +43,12 @@ cd frontend && npm run build
 CI runs exactly this, plus `tret packs validate` on the shipped pack, a
 `docker compose` boot smoke test, and the schema-lifecycle job below.
 
+Each test has a 120-second limit (`timeout` in `backend/pyproject.toml`). A
+test that hangs or loops forever stops the whole run with exit code 1. Read the
+stack printed under the `Timeout` banner: it shows where the test was stuck.
+Pass `--timeout=0` to turn the limit off when you step through a test in a
+debugger.
+
 ## Changing the database schema
 
 The ordinary suite runs on sqlite and in-process fakes, so it cannot see whether
