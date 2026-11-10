@@ -18,6 +18,7 @@ import { DisclosurePanels } from '../components/batches/DisclosurePanels'
 import { EvaluationDrawer } from '../components/batches/EvaluationDrawer'
 import { useEvaluationForm } from '../components/batches/EvaluationSection'
 import {
+  deliveredElsewhereTitle,
   flagLabel,
   fmtScore,
   fmtSigned,
@@ -849,6 +850,15 @@ function TargetsTable({
           )}
           {e.stale && <span className="chip" style={{ marginLeft: 4 }}>stale</span>}
           {suggested.has(t.id) && <span className="chip chip-check" style={{ marginLeft: 4 }}>check</span>}
+          {(e.delivered_elsewhere ?? 0) > 0 && (
+            <span
+              className="chip"
+              style={{ marginLeft: 4 }}
+              title={deliveredElsewhereTitle(e.delivered_elsewhere!, e.gap_rechecked)}
+            >
+              delivered elsewhere
+            </span>
+          )}
         </td>
         <td className="num">{e.rank != null && e.of != null ? `${e.rank}/${e.of}` : '—'}</td>
         <td className={`num ${(e.residual ?? 0) < 0 ? 'delta-neg' : (e.residual ?? 0) > 0 ? 'delta-pos' : ''}`}>
@@ -1063,6 +1073,10 @@ function TargetsTable({
         open={drawerTarget !== null}
         onClose={() => setDrawerTarget(null)}
         suggested={drawerTarget !== null && suggested.has(drawerTarget)}
+        deliveredElsewhere={
+          targets.find((t) => t.id === drawerTarget)?.evaluation?.delivered_elsewhere ?? 0
+        }
+        gapRechecked={targets.find((t) => t.id === drawerTarget)?.evaluation?.gap_rechecked}
       />
     </div>
   )

@@ -1,9 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 
 import { api, type BatchComparison, type BatchComparisonRow } from '../api/client'
 import { Scorecard } from '../components/batches/Scorecard'
 import {
+  DISPUTED_GAP_TITLE,
   dash,
   deltaClass,
   fmtMeanInterval,
@@ -15,7 +17,7 @@ import { formatCost } from '../components/shared/format'
 import { QueryError } from '../components/shared/MonoTable'
 import { StatusBadge } from '../components/shared/StatusBadge'
 
-function Side({ side }: { side: BatchComparisonRow['a'] }) {
+function Side({ side, disputed }: { side: BatchComparisonRow['a']; disputed?: boolean }) {
   if (!side) return <td colSpan={4} className="fine-print">not in this batch</td>
   const pages =
     side.retained_pages != null
@@ -27,6 +29,11 @@ function Side({ side }: { side: BatchComparisonRow['a'] }) {
     <>
       <td>
         <StatusBadge status={side.status} />
+        {disputed && (
+          <span className="chip" style={{ marginLeft: 4 }} title={DISPUTED_GAP_TITLE}>
+            gap disputed
+          </span>
+        )}
       </td>
       <td className="num">{fmtScore(side.quality)}</td>
       <td className="num">{pages}</td>
@@ -37,6 +44,7 @@ function Side({ side }: { side: BatchComparisonRow['a'] }) {
 
 function SummaryStrip({ cmp }: { cmp: BatchComparison }) {
   const s = cmp.summary ?? ({} as BatchComparison['summary'])
+  const disputed = (s.disputed_gaps_a ?? 0) + (s.disputed_gaps_b ?? 0)
   const pairs = cmp.rows.filter((r) => r.delta?.quality != null).length
   return (
     <div className="panel" style={{ margin: '14px 0' }}>
@@ -67,6 +75,35 @@ function SummaryStrip({ cmp }: { cmp: BatchComparison }) {
           Quality is not compared{cmp.quality_note ? `: ${cmp.quality_note}` : '.'}
         </div>
       )}
+      {s.delivered && (
+        <div style={{ marginTop: 6 }}>
+          {s.delivered.n === 0 ? (
+            <div className="mono-body">No company was delivered by both batches.</div>
+          ) : cmp.quality_comparable && s.delivered.mean_quality_delta != null ? (
+            <div className="mono-body">
+              Where both delivered ({s.delivered.n}): A wins {s.delivered.wins_a ?? '—'}, ties{' '}
+              {s.delivered.ties ?? '—'}, B wins {s.delivered.wins_b ?? '—'} · mean delta (B − A){' '}
+              <strong>
+                {fmtMeanInterval(s.delivered.mean_quality_delta, s.delivered.interval90)}
+              </strong>{' '}
+              <span className="fine-print">
+                {s.delivered.interval90 ? '90% interval' : 'too few pairs for an interval'}
+              </span>
+            </div>
+          ) : (
+            <div className="mono-body">Where both delivered ({s.delivered.n}): not comparable</div>
+          )}
+          <div className="fine-print">
+            The line above counts failed and gap runs with their scores; this one compares delivered
+            packages only.
+          </div>
+        </div>
+      )}
+      {disputed > 0 && (
+        <div className="mono-body" style={{ marginTop: 6 }} title={DISPUTED_GAP_TITLE}>
+          Disputed gaps: A {s.disputed_gaps_a ?? 0} · B {s.disputed_gaps_b ?? 0}
+        </div>
+      )}
     </div>
   )
 }
@@ -83,6 +120,10 @@ export function BatchCompare() {
     retry: false,
   })
   const cmp = query.data
+  const [onlyBoth, setOnlyBoth] = useState(false)
+  // An older server sends no `both_delivered`: no filter then, or it would empty the table.
+  const canFilterBoth = cmp?.summary.delivered != null
+  const rows = cmp ? (onlyBoth && canFilterBoth ? cmp.rows.filter((r) => r.both_delivered) : cmp.rows) : []
 
   return (
     <div>
@@ -116,6 +157,17 @@ export function BatchCompare() {
 
           <SummaryStrip cmp={cmp} />
 
+          {canFilterBoth && (
+            <label className="check-row" style={{ marginBottom: 8 }}>
+              <input
+                type="checkbox"
+                checked={onlyBoth}
+                onChange={(e) => setOnlyBoth(e.target.checked)}
+              />
+              <span>Only companies both delivered</span>
+            </label>
+          )}
+
           <div style={{ overflowX: 'auto' }}>
             <table className="mono-table">
               <thead>
@@ -140,14 +192,14 @@ export function BatchCompare() {
                 </tr>
               </thead>
               <tbody>
-                {cmp.rows.map((r) => (
+                {rows.map((r) => (
                   <tr key={r.row_key}>
                     <td>
                       {r.label}
                       <div className="fine-print">{r.row_key}</div>
                     </td>
-                    <Side side={r.a} />
-                    <Side side={r.b} />
+                    <Side side={r.a} disputed={r.disputed_gap === 'a'} />
+                    <Side side={r.b} disputed={r.disputed_gap === 'b'} />
                     <td className={`num ${deltaClass(r.delta?.quality)}`}>
                       {fmtSigned(r.delta?.quality)}
                     </td>

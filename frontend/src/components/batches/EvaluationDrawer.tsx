@@ -6,7 +6,7 @@ import { api, type SpotVerdict, type TargetEvaluation } from '../../api/client'
 import { formatCost, formatDateTime } from '../shared/format'
 import { Modal } from '../shared/Modal'
 import { StatusBadge } from '../shared/StatusBadge'
-import { flagLabel, fmtScore, fmtSigned, outlierText } from './evalHelpers'
+import { deliveredElsewhereTitle, flagLabel, fmtScore, fmtSigned, outlierText } from './evalHelpers'
 import { errText } from './shared'
 
 function Dots({ score }: { score: number | null }) {
@@ -29,6 +29,8 @@ export function EvaluationDrawer({
   open,
   onClose,
   suggested = false,
+  deliveredElsewhere = 0,
+  gapRechecked,
 }: {
   batchId: string
   targetId: string | null
@@ -36,6 +38,9 @@ export function EvaluationDrawer({
   onClose: () => void
   /** The client-side "check" suggestion for this target. */
   suggested?: boolean
+  /** Other batches' acceptable deliveries of this gap (from the target brief). */
+  deliveredElsewhere?: number
+  gapRechecked?: boolean | null
 }) {
   const queryClient = useQueryClient()
   const query = useQuery({
@@ -168,6 +173,15 @@ export function EvaluationDrawer({
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {deliveredElsewhere > 0 && (
+            <div className="fine-print">
+              <span className="chip" title={deliveredElsewhereTitle(deliveredElsewhere, gapRechecked)}>
+                delivered elsewhere
+              </span>{' '}
+              {deliveredElsewhereTitle(deliveredElsewhere, gapRechecked)}
             </div>
           )}
 

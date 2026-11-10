@@ -3481,6 +3481,10 @@ export interface BatchTargetEvaluationBrief {
   flags: string[]
   confidence: string | null
   stale: boolean
+  /** Other batches' acceptable deliveries for this gap; 0 for non-gaps. */
+  delivered_elsewhere?: number
+  /** true: judged with that evidence; false: new evidence since; null: n/a. */
+  gap_rechecked?: boolean | null
 }
 
 export interface BatchEvaluationDetail {
@@ -3528,6 +3532,9 @@ export interface BatchScorecard {
     scored: number
     mean_residual: number | null
     flags: Record<string, number>
+    /** Gaps another batch of the same target list delivered acceptably. */
+    gaps_disputed?: number
+    gaps_rechecked?: number
   } | null
   evaluation: BatchEvaluationPass | null
 }
@@ -3551,6 +3558,9 @@ export interface BatchComparisonRow {
   label: string
   a: ComparisonSide | null
   b: ComparisonSide | null
+  both_delivered?: boolean
+  /** Side that declared a gap the other side delivered acceptably. */
+  disputed_gap?: 'a' | 'b' | null
   delta: {
     quality: number | null
     cost_usd: number | null
@@ -3581,6 +3591,19 @@ export interface BatchComparison {
     energy_b: number | null
     acceptable_a: number | null
     acceptable_b: number | null
+    /** Companies both batches delivered. */
+    delivered?: {
+      n: number
+      wins_a: number | null
+      wins_b: number | null
+      ties: number | null
+      mean_quality_a: number | null
+      mean_quality_b: number | null
+      mean_quality_delta: number | null
+      interval90: [number, number] | null
+    }
+    disputed_gaps_a?: number
+    disputed_gaps_b?: number
   }
 }
 

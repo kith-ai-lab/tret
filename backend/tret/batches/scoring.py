@@ -13,6 +13,9 @@ evaluation pass exists (`tret/batches/evaluation.py`), its scores.
   reliability, model mix and robust-z outliers (`GET /batches/{id}/scorecard`).
 - `compare_batches`: two scorecards plus a row-by-row diff
   (`GET /batches/compare`).
+- `delivered_elsewhere`: for a disclosure batch's rows, the acceptable deliveries
+  of the same company in other batches of the family (the cross-check that tests a
+  gap's reason; the judge decides, nothing is overridden in code).
 - `recompute_relative`: rank, percentile and expected-vs-actual (residual) for
   the scored rows of a pass.
 """
@@ -43,6 +46,19 @@ OUTLIER_MIN_N = 5
 OUTLIER_LIMIT = 20
 OUTLIER_METRICS = ("cost_usd", "iteration_ratio", "retained_ratio", "retained_pages")
 TIE_POINTS = 5.0
+# Flags that say a delivery is not the document asked for: a row carrying one is not
+# evidence that the disclosure could be had.
+DISQUALIFYING_FLAGS = frozenset(
+    {
+        "wrong_year",
+        "wrong_entity",
+        "wrong_language",
+        "summary_not_report",
+        "missed_primary",
+        "unlogged_substitution",
+    }
+)
+CROSS_CHECK_MAX = 3
 BOOTSTRAP_RESAMPLES = 2000
 # Statuses of an evaluation pass that do not count as "the current pass".
 DEAD_PASS_STATUSES = ("cancelled", "failed")
@@ -376,6 +392,20 @@ def quality_summary(data: BatchData) -> dict | None:
     }
 
 
+def gap_checked_ids(row: TargetEvaluation | None) -> set[str]:
+    """The target ids a gap row's last judging was shown as delivered elsewhere."""
+    rel = row.relative if row is not None and isinstance(row.relative, dict) else {}
+    check = rel.get("gap_check")
+    ids = check.get("checked_against") if isinstance(check, dict) else None
+    return {str(i) for i in ids} if isinstance(ids, list) else set()
+
+
+def gap_rechecked(row: TargetEvaluation | None, evidence: list[dict]) -> bool:
+    """True when `evidence` is not empty and the row was judged with exactly that
+    evidence in view (the keep rule of a pass uses the same equality)."""
+    return bool(evidence) and {e["target_id"] for e in evidence} == gap_checked_ids(row)
+
+
 async def scorecard_from(db: AsyncSession, data: BatchData) -> dict:
     from tret.batches import evaluation as evaluation_service
 
@@ -397,6 +427,15 @@ async def scorecard_from(db: AsyncSession, data: BatchData) -> dict:
     for d in data.targets:
         if d.metrics["model_used"]:
             models[d.metrics["model_used"]] = models.get(d.metrics["model_used"], 0) + 1
+    quality = quality_summary(data)
+    if quality is not None and (batch.profile or "disclosure") == "disclosure":
+        gaps = [d for d in data.targets if d.cls == "gap"]
+        elsewhere = await delivered_elsewhere(db, batch, {d.row for d in gaps}, with_sources=False)
+        disputed = [d for d in gaps if elsewhere.get(d.row)]
+        quality["gaps_disputed"] = len(disputed)
+        quality["gaps_rechecked"] = sum(
+            1 for d in disputed if gap_rechecked(d.evaluation, elsewhere[d.row])
+        )
     return {
         "batch_id": str(batch.id),
         "name": batch.name,
@@ -427,7 +466,7 @@ async def scorecard_from(db: AsyncSession, data: BatchData) -> dict:
             {"model": m, "targets": n} for m, n in sorted(models.items(), key=lambda kv: (-kv[1], kv[0]))
         ],
         "outliers": outliers(data),
-        "quality": quality_summary(data),
+        "quality": quality,
         "evaluation": await evaluation_service.pass_summary(db, data.current, data.rows) if data.current else None,
     }
 
@@ -469,6 +508,13 @@ def _side(d: TargetData) -> dict:
         "retained_pages": m["retained_pages"],
         "source_pages": m["source_pages"],
     }
+
+
+def _qualifying_delivery(d: TargetData) -> bool:
+    """A picked target that delivered an acceptable, scored, undisqualified result."""
+    if d.cls != "success" or d.quality is None or not d.acceptable or d.evaluation is None:
+        return False
+    return DISQUALIFYING_FLAGS.isdisjoint(d.evaluation.flags or [])
 
 
 def _delta(a: float | None, b: float | None, places: int = 6) -> float | None:
@@ -528,12 +574,23 @@ async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
     for key in shared:
         da, db_ = picked_a[key], picked_b[key]
         sa, sb = _side(da), _side(db_)
+        disputed = None
+        if card_a["family_key"] != card_b["family_key"]:
+            pass
+        elif da.cls == "gap" and _qualifying_delivery(db_):
+            disputed = "a"
+        elif db_.cls == "gap" and _qualifying_delivery(da):
+            disputed = "b"
         rows.append(
             {
                 "row_key": key,
                 "label": da.target.label,
                 "a": sa,
                 "b": sb,
+                "both_delivered": sa["class"] == sb["class"] == "success"
+                and sa["quality"] is not None
+                and sb["quality"] is not None,
+                "disputed_gap": disputed,
                 "delta": {
                     "quality": _delta(sa["quality"], sb["quality"], 2),
                     "cost_usd": _delta(sa["cost_usd"], sb["cost_usd"]),
@@ -552,6 +609,27 @@ async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
         mean_delta = round(statistics.fmean(deltas), 2) if deltas else None
         interval = bootstrap_interval(deltas)
         rows.sort(key=lambda r: abs(r["delta"]["quality"]) if r["delta"]["quality"] is not None else -1, reverse=True)
+    both = [r for r in rows if r["both_delivered"]]
+    delivered: dict[str, Any] = {
+        "n": len(both),
+        "wins_a": None,
+        "wins_b": None,
+        "ties": None,
+        "mean_quality_a": None,
+        "mean_quality_b": None,
+        "mean_quality_delta": None,
+        "interval90": None,
+    }
+    if comparable:
+        d_deltas = [r["delta"]["quality"] for r in both]
+        delivered["wins_a"] = sum(1 for d in d_deltas if d <= -TIE_POINTS)
+        delivered["wins_b"] = sum(1 for d in d_deltas if d >= TIE_POINTS)
+        delivered["ties"] = len(d_deltas) - delivered["wins_a"] - delivered["wins_b"]
+        if both:
+            delivered["mean_quality_a"] = round(statistics.fmean([r["a"]["quality"] for r in both]), 1)
+            delivered["mean_quality_b"] = round(statistics.fmean([r["b"]["quality"] for r in both]), 1)
+            delivered["mean_quality_delta"] = round(statistics.fmean(d_deltas), 2)
+            delivered["interval90"] = bootstrap_interval(d_deltas)
     return {
         "a": card_a,
         "b": card_b,
@@ -568,6 +646,9 @@ async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
             "ties": ties,
             "mean_quality_delta": mean_delta,
             "interval90": interval,
+            "delivered": delivered,
+            "disputed_gaps_a": sum(1 for r in rows if r["disputed_gap"] == "a"),
+            "disputed_gaps_b": sum(1 for r in rows if r["disputed_gap"] == "b"),
             "cost_a": round(sum(r["a"]["cost_usd"] for r in rows), 6),
             "cost_b": round(sum(r["b"]["cost_usd"] for r in rows), 6),
             "energy_a": _sum_known([r["a"]["energy_wh"] for r in rows]),
@@ -613,6 +694,136 @@ async def _history(db: AsyncSession, ev: BatchEvaluation, keys: set[str]) -> dic
     return out
 
 
+async def delivered_elsewhere(
+    db: AsyncSession, batch: Batch, row_keys: set[str], *, with_sources: bool = True
+) -> dict[str, list[dict]]:
+    """Acceptable deliveries of the same companies in OTHER batches of this batch's
+    family (same workspace), by row key: scored rows of the other batch's current
+    pass whose target succeeded, is not stale, reached that pass's
+    `acceptable_quality` and carries no disqualifying flag. At most three per row key,
+    best quality first; each names its batch, target, quality, finish date, the run's
+    outcome status and reporting period and up to three source URLs of its packaged page maps. Never
+    carries a model name. Empty for a batch that is not a disclosure batch.
+
+    `with_sources=False` skips loading the page maps (`source_urls` is then empty):
+    the batch detail, scorecard and keep rule need only which targets qualify, and
+    the batch page polls them; only the judge's evidence pack shows the URLs."""
+    if (batch.profile or "disclosure") != "disclosure" or not row_keys:
+        return {}
+    candidates = list(
+        (
+            await db.execute(
+                select(TargetEvaluation).where(
+                    TargetEvaluation.workspace_id == batch.workspace_id,
+                    TargetEvaluation.family_key == family_key(batch),
+                    TargetEvaluation.status == "scored",
+                    TargetEvaluation.collection_id != batch.id,
+                    TargetEvaluation.row_key.in_(sorted(row_keys)),
+                )
+            )
+        ).scalars()
+    )
+    if not candidates:
+        return {}
+    cids = sorted({r.collection_id for r in candidates}, key=str)
+    # One query for every pass of the candidate batches; the current one is picked
+    # here by `current_pass`'s rule (latest not cancelled or failed, else latest).
+    passes = list(
+        (
+            await db.execute(
+                select(BatchEvaluation)
+                .where(BatchEvaluation.collection_id.in_(cids))
+                .order_by(BatchEvaluation.created_at.desc())
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    )
+    current: dict[uuid.UUID, BatchEvaluation] = {}
+    for p in passes:
+        if p.status not in DEAD_PASS_STATUSES:
+            current.setdefault(p.collection_id, p)
+    for p in passes:
+        current.setdefault(p.collection_id, p)
+    candidates = [
+        r
+        for r in candidates
+        if r.collection_id in current
+        and current[r.collection_id].id == r.evaluation_id
+        and r.quality is not None
+        and DISQUALIFYING_FLAGS.isdisjoint(r.flags or [])
+        and float(r.quality)
+        >= float((current[r.collection_id].rubric or {}).get("acceptable_quality", DEFAULT_ACCEPTABLE_QUALITY))
+    ]
+    if not candidates:
+        return {}
+    targets_by_id = {
+        t.id: t
+        for t in (
+            await db.execute(
+                select(BatchTarget)
+                .where(BatchTarget.id.in_([r.target_id for r in candidates]))
+                .execution_options(populate_existing=True)
+            )
+        ).scalars()
+    }
+    qualifying = [
+        (r, t)
+        for r in candidates
+        if (t := targets_by_id.get(r.target_id)) is not None
+        and target_class(t) == "success"
+        and not is_stale(r, t)
+        and r.evaluated_run_id == t.run_id
+    ]
+    if not qualifying:
+        return {}
+    batches: dict[uuid.UUID, Batch] = {}
+    from tret.batches.profiles.disclosure import _package_of, _relevant_maps
+
+    if with_sources:
+        wanted = sorted({r.collection_id for r, _ in qualifying}, key=str)
+        batches = {
+            b.id: b for b in (await db.execute(select(Batch).where(Batch.id.in_(wanted)))).scalars()
+        }
+    out: dict[str, list[dict]] = {}
+    for cid in sorted({r.collection_id for r, _ in qualifying}, key=str):
+        other = batches.get(cid)
+        mine = [(r, t) for r, t in qualifying if r.collection_id == cid]
+        findings = (
+            await core.load_review_findings(db, profile_for(other), [t for _, t in mine], other)
+            if with_sources and other is not None
+            else {}
+        )
+        for r, t in mine:
+            urls: list[str] = []
+            for f in _relevant_maps(findings.get(t.run_id, []) if t.run_id else []):
+                package = _package_of(f)
+                if f.status != "approved" or not package or package.get("status") != "packaged":
+                    continue
+                url = ((f.payload or {}).get("source") or {}).get("url")
+                if isinstance(url, str) and url and url not in urls:
+                    urls.append(url)
+            outcome = t.outcome if isinstance(t.outcome, dict) else {}
+            status, period = outcome.get("status"), outcome.get("reporting_period_label")
+            out.setdefault(r.row_key, []).append(
+                {
+                    "batch_id": str(cid),
+                    "batch_name": other.name if other is not None else None,
+                    "target_id": str(t.id),
+                    "quality": float(r.quality),
+                    "finished_at": core._iso(t.finished_at),
+                    "status": status if isinstance(status, str) and status else None,
+                    "period": period if isinstance(period, str) and period else None,
+                    "source_urls": urls[:CROSS_CHECK_MAX],
+                }
+            )
+    for key, items in out.items():
+        items.sort(
+            key=lambda e: (-e["quality"], e["finished_at"] is None, e["finished_at"] or "", e["target_id"])
+        )
+        out[key] = items[:CROSS_CHECK_MAX]
+    return out
+
+
 async def recompute_relative(db: AsyncSession, ev: BatchEvaluation) -> None:
     """Rank, percentile and expected-vs-actual for every scored row of the pass.
 
@@ -648,6 +859,7 @@ async def recompute_relative(db: AsyncSession, ev: BatchEvaluation) -> None:
                 offset = 5 * (r.difficulty - mean_difficulty)
             expected = mean - offset
             basis = "batch mean, difficulty-adjusted"
+        gap_check = (r.relative or {}).get("gap_check") if isinstance(r.relative, dict) else None
         r.relative = {
             "rank": rank,
             "of": n,
@@ -656,6 +868,8 @@ async def recompute_relative(db: AsyncSession, ev: BatchEvaluation) -> None:
             "expected_basis": basis,
             "residual": round(q - expected, 1),
             "outliers": outliers_by_target.get(str(r.target_id), []),
+            # Written by the evidence pack of a gap row, not a score: kept as it was.
+            **({"gap_check": gap_check} if gap_check is not None else {}),
         }
     await db.commit()
 

@@ -10,6 +10,18 @@ one that needs action on an existing install.
 
 ### Changed
 
+- **The batch comparison has a both-delivered view, and a gap is cross-checked against
+  other runs.** `GET /batches/compare` adds `summary.delivered` (wins, ties, mean quality
+  and delta over the rows both batches delivered, so low yield no longer drags the
+  quality comparison), `both_delivered` and `disputed_gap` per row and
+  `disputed_gaps_a` / `disputed_gaps_b`. When the judge scores a gap in a disclosure
+  batch, its evidence pack now lists acceptable deliveries of the same company in other
+  batches of the family (no batch or model names) so a gap reason that the issuer's own
+  site contradicts is caught; the judge still decides. The scorecard adds
+  `quality.gaps_disputed` / `gaps_rechecked`, target briefs `delivered_elsewhere` /
+  `gap_rechecked`, and "Only unscored" re-judges a scored gap when a new delivery elsewhere
+  appears or a shown one stops qualifying. No rubric change.
+
 - **Routing prefers open-weight models and sees the live OpenRouter catalog.** Every
   model carries `open_weights` (from OpenRouter's `hugging_face_id`, or `models.yaml`;
   local models are open) and a harness policy can say `open_weights: prefer | require |

@@ -140,3 +140,14 @@ export function keyFromLabel(label: string, taken: Set<string> = new Set()): str
   for (let i = 2; taken.has(key); i += 1) key = `${base}_${i}`.slice(0, 40)
   return key
 }
+
+export const DISPUTED_GAP_TITLE =
+  "A gap is disputed when the other batch delivered that company's disclosure, judged acceptable."
+
+export function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`
+}
+
+export function deliveredElsewhereTitle(n: number, rechecked: boolean | null | undefined): string {
+  return `${plural(n, 'other batch', 'other batches')} of this target list delivered this company's disclosure, judged acceptable. Re-checked by the judge: ${rechecked ? 'yes' : 'no'}.`
+}

@@ -1055,6 +1055,16 @@ def _results_summary(
 EXCERPT_HEAD_CHARS = 1200
 EXCERPT_BOUNDARY_CHARS = 400
 TEXT_ROLES = ("layout_text", "raw_text", "ocr_text")
+CROSS_CHECK_TEXT = (
+    "Other runs of the same target list delivered this company's FY{fy} disclosure, judged "
+    "acceptable (listed below). Use this to test the gap's reason, not to assume it. You cannot "
+    "open those runs' files: judge from each source URL (the issuer's own site, a third-party "
+    "copy or an archive) and the status and period shown. If the document is on the issuer's own "
+    "site and this run's stated reason does not explain why it could not get it, the reason is "
+    "wrong: score gap_honesty at most 2 and flag gap_reason_wrong. If the other runs only had a "
+    "third-party or archive copy, a specific, true reason with the routes tried listed can still "
+    "score well; judge whether the doctrine required this run to try that route."
+)
 
 
 async def _document_text(db: AsyncSession, document_id: Any) -> tuple[Document | None, str | None]:
@@ -1093,10 +1103,14 @@ async def build_evidence(
     run: Run | None,
     findings: list[Finding],
     rubric: dict | None = None,
+    *,
+    cross_check: list[dict] | None = None,
 ) -> tuple[str, list[uuid.UUID]]:
     """The blind evidence pack for one disclosure target (see
     `tret/batches/evidence.py`) and the documents to attach to the evaluator run:
-    each map's source document and its retained-text package document."""
+    each map's source document and its retained-text package document. For a gap
+    target, `cross_check` (`scoring.delivered_elsewhere`) adds what other runs of the
+    same target list delivered, so the judge can test the gap's reason."""
     from tret.batches import evidence, scoring
     from tret.batches.rubrics import default_rubric, rubric_text
 
@@ -1185,10 +1199,25 @@ async def build_evidence(
                         excerpts.append(f"### {payload.get('stem')}: {label} (page {page})\n{snippet}")
     attached = attached[: evidence.MAX_ATTACHED_DOCUMENTS]
 
+    cross_section: list[tuple[str, str]] = []
+    if row_class == "gap" and cross_check:
+        lines = [CROSS_CHECK_TEXT.format(fy=fy)]
+        for item in cross_check:
+            when = (item.get("finished_at") or "")[:10] or "date unknown"
+            status = item.get("status") or "not recorded"
+            period = evidence.clip(evidence.sanitize(item.get("period") or ""), 80) or "not recorded"
+            urls = "; ".join(evidence.clip(evidence.scrub(u, run), 200) for u in item.get("source_urls") or [])
+            lines.append(
+                f"- delivered {when}, quality {float(item['quality']):.0f} of 100; "
+                f"status: {status}; period: {period}; source: {urls or 'not recorded'}"
+            )
+        cross_section = [("Cross-check: other runs of this target list", "\n".join(lines))]
+
     sections = [
         ("Rubric", rubric_text(rubric, row_class)),
         ("Task", task),
         ("Result", result),
+        *cross_section,
         ("Page maps", "\n\n".join(map_blocks) or "(the run proposed no page map)"),
         ("Tool-call trail", evidence.run_digest(run) if run is not None else "(no run)"),
         ("Attached documents", evidence.attached_documents(attached)),
@@ -1338,8 +1367,9 @@ class DisclosureProfile:
         findings: list[Finding],
         *,
         rubric: dict | None = None,
+        cross_check: list[dict] | None = None,
     ) -> tuple[str, list[uuid.UUID]]:
-        return await build_evidence(db, batch, target, run, findings, rubric)
+        return await build_evidence(db, batch, target, run, findings, rubric, cross_check=cross_check)
 
     def settings_keys(self) -> tuple[str, ...]:
         return (
