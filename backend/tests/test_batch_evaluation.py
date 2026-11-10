@@ -138,6 +138,10 @@ class EvalEngine(PromptEngine):
                 run.status, run.error = "failed", "max_iterations (8) reached without completion"
                 await db.commit()
                 return
+            if self.judge_mode == "stuck_first" and not ti.get("_evaluator_retry"):
+                run.status, run.error = "failed", "stopped: 3 identical failing calls to read_document"
+                await db.commit()
+                return
             score = self.scores.get(label, 4)
             good = {
                 "scores": {k: {"score": score, "evidence": "see answer"} for k in CRITERIA},
@@ -603,6 +607,7 @@ def test_forged_task_input_cannot_write_a_review_or_a_collection_outcome(client,
         "max_iterations (40) reached without completion",
         "cost_cap_exceeded: run cost $0.43 >= cap $0.50",
         "output_budget_exceeded: 4096 output tokens",
+        "stopped: 3 identical failing calls to propose_package_map",
     ],
 )
 def test_run_limit_errors_do_not_leak_into_the_pack(client, world, eng, error):
@@ -813,6 +818,22 @@ def test_a_judge_that_runs_out_of_turns_is_relaunched_once_to_score_from_the_pac
     assert len(eng.judged) == 6 and sorted(set(eng.judged)) == ["row-1", "row-2", "row-3"]
     retry = eng.packs["row-1"]
     assert "used all its turns and recorded no score" in retry and "Call submit_evaluation now" not in retry
+    assert eng.iteration_caps["row-1"] == [evaluation.EVALUATOR_MAX_ITERATIONS, evaluation.RELAUNCH_MAX_ITERATIONS]
+    assert d["evaluation_cost_usd"] == pytest.approx(0.02 * 7)
+
+
+def test_a_judge_stopped_for_a_stuck_call_is_relaunched_once_to_score_from_the_pack(client, world, eng):
+    """The engine now stops a judge that repeats one failing call (it used to run on
+    to its turn limit and get the out-of-turns relaunch); it still gets one relaunch."""
+    eng.judge_mode = "stuck_first"
+    b = make(client, world)
+    d = run_batch(client, b["id"])
+    detail = ev_detail(client, b["id"])
+    assert detail["evaluation"]["counts"]["scored"] == 3 and detail["evaluation"]["counts"]["failed"] == 0
+    assert len(eng.judged) == 6
+    retry = eng.packs["row-1"]
+    assert "kept repeating a tool call that failed the same way" in retry
+    assert "used all its turns" not in retry and "Call submit_evaluation now" not in retry
     assert eng.iteration_caps["row-1"] == [evaluation.EVALUATOR_MAX_ITERATIONS, evaluation.RELAUNCH_MAX_ITERATIONS]
     assert d["evaluation_cost_usd"] == pytest.approx(0.02 * 7)
 

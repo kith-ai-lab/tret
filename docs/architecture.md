@@ -292,7 +292,13 @@ frontend (React/Vite) ── /api ──> backend (FastAPI) ──> Postgres
    above whatever a harness config asks for), a running **cost cap** priced from
    the model catalog, an optional per-run **output-token budget** (soft nudge to
    finalize, then a hard stop), **tool-result size caps** with explicit
-   `[TRUNCATED: …]` markers, and a repeated-identical-call breaker. Verdict-shaped
+   `[TRUNCATED: …]` markers, and a repeated-identical-call breaker. A model that
+   makes the same failing call (same tool, same arguments, same error) N times
+   in a row is stopped with `stopped: N identical failing calls to <tool>`
+   rather than left to burn the iteration cap; the call before the stop carries
+   a warning, a model switch starts the count again, and a run that already
+   recorded its terminal result keeps it. `loop_config.max_identical_failures`
+   sets N (default 3, minimum 2; 0 turns it off). Verdict-shaped
    tasks terminate via a `record_verdict` tool call validated against the pack
    schema, with up to 3 in-loop repair attempts on validation errors; the
    cited-values cross-check runs in the same place.

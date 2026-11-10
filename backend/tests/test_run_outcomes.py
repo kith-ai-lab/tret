@@ -155,6 +155,7 @@ def test_failures_score_zero_but_keep_their_kind():
     "error,expected",
     [
         ("max_iterations (24) reached without completion", "max_iterations"),
+        ("stopped: 3 identical failing calls to propose_package_map", "repeated_failing_call"),
         ("output_budget_exceeded: 900 output tokens vs budget 500", "output_budget_exceeded"),
         ("unknown_task_type: 'nope' is not declared", "unknown_task_type"),
         ("[anthropic] 529 overloaded", "provider_error"),

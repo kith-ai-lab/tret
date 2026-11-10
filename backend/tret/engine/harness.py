@@ -84,6 +84,7 @@ from tret.providers.catalog import (
     get_catalog,
 )
 from tret.router_llm.objectives import objective_of
+from tret.router_llm.outcomes import repeated_failure_stop_error
 from tret.router_llm.priors import OutcomePriors, PriorsProvider
 from tret.router_llm.router import ModelRouter, RoutingUnavailable
 from tret.engine.supervisor import (
@@ -906,6 +907,81 @@ def _note_repeated_failure(
         "change the arguments as the error says, or take a different step.]",
         count,
     )
+
+
+# ── hard stop on a stuck call ────────────────────────────────────────────────
+# The reminder above is advice, and some models do not take it. In the
+# 2026-11-09 open-weight comparison (batch 8ae1f358) Kimi K3 sent the same
+# failing call, got the same error, and sent it again until max_iterations (40)
+# on 15 of 48 disclosure targets. A model that has made the identical failing
+# call N times in a row will not recover on call N+1, and every further turn
+# re-sends the whole transcript at full price. So the run stops instead, with
+# `stopped: N identical failing calls to <tool>` as its error, and a batch
+# records the gap or failure at turn N rather than turn 40.
+#
+# "In a row" is over consecutive tool calls: any other call, or the same call
+# succeeding or failing differently, starts the count again, and so does a
+# model switch (a different model gets its own attempts). The call before the
+# stop carries a warning that the next identical one ends the run.
+# `loop_config.max_identical_failures` sets N per harness (minimum 2); 0 turns
+# the stop off.
+IDENTICAL_FAILURE_STOP_DEFAULT = 3
+
+
+def _identical_failure_limit(loop_cfg: dict) -> int:
+    """N for the stuck-call stop from a harness's loop_config: 0 means off,
+    anything else is at least 2 (one failure is not a repeat); an unreadable
+    value falls back to the default rather than turning the stop off."""
+    raw = loop_cfg.get("max_identical_failures", IDENTICAL_FAILURE_STOP_DEFAULT)
+    if isinstance(raw, bool):
+        return IDENTICAL_FAILURE_STOP_DEFAULT if raw else 0
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return IDENTICAL_FAILURE_STOP_DEFAULT
+    return 0 if n <= 0 else max(n, 2)
+
+
+@dataclass
+class _FailureStreak:
+    """Consecutive tool calls that were the same call failing with the same error."""
+
+    limit: int
+    key: str | None = None
+    tool: str = ""
+    count: int = 0
+
+    def record(self, tool: str, call_key: str, result_text: str, is_error: bool) -> None:
+        """Count one executed call. `result_text` is the tool's own result,
+        before any engine note is appended to it."""
+        if not is_error:
+            self.reset()
+            return
+        key = f"{call_key}\n{result_text}"
+        if key == self.key:
+            self.count += 1
+        else:
+            self.key, self.tool, self.count = key, tool, 1
+
+    def reset(self) -> None:
+        self.key, self.tool, self.count = None, "", 0
+
+    @property
+    def one_from_stop(self) -> bool:
+        return self.limit > 0 and self.count == self.limit - 1
+
+    @property
+    def tripped(self) -> bool:
+        return self.limit > 0 and self.count >= self.limit
+
+    def warning(self, finish: str) -> str:
+        times = "once" if self.count == 1 else f"{self.count} times in a row"
+        return (
+            f"\n\n[NOTE: This exact call has now failed {times} with the same error. If your "
+            "next call is this same call with the same arguments, the run stops here as "
+            "failed. Change the arguments as the error says, use a different tool, or "
+            f"finish with what you have ({finish}).]"
+        )
 
 
 class HarnessEngine:
@@ -1922,6 +1998,8 @@ class HarnessEngine:
         grounding_final_reply_blank = False
         seen_calls: dict[str, int] = {}  # repeated-identical-call breaker
         failed_calls: dict[str, int] = {}  # same call + same error, repeated
+        # Same call + same error IN A ROW: the hard stop (see `_FailureStreak`).
+        failure_streak = _FailureStreak(_identical_failure_limit(loop_cfg))
         # Stall signals for the supervisor. Counted here rather than re-derived
         # from the transcript each iteration, because "in a row" is a property of
         # the sequence and the transcript would have to be re-scanned to see it.
@@ -2016,6 +2094,31 @@ class HarnessEngine:
         for iteration in range(1, max_iterations + 1):
             if self._is_cancelled(run.id):
                 run.status = "cancelled"
+                break
+
+            # The stuck-call stop, checked here rather than straight after the
+            # tool results so the supervisor (end of the previous iteration) has
+            # had its chance: a model switch resets the streak and the new model
+            # gets its own attempts. Like the iteration ceiling below, a run that
+            # already recorded its terminal result keeps it; anything else fails,
+            # and a batch judges the run by what it did deliver (a disclosure
+            # target with a package map is settled by its maps, not by this).
+            if failure_streak.tripped:
+                stop_error = repeated_failure_stop_error(failure_streak.count, failure_streak.tool)
+                run.routing = {
+                    **(run.routing or {}),
+                    "identical_failure_stop": {
+                        "tool": failure_streak.tool,
+                        "count": failure_streak.count,
+                        "iteration": iteration - 1,
+                    },
+                }
+                if ctx.terminal_recorded:
+                    run.status = self._completion_status(ctx)
+                else:
+                    run.status = "failed"
+                    run.error = stop_error
+                log.info("run %s %s", run.id, stop_error)
                 break
 
             await self._publish_delegation_progress(run, iteration, max_iterations)
@@ -2642,6 +2745,7 @@ class HarnessEngine:
                 import json as _json
 
                 call_key = f"{tc.name}:{_json.dumps(tc.arguments, sort_keys=True, default=str)}"
+                failure_streak.record(tc.name, call_key, result_text, is_error)
                 seen_calls[call_key] = seen_calls.get(call_key, 0) + 1
                 repeated = 0
                 if seen_calls[call_key] >= 3 and not is_error:
@@ -2663,6 +2767,10 @@ class HarnessEngine:
                     )
                     if repeated:
                         repeated_call_trips += 1
+                    if failure_streak.one_from_stop:
+                        result_text += failure_streak.warning(
+                            ctx.terminal_tool or "your final answer"
+                        )
                 # `iteration` is what `plan_compaction`'s `KEEP_RECENT_ITERATIONS`
                 # protection reads (`_iteration_of`, engine/compaction.py) — left
                 # off here, every tool result read back as iteration 0, so the
@@ -2858,6 +2966,7 @@ class HarnessEngine:
                 compact_before_next_turn = True
                 consecutive_terminal_failures = 0
                 repeated_call_trips = 0
+                failure_streak.reset()
                 # `effort_raised` itself is left alone: the rung fires at most
                 # once per *run*, not once per model (supervisor.assess's own
                 # Rung 1 gate). But `effort_raised_at`/`failures_at_raise`/

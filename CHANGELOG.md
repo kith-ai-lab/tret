@@ -32,6 +32,22 @@ one that needs action on an existing install.
   (eco objective, standard ceiling kept; an unedited harness is upgraded at boot).
   The per-run web-search cap now stops the search loop the floor guarded against, and
   price tiers excluded nearly every open-weight model regardless of capability.
+- **A run stuck on one failing call now stops early.** When a model makes the same
+  failing tool call, with the same arguments and the same error, N times in a row, the
+  run ends with `stopped: N identical failing calls to <tool>` instead of running on to
+  `max_iterations`. The call before the stop warns the model. A model switch starts the
+  count again, a run that already recorded its terminal result keeps it, and a disclosure
+  target that already has a package map is still settled by its maps.
+  `loop_config.max_identical_failures` sets N (default 3, minimum 2; 0 turns it off).
+  Outcome records classify the stop as `repeated_failing_call`. A batch-evaluator judge
+  stopped this way gets one relaunch, as one that ran out of turns already did. In the
+  2026-11-09 open-weight comparison, Kimi K3 ran 15 of 48 disclosure targets to the
+  40-iteration cap this way.
+- **`propose_package_map` explains `keep_ranges` with an example.** A malformed value
+  now gets an error that shows a valid one (`[[12, 40], [96, 98]]`) and says what was
+  received. A flat, even-length list of integers, which some hosts produce by flattening
+  the nested list, is read as consecutive pairs. The tool result says how it was read,
+  and the draft still waits for a reviewer's approval.
 
 ### Fixed
 
