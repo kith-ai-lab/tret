@@ -525,6 +525,7 @@ class PromptProfile:
         findings: list[Finding],
         *,
         rubric: dict | None = None,
+        cross_check: list[dict] | None = None,
     ) -> tuple[str, list[uuid.UUID]]:
         """The blind evidence pack for one prompt target (`tret/batches/evidence.py`)
         and the run's own documents to attach to the evaluator run."""

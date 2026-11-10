@@ -13,6 +13,7 @@ import {
   fmtScore,
   metricLabel,
   fmtMetric,
+  plural,
 } from './evalHelpers'
 import { errText } from './shared'
 
@@ -152,6 +153,15 @@ export function Scorecard({
           sub="infra · timeouts · retries"
         />
       </div>
+
+      {(sc.quality?.gaps_disputed ?? 0) > 0 && (
+        <div className="fine-print" style={{ marginTop: 8 }}>
+          {plural(sc.quality!.gaps_disputed!, 'gap')} disputed by other batches ·{' '}
+          {sc.quality!.gaps_rechecked ?? 0} re-checked by the judge
+          {(sc.quality!.gaps_rechecked ?? 0) < sc.quality!.gaps_disputed! &&
+            ' · Re-evaluate with “Only unscored” to re-check them.'}
+        </div>
+      )}
 
       <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
         {(sc.models ?? []).map((m) => (

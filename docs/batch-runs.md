@@ -406,6 +406,16 @@ same rubric version and judge model; otherwise `quality_note` says why. Wins, ti
 resamples, fixed seed, at least three pairs). Cost and energy are summed over shared
 rows only.
 
+Failed and gap rows score near zero or on gap honesty alone, so a model with a low yield
+can look worse even when the packages it delivered are as good. `summary.delivered`
+therefore repeats the comparison over the **both-delivered** rows only (each row has
+`both_delivered`: both sides `success` with a score): `n`, wins, ties, both mean
+qualities, the mean delta and its interval; all but `n` are null when quality is not
+comparable. A row where one side is a `gap` and the other side delivered an acceptable
+result (scored at or above the bar, no disqualifying flag such as `wrong_year` or
+`missed_primary`) in batches of the same family is a **disputed gap**: the row's `disputed_gap` is `"a"` or `"b"` (the
+side that gave up) and `summary.disputed_gaps_a` / `disputed_gaps_b` count them.
+
 ### Evaluating a batch
 
 Pass `evaluation: {"enabled": true, "judge_model": null, "budget_usd": null, "rubric": null}`
@@ -440,6 +450,22 @@ tools `read_document`, `search_documents`, `submit_evaluation`, `submit_batch_re
   maps and excerpts (disclosure) and a trail of tool calls, with the run's documents
   attached; never the model, provider, spend, tokens, energy, iteration count or routing.
   Infrastructure failures and timeouts are `skipped`, not judged.
+- **Cross-check of a gap.** A judge that sees a gap alone can score a well-argued reason
+  100 even when another batch of the same target list delivered that company's
+  disclosure. So for a gap target of a disclosure batch the pack gains a section, "Cross-check:
+  other runs of this target list": up to three acceptable deliveries of the same company
+  in other batches of the family (current pass, not stale, at or above the bar, no
+  disqualifying flag) with date, quality, the outcome's status and reporting period and the source URLs,
+  never batch names or models. The judge tests the gap's reason against it: a document on
+  the issuer's own site that the stated reason does not explain scores gap honesty at
+  most 2 with `gap_reason_wrong`; a gap that only an archive or third-party copy could
+  fill can still score well. Nothing is overridden in code. The row records what it was
+  checked against (`relative.gap_check`, kept when ranks are recomputed), the scorecard's
+  `quality` gains `gaps_disputed` and `gaps_rechecked`, and each target's `evaluation`
+  gains `delivered_elsewhere` and `gap_rechecked`. "Only unscored" keeps a scored gap
+  only while the deliveries elsewhere are exactly the ones its judging saw; a new one, or
+  a shown one that stopped qualifying, makes it pending again (unselected rows of a
+  targeted re-judge are kept as they were).
 - **Relative scores.** Each scored row gets a rank, a percentile and an expected score:
   the same row's history in other batches of the family (shrunk toward the batch mean),
   else the batch mean moved 5 points per difficulty step. `residual` = quality - expected.
