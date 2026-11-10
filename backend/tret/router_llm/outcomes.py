@@ -26,6 +26,7 @@ router to avoid whichever model people happen to interrupt.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 
 from tret.services.transcript import TranscriptSignals, read_signals
@@ -73,6 +74,7 @@ ERROR_KINDS = (
     "cost_cap_exceeded",
     "output_budget_exceeded",
     "max_iterations",
+    "repeated_failing_call",
     "unknown_task_type",
     "unknown_tool",
     "routing_unavailable",
@@ -86,6 +88,22 @@ _ERROR_PREFIXES = (
     ("unknown_task_type", "unknown_task_type"),
     ("unknown_tool", "unknown_tool"),
 )
+
+# The engine's hard stop on a stuck call (engine/harness.py `_FailureStreak`):
+# the same tool, same arguments, same error, N times in a row. Written and read
+# here, beside the classifier, so the engine, the batch evaluator and the
+# analytics split all agree on one string.
+_REPEATED_FAILURE_STOP_RE = re.compile(r"^stopped: \d+ identical failing calls to ")
+
+
+def repeated_failure_stop_error(count: int, tool: str) -> str:
+    """The run error the engine writes when it stops a run on a stuck call."""
+    return f"stopped: {count} identical failing calls to {tool}"
+
+
+def is_repeated_failure_stop(error: str | None) -> bool:
+    """Is `error` the engine's stuck-call stop (`repeated_failure_stop_error`)?"""
+    return bool(_REPEATED_FAILURE_STOP_RE.match((error or "").strip()))
 
 # ── penalties ────────────────────────────────────────────────────────────────
 # Each is (per-event cost, maximum total). Every one of these is the engine
@@ -130,6 +148,8 @@ def error_kind(status: str, error: str | None) -> str | None:
     for prefix, kind in _ERROR_PREFIXES:
         if text.startswith(prefix):
             return kind
+    if is_repeated_failure_stop(text):
+        return "repeated_failing_call"
     if "no candidate models" in text.lower() or "cost ceiling" in text.lower():
         return "routing_unavailable"
     if text.startswith("["):  # ProviderError renders as "[provider] message"

@@ -321,6 +321,130 @@ async def test_hitting_the_ceiling_with_nothing_recorded_still_fails(world):
     assert result.events_of("budget_warning") == []
 
 
+# ── (b2) the same failing call, again and again, stops the run ────────────────
+def _stuck_turn(**arguments) -> ScriptedTurn:
+    """A turn that makes one lookup with an invented argument name: the
+    argument pre-check refuses it with the same error every time."""
+    return ScriptedTurn(
+        text="Looking the score up.",
+        tool_calls=[
+            ScriptedCall(
+                "lookup_dataset",
+                {"dataset": "hazard_scores", "site": SITE, **arguments},
+            )
+        ],
+    )
+
+
+async def _outcome_error_kind(world, run_id) -> str | None:
+    async with world.session_factory() as db:
+        row = (
+            await db.execute(select(RunOutcome).where(RunOutcome.run_id == run_id))
+        ).scalar_one()
+    return row.error_kind
+
+
+async def test_the_same_failing_call_three_times_in_a_row_stops_the_run(world):
+    """Kimi K3 repeated one failing call to the 40-iteration cap on 15 of 48
+    disclosure targets (2026-11-09). The third identical failure in a row now
+    ends the run, so the turns scripted after it are never played."""
+    harness_id = await world.create_harness(name="Stuck Analyst", max_iterations=12)
+    provider = ReplayProvider([_stuck_turn()] * 6)
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+
+    assert result.provider.turns_played == 3
+    assert result.run.iterations == 3
+    assert result.run.status == "failed"
+    assert result.run.error == "stopped: 3 identical failing calls to lookup_dataset"
+    assert result.run.routing["identical_failure_stop"] == {
+        "tool": "lookup_dataset",
+        "count": 3,
+        "iteration": 3,
+    }
+    assert await _outcome_error_kind(world, result.run.id) == "repeated_failing_call"
+
+    # The model is told on the call before the stop, and only then.
+    errors = result.tool_errors
+    assert len(errors) == 3
+    warning = "the run stops here as failed"
+    assert warning not in errors[0]["result"]
+    assert warning in errors[1]["result"] and "failed 2 times in a row" in errors[1]["result"]
+    tool_messages = [m for m in result.run.messages if m.get("role") == "tool"]
+    assert warning in tool_messages[1]["content"]
+    assert result.events_of("budget_warning") == []
+
+
+async def test_a_stuck_call_after_the_verdict_keeps_the_verdict(world):
+    """Like the iteration ceiling: a recorded, validated verdict is output, and
+    stopping the loop afterwards does not unmake it."""
+    harness_id = await world.create_harness(name="Stuck After Verdict", max_iterations=12)
+    provider = ReplayProvider([*divergence_happy_script()[:4], *[_stuck_turn()] * 5])
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+
+    assert result.provider.turns_played == 7
+    assert result.run.status == "completed", result.run.error
+    assert result.run.error is None
+    assert result.finding.payload["verdict"] == "diverge_signal_higher"
+    assert result.run.routing["identical_failure_stop"]["count"] == 3
+    assert result.events_of("done")[0].data["status"] == "completed"
+
+
+async def test_a_different_call_in_between_starts_the_count_again(world):
+    """Only failures in a row count: alternating two failing calls never trips
+    the stop, so the run reaches its ceiling as it did before."""
+    harness_id = await world.create_harness(name="Alternating Analyst", max_iterations=6)
+    provider = ReplayProvider([_stuck_turn(), _stuck_turn(note="x")] * 3)
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+
+    assert result.provider.turns_played == 6
+    assert result.run.status == "failed"
+    assert result.run.error == "max_iterations (6) reached without completion"
+    assert "identical_failure_stop" not in (result.run.routing or {})
+    assert all("the run stops here" not in e["result"] for e in result.tool_errors)
+
+
+@pytest.mark.parametrize(
+    ("setting", "turns_played", "error"),
+    [
+        (0, 5, "max_iterations (5) reached without completion"),
+        (4, 4, "stopped: 4 identical failing calls to lookup_dataset"),
+        (1, 2, "stopped: 2 identical failing calls to lookup_dataset"),  # minimum 2
+    ],
+)
+async def test_max_identical_failures_is_set_by_loop_config(world, setting, turns_played, error):
+    harness_id = await world.create_harness(
+        name=f"Stuck Analyst {setting}",
+        max_iterations=5,
+        loop_config_extra={"max_identical_failures": setting},
+    )
+    provider = ReplayProvider([_stuck_turn()] * 5)
+    result = await world.run(
+        provider=provider,
+        harness_id=harness_id,
+        task_type="divergence_assessment",
+        task_input={"site_id": SITE, "peril": PERIL},
+    )
+
+    assert result.provider.turns_played == turns_played
+    assert result.run.status == "failed"
+    assert result.run.error == error
+
+
 # ── (c) an undeclared task type is refused, not improvised ────────────────────
 async def test_a_task_type_the_pack_never_declared_is_refused(world):
     """No pack declaration, no task: the engine must not invent one.

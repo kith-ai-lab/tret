@@ -16,8 +16,15 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tret.engine import compaction
-from tret.engine.harness import _note_repeated_failure
+from tret.engine.harness import (
+    IDENTICAL_FAILURE_STOP_DEFAULT,
+    _FailureStreak,
+    _identical_failure_limit,
+    _note_repeated_failure,
+)
 from tret.engine.tools import execute_tool
 from tret.providers import openai_compat
 from tret.providers.base import Msg, ToolCall, ToolSpec, TurnComplete
@@ -277,8 +284,69 @@ def test_different_error_or_call_resets_count():
     assert _note_repeated_failure(failed, "t:{'x':1}", "Tool error: a")[1] == 0
 
 
+# ── stuck-call hard stop ────────────────────────────────────────────────────
+def test_the_streak_trips_on_the_third_identical_failure_in_a_row():
+    streak = _FailureStreak(3)
+    streak.record("t", "t:{}", "Tool error: bad", True)
+    assert not streak.one_from_stop and not streak.tripped
+    streak.record("t", "t:{}", "Tool error: bad", True)
+    assert streak.one_from_stop and not streak.tripped
+    assert "failed 2 times in a row" in streak.warning("record_verdict")
+    assert "(record_verdict)" in streak.warning("record_verdict")
+    streak.record("t", "t:{}", "Tool error: bad", True)
+    assert streak.tripped and streak.tool == "t" and streak.count == 3
+
+
+def test_any_other_call_or_error_or_a_success_restarts_the_streak():
+    streak = _FailureStreak(3)
+    for _ in range(2):
+        streak.record("t", "t:{}", "Tool error: bad", True)
+    streak.record("t", "t:{}", "Tool error: different", True)  # same call, new error
+    assert streak.count == 1
+    streak.record("u", "u:{}", "Tool error: different", True)  # new call, same error
+    assert streak.count == 1 and streak.tool == "u"
+    streak.record("u", "u:{}", "Tool error: different", True)
+    streak.record("u", "u:{}", "ok", False)  # the same call succeeding
+    assert streak.count == 0 and not streak.tripped
+    streak.record("u", "u:{}", "Tool error: different", True)
+    streak.reset()  # a model switch
+    assert streak.count == 0 and streak.tool == ""
+
+
+def test_a_limit_of_zero_never_trips_or_warns():
+    streak = _FailureStreak(0)
+    for _ in range(10):
+        streak.record("t", "t:{}", "Tool error: bad", True)
+        assert not streak.one_from_stop
+    assert not streak.tripped
+
+
+def test_the_warning_reads_once_for_a_limit_of_two():
+    streak = _FailureStreak(2)
+    streak.record("t", "t:{}", "Tool error: bad", True)
+    assert streak.one_from_stop and "has now failed once" in streak.warning("x")
+
+
+@pytest.mark.parametrize(
+    ("loop_config", "expected"),
+    [
+        ({}, IDENTICAL_FAILURE_STOP_DEFAULT),
+        ({"max_identical_failures": 5}, 5),
+        ({"max_identical_failures": "4"}, 4),
+        ({"max_identical_failures": 1}, 2),
+        ({"max_identical_failures": 0}, 0),
+        ({"max_identical_failures": -3}, 0),
+        ({"max_identical_failures": False}, 0),
+        ({"max_identical_failures": None}, IDENTICAL_FAILURE_STOP_DEFAULT),
+        ({"max_identical_failures": "many"}, IDENTICAL_FAILURE_STOP_DEFAULT),
+    ],
+)
+def test_the_limit_comes_from_loop_config(loop_config, expected):
+    assert IDENTICAL_FAILURE_STOP_DEFAULT == 3
+    assert _identical_failure_limit(loop_config) == expected
+
+
 # ── review fixes ────────────────────────────────────────────────────────────
-import pytest  # noqa: E402
 
 
 @pytest.mark.parametrize("bad", [None, 5, True, [1, 2], "str"])

@@ -67,6 +67,7 @@ from tret.engine.evaluation_tools import (
 )
 from tret.packs.links import packs_for_harness, resolve_pack_for_task
 from tret.providers.catalog import get_catalog
+from tret.router_llm.outcomes import is_repeated_failure_stop
 
 log = logging.getLogger("tret.evaluation")
 
@@ -96,6 +97,18 @@ OUT_OF_TURNS_INSTRUCTION = (
     "from the evidence pack above now: call submit_evaluation with your scores, difficulty, flags, "
     "confidence and rationale, and write no other reply. Call no other tool first; where the pack "
     "leaves a doubt, give your best estimate and set confidence to low."
+)
+# Stamped instead on the one relaunch of an evaluator run the engine stopped for
+# repeating the same failing tool call (`stopped: N identical failing calls`,
+# engine/harness.py `_FailureStreak`). Before that stop such a judge ran on to
+# its turn limit and was relaunched with the instruction above; it still gets
+# exactly one relaunch.
+STUCK_CALL_INSTRUCTION = (
+    "\n\nYour previous attempt kept repeating a tool call that failed the same way and "
+    "recorded no score. Score from the evidence pack above now: call submit_evaluation with "
+    "your scores, difficulty, flags, confidence and rationale, and write no other reply. Call "
+    "no other tool first; where the pack leaves a doubt, give your best estimate and set "
+    "confidence to low."
 )
 # Turn limit of a relaunch: room for the score and one stray call, no more. A
 # relaunch inherits the documents of the run it replaces, so without this a judge
@@ -942,6 +955,7 @@ async def _after_evaluator_run(
             )
             first_try = not (run.task_input or {}).get(RETRY_KEY)
             out_of_turns = run.status == "failed" and str(run.error or "").startswith("max_iterations")
+            stuck = run.status == "failed" and is_repeated_failure_stop(run.error)
             if not current:
                 # The target moved on (a retry is under way): hand the row back to the
                 # pump, which arms it for the target's current run once it settles.
@@ -950,7 +964,7 @@ async def _after_evaluator_run(
                     row.attempt, row.evaluated_run_id = target.attempts or 0, target.run_id
             elif (
                 first_try and ev.status == "running" and not core.draining()
-                and (run.status in core.SUCCESS_RUN_STATUSES or out_of_turns)
+                and (run.status in core.SUCCESS_RUN_STATUSES or out_of_turns or stuck)
             ):
                 per_target = estimate_evaluation_cost(ev.judge_model, 1)
                 others = len(_state()["unbooked"].get(evaluation_id, set()) - {run_id})
@@ -968,7 +982,13 @@ async def _after_evaluator_run(
                         task_input={
                             **run.task_input,
                             "message": str(run.task_input.get("message") or "")
-                            + (OUT_OF_TURNS_INSTRUCTION if out_of_turns else RETRY_INSTRUCTION),
+                            + (
+                                OUT_OF_TURNS_INSTRUCTION
+                                if out_of_turns
+                                else STUCK_CALL_INSTRUCTION
+                                if stuck
+                                else RETRY_INSTRUCTION
+                            ),
                             RETRY_KEY: True,
                             "_max_iterations": RELAUNCH_MAX_ITERATIONS,
                         },

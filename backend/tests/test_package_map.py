@@ -465,6 +465,78 @@ async def test_the_default_stem_is_sanitised(ctx, tmp_path, filename, expected):
     assert packaging._STEM_RE.fullmatch(expected)
 
 
+@pytest.mark.parametrize(
+    ("keep_ranges", "received"),
+    [
+        ("[[2, 4]]", 'Received a string: "[[2, 4]]".'),
+        ({"first": 2, "last": 4}, "Received an object:"),
+        (3, "Received an integer: 3."),
+        ([2, 4, 6], "Received a flat list of 3 integers [2, 4, 6], which cannot be read as"),
+        ([[2, 4], 6, 6], "keep_ranges[1] is an integer (6), not a [first, last] pair."),
+        ([[2, 4, 5]], "keep_ranges[0] is a list of 3 values ([2, 4, 5]), not 2."),
+        ([[2, "4"]], 'keep_ranges[0] is [2, "4"], which is not two integers.'),
+        ([[2.0, 4.0]], "keep_ranges[0] is [2.0, 4.0], which is not two integers."),
+        ([True, 4], "keep_ranges[0] is a boolean (true), not a [first, last] pair."),
+        ([], "Received an empty list."),
+    ],
+)
+async def test_a_malformed_keep_ranges_error_shows_a_valid_value_and_what_was_received(
+    ctx, attached, keep_ranges, received
+):
+    with pytest.raises(ToolError) as caught:
+        await propose_package_map(
+            ctx, source_document_id=str(attached.id), **{**EMBEDDED, "keep_ranges": keep_ranges}
+        )
+    message = str(caught.value)
+    assert "for example [[12, 40], [96, 98]]" in message
+    assert "[[12, 40]] for a single range" in message
+    assert received in message
+    assert (await ctx.db.execute(select(Finding))).scalars().all() == []
+
+
+async def test_a_flattened_even_length_keep_ranges_is_read_as_consecutive_pairs(ctx, attached):
+    """Some hosts flatten [[2, 4], [6, 6]] to [2, 4, 6, 6]. The tool reads it
+    back as pairs, records the pairs, and says so in its result."""
+    result = await propose_package_map(
+        ctx, source_document_id=str(attached.id), **{**EMBEDDED, "keep_ranges": [2, 4, 6, 6]}
+    )
+    finding = (await ctx.db.execute(select(Finding))).scalars().one()
+    assert finding.payload["map"]["keep_ranges"] == [[2, 4], [6, 6]]
+    assert finding.payload["selected_page_count"] == 4
+    assert finding.status == "draft"
+    assert (
+        "keep_ranges arrived as the flat list [2, 4, 6, 6] and was read as the pairs "
+        "[[2, 4], [6, 6]]"
+    ) in result
+
+
+async def test_a_nested_keep_ranges_result_carries_no_flattening_note(ctx, attached):
+    result = await propose_package_map(ctx, source_document_id=str(attached.id), **EMBEDDED)
+    assert "flat list" not in result
+
+
+async def test_a_flattened_pair_list_is_still_range_checked(ctx, attached):
+    with pytest.raises(ToolError, match="Out-of-bounds range"):
+        await propose_package_map(
+            ctx, source_document_id=str(attached.id), **{**EMBEDDED, "keep_ranges": [4, 2]}
+        )
+
+
+async def test_execute_tool_accepts_a_flattened_single_range(ctx, attached):
+    spec = get_builtin_tools()["propose_package_map"]
+    result, is_error = await execute_tool(
+        ctx, spec, {"source_document_id": str(attached.id), **EMBEDDED, "keep_ranges": [2, 4]}
+    )
+    assert is_error is False, result
+    assert "read as the pairs [[2, 4]]" in result
+
+
+def test_the_keep_ranges_schema_shows_a_worked_example():
+    spec = get_builtin_tools()["propose_package_map"]
+    description = spec.parameters["properties"]["keep_ranges"]["description"]
+    assert "[[12, 40], [96, 98]]" in description
+
+
 async def test_execute_tool_returns_a_tool_error_for_a_bad_map(ctx, attached):
     spec = get_builtin_tools()["propose_package_map"]
     result, is_error = await execute_tool(

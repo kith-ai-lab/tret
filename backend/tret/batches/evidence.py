@@ -58,7 +58,7 @@ def scrub(text: str | None, run: Any) -> str:
 RUN_LIMIT_TEXT = "the run stopped at a run limit before finishing"
 _LIMIT_RE = re.compile(
     r"max_iterations|iteration limit|cost_cap|cost cap|output_budget|budget_exceeded|run limit|"
-    r"max_cost|token limit|too many iterations",
+    r"max_cost|token limit|too many iterations|identical failing calls",
     re.IGNORECASE,
 )
 _NUMBERS_RE = re.compile(

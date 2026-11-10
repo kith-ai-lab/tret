@@ -1765,6 +1765,94 @@ def _normalise_exclusions(raw: object) -> list[dict]:
     return out
 
 
+# The error carries a worked example. Packaging's bare "keep_ranges must be a
+# [first, last] integer pair" was read by models as describing keep_ranges as a
+# whole: they sent one flat pair, got the same error back, and sent it again
+# (the stuck-call stop in engine/harness.py `_FailureStreak` exists for that).
+KEEP_RANGES_HELP = (
+    "keep_ranges must be a nonempty list of [first, last] integer pairs (physical pages), "
+    "for example [[12, 40], [96, 98]] to keep pages 12-40 and 96-98, or [[12, 40]] for a "
+    "single range; null keeps the whole file and is valid only with scope=standalone"
+)
+_SHAPE_PREVIEW_MAX = 80
+
+
+def _shape_preview(value: object) -> str:
+    try:
+        text = json.dumps(value)
+    except (TypeError, ValueError):
+        text = repr(value)
+    return text if len(text) <= _SHAPE_PREVIEW_MAX else text[: _SHAPE_PREVIEW_MAX - 3] + "..."
+
+
+def _json_kind(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, int):
+        return "an integer"
+    if isinstance(value, float):
+        return "a non-integer number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, dict):
+        return "an object"
+    if isinstance(value, (list, tuple)):
+        return "a list"
+    return type(value).__name__
+
+
+def _is_int_pair(value: object) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(type(v) is int for v in value)
+    )
+
+
+def _normalise_keep_ranges(
+    raw: object,
+) -> tuple[tuple[tuple[int, int], ...] | None, list[int] | None]:
+    """(keep_ranges as pairs, the flat list they were read from or None).
+
+    Accepts null, a list of [first, last] integer pairs, and one flattened form:
+    an even-length list of integers, read as consecutive pairs ([12, 40, 96, 98]
+    -> [[12, 40], [96, 98]]). Some hosts flatten nested arrays in tool arguments;
+    the tool's contract only ever describes pairs, so pairing in order is the
+    one reading the schema allows. It is still only a draft: nothing is packaged
+    until a person approves the map, which shows the pairs, and the tool result
+    says how the list was read. Anything else is an error that names what was
+    received and shows a valid value. Bounds, order and overlap are left to
+    `packaging.validate_map`.
+    """
+    if raw is None:
+        return None, None
+    if not isinstance(raw, list):
+        raise ToolError(f"{KEEP_RANGES_HELP}. Received {_json_kind(raw)}: {_shape_preview(raw)}.")
+    if not raw:
+        raise ToolError(f"{KEEP_RANGES_HELP}. Received an empty list.")
+    if all(type(v) is int for v in raw):
+        if len(raw) % 2:
+            raise ToolError(
+                f"{KEEP_RANGES_HELP}. Received a flat list of {len(raw)} integers "
+                f"{_shape_preview(raw)}, which cannot be read as [first, last] pairs; put each "
+                "range in its own pair."
+            )
+        return tuple((raw[i], raw[i + 1]) for i in range(0, len(raw), 2)), list(raw)
+    for i, item in enumerate(raw):
+        if _is_int_pair(item):
+            continue
+        if not isinstance(item, (list, tuple)):
+            what = f"{_json_kind(item)} ({_shape_preview(item)}), not a [first, last] pair"
+        elif len(item) != 2:
+            what = f"a list of {len(item)} values ({_shape_preview(item)}), not 2"
+        else:
+            what = f"{_shape_preview(item)}, which is not two integers"
+        raise ToolError(f"{KEEP_RANGES_HELP}. Received a list whose keep_ranges[{i}] is {what}.")
+    return tuple((item[0], item[1]) for item in raw), None
+
+
 def _read_head_sync(path: Path, n: int = 5) -> bytes:
     with path.open("rb") as fh:
         return fh.read(n)
@@ -1821,8 +1909,9 @@ def _read_head_sync(path: Path, n: int = 5) -> bytes:
                     "maxItems": 2,
                 },
                 "description": (
-                    "Inclusive [first, last] physical page pairs, increasing and disjoint. null "
-                    "means the whole original and is valid only for scope=standalone."
+                    "Inclusive [first, last] physical page pairs, increasing and disjoint, for "
+                    "example [[12, 40], [96, 98]]; one range is [[12, 40]]. null means the whole "
+                    "original and is valid only for scope=standalone."
                 ),
             },
             "incorporations": {
@@ -1971,8 +2060,7 @@ async def propose_package_map(
             "re-propose it with the same source document and the same stem"
         )
 
-    if keep_ranges is not None and not isinstance(keep_ranges, list):
-        raise ToolError("keep_ranges must be an array of [first, last] pairs, or null")
+    keep_pairs, keep_flat = _normalise_keep_ranges(keep_ranges)
     if not isinstance(review_note, str):
         raise ToolError("review_note must be a string")
 
@@ -1992,11 +2080,7 @@ async def propose_package_map(
         title=title,
         role=role,
         scope=scope,
-        keep_ranges=(
-            None
-            if keep_ranges is None
-            else tuple(tuple(r) if isinstance(r, list) else r for r in keep_ranges)
-        ),
+        keep_ranges=keep_pairs,
         review_note=review_note,
         incorporations=tuple(incorporation_records),
         exclusions=tuple(exclusion_records),
@@ -2041,7 +2125,7 @@ async def propose_package_map(
                 "title": title,
                 "role": role,
                 "scope": scope,
-                "keep_ranges": None if keep_ranges is None else [list(r) for r in mapping.keep_ranges],
+                "keep_ranges": None if keep_pairs is None else [list(r) for r in mapping.keep_ranges],
                 "review_note": review_note,
                 "incorporations": incorporation_records,
                 "exclusions": exclusion_records,
@@ -2087,6 +2171,13 @@ async def propose_package_map(
         f"incorporation record(s)) — awaiting approval (finding {finding.id}). NOTHING has been "
         "packaged: files are produced only if and when an approver accepts this map. Ranges are "
         "physical PDF page indices counted from 1, not printed folios or page labels."
+        + (
+            f" Note: keep_ranges arrived as the flat list {json.dumps(keep_flat)} and was read "
+            f"as the pairs {json.dumps([list(r) for r in keep_pairs])}. If you meant other "
+            "pages, propose this map again with the same source document and stem."
+            if keep_flat is not None
+            else ""
+        )
     )
 
 

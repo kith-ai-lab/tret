@@ -78,6 +78,32 @@ def test_derive_target_status(run_status, outcome, maps, kw, expected):
     assert derive_target_status(run_status, outcome, maps, **kw) == expected
 
 
+STUCK = "stopped: 3 identical failing calls to capture_source"
+CEILING = "max_iterations (40) reached without completion"
+
+
+@pytest.mark.parametrize("run_error", [CEILING, STUCK])
+@pytest.mark.parametrize(
+    ("maps", "kw", "expected_status"),
+    [
+        ([], {}, "failed"),
+        ([m("draft")], {}, "review"),
+        ([m("approved", PACKAGED)], {}, "completed"),
+        ([m("approved", PACKAGED)], {"auto_write": True, "written": True}, "written"),
+    ],
+)
+def test_a_stuck_call_stop_settles_a_target_as_the_iteration_ceiling_does(
+    run_error, maps, kw, expected_status
+):
+    """The engine's stuck-call stop fails the run the way the iteration ceiling
+    does: a target with no map fails with the run's error, and one whose run
+    already proposed a map is judged by its maps, so an approved, packaged map
+    is still delivered."""
+    status, error = derive_target_status("failed", None, maps, run_error=run_error, **kw)
+    assert status == expected_status
+    assert error == (run_error if not maps else f"run ended failed: {run_error}")
+
+
 @pytest.mark.parametrize(
     ("current", "statuses", "expected"),
     [
