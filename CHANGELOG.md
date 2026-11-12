@@ -64,6 +64,11 @@ one that needs action on an existing install.
 
 ### Changed
 
+- Experiments never pin a model. Make default applies only an arm's objective and iteration
+  limit; an arm's model stays with the router, its evaluated runs being evidence for the
+  family gate, and a model-only arm is not promotable. Experiment results gain
+  `experiment.router_gate`, and `POST /api/routing/preview` accepts an optional `family_key`
+  (workspace taken from the caller) and returns `family_priors` when family evidence applied.
 - **The batch comparison has a both-delivered view, and a gap is cross-checked against
   other runs.** `GET /batches/compare` adds `summary.delivered` (wins, ties, mean quality
   and delta over the rows both batches delivered, so low yield no longer drags the

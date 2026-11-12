@@ -8,7 +8,7 @@ import {
   type ExperimentArmResult,
   type ExperimentResult,
 } from '../api/client'
-import { fmtMeanInterval, fmtScore } from '../components/batches/evalHelpers'
+import { fmtMeanInterval, fmtScore, routerGateLine } from '../components/batches/evalHelpers'
 import { errText } from '../components/batches/shared'
 import { ROLE_RANK } from '../components/shared/Lessons'
 import { useConfirm } from '../components/shared/ConfirmDialog'
@@ -60,7 +60,13 @@ export function BatchExperiment() {
   const exp = result?.experiment
   const harnessId = exp?.harness_id ?? null
 
+  // What the router would pick now. On request only: each check is a real router call.
+  const previewMutation = useMutation({
+    mutationFn: () => api.previewRouting({ harness_id: harnessId!, family_key: exp!.family_key }),
+  })
+
   const refresh = () => {
+    previewMutation.reset()
     void queryClient.invalidateQueries({ queryKey: ['batch-experiment', id] })
     void queryClient.invalidateQueries({ queryKey: ['batch-experiments'] })
     void queryClient.invalidateQueries({ queryKey: ['batches'] })
@@ -135,6 +141,7 @@ export function BatchExperiment() {
     return a?.label ? `${key} (${a.label})` : key
   }
   const promoted = exp.promoted
+  const routerPick = previewMutation.data?.results?.[0] ?? null
 
   const rows: { name: string; cell: (a: ExperimentArmResult) => React.ReactNode }[] = [
     { name: 'Sets', cell: (a) => armSets(a) },
@@ -266,19 +273,17 @@ export function BatchExperiment() {
                     {exp.current_arm === a.key ? (
                       <span className="fine-print">current default</span>
                     ) : (
-                      <>
+                      a.promotion?.allowed ? (
                         <button
                           className="btn btn-sm"
-                          disabled={promoteMutation.isPending || !a.promotion?.allowed}
-                          title={a.promotion?.allowed ? undefined : (a.promotion?.blocked_reason ?? undefined)}
+                          disabled={promoteMutation.isPending}
                           onClick={() => void makeDefault(a)}
                         >
                           Make default
                         </button>
-                        {a.promotion && !a.promotion.allowed && a.promotion.blocked_reason && (
-                          <div className="fine-print">{a.promotion.blocked_reason}</div>
-                        )}
-                      </>
+                      ) : (
+                        <div className="fine-print">{a.promotion?.blocked_reason ?? 'Nothing to apply.'}</div>
+                      )
                     )}
                   </td>
                 ))}
@@ -290,6 +295,51 @@ export function BatchExperiment() {
       {!canPromote && (
         <div className="fine-print" style={{ marginTop: 6 }}>
           Making an arm the default changes the harness policy and needs the admin role.
+        </div>
+      )}
+
+      {harnessId && exp.family_key && (
+        <div className="panel" style={{ margin: '12px 0' }}>
+          <div className="mono-label">What the router would pick now</div>
+          {routerPick ? (
+            <>
+              <div className="mono-body" style={{ marginTop: 4 }}>
+                {routerPick.decision.chosen_model}
+                {routerPick.decision.reasoning && <div>{routerPick.decision.reasoning}</div>}
+              </div>
+              <div className="fine-print" style={{ marginTop: 4 }}>
+                {routerPick.decision.family_priors ?? previewMutation.data?.family_priors
+                  ? 'Family evidence was applied to this pick.'
+                  : 'Family evidence was not applied to this pick.'}
+              </div>
+              <div className="fine-print">
+                A preview does not explore and sizes the task from the agent's instructions alone; a real run can
+                differ.
+              </div>
+            </>
+          ) : previewMutation.isError ? (
+            <div className="fine-print" style={{ marginTop: 4 }}>
+              The router could not be asked just now.
+            </div>
+          ) : (
+            <div className="fine-print" style={{ marginTop: 4 }}>
+              Ask the router what it would pick for this agent and family. Each check is one small router call on
+              this workspace's key.
+            </div>
+          )}
+          {routerGateLine(exp.router_gate) && (
+            <div className="fine-print" style={{ marginTop: 4 }}>
+              {routerGateLine(exp.router_gate)}
+            </div>
+          )}
+          <button
+            className="btn btn-sm"
+            style={{ marginTop: 8 }}
+            disabled={previewMutation.isPending}
+            onClick={() => previewMutation.mutate()}
+          >
+            {previewMutation.isPending ? 'Checking…' : "Check the router's pick"}
+          </button>
         </div>
       )}
 

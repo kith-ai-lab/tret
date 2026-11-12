@@ -3997,6 +3997,8 @@ export interface components {
              * @default false
              */
             compare: boolean;
+            /** Family Key */
+            family_key?: string | null;
             /** Harness Id */
             harness_id?: string | null;
             /** Max Output Tokens */

@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.batches import advice, core, families, scoring
+from tret.batches.gate import safe_family_gate
 from tret.db.models import Batch, BatchExperiment, Harness, HarnessPolicyHistory, User
 from tret.providers.catalog import get_catalog
 from tret.router_llm.objectives import OBJECTIVES, objective_of, within_cost_tier
@@ -395,10 +396,11 @@ def _recommend(arm_stats: list[dict], objective: str) -> dict | None:
     return {"arm": pick["key"], "reason": reason} if pick is not None else {"arm": None, "reason": reason}
 
 
-PIN_NOTE = (
-    "Pinning turns off automatic routing and outcome learning for this harness; its allowed list "
-    "and cost ceiling no longer apply to runs on it."
+MODEL_ARM_NOTE = (
+    "This arm's model is not pinned. Model choice stays with the router; this experiment's "
+    "evaluated runs are its evidence once the family's spot-check gate is open."
 )
+MODEL_ONLY_REASON = "A model arm changes no harness setting: its runs are evidence for the router."
 
 
 def _describe_model(policy: dict) -> str:
@@ -470,18 +472,19 @@ def promotion_plan(
         base_loop = copy.deepcopy(last_row.previous_loop_config)
         notes.append(f"replaces the earlier promotion of arm {promoted.get('arm')}")
     new_policy, new_loop = copy.deepcopy(base_policy), copy.deepcopy(base_loop)
+    # The arm's model is never written to a harness: dynamic routing keeps choosing it.
     if arm.get("model_override"):
-        new_policy = {**new_policy, "mode": "pinned", "model": arm["model_override"]}
-        notes.append(PIN_NOTE)
+        notes.append(MODEL_ARM_NOTE)
     if arm.get("objective"):
         new_policy["objective"] = arm["objective"]
     if arm.get("max_iterations"):
         new_loop["max_iterations"] = arm["max_iterations"]
     changes = _diff(current_policy, new_policy, current_loop, new_loop)
-    problem = _arm_policy_problem(arm, current_policy)
     reason = None
-    if problem:
-        reason = f"arm {arm['key']} no longer fits the harness policy: {problem}"
+    model_only = bool(arm.get("model_override")) and not arm.get("objective") and not arm.get("max_iterations")
+    if model_only:
+        reason = MODEL_ONLY_REASON
+        changes = []
     elif not changes:
         reason = "the harness already has these settings"
     return {
@@ -491,7 +494,7 @@ def promotion_plan(
         "notes": notes,
         "new_model_policy": new_policy,
         "new_loop_config": new_loop,
-        "token": _token(current_policy, current_loop, new_policy, new_loop),
+        "token": _token(current_policy, current_loop, new_policy, new_loop) if not model_only else None,
     }
 
 
@@ -651,7 +654,17 @@ async def experiment_result(db: AsyncSession, e: BatchExperiment) -> dict:
         recommendation = {"arm": None, "reason": note or "The arms are not scored comparably, so there is nothing to recommend."}
     else:
         recommendation = _recommend(arms_out, objective)
-    current_arm = next((a["key"] for a in arms_out if a["_current"]), None)
+    # Arms whose plan changes nothing can share a plan (an arm's model is dropped): prefer the
+    # one this experiment actually promoted.
+    current_keys = [a["key"] for a in arms_out if a["_current"]]
+    promoted_arm = (e.promoted or {}).get("arm")
+    current_arm = promoted_arm if promoted_arm in current_keys else next(iter(current_keys), None)
+    try:
+        router_gate = (
+            await safe_family_gate(db, f"{e.family_key}@{e.workspace_id}") if e.family_key else None
+        )
+    except Exception:  # noqa: BLE001 - a display extra, never worth failing the result
+        router_gate = None
     for a in arms_out:
         del a["_current"]
     result_batches = [b for b in batches.values() if b is not None]
@@ -670,6 +683,7 @@ async def experiment_result(db: AsyncSession, e: BatchExperiment) -> dict:
             "promoted": e.promoted,
             "current_arm": current_arm,
             "evaluating": evaluating,
+            "router_gate": router_gate,
             "warnings": _warnings(e, harness, batches),
         },
         "arms": arms_out,
@@ -702,6 +716,8 @@ async def promote(
             await db.refresh(harness)
     await db.refresh(e)
     plan = promotion_plan(e, arm, harness, await _last_promotion_row(db, e))
+    if plan["blocked_reason"] == MODEL_ONLY_REASON:
+        raise HTTPException(409, f"Arm {arm_key} cannot be made the default: {plan['blocked_reason']}")
     if token is not None and token != plan["token"]:
         raise HTTPException(
             409,

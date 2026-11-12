@@ -177,6 +177,13 @@ export interface RoutingEvidence {
   unrecorded: string[]
 }
 
+/** What the family-evidence path recorded; present only when it was applied. */
+export interface RoutingFamilyPriors {
+  used: boolean
+  gate?: Partial<RouterGate>
+  adjusted?: Record<string, unknown>
+}
+
 export interface RoutingDecision {
   router_model: string | null
   routing_prompt_version: string
@@ -200,6 +207,9 @@ export interface RoutingDecision {
   /** Who supplied `objective`: "run_override" | "harness" | "pack_task" |
    *  "default". Absent on decisions recorded before the field existed. */
   objective_source?: string
+  /** Present only when this decision was made against a batch family's evidence. */
+  task_family?: string | null
+  family_priors?: RoutingFamilyPriors | null
   /** The shape the fallback table keys on, and the key evidence is grouped by. */
   task_shape?: string
   max_cost_tier?: string
@@ -297,6 +307,10 @@ export interface RoutingPreviewBody {
    *  always) instead of just the policy's own — one router call each.
    *  Requires the workspace's approver role or higher (403 below it). */
   compare?: boolean
+  /** Preview as a batch run of this family would route: the server builds the
+   *  family with the caller's own workspace, so family evidence is applied
+   *  exactly as for a real run. Omit for the plain preview. */
+  family_key?: string
 }
 
 /** One objective's row of a `POST /api/routing/preview` response. `estimate`
@@ -3483,6 +3497,8 @@ export interface ExperimentResult {
     warnings?: string[]
     /** An evaluation pass is running on an arm batch. */
     evaluating?: boolean
+    /** Router-learning gate for this experiment's family; absent on older servers. */
+    router_gate?: RouterGate | null
   }
   arms: ExperimentArmResult[]
   comparisons: ExperimentComparison[]
@@ -4118,7 +4134,10 @@ export const api = {
 
   // routing preview (dry run — see api/routing.py; never persists, never runs)
   previewRouting: (body: RoutingPreviewBody) =>
-    request<{ results: RoutingPreviewResult[] }>('/routing/preview', { method: 'POST', body }),
+    request<{ results: RoutingPreviewResult[]; family_priors?: RoutingFamilyPriors | null }>(
+      '/routing/preview',
+      { method: 'POST', body },
+    ),
 
   // documents + datasets
   uploadDocument: (file: File) => {

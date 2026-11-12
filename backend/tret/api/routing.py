@@ -69,6 +69,11 @@ class RoutingPreviewBody(BaseModel):
     # go fully inline — a form previewing edits it has not saved yet has no
     # harness row to point at.
     harness_id: uuid.UUID | None = None
+    # Optional batch family (`families.family_key` form). When given, the preview routes
+    # as a batch run of that family would: the server builds `<family_key>@<caller's
+    # workspace id>` itself (a workspace is never taken from the body) so the family's
+    # gated evidence applies. Omitted: the preview is exactly what it always was.
+    family_key: str | None = Field(default=None, max_length=200)
     # Overrides the named harness's model_policy when both are given (the
     # "preview my unsaved edits" case); required when harness_id is not given.
     # Validated the same way the harness write path validates a saved policy
@@ -482,6 +487,10 @@ async def preview_routing(
     registry = ProviderRegistry(await load_db_keys(db, ctx.id))
     model_router = ModelRouter(engine.catalog, registry, engine.priors)
 
+    family_key = (body.family_key or "").strip()
+    if "@" in family_key:
+        raise HTTPException(422, "family_key must not contain '@': the workspace is the caller's own")
+    task_family = f"{family_key}@{ctx.id}" if family_key else None
     objectives = list(OBJECTIVES) if body.compare else [objective_of(model_policy)]
 
     results = []
@@ -510,6 +519,7 @@ async def preview_routing(
                 n_documents=body.n_documents,
                 est_input_tokens=est_input_tokens,
                 min_context_window=min_context_window,
+                **({"task_family": task_family} if task_family else {}),
             )
             model_info = engine.catalog.get(decision.chosen_model)
             # Two ends of a range, not a point estimate — the actual bill
@@ -552,4 +562,11 @@ async def preview_routing(
         total_router_overhead_usd,
     )
 
-    return {"results": results}
+    out: dict = {"results": results}
+    # Only when family evidence was actually applied (the decision carries it then).
+    family_priors = next(
+        (r["decision"]["family_priors"] for r in results if r["decision"].get("family_priors")), None
+    )
+    if family_priors:
+        out["family_priors"] = family_priors
+    return out

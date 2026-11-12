@@ -701,14 +701,25 @@ the experiment and an **admin** (not an approver) promotes an arm.
   (`allowed`, `blocked_reason`, `changes`, `notes` and a `token`). `changes` lists everything that
   would differ on the harness (Model, Objective, Max iterations, and any other policy or loop key
   as `policy.<key>` / `loop.<key>`), not only what the arm sets; the request may carry the
-  `token` it was shown, and a stale one is a 409 so nothing is written under a changed harness. A model arm pins the harness to that model (this turns off
-  automatic routing and outcome learning, and the harness's allowed list and cost ceiling no
-  longer apply to runs on it), an objective arm sets the policy objective, an iterations arm
-  sets `loop_config.max_iterations`. The arm is re-checked against the harness's current
-  policy and refused (409) if it no longer fits, or if the harness already has these
-  settings. While the harness still has an earlier promotion of the same experiment, a
+  `token` it was shown, and a stale one is a 409 so nothing is written under a changed harness. Make default applies
+  only an arm's objective (the policy `objective`) and iteration limit (`loop_config.max_iterations`);
+  an arm's model is never written to a harness, and `mode`, `model`, `allowed` and every other
+  policy key stay as they are. A model arm is evidence for the router: its evaluated runs feed
+  the per-family evidence once the family's spot-check gate is open, and an arm that sets only a
+  model is not promotable (`allowed` false, 409 on `promote`). Creation still refuses a model the
+  policy does not allow. The plan is refused (409) if the harness already has these settings.
+  While the harness still has an earlier promotion of the same experiment, a
   second arm replaces it: it is applied on top of the policy from before the experiment's
-  first promotion. `experiment.current_arm` names the arm whose settings the harness has now.
+  first promotion. `experiment.current_arm` names the arm whose objective and iteration limit the harness has now
+  (the promoted arm when several arms would change nothing, never a model-only arm).
+  The experiment page has a "What the router would pick now" check that asks the router for this
+  agent and family on request. Each check is one small router call on the workspace's own key; it
+  does not explore, and it sizes the task from the agent's instructions alone, so a real run can
+  differ (`POST /api/routing/preview` with `family_key`; the server adds the caller's workspace,
+  and the response carries `family_priors` only when family evidence was applied). The result
+  carries `experiment.router_gate`, the family's spot-check gate. An experiment never sets a
+  pin; manual pinning in the harness editor is a separate operator override. When a promotion
+  replaces an earlier one, the policy returns to its pre-experiment baseline, whatever that was.
   The change is validated like a harness edit and recorded in the harness's policy history
   with who, when and the previous values; two concurrent promotions serialise on the harness row.
 - **Reading while it runs.** Intervals stay empty until every row of every arm has settled,
