@@ -39,7 +39,13 @@ have picked and why; it never changes the model that runs. With `live`, an agent
 sets `adaptive.ranking: scored` is routed by that ranking with no router call, and the block is
 stored in `runs.routing.scored`; every other agent is as under `shadow`. The `quality` and
 `token_conservation` objectives are not scored. No migration; with the default nothing is
-recorded and routing is byte-identical to before.
+recorded and routing is byte-identical to before. For an agent routed by the scored ranking the
+exploration share is now acted on, at the policy's `adaptive.exploration` (default 0.05); set
+`adaptive.exploration: 0` on an opted-in agent to stop it exploring (this also turns off today's
+exploration for the runs where that agent falls through to today's router). A success on an
+exploration run that has findings cannot give the model a record until one of them is approved
+in review. A batch run whose findings include a review rejection and no review approval now
+counts as a failure in the per-agent record.
 
 ## 2026-11-12 · router learning per batch family (gated)
 

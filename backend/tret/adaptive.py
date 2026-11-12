@@ -108,7 +108,10 @@ class AdaptivePolicy:
     instead of asking the router LLM. `exploration: 0` (not the harness
     ceiling) is what actually turns the behavior off — the guardrails around
     it (objective, task shape, tier, no pin/override) narrow *when* it can
-    fire, this is *whether* it does at all.
+    fire, this is *whether* it does at all. `exploration` is also the share
+    the scored ranking (`ranking: scored`) sends to a model the agent has not
+    tried yet; there it applies whatever the task shape, within
+    `exploration_max_cost_tier`.
     """
 
     learn_from_outcomes: bool = True

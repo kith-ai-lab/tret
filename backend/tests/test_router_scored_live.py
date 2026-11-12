@@ -262,22 +262,26 @@ async def test_a_cooling_model_with_a_record_is_not_picked(monkeypatch):
 
 
 # 10 ─ the draw ───────────────────────────────────────────────────────────────
-FIRES_SEED = next(s for s in range(500) if random.Random(s).random() < scoring.EXPLORATION_SHARE)
+SHARE = 0.1
+FIRES_SEED = next(s for s in range(500) if random.Random(s).random() < SHARE)
 
 
-async def test_the_draw_is_recorded_but_not_applied_and_the_live_rng_is_untouched(monkeypatch):
+async def test_the_draw_is_acted_on_and_the_live_rng_is_untouched(monkeypatch):
     alpha, beta, gamma = _model("alpha"), _model("beta", price="2"), _model("gamma")
     stub = _Stub(rows=_rows(alpha.id, 0.20) + _rows(beta.id, 0.01))
-    policy = _pol({"ranking": "scored", "exploration": 0.2})
+    policy = _pol({"ranking": "scored", "exploration": SHARE})
     router, reg = _router(
         stub, alpha, beta, gamma, seed=7, shadow_rng=random.Random(FIRES_SEED)
     )
     for i in range(3):
         d = await _decide(router, "live", monkeypatch, policy=policy)
         ex = d.scored["exploration"]
-        assert ex["draw"] is not None and ex["applied"] is False and ex["candidate"] == gamma.id
-        assert ex["fired"] is (i == 0)  # only the first draw of the seeded stream is under the share
-        assert d.chosen_model == beta.id == d.scored["ranked_pick"]
+        fires = i == 0  # only the first draw of the seeded stream is under the share
+        assert ex["draw"] is not None and ex["candidate"] == gamma.id
+        assert ex["fired"] is fires and ex["applied"] is fires
+        assert d.scored["ranked_pick"] == beta.id
+        assert d.chosen_model == (gamma.id if fires else beta.id)
+        assert d.exploration["explored"] is fires
     assert reg.calls == 0
     assert router._rng.random() == random.Random(7).random()
 
