@@ -150,6 +150,15 @@ async def test_shadow_adds_only_the_shadow_key(shadow_on, monkeypatch):
     assert block["live_choice"] == on.chosen_model
 
 
+async def test_live_gives_a_non_opted_agent_the_same_shadow_block_as_shadow(monkeypatch):
+    monkeypatch.setattr(get_settings(), "router_agent_scoring", "live")
+    live = await _decide(_router(_priors(), shadow_rng=random.Random(4)), harness_id=HARNESS)
+    monkeypatch.setattr(get_settings(), "router_agent_scoring", "shadow")
+    shadow = await _decide(_router(_priors(), shadow_rng=random.Random(4)), harness_id=HARNESS)
+    assert live.shadow is not None and live.scored is None
+    assert live.shadow == shadow.shadow and _comparable(live) == _comparable(shadow)
+
+
 async def test_shadow_without_a_harness_id_records_nothing(shadow_on):
     assert (await _decide(_router(_priors()))).shadow is None
 

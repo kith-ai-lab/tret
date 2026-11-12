@@ -168,10 +168,11 @@ def test_another_agents_cost_is_never_used():
     assert by["test/b"]["resource_per_run"] == pytest.approx(0.003)
 
 
-def test_tokens_unit_is_input_plus_output():
+def test_token_conservation_is_not_scored():
+    # Recorded token counts leave out cache reads, so tokens per result is not
+    # comparable across models.
     block = _go(_runs("test/a", 10, 10, inp=800, out=200), [_m("a")], objective="token_conservation")
-    e = block["models"][0]
-    assert block["unit"] == "tokens" and e["resource_per_run"] == 1000.0
+    assert block["status"] == "objective_not_scored" and "tokens" not in scoring.UNITS.values()
 
 
 def test_wh_unit_uses_observed_energy_and_falls_back_to_list_when_none_recorded():
@@ -415,11 +416,6 @@ def test_calibration_scales_untried_list_prices_but_not_observed_ones():
     assert by["test/tried"]["resource_per_run"] == 0.006
 
 
-def test_calibration_is_one_for_tokens():
-    block = _go(_runs("test/a", 10, 10), [_m("a"), _m("b")], objective="token_conservation")
-    assert block["agent"]["list_price_calibration"] == 1.0
-
-
 def test_calibration_is_clamped_at_both_ends():
     assert _cal_block(1000.0)[0]["agent"]["list_price_calibration"] == scoring.CALIBRATION_MAX
     assert _cal_block(1e-7)[0]["agent"]["list_price_calibration"] == scoring.CALIBRATION_MIN
@@ -533,3 +529,42 @@ def test_the_floor_comparison_is_strict(monkeypatch):
     rows = _runs("test/a", 30, 27) + _runs("test/b", 30, 27)
     by = _by(_go(rows, [_m("a"), _m("b")]))
     assert by["test/a"]["excluded"] is None and by["test/b"]["excluded"] is None
+
+
+# ── exploration_live ─────────────────────────────────────────────────────────
+def _fresh_case():
+    rows = _runs("test/tried", 10, 10)
+    return rows, [_m("tried"), _m("fresh")], {"test/tried": _prior("test/tried", 0.9)}
+
+
+def test_exploration_not_live_picks_the_ranked_pick_even_when_the_draw_fires():
+    rows, models, pooled = _fresh_case()
+    block = _go(rows, models, pooled, draw=0.05, exploration_live=False)
+    ex = block["exploration"]
+    assert ex["fired"] is True and ex["applied"] is False and ex["candidate"] == "test/fresh"
+    assert block["pick"] == block["ranked_pick"] == "test/tried"
+    assert "would have been tried but the exploration share is not live for this agent yet" in block["reason"]
+    assert "test/fresh" in block["reason"]
+
+
+def test_exploration_not_live_keeps_the_existing_wording_when_the_draw_did_not_fire():
+    rows, models, pooled = _fresh_case()
+    live = _go(rows, models, pooled, draw=0.99)
+    held = _go(rows, models, pooled, draw=0.99, exploration_live=False)
+    assert held["reason"] == live["reason"]
+    off = _go(rows, models, pooled, exploration_share=0.0, draw=None, exploration_live=False)
+    assert "Exploration is off" in off["reason"] and off["exploration"]["applied"] is False
+
+
+def test_exploration_applied_is_true_in_the_default_mode_when_fired():
+    rows, models, pooled = _fresh_case()
+    block = _go(rows, models, pooled, draw=0.05)
+    assert block["exploration"]["fired"] is True and block["exploration"]["applied"] is True
+    assert block["pick"] == "test/fresh"
+    assert _go(rows, models, pooled, draw=0.99)["exploration"]["applied"] is False
+
+
+def test_the_block_lists_the_main_ranking_in_rank_order():
+    a, b = _m("a", price="5"), _m("b", price="1")
+    block = _go(_runs("test/a", 10, 10, cost=0.05) + _runs("test/b", 10, 10, cost=0.01), [a, b])
+    assert block["ranking"] == ["test/b", "test/a"] and block["ranked_pick"] == "test/b"
