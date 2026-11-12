@@ -1351,6 +1351,51 @@ async def pass_is_open(db: AsyncSession, collection_id: uuid.UUID) -> bool:
     return current is not None and current.status in ("running", "completed")
 
 
+def reset_row(row: TargetEvaluation, t: BatchTarget, *, keep_review: bool = False) -> None:
+    """Re-arm `row` onto `t`'s current attempt and run: a pending row with no
+    score, no flags and no review (unless `keep_review`). The cost already spent
+    stays on the row."""
+    row.attempt = t.attempts or 0
+    row.evaluated_run_id = t.run_id
+    row.evaluator_run_id = None  # a judge still working on the old attempt is late
+    row.status, row.skip_reason, row.error = "pending", None, None
+    row.scores, row.flags = {}, []
+    row.quality = row.difficulty = row.confidence = row.rationale = None
+    row.relative = None
+    if not keep_review:
+        row.review = None
+    row.finished_at = None
+
+
+async def skip_row_as_infra(
+    db: AsyncSession, batch_id: uuid.UUID, target_id: uuid.UUID
+) -> tuple[BatchEvaluation | None, bool]:
+    """A target that was judged and then marked an infrastructure failure
+    (`search_outage.mark_transcript_outages`) ends in the state a freshly settled
+    infra target gets in `on_target_settled`: its row in the batch's current pass
+    is re-armed (`reset_row`) and skipped with `INFRA_SKIP`, so the scorecard, the
+    comparison, the family leaderboard and the run's evaluated score stop reading
+    it. A person's review on the row is kept as it was. Returns `(pass, had_review)`
+    when a row changed (the caller commits), else `(None, False)`."""
+    ev = await scoring.current_pass(db, batch_id)
+    t = await db.get(BatchTarget, target_id)
+    if ev is None or t is None:
+        return None, False
+    row = (
+        await db.execute(
+            select(TargetEvaluation).where(
+                TargetEvaluation.evaluation_id == ev.id, TargetEvaluation.target_id == target_id
+            )
+        )
+    ).scalars().first()
+    if row is None or (row.status == "skipped" and row.skip_reason == INFRA_SKIP):
+        return None, False
+    had_review = isinstance(row.review, dict) and bool(row.review)
+    reset_row(row, t, keep_review=True)
+    row.status, row.skip_reason = "skipped", INFRA_SKIP
+    return ev, had_review
+
+
 async def on_target_settled(batch_id: uuid.UUID, target_id: uuid.UUID) -> None:
     """A target reached a terminal status (`core._settle_target`): arm its row in
     the batch's current pass, or re-arm it after a retry, then pump whenever the
@@ -1388,14 +1433,7 @@ async def on_target_settled(batch_id: uuid.UUID, target_id: uuid.UUID) -> None:
                     reopen = not skipped
                 elif row.attempt != (t.attempts or 0) or row.evaluated_run_id != t.run_id:
                     _rescore_old_after_commit(db, row.evaluated_run_id, t.run_id)
-                    row.attempt = t.attempts or 0
-                    row.evaluated_run_id = t.run_id
-                    row.evaluator_run_id = None  # a judge still working on the old attempt is late
-                    row.status, row.skip_reason, row.error = "pending", None, None
-                    row.scores, row.flags = {}, []
-                    row.quality = row.difficulty = row.confidence = row.rationale = None
-                    row.relative = row.review = None
-                    row.finished_at = None
+                    reset_row(row, t)
                     if skipped:
                         row.status, row.skip_reason = "skipped", INFRA_SKIP
                     reopen = not skipped

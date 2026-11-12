@@ -833,6 +833,16 @@ function BatchDetail({ id }: { id: string }) {
       )}
 
       <WarningsBox warnings={c.warnings} />
+      {(c.search_outage_targets ?? 0) > 0 && (
+        <div className="callout callout-warn" style={{ marginBottom: 14 }}>
+          <div className="callout-title">Search was unavailable</div>
+          <div style={{ marginTop: 4 }}>
+            {c.search_outage_targets} {c.search_outage_targets === 1 ? 'target' : 'targets'} could not
+            search the web because the search backend did not answer. They are counted as
+            infrastructure failures, not gaps. Retry them once search is working again.
+          </div>
+        </div>
+      )}
 
       <Scorecard batchId={id} onChanged={refresh} />
 

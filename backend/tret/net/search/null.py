@@ -7,7 +7,7 @@ every caller and turns "search is off" into an AttributeError somewhere.
 """
 from __future__ import annotations
 
-from tret.net.search.base import SearchResult, SearchUnavailable
+from tret.net.search.base import SearchNotConfigured, SearchResponse, SearchResult
 
 
 class NullSearchProvider:
@@ -15,8 +15,11 @@ class NullSearchProvider:
     host = ""
 
     async def search(self, query: str, *, max_results: int) -> list[SearchResult]:
-        raise SearchUnavailable(
+        raise SearchNotConfigured(
             "No web search backend is configured. Set TRET_SEARCH_PROVIDER to "
             "'brave' (with TRET_SEARCH_API_KEY) or 'searxng' (with "
             "TRET_SEARXNG_BASE_URL)."
         )
+
+    async def search_detailed(self, query: str, *, max_results: int) -> SearchResponse:
+        return SearchResponse(results=await self.search(query, max_results=max_results))

@@ -471,6 +471,9 @@ def _package_of(finding: Any) -> dict | None:
     return package if isinstance(package, dict) else None
 
 
+NO_MAP_ERROR = "run ended without a package map"
+
+
 def derive_target_status(
     run_status: str | None,
     outcome: dict | None,
@@ -506,7 +509,7 @@ def derive_target_status(
     if not maps:
         if (outcome or {}).get("status") in ("gap", "blocked"):
             return "gap", None
-        return "gap", "run ended without a package map"
+        return "gap", NO_MAP_ERROR
     if any(m.status == "draft" for m in maps):
         return "review", warning
     approved = [m for m in maps if m.status == "approved"]

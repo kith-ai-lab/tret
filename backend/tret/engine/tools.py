@@ -72,7 +72,13 @@ from tret.net.fetch import (
     find_snapshot,
     store_snapshot,
 )
-from tret.net.search import SearchUnavailable, get_search_provider
+from tret.net.search import (
+    SEARCH_DEGRADED_MIN_ENGINES,
+    SearchNotConfigured,
+    SearchUnavailable,
+    get_search_provider,
+    search_detailed,
+)
 from tret.providers.base import ToolSpec
 from tret.router_llm.objectives import THRIFT_OBJECTIVES
 from tret.services import connections as connections_service
@@ -693,6 +699,9 @@ async def _record_egress(
         await egress_audit.record(ctx.db, **fields)
 
 
+_SEARCH_REASON_MAX = 400  # an audit row's reason stays one line even for a long engine list
+
+
 @builtin(
     "web_search",
     "Search the public web for pages relevant to a query. Returns titles, URLs and "
@@ -738,11 +747,14 @@ async def web_search(ctx: RunContext, query: str, max_results: int = 5) -> str:
     ctx.web_searches += 1
     provider = get_search_provider()
     try:
-        results = await provider.search(query, max_results=int(max_results))
+        response = await search_detailed(provider, query, max_results=int(max_results))
     except SearchUnavailable as e:
+        # Not configured is the operator's choice, not a backend outage: its own
+        # reason, which the batch outage rule ignores.
+        kind = "search_unconfigured" if isinstance(e, SearchNotConfigured) else "search_unavailable"
         await _record_egress(
             ctx, method="GET", host=getattr(provider, "host", ""), path="/search",
-            decision=egress_audit.DECISION_DENIED, reason=f"search_unavailable: {e}",
+            decision=egress_audit.DECISION_DENIED, reason=f"{kind}: {e}",
         )
         raise ToolError(str(e)) from e
     except EgressDenied as e:
@@ -751,10 +763,33 @@ async def web_search(ctx: RunContext, query: str, max_results: int = 5) -> str:
             decision=egress_audit.DECISION_DENIED, reason=e.reason,
         )
         raise ToolError(f"Search refused by egress policy: {e.detail or e.reason}") from e
+    results = response.results
+    unresponsive = response.unresponsive
+    # Zero hits with several engines down is not an answer about the document:
+    # the audit row says which case it was (the batch outage rule reads it), and
+    # the model is told not to take the silence as evidence.
+    degraded = not results and len(unresponsive) >= SEARCH_DEGRADED_MIN_ENGINES
+    if results:
+        reason = f"search_results: {len(results)}"
+    elif degraded:
+        reason = ("search_degraded: " + "; ".join(f"{n}: {r}" if r else n for n, r in unresponsive))[
+            :_SEARCH_REASON_MAX
+        ]
+    else:
+        reason = "search_empty"
     await _record_egress(
         ctx, method="GET", host=getattr(provider, "host", ""), path="/search",
-        decision=egress_audit.DECISION_ALLOWED, status_code=200,
+        decision=egress_audit.DECISION_ALLOWED, status_code=200, reason=reason,
     )
+    if degraded:
+        engines = "; ".join(f"{n}: {r}" if r else n for n, r in unresponsive[:6])
+        return (
+            f"No web results for '{query}'. {len(unresponsive)} of the search backend's "
+            f"engines did not respond ({engines}), so the search backend may be "
+            "unavailable. This is not evidence that the document does not exist. If "
+            "searches keep coming back like this, stop searching, try URLs you already "
+            "know, and say in your outcome that search was unavailable."
+        )
     if not results:
         return f"No web results for '{query}'."
     lines = [

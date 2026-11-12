@@ -220,6 +220,32 @@ read-only file system, the capture store): recording that as a finding about the
 would mislead. Fix the cause and retry the targets, or send `{"force": true}` to
 finalize anyway.
 
+A target whose run delivered nothing and whose web searches all failed because the
+search backend was down is treated the same way. Settlement counts the run's `web_search`
+audit rows, and when there are at least two, none had results, none was an honest empty
+answer, and every one was `search_degraded` or `search_unavailable` (read from each row's
+explicit reason, never from its path), it prefixes the
+target's error with `search backend unavailable` (a failed run keeps its own error after
+it). The status stays `gap` or `failed`, and the batch JSON reports how many targets
+carry the marker as `search_outage_targets`. Retry them once search is back. The model's
+own report of "blocked" is not what decides this; only the audit rows do. Only the run's own searches are counted (searches made by a
+delegated subagent run are not), and a search that was never configured
+(`TRET_SEARCH_PROVIDER` empty, or missing its key or URL) is not an outage.
+
+Runs made before that rule have no audit record of the outage, so `tret batch search-outages
+--batch <id>` reads the database directly and lists gap or failed targets that delivered nothing
+and whose stored transcript shows at least two web searches, none with results. It writes nothing
+by itself: only the targets you name with `--mark <target id>` are marked, and only with `--apply`
+(without it the command says what it would do). Marking sets the same error marker, so the
+target becomes `infra`. If the target had already been judged, its row in the current evaluation
+pass is skipped as an infrastructure failure, the way a fresh infra target's is, and its run's
+evaluated score is re-scored.
+Timed-out targets and storage failures are never listed, and naming one is refused. Naming a target that is already marked
+runs the evaluation and re-score steps again, which repairs a run that stopped part way. A human review on a marked row is
+kept, but the row no longer counts as a spot check, and the command prints a line for each such target. Searches made by a
+delegated subagent run are not in the parent's transcript, so you have to judge those yourself. The evaluation pass's written
+summary is not rewritten.
+
 ## Guards
 
 - **Free space.** The local capture store keeps every document and Document-backed
@@ -404,7 +430,9 @@ it already has; no model is called. Every target falls into one class: `success`
 (written or completed), `gap`, `rejected`, `failed`, `infra`, `timeout` or `unsettled`.
 A failed or gap target whose error or outcome summary reads as a storage or I/O fault
 ("insufficient storage space", `ENOSPC`, a read-only file system) is `infra`, and one
-that hit the run time limit is `timeout`: both count against **reliability**, never
+that hit the run time limit is `timeout`. A target whose error carries the search outage
+marker described under "Finalize and infrastructure failures" is `infra` too, and the
+outcome summary is never consulted for that one. Both count against **reliability**, never
 against the model, and leave the yield denominator. The scorecard reports:
 
 - **yield**: acceptable results / (targets - infra - timeout - unsettled). Without an

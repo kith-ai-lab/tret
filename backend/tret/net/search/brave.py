@@ -18,7 +18,7 @@ import httpx
 from tret.config import get_settings
 from tret.net.client import USER_AGENT, open_client
 from tret.net.policy import CLASS_SEARCH
-from tret.net.search.base import SearchResult, SearchUnavailable
+from tret.net.search.base import SearchNotConfigured, SearchResponse, SearchResult, SearchUnavailable
 
 ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 
@@ -29,10 +29,13 @@ class BraveSearchProvider:
 
     def __init__(self, api_key: str):
         if not api_key:
-            raise SearchUnavailable(
+            raise SearchNotConfigured(
                 "TRET_SEARCH_PROVIDER=brave but TRET_SEARCH_API_KEY is empty."
             )
         self._api_key = api_key
+
+    async def search_detailed(self, query: str, *, max_results: int) -> SearchResponse:
+        return SearchResponse(results=await self.search(query, max_results=max_results))
 
     async def search(self, query: str, *, max_results: int) -> list[SearchResult]:
         headers = {

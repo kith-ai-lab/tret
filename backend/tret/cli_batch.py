@@ -2,7 +2,9 @@
 
 A batch executes inside the server (its runs, slots, review gate and records
 all live there), so this is an httpx client of `/api/batches`, not a database
-tool. The same calls the Batches page makes; see docs/batch-runs.md.
+tool. The same calls the Batches page makes; see docs/batch-runs.md. The one
+exception is `search-outages`, which reads the database like
+`tret approvals mark-packaging` does.
 
 Connection and auth (options on the `batch` group, accepted before or after the
 subcommand):
@@ -126,6 +128,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     finalize.add_argument("batch_id")
     finalize.add_argument("--force", action="store_true", help="Finalize despite I/O or storage failures")
     command("list", "List the workspace's batches")
+    outages = bsub.add_parser(
+        "search-outages",
+        help="List (and with --mark --apply, mark) targets of earlier runs that look like search-outage victims",
+        description="Read the database directly, like `tret approvals mark-packaging`: no server and no "
+        "connection options. Lists gap or failed targets that delivered nothing and whose stored "
+        "transcript shows at least two web searches, none with results. Writes nothing unless "
+        "--mark and --apply are both given, and then marks only the named targets.",
+    )
+    outages.add_argument("--batch", action="append", required=True, metavar="BATCH_ID", help="Batch to scan (repeatable)")
+    outages.add_argument("--mark", action="append", metavar="TARGET_ID", help="Target to mark (repeatable)")
+    outages.add_argument("--apply", action="store_true", help="With --mark: write the marks (default: say what would happen)")
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
@@ -381,8 +394,102 @@ _COMMANDS = {
 }
 
 
+def _search_outages(args: argparse.Namespace) -> int:
+    """`tret batch search-outages`: candidates, a dry run, or the marks. Exit 1 if
+    anything was refused, an id was unknown or unparseable, or a batch was not found."""
+    import asyncio
+    import uuid
+
+    from tret.batches import search_outage
+    from tret.db.engine import get_session_factory
+    from tret.db.models import Batch
+
+    def parse(values: list[str] | None, what: str) -> tuple[list[str], list[str]]:
+        good: list[str] = []
+        bad: list[str] = []
+        for v in values or []:
+            try:
+                u = str(uuid.UUID(str(v)))
+            except ValueError:
+                bad.append(f"{what} {v}: not a valid id")
+                continue
+            if u not in good:
+                good.append(u)
+        return good, bad
+
+    if args.apply and not args.mark:
+        print("usage: tret batch search-outages: error: --apply needs at least one --mark", file=sys.stderr)
+        return 2
+    batches, bad = parse(args.batch, "batch")
+    marks, bad_marks = parse(args.mark, "target")
+    problems = bad + bad_marks
+    for line in problems:
+        print(line, file=sys.stderr)
+
+    async def go():
+        async with get_session_factory()() as db:
+            if not marks:
+                for b in batches:
+                    if await db.get(Batch, uuid.UUID(b)) is None:
+                        print(f"{b}: not found, skipped", file=sys.stderr)
+                        problems.append(b)
+                return await search_outage.transcript_candidates(db, batches), None
+            return None, await search_outage.mark_transcript_outages(db, batches, marks, dry_run=not args.apply)
+
+    cands, res = asyncio.run(go())
+    if res is None:
+        header = f"  {'batch':<36}  {'target':<36}  {'status':<7} {'srch':>4} {'none':>4} {'err':>3}  label"
+        if cands:
+            print(header)
+        for c in cands:
+            tail = f"  | {c['summary']}" if c["summary"] else ""
+            print(
+                f"  {c['batch_id']:<36}  {c['target_id']:<36}  {c['status']:<7} "
+                f"{c['searches']:>4} {c['nothing']:>4} {c['error']:>3}  {c['label']}{tail}"
+            )
+        print(f"{len(cands)} candidate(s); nothing was written. Mark with --mark <target id> --apply")
+        return 1 if problems else 0
+    refused_all = list(res["refused"])
+    for b in res["batches"]:
+        if not b["found"]:
+            print(f"{b['batch_id']}: not found, nothing changed")
+            continue
+        if args.apply:
+            tail = f", {b['rechecked']} already marked and re-checked" if b["rechecked"] else ""
+            print(f"{b['batch_id']}: {b['marked']} marked, {len(b['refused'])} refused{tail}")
+        else:
+            print(f"{b['batch_id']}: would mark {b['marked']}, would refuse {len(b['refused'])}")
+    for m in res["marked"]:
+        verb = "marked" if args.apply else "would mark"
+        print(f"  {verb} {m['target_id']}  {m['label']}")
+    for m in res["rechecked"]:
+        print(f"  already marked, re-checked {m['target_id']}  {m['label']}")
+    for tid in res["human_reviewed"]:
+        print(
+            f"  {tid}: a person's review is kept on the evaluation row, but the row no longer "
+            "counts as a spot check"
+        )
+    seen = set()
+    for r in refused_all:
+        if r["target_id"] in seen:
+            continue
+        seen.add(r["target_id"])
+        print(f"  refused {r['target_id']}: {r['reason']}", file=sys.stderr)
+    if not args.apply:
+        print("dry run: nothing written; add --apply to mark")
+    elif res["marked"] or res["rechecked"]:
+        print(
+            "A running server picks up the re-scored record within about 60 seconds "
+            "(its priors cache lifetime)."
+        )
+    unfound = any(not b["found"] for b in res["batches"])
+    return 1 if (refused_all or problems or unfound) else 0
+
+
 def run(args: argparse.Namespace) -> int:
     """Execute the parsed `batch` command; returns the exit status."""
+    if args.batch_command == "search-outages":
+        return _search_outages(args)
     api = None
     try:
         api = Api(args)

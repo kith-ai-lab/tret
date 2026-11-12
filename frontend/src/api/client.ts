@@ -3202,6 +3202,8 @@ export interface Batch {
   /** Set on a batch that belongs to an experiment: `{id, arm}` (replicate) or
    *  `{id, arms}` (split). Absent on older servers and on ordinary batches. */
   experiment?: BatchExperimentRef | null
+  /** Targets whose run delivered nothing because the web-search backend was down; counted as infrastructure failures. Absent on older servers. */
+  search_outage_targets?: number
   warnings: string[]
   finalize: { written_at: string; files: BatchFinalizeFile[]; error: string | null } | null
   /** Present on create and on GET /batches/{id}. */

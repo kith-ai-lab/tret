@@ -39,7 +39,7 @@ from sqlalchemy import Select, select
 from sqlalchemy.orm import load_only
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tret.batches import core
+from tret.batches import core, search_outage
 from tret.batches.profiles import profile_for
 from tret.batches.rubrics import DEFAULT_ACCEPTABLE_QUALITY
 from tret.db.models import Batch, BatchEvaluation, BatchTarget, Finding, Harness, Run, TargetEvaluation
@@ -152,6 +152,10 @@ def target_class(t: BatchTarget) -> str:
     if status in UNSETTLED_STATUSES:
         return "unsettled"
     if status in ("failed", "gap", "write_failed"):
+        # Read from `error` only: it is stamped by settlement from the audit rows.
+        # The outcome summary is the model's own text and must not class a target.
+        if search_outage.is_search_outage_error(t.error):
+            return "infra"
         summary = (t.outcome or {}).get("summary") if isinstance(t.outcome, dict) else None
         if core.is_infra_error(t.error) or core.is_infra_error(summary if isinstance(summary, str) else None):
             return "infra"

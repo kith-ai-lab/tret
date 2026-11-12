@@ -174,6 +174,20 @@ one that needs action on an existing install.
 
 ### Fixed
 
+- **A search-backend outage no longer counts against the model.** `web_search` now reads
+  SearXNG's `unresponsive_engines`: when a query returns nothing and two or more engines did
+  not respond, the tool tells the model the backend may be unavailable, and each call's audit
+  row records which case it was (`search_results`, `search_empty`, `search_degraded`,
+  `search_unavailable`, `search_unconfigured`). A batch target whose run delivered nothing
+  while every search that reached the backend failed this way (at least two) is marked
+  `search backend unavailable: ...` at settlement and classed `infra`: out of the yield,
+  never judged, retried like other infrastructure failures. The model's own report of
+  "blocked" does not decide this, a timed-out target stays `timeout`, and a search that was
+  never configured is not an outage. The batch page says how many targets were affected
+  (`search_outage_targets`). `tret batch search-outages` lists earlier runs whose every
+  search returned nothing and marks the ones an operator names; a marked row that was
+  already judged stops counting, and a human review on it is kept.
+
 - **`MissingGreenlet` in runs that searched documents another run was chunking.**
   `ensure_chunks` rolled back the run's whole session when a concurrent run won the
   `UNIQUE(document_id, ordinal)` race, expiring the run row mid-loop. Chunks are now
