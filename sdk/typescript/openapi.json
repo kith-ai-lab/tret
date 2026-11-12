@@ -1706,6 +1706,18 @@
             "title": "Compare",
             "type": "boolean"
           },
+          "family_key": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Family Key"
+          },
           "harness_id": {
             "anyOf": [
               {

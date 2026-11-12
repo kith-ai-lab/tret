@@ -370,6 +370,68 @@ async def test_preview_forces_exploration_to_zero_on_the_policy_it_routes_with(
         assert policy["adaptive"]["exploration"] == 0
 
 
+# ── family-aware preview ─────────────────────────────────────────────────────
+async def _capture_route(monkeypatch, *, priors=None):
+    captured: list[dict] = []
+    real_route = ModelRouter.route
+
+    async def _route(self, **kwargs):
+        captured.append(kwargs)
+        decision = await real_route(self, **kwargs)
+        if priors is not None and kwargs.get("task_family"):
+            decision.task_family = kwargs["task_family"]
+            decision.family_priors = priors
+        return decision
+
+    monkeypatch.setattr(ModelRouter, "route", _route)
+    return captured
+
+
+async def test_preview_without_family_key_is_exactly_as_before(client, seed, session_factory, monkeypatch):
+    _team, admin, _pack, harness = await _basic_setup(seed, session_factory)
+    await login(client, admin.email)
+    captured = await _capture_route(monkeypatch, priors={"used": True, "gate": {}, "adjusted": {}})
+    r = await client.post(
+        "/api/routing/preview", json={"harness_id": str(harness.id), "task_type": "divergence_assessment"}
+    )
+    assert r.status_code == 200, r.text
+    assert "task_family" not in captured[0]
+    assert set(r.json()) == {"results"}
+    assert "family_priors" not in r.json()["results"][0]["decision"]
+
+
+async def test_preview_family_key_uses_the_callers_workspace(client, seed, session_factory, monkeypatch):
+    team, admin, _pack, harness = await _basic_setup(seed, session_factory)
+    await login(client, admin.email)
+    priors = {"used": True, "gate": {"open": True}, "adjusted": {}}
+    captured = await _capture_route(monkeypatch, priors=priors)
+    r = await client.post(
+        "/api/routing/preview",
+        json={"harness_id": str(harness.id), "task_type": "divergence_assessment", "family_key": "prompt:abc"},
+    )
+    assert r.status_code == 200, r.text
+    assert captured[0]["task_family"] == f"prompt:abc@{team.id}"
+    assert r.json()["family_priors"] == priors
+    # a workspace smuggled into the family key is refused, never trusted
+    bad = await client.post(
+        "/api/routing/preview",
+        json={"harness_id": str(harness.id), "task_type": "divergence_assessment", "family_key": f"x@{uuid.uuid4()}"},
+    )
+    assert bad.status_code == 422
+
+
+async def test_preview_with_an_unknown_family_has_no_family_priors(client, seed, session_factory):
+    _team, admin, _pack, harness = await _basic_setup(seed, session_factory)
+    await login(client, admin.email)
+    r = await client.post(
+        "/api/routing/preview",
+        json={"harness_id": str(harness.id), "task_type": "divergence_assessment", "family_key": "no-such-family"},
+    )
+    assert r.status_code == 200, r.text
+    assert "family_priors" not in r.json()
+    assert r.json()["results"][0]["decision"]["chosen_model"]
+
+
 # ── never persists ───────────────────────────────────────────────────────────
 async def test_preview_creates_no_run_row(client, seed, session_factory):
     _team, admin, _pack, harness = await _basic_setup(seed, session_factory)

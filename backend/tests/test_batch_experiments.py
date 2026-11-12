@@ -5,6 +5,7 @@ admin-only promotion and its history row. Built on the prompt-batch fixtures."""
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -178,7 +179,7 @@ def test_promote_is_admin_only_and_records_history(client, world, engine):
     world.role = "admin"
     exp, r = promote(client)
     assert r.status_code == 200, r.text
-    assert r.json()["model_policy"]["mode"] == "pinned" and r.json()["model_policy"]["model"] == OTHER
+    assert r.json()["model_policy"].get("mode") != "pinned" and "model" not in r.json()["model_policy"]
     assert r.json()["loop_config"]["max_iterations"] == 12
 
     async def state(db):
@@ -188,7 +189,7 @@ def test_promote_is_admin_only_and_records_history(client, world, engine):
         return h.model_policy, h.loop_config, rows, e.promoted
 
     policy, loop, rows, promoted = run_db(client, world, state)
-    assert policy["model"] == OTHER and loop["max_iterations"] == 12
+    assert "model" not in policy and loop["max_iterations"] == 12
     assert len(rows) == 1 and rows[0].source == "experiment" and str(rows[0].source_id) == exp
     assert rows[0].changed_by == world.user.id and rows[0].previous_loop_config != rows[0].new_loop_config
     assert promoted["arm"] == "B" and promoted["by_name"] == "Rex Reviewer" and promoted["history_id"] == str(rows[0].id)
@@ -381,36 +382,37 @@ def test_promote_each_arm_field_and_a_second_arm_replaces_the_first(client, worl
     arms = [{"model_override": CHEAP}, {"objective": "eco"}, {"max_iterations": 12}]
     res = make(client, world, arms).json()
     plan_a = res["arms"][0]["promotion"]
-    assert plan_a["allowed"] is True and plan_a["changes"] == [
-        {"field": "Model", "from": "automatic routing", "to": f"pinned to {CHEAP}"}
-    ]
-    assert any(n.startswith("Pinning turns off automatic routing and outcome learning") for n in plan_a["notes"])
+    # a model-only arm changes no harness setting
+    assert plan_a["allowed"] is False and plan_a["changes"] == [] and plan_a["token"] is None
+    assert plan_a["blocked_reason"] == "A model arm changes no harness setting: its runs are evidence for the router."
+    assert any("not pinned" in n and "router" in n for n in plan_a["notes"])
     assert res["arms"][1]["promotion"]["changes"] == [{"field": "Objective", "from": "balanced", "to": "eco"}]
     assert res["arms"][2]["promotion"]["changes"] == [{"field": "Max iterations", "from": "20", "to": "12"}]
     assert res["experiment"]["current_arm"] is None
     world.role = "admin"
     exp, r = promote(client, "A")
-    assert r.status_code == 200, r.text
-    pinned = {**base, "mode": "pinned", "model": CHEAP}
-    assert r.json()["model_policy"] == pinned and r.json()["loop_config"] == loop
-    assert r.json()["experiment"]["experiment"]["current_arm"] == "A"
-    again = promote(client, "A")[1]
-    assert again.status_code == 409 and "already has these settings" in again.text
-    # B replaces A on the pre-promotion baseline: the model goes back to automatic routing
-    shown = client.get(f"/api/batches/experiments/{exp}").json()["arms"][1]["promotion"]
-    assert "replaces the earlier promotion of arm A" in shown["notes"]
+    assert r.status_code == 409 and "evidence for the router" in r.text
+    assert _history(client, world) == []
     r = promote(client, "B")[1]
-    assert r.json()["model_policy"] == {**base, "objective": "eco"} and r.json()["loop_config"] == loop
+    assert r.status_code == 200, r.text
+    eco = {**base, "objective": "eco"}
+    assert r.json()["model_policy"] == eco and r.json()["loop_config"] == loop
+    assert r.json()["experiment"]["experiment"]["current_arm"] == "B"
+    again = promote(client, "B")[1]
+    assert again.status_code == 409 and "already has these settings" in again.text
+    # C replaces B on the pre-promotion baseline
+    shown = client.get(f"/api/batches/experiments/{exp}").json()["arms"][2]["promotion"]
+    assert "replaces the earlier promotion of arm B" in shown["notes"]
     r = promote(client, "C")[1]
     assert r.json()["loop_config"] == {"max_iterations": 12, "max_cost_usd": 5} and r.json()["model_policy"] == base
     rows = _history(client, world)
-    assert [x[0] for x in rows] == ["experiment"] * 3 and {x[1] for x in rows} == {exp}
-    assert rows[0][2] == base and rows[0][3] == pinned and rows[0][4] == rows[0][5] == loop
-    assert rows[1][2] == pinned and rows[1][3] == {**base, "objective": "eco"} and rows[2][4] == loop
+    assert [x[0] for x in rows] == ["experiment"] * 2 and {x[1] for x in rows} == {exp}
+    assert rows[0][2] == base and rows[0][3] == eco and rows[0][4] == rows[0][5] == loop
+    assert rows[1][2] == eco and rows[1][3] == base and rows[1][5] == {"max_iterations": 12, "max_cost_usd": 5}
     got = client.get(f"/api/batches/experiments/{exp}").json()["experiment"]["promoted"]
-    assert got["arm"] == "C" and got["by_name"] == "Rex Reviewer" and got["history_id"] == rows[2][6]
+    assert got["arm"] == "C" and got["by_name"] == "Rex Reviewer" and got["history_id"] == rows[1][6]
     world.role = "approver"
-    assert promote(client, "A")[1].status_code == 403
+    assert promote(client, "B")[1].status_code == 403
 
 
 def test_the_same_arm_can_be_promoted_again_after_a_revert(client, world, engine):
@@ -432,17 +434,17 @@ def test_the_same_arm_can_be_promoted_again_after_a_revert(client, world, engine
     assert [x[0] for x in _history(client, world)] == ["experiment", "revert", "experiment"]
 
 
-def test_a_policy_tightened_after_creation_blocks_promotion(client, world, engine):
+def test_a_policy_tightened_after_creation_does_not_matter_to_promotion(client, world, engine):
     _set_policy(client, world, {"mode": "auto"}, {})
-    res = make(client, world, [{"model_override": OTHER}, {"model_override": CHEAP}]).json()
+    res = make(client, world, [{"model_override": OTHER, "objective": "eco"}, {"model_override": CHEAP}]).json()
     assert res["arms"][0]["promotion"]["allowed"] is True
     _set_policy(client, world, {"mode": "auto", "allowed": [CHEAP]}, {})
     shown = client.get(f"/api/batches/experiments/{res['experiment']['id']}").json()["arms"][0]["promotion"]
-    assert shown["allowed"] is False and "allowed model list" in shown["blocked_reason"]
+    assert shown["allowed"] is True and "allowed model list" not in str(shown)
     world.role = "admin"
     r = promote(client, "A")[1]
-    assert r.status_code == 409 and "allowed model list" in r.text
-    assert _history(client, world) == []
+    assert r.status_code == 200
+    assert r.json()["model_policy"] == {"mode": "auto", "allowed": [CHEAP], "objective": "eco"}
 
 
 def test_sample_n_at_or_above_the_row_count_and_too_few_split_rows_are_422(client, world, engine):
@@ -462,14 +464,17 @@ def test_creation_warnings(client, world, engine):
     assert any("arm A changes only the objective" in w_ for w_ in res["experiment"]["warnings"])
 
 
-def test_an_arm_that_sets_two_fields_promotes_both(client, world, engine):
+def test_an_arm_that_sets_two_fields_promotes_only_the_non_model_ones(client, world, engine):
     base = {"mode": "auto", "objective": "balanced"}
     _set_policy(client, world, base, {"max_iterations": 20})
     assert make(client, world, [{"objective": "quality"}, {"model_override": OTHER, "max_iterations": 7}]).status_code == 200
     world.role = "admin"
     r = promote(client, "B")[1]
-    assert r.json()["model_policy"] == {**base, "mode": "pinned", "model": OTHER}
+    assert r.json()["model_policy"] == base  # the model is never written
     assert r.json()["loop_config"] == {"max_iterations": 7}
+    (row,) = _history(client, world)
+    assert row[2] == row[3] == base and row[5] == {"max_iterations": 7}
+    assert _arm_plan(client, r.json()["experiment"]["experiment"]["id"], "B")["blocked_reason"] == "the harness already has these settings"
 
 
 def test_a_boot_upgrade_does_not_overwrite_a_promoted_policy(client, world, engine):
@@ -485,10 +490,10 @@ def test_a_boot_upgrade_does_not_overwrite_a_promoted_policy(client, world, engi
         return dict(h.model_policy)
 
     assert run_db(client, world, boot) != old  # the premise: an unedited old seed is upgraded
-    assert make(client, world, [{"max_iterations": 9}, {"model_override": CHEAP}]).status_code == 200
+    assert make(client, world, [{"max_iterations": 9}, {"objective": "quality"}]).status_code == 200
     world.role = "admin"
     promoted = promote(client, "B")[1].json()["model_policy"]
-    assert run_db(client, world, boot) == promoted and promoted["model"] == CHEAP
+    assert run_db(client, world, boot) == promoted and promoted["objective"] == "quality"
 
 
 # ── a normal batch is unchanged; the public body cannot carry experiment settings ──
@@ -606,21 +611,14 @@ def test_changes_list_everything_a_replacing_promotion_changes(client, world, en
     _set_policy(client, world, {"mode": "auto", "objective": "balanced"}, {"max_iterations": 24})
     res = make(client, world, [{"model_override": CHEAP, "max_iterations": 10}, {"objective": "eco"}]).json()
     exp = res["experiment"]["id"]
-    # not replacing: only what really differs
-    assert _fields(res["arms"][0]["promotion"]) == {
-        "Model": ("automatic routing", f"pinned to {CHEAP}"),
-        "Max iterations": ("24", "10"),
-    }
+    # not replacing: only what really differs (never a model)
+    assert _fields(res["arms"][0]["promotion"]) == {"Max iterations": ("24", "10")}
     assert _fields(res["arms"][1]["promotion"]) == {"Objective": ("balanced", "eco")}
     world.role = "admin"
     assert promote(client, "A")[1].status_code == 200
     plan = _arm_plan(client, exp, "B")
     assert "replaces the earlier promotion of arm A" in plan["notes"]
-    assert _fields(plan) == {
-        "Model": (f"pinned to {CHEAP}", "automatic routing"),
-        "Max iterations": ("10", "24"),
-        "Objective": ("balanced", "eco"),
-    }
+    assert _fields(plan) == {"Max iterations": ("10", "24"), "Objective": ("balanced", "eco")}
     assert _arm_plan(client, exp, "A")["blocked_reason"] == "the harness already has these settings"
 
 
@@ -707,3 +705,157 @@ async def test_paired_summary_orders_shared_rows_by_picked_position(w):
     assert expected != scoring.bootstrap_interval([float(x) for x in in_dict_order])
     got = scoring.paired_summary(da, db_)
     assert got["interval90"] == expected and got["n"] == 6
+
+
+# ── no pinning: models are evidence for the router ────────────────────────────
+ARM_TABLE = [
+    {"model_override": CHEAP},
+    {"model_override": OTHER, "objective": "eco"},
+    {"model_override": CHEAP, "max_iterations": 5},
+    {"model_override": OTHER, "objective": "quality", "max_iterations": 9},
+]
+
+
+@pytest.mark.parametrize("arm", ARM_TABLE + [{"objective": "eco"}, {"max_iterations": 3}])
+@pytest.mark.parametrize("policy", [{"mode": "auto", "objective": "balanced"}, {"mode": "pinned", "model": CHEAP}])
+@pytest.mark.parametrize("replaces", [None, "auto", "pinned"])
+def test_no_plan_ever_pins_a_model(arm, policy, replaces):
+    ws = uuid.uuid4()
+    loop = {"max_iterations": 20}
+    last_row = None
+    expect = policy  # the base the plan starts from
+    if replaces:
+        # an earlier promotion by this experiment wrote `policy`; its baseline was `prev`
+        prev = {"mode": "auto", "objective": "quality"} if replaces == "auto" else {"mode": "pinned", "model": OTHER}
+        last_row = SimpleNamespace(
+            new_model_policy=policy, new_loop_config=loop, previous_model_policy=prev, previous_loop_config=loop
+        )
+        expect = prev
+    e = SimpleNamespace(workspace_id=ws, promoted={"arm": "Z"} if replaces else None)
+    harness = SimpleNamespace(is_archived=False, workspace_id=ws, model_policy=policy, loop_config=loop)
+    full = {"key": "A", "model_override": None, "objective": None, "max_iterations": None, **arm}
+    plan = experiments.promotion_plan(e, full, harness, last_row)
+    new = plan["new_model_policy"]
+    assert new.get("mode") == expect.get("mode") and new.get("model") == expect.get("model")
+    if expect.get("mode") != "pinned":
+        assert new.get("mode") != "pinned" and "model" not in new
+    if arm.get("model_override") and expect.get("model") != arm["model_override"]:
+        assert new.get("model") != arm["model_override"]
+    if replaces:
+        assert "replaces the earlier promotion" in plan["notes"][0]
+    assert (plan["token"] is None) == (plan["blocked_reason"] == experiments.MODEL_ONLY_REASON)
+
+
+def test_current_arm_prefers_the_promoted_arm_when_plans_coincide(client, world, engine):
+    _set_policy(client, world, {"mode": "auto", "objective": "balanced"}, {"max_iterations": 20})
+    res = make(client, world, [{"model_override": CHEAP, "objective": "eco"}, {"objective": "eco"}]).json()
+    assert res["experiment"]["current_arm"] is None
+    world.role = "admin"
+    r = promote(client, "B")[1]
+    assert r.status_code == 200, r.text
+    assert r.json()["experiment"]["experiment"]["current_arm"] == "B"
+    exp = res["experiment"]["id"]
+    assert client.get(f"/api/batches/experiments/{exp}").json()["experiment"]["current_arm"] == "B"
+
+
+def test_model_only_promote_with_a_token_gets_the_model_only_reason(client, world, engine):
+    base = {"mode": "auto", "objective": "balanced"}
+    _set_policy(client, world, base, {"max_iterations": 20})
+    res = make(client, world, [{"model_override": CHEAP}, {"objective": "eco"}]).json()
+    exp = res["experiment"]["id"]
+    world.role = "admin"
+    r = client.post(f"/api/batches/experiments/{exp}/promote", json={"arm": "A", "token": "deadbeefdeadbeef"})
+    assert r.status_code == 409 and experiments.MODEL_ONLY_REASON in r.json()["detail"]
+    assert "changed since" not in r.text
+    assert _history(client, world) == []
+
+    async def state(db):
+        h = await db.get(Harness, world.harness.id)
+        return h.model_policy, h.loop_config
+
+    assert run_db(client, world, state) == (base, {"max_iterations": 20})
+
+
+def test_model_only_arm_cannot_be_promoted_and_changes_nothing(client, world, engine):
+    base = {"mode": "auto", "objective": "balanced"}
+    _set_policy(client, world, base, {"max_iterations": 20})
+    res = make(client, world, [{"model_override": CHEAP}, {"model_override": OTHER}]).json()
+    assert all(a["promotion"]["allowed"] is False and a["promotion"]["token"] is None for a in res["arms"])
+    world.role = "admin"
+    r = promote(client, "A")[1]
+    assert r.status_code == 409 and "A model arm changes no harness setting" in r.text
+    assert _history(client, world) == []
+    assert res["experiment"]["current_arm"] is None
+
+    async def state(db):
+        h = await db.get(Harness, world.harness.id)
+        return h.model_policy, h.loop_config
+
+    assert run_db(client, world, state) == (base, {"max_iterations": 20})
+
+
+def test_a_model_plus_objective_arm_promotes_only_the_objective(client, world, engine):
+    base = {"mode": "auto", "objective": "balanced", "allowed": [CHEAP, OTHER]}
+    _set_policy(client, world, base, {"max_iterations": 20})
+    res = make(client, world, [{"model_override": OTHER, "objective": "eco"}, {"model_override": CHEAP, "max_iterations": 8}]).json()
+    plan = res["arms"][0]["promotion"]
+    assert plan["allowed"] and _fields(plan) == {"Objective": ("balanced", "eco")}
+    assert any("not pinned" in n for n in plan["notes"])
+    world.role = "admin"
+    r = promote(client, "A")[1]
+    assert r.status_code == 200
+    assert r.json()["model_policy"] == {**base, "objective": "eco"}  # mode/model/allowed untouched
+    (row,) = _history(client, world)
+    assert row[2] == base and row[3] == {**base, "objective": "eco"} and row[4] == row[5]
+    # the max-iterations arm: replaces A on the baseline, changes only the loop
+    plan_b = _arm_plan(client, res["experiment"]["id"], "B")
+    assert _fields(plan_b) == {"Objective": ("eco", "balanced"), "Max iterations": ("20", "8")}
+    r = promote(client, "B")[1]
+    assert r.json()["model_policy"] == base and r.json()["loop_config"] == {"max_iterations": 8}
+
+
+def test_replacing_an_old_pinning_promotion_shows_the_unpin(client, world, engine):
+    base = {"mode": "auto", "objective": "balanced"}
+    _set_policy(client, world, base, {"max_iterations": 20})
+    res = make(client, world, [{"objective": "eco"}, {"max_iterations": 9}]).json()
+    exp = res["experiment"]["id"]
+    pinned = {**base, "mode": "pinned", "model": CHEAP}
+
+    async def plant(db):
+        hid = uuid.uuid4()
+        db.add(
+            HarnessPolicyHistory(
+                id=hid, workspace_id=world.ws.id, harness_id=world.harness.id, changed_by=world.user.id,
+                source="experiment", source_id=uuid.UUID(exp), previous_model_policy=base,
+                previous_loop_config={"max_iterations": 20}, new_model_policy=pinned,
+                new_loop_config={"max_iterations": 20},
+            )
+        )
+        h = await db.get(Harness, world.harness.id)
+        h.model_policy = pinned
+        e = await db.get(BatchExperiment, uuid.UUID(exp))
+        e.promoted = {"arm": "A", "by": "x", "by_name": "x", "at": "2026-11-12", "history_id": str(hid)}
+        await db.commit()
+
+    run_db(client, world, plant)
+    plan = _arm_plan(client, exp, "B")
+    assert _fields(plan) == {"Model": (f"pinned to {CHEAP}", "automatic routing"), "Max iterations": ("20", "9")}
+    world.role = "admin"
+    assert promote(client, "B")[1].json()["model_policy"] == base
+
+
+def test_router_gate_is_in_the_result(client, world, engine):
+    res = make(client, world, TWO).json()
+    gate = res["experiment"]["router_gate"]
+    assert set(gate) >= {"open", "spot_checks", "agreeing", "needed_checks"} and gate["open"] is False
+    exp = res["experiment"]["id"]
+    assert client.get(f"/api/batches/experiments/{exp}").json()["experiment"]["router_gate"] == gate
+
+
+def test_router_gate_failure_is_null(client, world, engine, monkeypatch):
+    async def boom(db, family):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(experiments, "safe_family_gate", boom)
+    res = make(client, world, TWO).json()
+    assert res["experiment"]["router_gate"] is None
