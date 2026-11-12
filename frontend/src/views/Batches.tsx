@@ -68,6 +68,14 @@ function BatchList() {
   const navigate = useNavigate()
   const [creating, setCreating] = useState(false)
   const [selected, setSelected] = useState<string[]>([])
+  const [showFamilies, setShowFamilies] = useState(false)
+  // Lazy: only asked once the list is opened; an older server just shows the error text.
+  const familiesQuery = useQuery({
+    queryKey: ['batch-families'],
+    queryFn: api.listBatchFamilies,
+    enabled: showFamilies,
+    retry: false,
+  })
   const toggleSelected = (id: string) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   const listQuery = useQuery({
@@ -98,11 +106,47 @@ function BatchList() {
           >
             Compare
           </button>
+          <button
+            className="btn"
+            aria-expanded={showFamilies}
+            onClick={() => setShowFamilies((v) => !v)}
+          >
+            Families
+          </button>
           <button className="btn btn-primary" onClick={() => setCreating(true)}>
             New batch
           </button>
         </div>
       </div>
+
+      {showFamilies && (
+        <div className="panel" style={{ margin: '14px 0' }}>
+          <div className="mono-label">Families</div>
+          <div className="fine-print">
+            Batches of the same target list or prompt template, compared on one leaderboard.
+          </div>
+          {familiesQuery.isLoading ? (
+            <div className="fine-print pulse">Loading…</div>
+          ) : familiesQuery.error ? (
+            <span className="error-text">{errText(familiesQuery.error)}</span>
+          ) : (familiesQuery.data ?? []).length === 0 ? (
+            <div className="fine-print">No families yet.</div>
+          ) : (
+            <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+              {(familiesQuery.data ?? []).map((f) => (
+                <li key={f.family_key} className="mono-body">
+                  <Link to={`/batches/family?key=${encodeURIComponent(f.family_key)}`}>
+                    {f.family_label}
+                  </Link>{' '}
+                  <span className="fine-print">
+                    {f.batches} {f.batches === 1 ? 'batch' : 'batches'} · {f.evaluated_batches} evaluated
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {listQuery.isLoading ? (
         <div className="empty pulse">Loading batches…</div>

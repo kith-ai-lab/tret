@@ -650,6 +650,14 @@ def _pick(candidates: list[TargetData]) -> TargetData:
     )
 
 
+def picked_rows(data: BatchData) -> dict[str, TargetData]:
+    """One target per row key (`_pick`)."""
+    groups: dict[str, list[TargetData]] = {}
+    for d in data.targets:
+        groups.setdefault(d.row, []).append(d)
+    return {key: _pick(members) for key, members in groups.items()}
+
+
 def _side(d: TargetData) -> dict:
     m = d.metrics
     flags = list(d.evaluation.flags or []) if d.quality is not None and d.evaluation is not None else []
@@ -718,14 +726,7 @@ async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
     card_a, card_b = await scorecard_from(db, data_a), await scorecard_from(db, data_b)
     note = _quality_note(data_a, data_b)
     comparable = note is None
-    picked_a: dict[str, TargetData] = {}
-    picked_b: dict[str, TargetData] = {}
-    for data, picked in ((data_a, picked_a), (data_b, picked_b)):
-        groups: dict[str, list[TargetData]] = {}
-        for d in data.targets:
-            groups.setdefault(d.row, []).append(d)
-        for key, members in groups.items():
-            picked[key] = _pick(members)
+    picked_a, picked_b = picked_rows(data_a), picked_rows(data_b)
     shared = [k for k in picked_a if k in picked_b]
     shared.sort(key=lambda k: picked_a[k].target.position)
     rows = []
@@ -803,6 +804,13 @@ async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
             delivered["mean_quality_b"] = round(statistics.fmean([r["b"]["quality"] for r in both]), 1)
             delivered["mean_quality_delta"] = round(statistics.fmean(d_deltas), 2)
             delivered["interval90"] = bootstrap_interval(d_deltas)
+    from tret.batches import pairwise
+
+    overlay, pairwise_summary = await pairwise.compare_overlay(
+        db, a, b, data_a, data_b, picked_a, picked_b, comparable
+    )
+    for r in rows:
+        r["pairwise"] = overlay.get(r["row_key"])
     return {
         "a": card_a,
         "b": card_b,
@@ -820,6 +828,7 @@ async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
             "mean_quality_delta": mean_delta,
             "interval90": interval,
             "delivered": delivered,
+            "pairwise": pairwise_summary,
             "disputed_gaps_a": sum(1 for r in rows if r["disputed_gap"] == "a"),
             "disputed_gaps_b": sum(1 for r in rows if r["disputed_gap"] == "b"),
             "disputed_primaries_a": sum(1 for r in rows if r["disputed_primary"] in ("a", "both")),

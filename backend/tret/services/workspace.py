@@ -38,7 +38,7 @@ from tret.engine.extensions import GateResult, get_extension_registry
 import tret.engine.collection_tools  # noqa: F401 - registers report_collection_outcome
 import tret.engine.evaluation_tools  # noqa: F401 - registers submit_evaluation, submit_batch_review
 import tret.engine.batch_tools  # noqa: F401 - registers start_batch, batch_status, batch_results
-from tret.engine.batch_tools import BATCH_TOOLS, BATCH_TOOLS_SEEDED_KEY
+from tret.engine.batch_tools import BATCH_COMPARE_SEEDED_KEY, BATCH_TOOLS, BATCH_TOOLS_SEEDED_KEY
 from tret.net.policy import CLASS_RESEARCH, MODE_OFF, effective_mode
 from tret.packs.links import link_all_workspace_packs
 from tret.packs.loader import PackValidationError, install_pack
@@ -301,7 +301,23 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
             missing_batch_tools = [n for n in BATCH_TOOLS if n not in (chat_harness.tool_names or [])]
             if missing_batch_tools:
                 chat_harness.tool_names = [*chat_harness.tool_names, *missing_batch_tools]
-            workspace.settings = {**(workspace.settings or {}), BATCH_TOOLS_SEEDED_KEY: True}
+            workspace.settings = {
+                **(workspace.settings or {}),
+                BATCH_TOOLS_SEEDED_KEY: True,
+                BATCH_COMPARE_SEEDED_KEY: True,
+            }
+        # `batch_compare` came after the other three: offered once more, and only to a
+        # harness that still lists one of them (an operator who removed them stays removed).
+        if (
+            workspace is not None
+            and not (workspace.settings or {}).get(BATCH_COMPARE_SEEDED_KEY)
+            and "run_harness_task" in (chat_harness.tool_names or [])
+        ):
+            if "batch_compare" not in (chat_harness.tool_names or []) and any(
+                n in (chat_harness.tool_names or []) for n in ("start_batch", "batch_status", "batch_results")
+            ):
+                chat_harness.tool_names = [*chat_harness.tool_names, "batch_compare"]
+            workspace.settings = {**(workspace.settings or {}), BATCH_COMPARE_SEEDED_KEY: True}
         missing_connector_tools = [
             n
             for n in ("list_connected_sources", "search_connected_files", "read_connected_file")
@@ -350,7 +366,11 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
     new_chat_harness.packs_linked_at = datetime.now(timezone.utc)
     workspace = await db.get(Workspace, workspace_id)
     if workspace is not None:
-        workspace.settings = {**(workspace.settings or {}), BATCH_TOOLS_SEEDED_KEY: True}
+        workspace.settings = {
+            **(workspace.settings or {}),
+            BATCH_TOOLS_SEEDED_KEY: True,
+            BATCH_COMPARE_SEEDED_KEY: True,
+        }
 
 
 COLLECTION_HARNESS_NAME = "Disclosure Collector"
@@ -504,6 +524,7 @@ EVALUATOR_HARNESS_TOOLS = [
     "search_documents",
     "submit_evaluation",
     "submit_batch_review",
+    "submit_pairwise",
 ]
 
 # Premium on the ceiling so a judge chosen per pass (an Opus-class model by
@@ -545,8 +566,22 @@ EVALUATOR_DOCTRINE = (
     "6. Use only the flags listed in the rubric, and only when the evidence shows them.\n"
     "7. Open attached documents only to check a specific doubt, such as whether the retained pages "
     "contain the emissions tables. Use at most four tool calls before submitting.\n"
-    "8. Finish by calling submit_evaluation exactly once. Do not write a report in the chat; the tool "
-    "call is the result."
+    "8. Finish by calling submit_evaluation exactly once (submit_pairwise instead when the task asks "
+    "you to compare two outputs). Do not write a report in the chat; the tool call is the result."
+)
+
+
+_EVALUATOR_DOCTRINE_ITEM_8 = (
+    "8. Finish by calling submit_evaluation exactly once (submit_pairwise instead when the task asks "
+    "you to compare two outputs). Do not write a report in the chat; the tool call is the result."
+)
+# Doctrine texts an earlier release seeded; an unedited one is upgraded, an edited one never.
+_PREVIOUS_EVALUATOR_DOCTRINES = (
+    EVALUATOR_DOCTRINE.replace(
+        _EVALUATOR_DOCTRINE_ITEM_8,
+        "8. Finish by calling submit_evaluation exactly once. Do not write a report in the chat; the "
+        "tool call is the result.",
+    ),
 )
 
 
@@ -571,7 +606,9 @@ async def ensure_evaluator_harness(db: AsyncSession, workspace_id) -> Harness:
         missing = [n for n in EVALUATOR_HARNESS_TOOLS if n not in (existing.tool_names or [])]
         if missing:
             existing.tool_names = [*(existing.tool_names or []), *missing]
-            await db.flush()
+        if existing.system_prompt_extra in _PREVIOUS_EVALUATOR_DOCTRINES:
+            existing.system_prompt_extra = EVALUATOR_DOCTRINE
+        await db.flush()
         return existing
     harness = Harness(
         workspace_id=workspace_id,

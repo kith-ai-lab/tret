@@ -80,6 +80,7 @@ ELIDABLE_TOOLS = frozenset(
         # Re-readable on demand from the batch itself: a status snapshot and a
         # page of results the model can call again.
         "batch_status",
+        "batch_compare",
         "batch_results",
     }
     # `run_harness_task`, and any future sibling delegation tool, by name —
@@ -121,6 +122,7 @@ PROTECTED_TOOLS = frozenset(
         # longer see is one it might submit a second time.
         "submit_evaluation",
         "submit_batch_review",
+        "submit_pairwise",
         # Starts a durable batch: a turn that can no longer see it has started
         # one might start the same batch again.
         "start_batch",

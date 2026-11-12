@@ -3,6 +3,7 @@ import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import { Analytics } from './views/Analytics'
 import { Approvals } from './views/Approvals'
 import { BatchCompare } from './views/BatchCompare'
+import { BatchFamily } from './views/BatchFamily'
 import { Batches } from './views/Batches'
 import { Chat } from './views/Chat'
 import { ConnectionsView } from './views/Connections'
@@ -34,6 +35,7 @@ export function AppRoutes() {
       <Route path="/approvals" element={<Approvals />} />
       <Route path="/batches" element={<Batches />} />
       <Route path="/batches/compare" element={<BatchCompare />} />
+      <Route path="/batches/family" element={<BatchFamily />} />
       <Route path="/batches/:id" element={<Batches />} />
       <Route path="/collections" element={<CollectionRedirect />} />
       <Route path="/collections/:id" element={<CollectionRedirect />} />

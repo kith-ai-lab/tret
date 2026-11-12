@@ -1053,6 +1053,7 @@ def _results_summary(
 # evaluation evidence
 # ══════════════════════════════════════════════════════════════════════════
 EXCERPT_HEAD_CHARS = 1200
+PAIRWISE_MAX_DOCUMENTS = 4
 EXCERPT_BOUNDARY_CHARS = 400
 TEXT_ROLES = ("layout_text", "raw_text", "ocr_text")
 CROSS_CHECK_TEXT = (
@@ -1109,33 +1110,12 @@ def _page_excerpt(text: str, page: Any, chars: int) -> str | None:
     return " ".join(text[match.end() : match.end() + chars].split())
 
 
-async def build_evidence(
-    db: AsyncSession,
-    batch: Batch,
-    target: BatchTarget,
-    run: Run | None,
-    findings: list[Finding],
-    rubric: dict | None = None,
-    *,
-    cross_check: list[dict] | None = None,
-    primary_check: list[dict] | None = None,
-) -> tuple[str, list[uuid.UUID]]:
-    """The blind evidence pack for one disclosure target (see
-    `tret/batches/evidence.py`) and the documents to attach to the evaluator run:
-    each map's source document and its retained-text package document. For a gap
-    target, `cross_check` (`scoring.delivered_elsewhere`) adds what other runs of the
-    same target list delivered, so the judge can test the gap's reason. For a delivered
-    target, `primary_check` (`scoring.primaries_elsewhere`) adds the main documents other
-    runs packaged that this run did not, so the judge can test whether it captured the
-    primary disclosure."""
-    from tret.batches import evidence, scoring
-    from tret.batches.rubrics import default_rubric, rubric_text
-
-    rubric = rubric or default_rubric("disclosure")
-    row_class = scoring.target_class(target)
+def _task_text(target: BatchTarget) -> str:
+    """The task block of an evidence pack: the register row and the doctrine the run
+    was held to."""
     fy = target.fiscal_year
     urls = "; ".join(target.known_urls or []) or "none"
-    task = "\n".join(
+    return "\n".join(
         [
             f"- Company: {target.company}",
             f"- Market: {target.market}; domicile: {target.domicile_country or 'not recorded'}; "
@@ -1148,6 +1128,39 @@ async def build_evidence(
             f"The run was held to this doctrine:\n{doctrine_text(fy)}",
         ]
     )
+
+
+async def pairwise_output(
+    db: AsyncSession, batch: Batch, target: BatchTarget, run: Run | None, findings: list[Finding]
+) -> tuple[str, list[uuid.UUID]]:
+    """One run's output for a pairwise call and the documents to attach: only this side's
+    Result, page maps and retained-text excerpts, scrubbed of its own model and provider
+    names. No rubric, no cross-check, no tool-call trail (a trail leaks effort)."""
+    from tret.batches import evidence, scoring
+
+    result, map_blocks, excerpts, attached = await _run_parts(
+        db, target, run, findings, scoring.target_class(target)
+    )
+    attached = attached[: PAIRWISE_MAX_DOCUMENTS]
+    output = "\n\n".join(
+        [
+            f"### Result\n{evidence.sanitize(result)}",
+            "### Page maps\n" + ("\n\n".join(map_blocks) or "(the run proposed no page map)"),
+            "### Excerpts\n" + ("\n\n".join(excerpts) or "(none)"),
+        ]
+    )
+    return evidence.scrub(output, run), [d.id for d, _ in attached]
+
+
+async def _run_parts(
+    db: AsyncSession, target: BatchTarget, run: Run | None, findings: list[Finding], row_class: str
+) -> tuple[str, list[str], list[str], list[tuple[Document, str]]]:
+    """What one run's evidence consists of, shared by the per-target pack and the
+    pairwise pack: the Result section, the page-map blocks, the retained-text and
+    page-boundary excerpts, and the documents to attach (source and retained text of
+    each map, before the pack's attachment cap)."""
+    from tret.batches import evidence
+
     error = evidence.clean_error(summarise_run_error(target.error), run) if target.error else "none"
     result = "\n".join(
         [
@@ -1214,6 +1227,36 @@ async def build_evidence(
                     snippet = _page_excerpt(source_text, page, EXCERPT_BOUNDARY_CHARS)
                     if snippet:
                         excerpts.append(f"### {payload.get('stem')}: {label} (page {page})\n{snippet}")
+    return result, map_blocks, excerpts, attached
+
+
+async def build_evidence(
+    db: AsyncSession,
+    batch: Batch,
+    target: BatchTarget,
+    run: Run | None,
+    findings: list[Finding],
+    rubric: dict | None = None,
+    *,
+    cross_check: list[dict] | None = None,
+    primary_check: list[dict] | None = None,
+) -> tuple[str, list[uuid.UUID]]:
+    """The blind evidence pack for one disclosure target (see
+    `tret/batches/evidence.py`) and the documents to attach to the evaluator run:
+    each map's source document and its retained-text package document. For a gap
+    target, `cross_check` (`scoring.delivered_elsewhere`) adds what other runs of the
+    same target list delivered, so the judge can test the gap's reason. For a delivered
+    target, `primary_check` (`scoring.primaries_elsewhere`) adds the main documents other
+    runs packaged that this run did not, so the judge can test whether it captured the
+    primary disclosure."""
+    from tret.batches import evidence, scoring
+    from tret.batches.rubrics import default_rubric, rubric_text
+
+    rubric = rubric or default_rubric("disclosure")
+    row_class = scoring.target_class(target)
+    fy = target.fiscal_year
+    task = _task_text(target)
+    result, map_blocks, excerpts, attached = await _run_parts(db, target, run, findings, row_class)
     attached = attached[: evidence.MAX_ATTACHED_DOCUMENTS]
 
     cross_section: list[tuple[str, str]] = []
@@ -1402,6 +1445,16 @@ class DisclosureProfile:
         return await build_evidence(
             db, batch, target, run, findings, rubric, cross_check=cross_check, primary_check=primary_check
         )
+
+    def pairwise_task(self, batch: Batch, target: BatchTarget) -> str:
+        """The task block of a pairwise message (shown once for the pair)."""
+        return _task_text(target)
+
+    async def pairwise_evidence(
+        self, db: AsyncSession, batch: Batch, target: BatchTarget, run: Run | None, findings: list[Finding]
+    ) -> tuple[str, list[uuid.UUID]]:
+        """One side's output text and its attached documents (at most four)."""
+        return await pairwise_output(db, batch, target, run, findings)
 
     def settings_keys(self) -> tuple[str, ...]:
         return (

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import { api, type BatchScorecard } from '../../api/client'
 import { useConfirm } from '../shared/ConfirmDialog'
@@ -98,7 +99,18 @@ export function Scorecard({
         <div className="mono-label">
           Scorecard
           {compact && sc.name ? ` · ${sc.name}` : ''}
-          {sc.family_label ? <span className="fine-print"> · {sc.family_label}</span> : null}
+          {sc.family_label ? (
+            <span className="fine-print">
+              {' · '}
+              {sc.family_key ? (
+                <Link to={`/batches/family?key=${encodeURIComponent(sc.family_key)}`} title="Leaderboard of every batch in this family">
+                  {sc.family_label}
+                </Link>
+              ) : (
+                sc.family_label
+              )}
+            </span>
+          ) : null}
         </div>
         {!compact && (
           <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>

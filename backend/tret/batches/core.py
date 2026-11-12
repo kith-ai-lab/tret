@@ -1227,6 +1227,14 @@ async def sweep_orphaned_collections(db: AsyncSession) -> int:
         log.warning("orphaned-evaluation sweep skipped", exc_info=True)
         with contextlib.suppress(Exception):
             await db.rollback()
+    try:
+        from tret.batches import pairwise
+
+        await pairwise.sweep_orphaned_pairwise(db)
+    except Exception:  # noqa: BLE001 - boot must not depend on the pairwise judge either
+        log.warning("orphaned-pairwise sweep skipped", exc_info=True)
+        with contextlib.suppress(Exception):
+            await db.rollback()
     return len(to_settle)
 
 

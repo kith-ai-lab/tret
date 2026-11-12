@@ -657,3 +657,104 @@ async def test_a_removed_batch_tool_stays_removed_after_reseeding(seed_db, _no_p
     await seed_chat_harness(seed_db, h.workspace_id)
     await seed_db.refresh(h)
     assert "start_batch" not in h.tool_names
+
+
+# ── batch_compare ────────────────────────────────────────────────────────────
+from tests.test_batch_pairwise import scored, w  # noqa: E402,F401 - fixtures
+from tret.engine.batch_tools import BATCH_COMPARE_SEEDED_KEY, BATCH_TOOLS_SEEDED_KEY, batch_compare  # noqa: E402
+
+
+def _compare_ctx(w, workspace_id=None):
+    run = Run(id=uuid.uuid4(), project_id=w.project.id, harness_id=w.harness.id, task_type="chat",
+              task_input={}, document_ids=[], status="running")
+    return run, RunContext(
+        db=w.db, run_id=run.id, project_id=w.project.id, pack_id=None, doctrine_sha=None, model_used=None,
+        document_ids=[], output_schemas={}, workspace_id=workspace_id or w.ws.id,
+    )
+
+
+async def test_batch_compare_returns_the_shape_and_the_ten_biggest_gaps(w):
+    rows_a = [(f"r{i:02d}", "completed", 50.0, "x") for i in range(12)]
+    # |delta| grows with i, alternating sign; the two smallest (i=0, 1) must be cut.
+    rows_b = [(f"r{i:02d}", "completed", 50.0 + (i + 1) * (1 if i % 2 else -1), "y") for i in range(12)]
+    a, _, _ = await scored(w, "A", "a", rows_a)
+    b, _, _ = await scored(w, "B", "b", rows_b)
+    _, ctx = _compare_ctx(w)
+    out = json.loads(await batch_compare(ctx, batch_a=str(a.id), batch_b=str(b.id)))
+    assert set(out) == {"same_family", "quality_comparable", "quality_note", "shared", "only_a", "only_b",
+                        "summary", "rows", "page"}
+    assert out["same_family"] and out["quality_comparable"] and out["shared"] == 12
+    assert out["page"] == f"/batches/compare?a={a.id}&b={b.id}"
+    assert set(out["summary"]) == {"wins_a", "wins_b", "ties", "mean_quality_delta", "interval90", "delivered",
+                                   "pairwise", "disputed_gaps_a", "disputed_gaps_b", "disputed_primaries_a",
+                                   "disputed_primaries_b", "cost_a", "cost_b", "energy_a", "energy_b",
+                                   "acceptable_a", "acceptable_b"}
+    assert out["summary"]["pairwise"]["judged"] == 0
+    assert len(out["rows"]) == 10
+    deltas = [abs(r["delta_quality"]) for r in out["rows"]]
+    assert deltas == sorted(deltas, reverse=True) and deltas[0] == 12 and deltas[-1] == 3
+    assert set(out["rows"][0]) == {"label", "a", "b", "delta_quality"}
+    assert set(out["rows"][0]["a"]) == {"status", "quality", "flags"}
+
+
+async def test_batch_compare_stays_inside_the_workspace_and_refuses_one_batch(w):
+    a, _, _ = await scored(w, "A", "a", [("acme", "completed", 70, "x")])
+    b, _, _ = await scored(w, "B", "b", [("acme", "completed", 70, "x")])
+    _, ctx = _compare_ctx(w)
+    with pytest.raises(ToolError, match="Batch not found"):
+        await batch_compare(_compare_ctx(w, w.other_ws.id)[1], batch_a=str(a.id), batch_b=str(b.id))
+    with pytest.raises(ToolError, match="not a valid batch id"):
+        await batch_compare(ctx, batch_a="nope", batch_b=str(b.id))
+    with pytest.raises(ToolError, match="different batches"):
+        await batch_compare(ctx, batch_a=str(a.id), batch_b=str(a.id))
+    unscored = await scored(w, "C", "c", [("acme", "completed", 70, "x")], fy=2024)
+    out = json.loads(await batch_compare(ctx, batch_a=str(a.id), batch_b=str(unscored[0].id)))
+    assert out["quality_comparable"] is False and out["quality_note"] and out["summary"]["pairwise"] is None
+
+
+def test_batch_compare_is_registered_like_the_other_batch_tools():
+    assert "batch_compare" in BATCH_TOOLS and "batch_compare" in get_builtin_tools()
+    assert not {"batch_compare"} & delegation.SUBAGENT_ALLOWED_TOOLS
+
+
+async def test_batch_compare_is_offered_once_to_existing_chat_harnesses(seed_db, _no_packs):
+    old_tools = ["run_harness_task", "start_batch", "batch_status", "batch_results", "read_document"]
+    h = await _chat_harness(seed_db, old_tools)
+    ws = await seed_db.get(Workspace, h.workspace_id)
+    ws.settings = {BATCH_TOOLS_SEEDED_KEY: True}  # the earlier one-time backfill already ran
+    await seed_db.flush()
+    await seed_chat_harness(seed_db, h.workspace_id)
+    await seed_db.refresh(h)
+    assert "batch_compare" in h.tool_names
+    assert (await seed_db.get(Workspace, h.workspace_id)).settings[BATCH_COMPARE_SEEDED_KEY] is True
+    # an operator who then removes it is not re-seeded
+    h.tool_names = [t for t in h.tool_names if t != "batch_compare"]
+    await seed_db.flush()
+    await seed_chat_harness(seed_db, h.workspace_id)
+    await seed_db.refresh(h)
+    assert "batch_compare" not in h.tool_names
+
+
+async def test_batch_compare_is_not_offered_to_a_harness_that_dropped_the_batch_tools(seed_db, _no_packs):
+    h = await _chat_harness(seed_db, ["run_harness_task", "read_document"])
+    ws = await seed_db.get(Workspace, h.workspace_id)
+    ws.settings = {BATCH_TOOLS_SEEDED_KEY: True}  # seeded once; the operator removed all three
+    await seed_db.flush()
+    await seed_chat_harness(seed_db, h.workspace_id)
+    await seed_db.refresh(h)
+    assert not {"batch_compare", "start_batch"} & set(h.tool_names)
+    assert (await seed_db.get(Workspace, h.workspace_id)).settings[BATCH_COMPARE_SEEDED_KEY] is True
+
+
+
+async def test_batch_compare_without_comparable_quality_gives_no_quality_and_orders_by_label(w):
+    a, _, _ = await scored(w, "A", "a", [("zed", "completed", 90, "x"), ("amy", "completed", 10, "x")])
+    other, _, _ = await scored(
+        w, "B", "b", [("zed", "completed", 10, "x"), ("amy", "completed", 90, "x")], judge="anthropic/claude-sonnet-5-5"
+    )
+    _, ctx = _compare_ctx(w)
+    out = json.loads(await batch_compare(ctx, batch_a=str(a.id), batch_b=str(other.id)))
+    assert out["quality_comparable"] is False
+    assert [r["label"] for r in out["rows"]] == ["Amy", "Zed"]
+    assert all(r["delta_quality"] is None and r["a"]["quality"] is None and r["b"]["quality"] is None for r in out["rows"])
+    assert "label" in get_builtin_tools()["batch_compare"].description

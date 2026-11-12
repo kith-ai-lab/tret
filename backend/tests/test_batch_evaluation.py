@@ -496,7 +496,7 @@ def test_the_parent_run_is_charged_for_the_evaluation_too(client, world, eng):
 def test_the_evaluator_harness_and_its_tools(client, world, eng):
     tools = get_builtin_tools()
     assert "submit_evaluation" in tools and "submit_batch_review" in tools
-    assert set(EVALUATOR_HARNESS_TOOLS) == {"read_document", "search_documents", "submit_evaluation", "submit_batch_review"}
+    assert set(EVALUATOR_HARNESS_TOOLS) == {"read_document", "search_documents", "submit_evaluation", "submit_batch_review", "submit_pairwise"}
     assert not {"submit_evaluation", "submit_batch_review"} & set(COLLECTION_HARNESS_TOOLS)
     assert "Finish by calling submit_evaluation exactly once" in EVALUATOR_DOCTRINE
 
@@ -508,7 +508,7 @@ def test_the_evaluator_harness_and_its_tools(client, world, eng):
         return a.id == b.id == c.id, c.tool_names, a.task_profile
 
     same, names, profile = run_db(client, world, go)
-    assert same and names == ["read_document", "search_documents", "submit_evaluation", "submit_batch_review"]
+    assert same and names == ["read_document", "search_documents", "submit_evaluation", "submit_batch_review", "submit_pairwise"]
     assert profile == "freeform"
 
 

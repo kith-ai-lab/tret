@@ -18,8 +18,14 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from tret.batches.rubrics import EVALUATION_ID_KEY, compute_quality, criterion_applies
-from tret.db.models import BatchEvaluation, BatchTarget, Run, TargetEvaluation
+from tret.batches.rubrics import (
+    EVALUATION_ID_KEY,
+    PAIRWISE_ID_KEY,
+    PAIRWISE_ORDER_KEY,
+    compute_quality,
+    criterion_applies,
+)
+from tret.db.models import BatchEvaluation, BatchTarget, PairwiseJudgment, Run, TargetEvaluation
 from tret.engine.collection_tools import COLLECTION_ID_KEY, COLLECTION_TARGET_KEY
 from tret.engine.tools import RunContext, ToolError, builtin
 
@@ -32,10 +38,14 @@ ENGINE_STAMPED_KEYS = (
     EVALUATION_ID_KEY,
     TARGET_EVALUATION_ID_KEY,
     BATCH_REVIEW_KEY,
+    PAIRWISE_ID_KEY,
+    PAIRWISE_ORDER_KEY,
     COLLECTION_ID_KEY,
     COLLECTION_TARGET_KEY,
 )
-EVALUATION_TOOLS = ("submit_evaluation", "submit_batch_review")
+EVALUATION_TOOLS = ("submit_evaluation", "submit_batch_review", "submit_pairwise")
+PAIRWISE_PREFERENCES = ("first", "second", "tie")
+PAIRWISE_ORDERS = ("low_first", "high_first")
 CONFIDENCES = ("low", "medium", "high")
 MAX_EVIDENCE_CHARS = 600
 MAX_RATIONALE_CHARS = 1500
@@ -55,6 +65,11 @@ def _uuid(value, what: str) -> uuid.UUID:
 async def _evaluator_row(ctx: RunContext) -> tuple[TargetEvaluation, BatchEvaluation]:
     run = await ctx.db.get(Run, ctx.run_id)
     raw = (run.task_input or {}).get(TARGET_EVALUATION_ID_KEY) if run is not None else None
+    if not raw and run is not None and (run.task_input or {}).get(PAIRWISE_ID_KEY):
+        raise ToolError(
+            "This run is a pairwise comparison, not a scoring run: call submit_pairwise instead; "
+            "submit_evaluation records nothing here."
+        )
     if not raw:
         raise ToolError("This run is not a batch evaluation; submit_evaluation does nothing here.")
     row = await ctx.db.get(TargetEvaluation, _uuid(raw, "target evaluation"))
@@ -262,3 +277,102 @@ async def submit_batch_review(
     }
     await ctx.db.commit()
     return "Batch review recorded."
+
+
+async def _pairwise_row(ctx: RunContext) -> tuple[PairwiseJudgment, str, dict]:
+    """The judgment this run answers, the presentation order of this run and its
+    (still unanswered) call entry. Refuses anywhere but a pairwise judge run the
+    judgment itself launched."""
+    run = await ctx.db.get(Run, ctx.run_id)
+    task_input = (run.task_input or {}) if run is not None else {}
+    raw = task_input.get(PAIRWISE_ID_KEY)
+    order = task_input.get(PAIRWISE_ORDER_KEY)
+    if not raw and task_input.get(TARGET_EVALUATION_ID_KEY):
+        raise ToolError(
+            "This run scores one target, not a pairwise comparison: call submit_evaluation instead."
+        )
+    if not raw or order not in PAIRWISE_ORDERS:
+        raise ToolError("This run is not a pairwise judgment; submit_pairwise does nothing here.")
+    row = await ctx.db.get(PairwiseJudgment, _uuid(raw, "pairwise judgment"))
+    if row is None or ctx.workspace_id is None or row.workspace_id != ctx.workspace_id:
+        raise ToolError("This run's pairwise judgment was not found; nothing was recorded.")
+    if row.status != "running":
+        raise ToolError("This pairwise judgment is no longer waiting for an answer; nothing was recorded.")
+    entry = next(
+        (
+            c
+            for c in row.calls or []
+            if isinstance(c, dict) and c.get("order") == order and c.get("evaluator_run_id") == str(ctx.run_id)
+        ),
+        None,
+    )
+    if entry is None:
+        raise ToolError("This run is not the judge of this pairwise judgment; nothing was recorded.")
+    if entry.get("preferred") is not None:
+        raise ToolError("This order was already answered; nothing more was recorded.")
+    return row, order, entry
+
+
+@builtin(
+    "submit_pairwise",
+    "Record which of the two outputs shown (Output 1 and Output 2) is the better delivery for the "
+    "task under the rubric. Call exactly once, at the end. preferred is first, second or tie (tie "
+    "only when there is no material difference). criteria has one entry per rubric criterion that "
+    "applies: first, second or tie. confidence is low, medium or high. rationale is a few sentences "
+    "naming what decided it.",
+    {
+        "type": "object",
+        "properties": {
+            "preferred": {"type": "string", "enum": list(PAIRWISE_PREFERENCES)},
+            "criteria": {
+                "type": "object",
+                "description": "criterion key -> first | second | tie, every applicable rubric criterion.",
+                "additionalProperties": {"type": "string", "enum": list(PAIRWISE_PREFERENCES)},
+            },
+            "confidence": {"type": "string", "enum": list(CONFIDENCES)},
+            "rationale": {"type": "string", "maxLength": MAX_RATIONALE_CHARS},
+        },
+        "required": ["preferred", "criteria", "confidence", "rationale"],
+    },
+)
+async def submit_pairwise(
+    ctx: RunContext, preferred: str, criteria: dict, confidence: str, rationale: str
+) -> str:
+    row, _order, entry = await _pairwise_row(ctx)
+    if preferred not in PAIRWISE_PREFERENCES:
+        raise ToolError(f"preferred must be one of {', '.join(PAIRWISE_PREFERENCES)}.")
+    if confidence not in CONFIDENCES:
+        raise ToolError(f"confidence must be one of {', '.join(CONFIDENCES)}.")
+    if not isinstance(rationale, str) or not rationale.strip():
+        raise ToolError("rationale is required.")
+    if len(rationale) > MAX_RATIONALE_CHARS:
+        raise ToolError(f"rationale must be at most {MAX_RATIONALE_CHARS} characters.")
+    if not isinstance(criteria, dict):
+        raise ToolError("criteria must be an object keyed by criterion.")
+    from tret.batches.pairwise import rubric_for_row  # lazy: pairwise imports the batch orchestrator
+
+    rubric = await rubric_for_row(ctx.db, row)
+    if rubric is None:
+        raise ToolError("The rubric this judgment started with has changed; nothing was recorded.")
+    applicable = [
+        c["key"] for c in rubric.get("criteria") or [] if criterion_applies(c.get("applies", "all"), "success")
+    ]
+    unknown = sorted(set(criteria) - set(applicable))
+    if unknown:
+        raise ToolError(f"Unknown criterion key(s): {', '.join(unknown)}. Criteria: {', '.join(applicable)}.")
+    missing = [k for k in applicable if k not in criteria]
+    if missing:
+        raise ToolError(f"criteria must include every applicable criterion; missing: {', '.join(missing)}.")
+    for key, value in criteria.items():
+        if value not in PAIRWISE_PREFERENCES:
+            raise ToolError(f"criteria.{key} must be one of {', '.join(PAIRWISE_PREFERENCES)}.")
+    done = {
+        **entry,
+        "preferred": preferred,
+        "criteria": {k: criteria[k] for k in applicable},
+        "confidence": confidence,
+        "rationale": rationale.strip(),
+    }
+    row.calls = [done if c is entry else c for c in row.calls]
+    await ctx.db.commit()
+    return "Pairwise judgment recorded."

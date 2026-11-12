@@ -274,7 +274,7 @@ const results = await (await fetch(`${baseUrl}/api/batches/${batch.id}/records/r
 
 ## From a chat or harness
 
-A chat turn can start a batch itself. Three builtin tools (`engine/batch_tools.py`)
+A chat turn can start a batch itself. Four builtin tools (`engine/batch_tools.py`)
 ride along with `run_harness_task` on the seeded chat harness. They are added once per
 workspace (`settings.batch_tools_seeded`), so an operator who removed delegation, or
 removed `start_batch` itself, keeps them out; add them to another harness by name if you
@@ -285,6 +285,7 @@ want them there:
 | `start_batch` | creates and starts a prompt batch and returns at once: `{"batch_id", "name", "targets", "status", "estimated_cost_usd", "page": "/batches/<id>"}` |
 | `batch_status` | counts by status, cost so far and the review queue: `{"batch_id", "name", "status", "counts", "cost_usd", "pending_reviews": [{"finding_id", "target_label", "schema_slug"}], "page"}` |
 | `batch_results` | one row per target, paged (`offset`, `limit` up to 200; optional `status` filter): `{"total", "offset", "rows": [{"position", "label", "status", "answer", "finding", "cost_usd", "error"}]}`; `answer` is cut to 2000 characters |
+| `batch_compare` | compares two batches of a family: `{"same_family", "quality_comparable", "quality_note", "shared", "summary", "rows" (the ten largest quality gaps), "page"}`; read-only (see "Families") |
 
 `start_batch` takes `name`, `template` (`{column}` placeholders), the rows either inline
 (`rows`, 1-500 objects) or as a CSV document of the workspace (`document_id`), and the
@@ -511,6 +512,72 @@ tools `read_document`, `search_documents`, `submit_evaluation`, `submit_batch_re
   (evaluator runs at once, 1-4, default 2) and `TRET_BATCH_EVALUATOR_RUN_TIMEOUT_SECONDS`
   (default 300). `POST .../evaluation/cancel` stops a running pass.
 
+### The pairwise judge
+
+Rubric scores grade each target alone, so two batches that both score 80 on a row look
+tied even when one holds far more of the required disclosure. The **pairwise judge**
+(`tret/batches/pairwise.py`) puts the same row's output from two batches of a family in
+front of one judge, side by side, and asks which is the better delivery for that task
+under the rubric. Use it on the rows the rubric cannot separate (`near_ties`: both
+delivered, scores within 5 points) or on every row both delivered (`both_delivered`).
+
+- **Blind and order-swapped.** The message holds the rubric and the task once, then
+  "Output 1" and "Output 2". Each output is scrubbed of its own run's model and provider
+  names and carries no cost, token or iteration count, batch name or "which batch is
+  this". Every pair is judged twice, once in each order. Both calls prefer the same side:
+  a **clear** win. A side and a tie: a **lean**. Both ties: a tie. Opposite sides:
+  **inconsistent** (position bias, treat as no verdict).
+- **It never changes a score.** Verdicts are shown beside the rubric numbers (a "Pairwise"
+  column and a tally on the compare page); `quality`, yield and the scorecard are
+  untouched, and the rubric is unchanged. Judge runs carry `_pairwise_judgment_id`, so the
+  router learns nothing from them (`run_outcomes` rows are not written).
+- **Stored once per pair.** A judgment is keyed by the two targets (canonical order),
+  the judge and the rubric version, so judging A against B and later B against A reuses it.
+  It goes stale when either target is retried or re-run and is judged again on the next
+  start. Only batches that are quality-comparable (same family, rubric and judge) can be
+  judged.
+- **Long tasks are cut.** The task shown to the pairwise judge is cut at 12,000 characters
+  (and the rubric at 8,000), marked `[task cut at the size limit]`, so on very long prompt
+  inputs the judge compares the outputs against a truncated task.
+- **One pass at a time, and a stable rubric.** Starting a second pass for a pair that is
+  already pending or running (including two concurrent starts) is a 409. A judgment is
+  tied to the rubric version it started with: if the batches' current rubric no longer has
+  that version the judgment fails with "the rubric changed; start the pairwise judge again".
+  Existing workspaces' Batch Evaluator doctrine is upgraded to mention `submit_pairwise`
+  only when it still equals the text an earlier release seeded; an edited doctrine is never
+  overwritten (the pairwise message itself says it is not a scoring run).
+- **Cost.** Two judge calls per pair, about the cost of two per-target evaluations
+  (roughly $0.10 to $0.25 on an Opus-class judge); the default budget is 1.5 x pairs x 2 x
+  that estimate (floor $1). When the pass's spend reaches the budget the remaining pairs
+  are `skipped` ("budget"). A judge that ends without calling `submit_pairwise` fails its
+  pair.
+- **API.** `POST /api/batches/compare/pairwise` (approver; `a`, `b`, `scope`, `max_pairs`
+  1-100, `budget_usd`) starts it and returns the status; `GET
+  /api/batches/compare/pairwise?a=&b=` returns the status with one row per pair (verdict
+  `a` | `b` | `tie` | `inconsistent`, strength, the two calls' rationales);
+  `POST .../compare/pairwise/cancel` stops it. `GET /api/batches/compare` adds `pairwise` to
+  each row and `summary.pairwise` (zeros until something is judged).
+
+### Families
+
+`GET /api/batches/families` lists the workspace's batch families (disclosure by fiscal
+year; prompt batches by harness and template) and `GET /api/batches/family?key=<family_key>`
+returns the **leaderboard**: one row per batch (yield, quality, cost and Wh per acceptable
+result, models, judge, whether it shares the family's comparable set) and one row per
+model. The comparable set is the most common rubric + judge among the batches' current
+passes (ties go to the newest); other batches are counted in `excluded_batches` and
+left out of the model table. Per model: delivered, yield, mean quality with a 90%
+bootstrap interval (three or more scores), mean residual, cost and Wh per acceptable
+result, p95 iterations and cost over acceptable runs, infrastructure failures and a Pareto
+mark (not beaten on both quality and cost per acceptable result, among models with three
+or more scored rows). The page is `/batches/family?key=...`; it is computed on demand and
+never polled.
+
+The chat harness gains `batch_compare` (batch_a, batch_b): the compare summary, the
+pairwise tally and the ten rows with the largest quality difference, read-only. It is
+offered once to existing chat harnesses that still list the other batch tools
+(`settings.batch_compare_seeded`).
+
 ## Agentic test probes
 
 For the agentic test protocol (id, level, identity, steps, oracle, expected cost). All
@@ -607,3 +674,33 @@ the pass completes. Expected cost: about $0.30.
 BATCH-EVAL-02, mark one row agree, one adjust within 15 points of its score and one
 disagree. Oracle: `spot_checks` is 3 and `agreement` is 2/3; an analyst gets 403; a
 non-scored row is a 409. Expected cost: none.
+
+**BATCH-EVAL-07. Pairwise judge on near ties.** Level: L2. Identity: approver. Steps: with two
+evaluated batches of one family and one judge, open the compare page, run the pairwise
+judge on `near_ties` with 4 pairs. Oracle: each pair gets a verdict `a` / `b` / `tie` /
+`inconsistent`, the rubric qualities on the page are unchanged, the status shows 8 judge
+calls of cost, and `run_outcomes` has no new rows. Expected cost: about $0.60.
+
+**BATCH-EVAL-08. Pairwise is blind and order-stable.** Level: L2. Identity: approver. Steps:
+run BATCH-EVAL-07, then read the judge runs' task messages. Oracle: no model, provider,
+batch name, dollar amount or token count appears; the same row appears in both orders;
+starting the judge again (A, B or B, A) judges nothing new. Expected cost: none beyond
+BATCH-EVAL-07.
+
+**BATCH-EVAL-09. Pairwise stale and budget.** Level: L2. Identity: approver. Steps: retry one
+judged target and re-score it, then start the pairwise judge again with `budget_usd` set
+to about one pair. Oracle: only the retried row is judged again, the others stay; with a
+tiny budget the first pair finishes and the rest are `skipped` with error `budget`.
+Expected cost: about $0.30.
+
+**BATCH-EVAL-10. Family leaderboard.** Level: L2. Identity: member. Steps: open
+`/batches/family?key=disclosure:fy2025` with three or more evaluated batches, one scored by
+a different judge. Oracle: that batch is marked not comparable and counted in
+`excluded_batches`; the model table lists each model once with yield, quality interval and
+a Pareto mark; clicking a column header re-sorts; picking two batches opens the compare
+page. Expected cost: none.
+
+**BATCH-EVAL-11. `batch_compare` from chat.** Level: L2. Identity: approver. Steps: in the
+chat, ask to compare two batches by id. Oracle: the reply cites `wins`, the quality delta
+and its interval, the pairwise tally and links the compare page; asking about a batch of
+another workspace is refused. Expected cost: about $0.05.

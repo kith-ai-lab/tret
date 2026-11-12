@@ -59,6 +59,7 @@ MAX_CELL_CHARS = 20_000
 MAX_LABEL_CHARS = 200
 SLUG_MAX = 40
 ANSWER_CELL_CHARS = 160
+PAIRWISE_MAX_DOCUMENTS = 4
 ANSWER_EVIDENCE_CHARS = 8000
 # `review_schema` value meaning "pause at a draft finding of any type".
 ANY_REVIEW = "any"
@@ -568,6 +569,42 @@ class PromptProfile:
             ("Attached documents", evidence.attached_documents([(d, "given to the run") for d in docs])),
         ]
         return evidence.assemble(sections), [d.id for d in docs]
+
+    def pairwise_task(self, batch: Batch, target: BatchTarget) -> str:
+        """The task block of a pairwise message (shown once for the pair)."""
+        return render_template((batch.settings or {}).get("template") or "", target.task_input or {})
+
+    async def pairwise_evidence(
+        self, db: AsyncSession, batch: Batch, target: BatchTarget, run: Run | None, findings: list[Finding]
+    ) -> tuple[str, list[uuid.UUID]]:
+        """One side's output text (the answer, the finding it proposed, its error) and the
+        run's own documents (at most four), scrubbed of the run's model and provider names."""
+        from tret.batches import evidence, scoring
+
+        outcome = target.outcome or {}
+        answer = evidence.scrub(str(outcome.get("answer") or ""), run)
+        finding = outcome.get("finding")
+        error = evidence.clean_error(summarise_run_error(target.error), run) if target.error else "none"
+        lines = [
+            f"Target status: {target.status} (class: {scoring.target_class(target)})",
+            f"Error: {error}",
+            "Answer of the run:",
+            answer[:ANSWER_EVIDENCE_CHARS] + ("\n[answer cut]" if len(answer) > ANSWER_EVIDENCE_CHARS else "")
+            if answer
+            else "(no answer text)",
+        ]
+        if isinstance(finding, dict):
+            payload = json.dumps(finding.get("payload"), ensure_ascii=False, default=str)
+            lines += [
+                f"Finding proposed by the run: {finding.get('schema_slug')} ({finding.get('status')})",
+                evidence.clip(evidence.scrub(payload, run), 1500),
+            ]
+        docs: list[Document] = []
+        for doc_id in (run.document_ids or [] if run is not None else [])[:PAIRWISE_MAX_DOCUMENTS]:
+            doc = await db.get(Document, doc_id)
+            if doc is not None:
+                docs.append(doc)
+        return evidence.scrub("\n".join(lines), run), [d.id for d in docs]
 
     # ── records ────────────────────────────────────────────────────────────
     async def records(
