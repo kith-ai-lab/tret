@@ -197,10 +197,13 @@ async def family_leaderboard(db: AsyncSession, workspace_id: uuid.UUID, key: str
     datas = [await scoring.collect(db, b) for b in batches]
     agg = models_from(datas)
     best = agg["comparable"]
+    from tret.batches.gate import safe_family_gate
+
+    router_gate = await safe_family_gate(db, f"{key}@{workspace_id}")
     rows: list[dict[str, Any]] = []
     row_keys: set[str] = set()
     for data in datas:
-        card = await scoring.scorecard_from(db, data)
+        card = await scoring.scorecard_from(db, data, router_gate=router_gate)
         row_keys.update(d.row for d in data.targets)
         ev = _live(data)
         quality = card["quality"] or {}
@@ -246,4 +249,5 @@ async def family_leaderboard(db: AsyncSession, workspace_id: uuid.UUID, key: str
         "row_keys": len(row_keys),
         "batches": rows,
         "models": agg["models"],
+        "router_gate": router_gate,
     }

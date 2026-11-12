@@ -10,7 +10,7 @@ import {
   type FamilyModelsBlock,
 } from '../api/client'
 import { FamilyScatter } from '../components/batches/FamilyScatter'
-import { dash, fmtDuration, fmtPct, fmtScore } from '../components/batches/evalHelpers'
+import { ROUTER_GATE_TOOLTIP, dash, fmtDuration, fmtPct, fmtScore, routerGateLine } from '../components/batches/evalHelpers'
 import { errText } from '../components/batches/shared'
 import { formatCost, formatDateTime } from '../components/shared/format'
 import { QueryError } from '../components/shared/MonoTable'
@@ -121,6 +121,11 @@ export function BatchFamily() {
             {lb.profile} · {lb.batches.length} {lb.batches.length === 1 ? 'batch' : 'batches'}
             {lb.row_keys ? ` · ${lb.row_keys} rows` : ''}
           </div>
+          {routerGateLine(lb.router_gate) && (
+            <div className="fine-print" style={{ marginTop: 4 }} title={ROUTER_GATE_TOOLTIP}>
+              {routerGateLine(lb.router_gate)}
+            </div>
+          )}
           <div className="panel" style={{ margin: '14px 0' }}>
             <div className="mono-label">Comparable set</div>
             {cs ? (

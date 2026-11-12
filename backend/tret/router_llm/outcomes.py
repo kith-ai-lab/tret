@@ -129,6 +129,29 @@ HUMAN_PRIOR_SUCCESSES = 1.0
 HUMAN_PRIOR_TRIALS = 2.0
 
 
+# The evaluated blend (`evaluated_quality`): the batch evaluator's score of a run
+# joins the automatic signals and the human finding verdict. Without the evaluator
+# term the 0.3 : 0.2 human : automatic split reduces to HUMAN_WEIGHT : 1 - HUMAN_WEIGHT,
+# so the two scores agree whenever a run has no evaluation.
+EVALUATOR_BLEND_WEIGHT = 0.5
+HUMAN_BLEND_WEIGHT = 0.3
+AUTOMATIC_BLEND_WEIGHT = 0.2
+
+
+def evaluated_quality(*, auto: float, human_rate: float | None, evaluator: float) -> float:
+    """The outcome score blended with an evaluator's score, in [0, 1]. Pure.
+
+    Weights 0.5 evaluator, 0.3 human (the smoothed approval rate; absent when no
+    finding was decided), 0.2 automatic, renormalised over the terms present.
+    """
+    terms = [(EVALUATOR_BLEND_WEIGHT, evaluator), (AUTOMATIC_BLEND_WEIGHT, auto)]
+    if human_rate is not None:
+        terms.append((HUMAN_BLEND_WEIGHT, human_rate))
+    total = sum(w for w, _ in terms)
+    value = sum(w * v for w, v in terms) / total
+    return round(min(1.0, max(0.0, value)), 4)
+
+
 def _capped(count: int, per_event: float, cap: float) -> float:
     return min(count * per_event, cap)
 

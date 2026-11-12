@@ -571,8 +571,9 @@ def missing_main_documents(own_sources: list[dict], other_sources: list[dict]) -
     return out
 
 
-async def scorecard_from(db: AsyncSession, data: BatchData) -> dict:
+async def scorecard_from(db: AsyncSession, data: BatchData, *, router_gate: dict | None = None) -> dict:
     from tret.batches import evaluation as evaluation_service
+    from tret.batches.gate import safe_family_gate
 
     batch = data.batch
     classes = {c: 0 for c in CLASSES}
@@ -612,6 +613,13 @@ async def scorecard_from(db: AsyncSession, data: BatchData) -> dict:
         quality["primaries_rechecked"] = sum(
             1 for d in disputed_main if primary_rechecked(d.evaluation, primaries[d.row])
         )
+    evaluation_block = (
+        await evaluation_service.pass_summary(db, data.current, data.rows) if data.current else None
+    )
+    if evaluation_block is not None:
+        if router_gate is None:
+            router_gate = await safe_family_gate(db, f"{family_key(batch)}@{batch.workspace_id}")
+        evaluation_block = {**evaluation_block, "router_gate": router_gate}
     return {
         "batch_id": str(batch.id),
         "name": batch.name,
@@ -643,7 +651,7 @@ async def scorecard_from(db: AsyncSession, data: BatchData) -> dict:
         ],
         "outliers": outliers(data),
         "quality": quality,
-        "evaluation": await evaluation_service.pass_summary(db, data.current, data.rows) if data.current else None,
+        "evaluation": evaluation_block,
     }
 
 

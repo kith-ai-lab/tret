@@ -39,7 +39,9 @@ importers of `tret.router_llm.priors` keep working unchanged.
 """
 from __future__ import annotations
 
+import logging
 import time
+import weakref
 from datetime import timedelta, timezone
 
 from sqlalchemy import select
@@ -54,6 +56,9 @@ from tret.router_llm.priors_base import (
     OFF_BAND_WEIGHT,
     PRIOR_BOUNDARY_GUARD,
     PRIORS_VERSION,
+    FAMILY_MAX_SHIFT,
+    FAMILY_MIN_ROWS,
+    FAMILY_SHRINKAGE_STRENGTH,
     SHRINKAGE_STRENGTH,
     Z_CONSERVATIVE,
     EndpointPrior,
@@ -62,10 +67,17 @@ from tret.router_llm.priors_base import (
     PriorsProvider,
     _utcnow,
     poor_endpoints,
+    family_adjusted,
     summarize,
 )
 
 __all__ = [
+    "FAMILY_MAX_SHIFT",
+    "FAMILY_MIN_ROWS",
+    "FAMILY_SHRINKAGE_STRENGTH",
+    "family_adjusted",
+    "invalidate_all_priors",
+    "reset_priors_registry",
     "COOLDOWN_ERROR_KIND",
     "COOLDOWN_PROVIDERS",
     "COOLDOWN_TRIP_COUNT",
@@ -126,6 +138,30 @@ COOLDOWN_ERROR_KIND = "provider_error"
 COOLDOWN_PROVIDERS = frozenset({"openrouter", "anthropic"})
 
 
+# Every live `OutcomePriors`, so code outside the engine (an evaluation landing, a
+# spot check, an approval) can drop their caches without holding a reference.
+_INSTANCES: "weakref.WeakSet[OutcomePriors]" = weakref.WeakSet()
+
+
+def invalidate_all_priors() -> None:
+    """Drop every `OutcomePriors` cache, family gates included, in this process.
+    Called by the review / evaluation / approval hooks (the run-end `invalidate()`
+    deliberately keeps the gate cache). Only clears in-memory dicts: no I/O, so a
+    provider from another event loop or with a closed session factory cannot make it
+    raise; each instance is guarded anyway. Never raises."""
+    for instance in list(_INSTANCES):
+        try:
+            instance.invalidate()
+            instance.invalidate_gates()
+        except Exception:  # noqa: BLE001 - cache hygiene must not fail its caller
+            logging.getLogger("tret.priors").exception("failed to invalidate routing priors")
+
+
+def reset_priors_registry() -> None:
+    """Forget every registered provider (test isolation)."""
+    _INSTANCES.clear()
+
+
 def _aware(observed_at):
     """`observed_at`, guaranteed tz-aware — same defensive coercion
     `priors_base._row_weight` applies, needed here too since a naive and an
@@ -160,9 +196,38 @@ class OutcomePriors:
         # every call" — the same env-driven default every other caller gets.
         # Set explicitly (tests do this) to pin it independent of settings.
         self._cooldown_minutes = cooldown_minutes
+        # task_family -> (monotonic stamp, gate dict): its own TTL, NOT cleared by the
+        # run-end `invalidate()` (a busy batch would keep it cold); cleared by the
+        # review / evaluation hooks through `invalidate_all_priors()`.
+        self._gates: dict[str, tuple[float, dict]] = {}
+        self._family_cache: dict[tuple, tuple[float, tuple[dict[str, ModelPrior], dict | None]]] = {}
+        _INSTANCES.add(self)
 
     def invalidate(self) -> None:
         self._cache.clear()
+        self._family_cache.clear()
+
+    def invalidate_gates(self) -> None:
+        self._gates.clear()
+        self._family_cache.clear()
+
+    async def _gate(self, task_family: str) -> dict:
+        """The family's gate (`batches.gate.family_gate`), cached for the TTL. A
+        failure reads as closed and is not cached."""
+        hit = self._gates.get(task_family)
+        if hit and (time.monotonic() - hit[0]) < self._ttl:
+            return hit[1]
+        from tret.batches.gate import family_gate
+
+        factory = self._session_factory
+        if factory is None:
+            from tret.db.engine import get_session_factory
+
+            factory = get_session_factory()
+        async with factory() as db:
+            gate = await family_gate(db, task_family)
+        self._gates[task_family] = (time.monotonic(), gate)
+        return gate
 
     async def _rows(self, task_shape: str, objective: str) -> list[RunOutcome]:
         factory = self._session_factory
@@ -177,6 +242,28 @@ class OutcomePriors:
                 .where(
                     RunOutcome.task_shape == task_shape,
                     RunOutcome.objective == objective,
+                    RunOutcome.observed_at >= since,
+                    RunOutcome.outcome_class.notin_(NON_QUALITY_CLASSES),
+                )
+                .order_by(RunOutcome.observed_at.desc())
+                .limit(ROW_SCAN_LIMIT)
+            )
+            return list((await db.execute(q)).scalars().all())
+
+    async def _family_rows(self, task_family: str, objective: str) -> list[RunOutcome]:
+        factory = self._session_factory
+        if factory is None:
+            from tret.db.engine import get_session_factory
+
+            factory = get_session_factory()
+        since = self._now() - timedelta(days=WINDOW_DAYS)
+        async with factory() as db:
+            q = (
+                select(RunOutcome)
+                .where(
+                    RunOutcome.task_family == task_family,
+                    RunOutcome.objective == objective,
+                    RunOutcome.evaluated_quality_score.is_not(None),
                     RunOutcome.observed_at >= since,
                     RunOutcome.outcome_class.notin_(NON_QUALITY_CLASSES),
                 )
@@ -206,6 +293,59 @@ class OutcomePriors:
         priors = summarize(rows, size_band=size_band, now=self._now())
         self._cache[key] = (time.monotonic(), priors)
         return priors
+
+    async def for_key_family(
+        self,
+        *,
+        task_shape: str,
+        objective: str,
+        size_band: str | None = None,
+        task_family: str,
+    ) -> tuple[dict[str, ModelPrior], dict | None]:
+        """`for_key`, re-ranked by the family's own evidence when its gate is open.
+
+        Returns `(priors, status)`; `status` is None when the feature is off, else
+        `{"used", "gate": {open, spot_checks, agreement}, "adjusted": {model: delta}}`
+        where `used` is true only when an adjustment was computed and applied in THIS
+        call. Nothing is remembered on the provider except time-limited caches.
+        Any failure returns the base priors with `{"used": False, "error": True}`."""
+        base = await self.for_key(task_shape=task_shape, objective=objective, size_band=size_band)
+        from tret.config import get_settings
+
+        if get_settings().router_family_priors == "off":
+            return base, None
+        key = (task_shape, objective, size_band, task_family)
+        hit = self._family_cache.get(key)
+        if hit and (time.monotonic() - hit[0]) < self._ttl:
+            return hit[1]
+        summary = {"open": False, "spot_checks": 0, "agreement": None}
+        try:
+            gate = await self._gate(task_family)
+            summary = {
+                "open": bool(gate.get("open")),
+                "spot_checks": gate.get("spot_checks", 0),
+                "agreement": gate.get("agreement"),
+            }
+            if not summary["open"]:
+                result = (base, {"used": False, "gate": summary, "adjusted": {}})
+            else:
+                rows = [
+                    r
+                    for r in await self._family_rows(task_family, objective)
+                    # only what the gate's own judge and rubric produced
+                    if (r.components or {}).get("evaluator", {}).get("rubric_version")
+                    == gate.get("rubric_version")
+                    and (r.components or {}).get("evaluator", {}).get("judge_model")
+                    == gate.get("judge_model")
+                ]
+                priors, info = family_adjusted(base, rows, now=self._now())
+                adjusted = info["adjusted"]
+                result = (priors, {"used": bool(adjusted), "gate": summary, "adjusted": adjusted})
+        except Exception:  # noqa: BLE001
+            logging.getLogger("tret.priors").exception("failed to read family routing priors")
+            return base, {"used": False, "error": True, "gate": summary, "adjusted": {}}
+        self._family_cache[key] = (time.monotonic(), result)
+        return result
 
     async def _cooldown_rows(self, candidate_ids: list[str], since) -> list[RunOutcome]:
         """Every outcome for `candidate_ids` since `since`, newest first.

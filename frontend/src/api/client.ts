@@ -3573,7 +3573,23 @@ export interface BatchEvaluationSettings {
   rubric?: BatchRubric | null
 }
 
+/** State of the gate that lets evaluator scores feed router learning for a family. */
+export interface RouterGate {
+  open: boolean
+  spot_checks: number
+  agreeing: number
+  /** 0..1; null when there are no spot checks. */
+  agreement: number | null
+  needed_checks: number
+  needed_agreement: number
+  mode: 'gated' | 'off'
+  rubric_version: string | null
+  judge_model: string | null
+}
+
 export interface BatchEvaluationPass {
+  /** Absent on older servers. */
+  router_gate?: RouterGate | null
   id: string
   status: BatchEvaluationStatus
   judge_model: string
@@ -3983,6 +3999,8 @@ export interface FamilyLeaderboard {
   batches: FamilyBatchRow[]
   /** Batches left out of the per-model table (rubric, judge or evaluation state differs). */
   excluded_batches?: number
+  /** Absent on older servers. */
+  router_gate?: RouterGate | null
   /** Flat list. A nested {comparable, models, excluded_batches} block is tolerated by the view. */
   models: FamilyModel[] | FamilyModelsBlock
 }

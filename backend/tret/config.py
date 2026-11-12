@@ -709,6 +709,38 @@ class Settings(BaseSettings):
             raise ValueError(f"router_open_weights must be one of prefer|require|any, got {value!r}")
         return text
 
+    # Per-workspace learning from batch families (E4b): "gated" (default) lets a
+    # family's own evidence (outcomes blended with the evaluator's scores) steer
+    # routing for that family's runs only once human spot checks agree with the
+    # judge (`router_family_gate_min_checks` reviewed rows at
+    # `router_family_gate_min_agreement`); "off" never reads family evidence and
+    # leaves every routing decision exactly as it was before.
+    router_family_priors: Literal["gated", "off"] = "gated"
+    router_family_gate_min_checks: int = 15
+    router_family_gate_min_agreement: float = 0.8
+
+    @field_validator("router_family_priors", mode="before")
+    @classmethod
+    def _validate_router_family_priors(cls, value):
+        text = str(value if value is not None else "").strip().lower()
+        if text not in ("gated", "off"):
+            raise ValueError(f"router_family_priors must be gated|off, got {value!r}")
+        return text
+
+    @field_validator("router_family_gate_min_checks")
+    @classmethod
+    def _validate_family_gate_checks(cls, value):
+        if value < 1:
+            raise ValueError("router_family_gate_min_checks must be >= 1")
+        return value
+
+    @field_validator("router_family_gate_min_agreement")
+    @classmethod
+    def _validate_family_gate_agreement(cls, value):
+        if not 0 < value <= 1:
+            raise ValueError("router_family_gate_min_agreement must be in (0, 1]")
+        return value
+
     # Headless CLI ledger (`tret run`, tret/local_run.py). One JSON line is
     # appended here per run: what it cost, what it's estimated to have emitted,
     # which model, which ledger id. Empty means the default, ~/.tret/ledger.jsonl

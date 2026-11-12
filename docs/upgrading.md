@@ -30,6 +30,17 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## 2026-11-12 · router learning per batch family (gated)
+
+Migration `f2a9c6d4e817` adds `run_outcomes.task_family` and `evaluated_quality_score`
+(run `tret outcomes backfill` to fill them for old batch runs). **Nothing changes for
+routing until people spot-check a family's evaluator scores**: `quality_score` and the
+base priors are byte-identical to before. At least `TRET_ROUTER_FAMILY_GATE_MIN_CHECKS`
+(default 15) reviewed rows with at least `TRET_ROUTER_FAMILY_GATE_MIN_AGREEMENT`
+(default 0.8) agreement open it for that workspace's family; it then only re-ranks models
+the family has compared (two or more, five evaluated rows each), by at most 0.25.
+`TRET_ROUTER_FAMILY_PRIORS=off` (default `gated`) disables it entirely.
+
 ## 2026-11-06 · live model catalog and open-weight preference
 
 Behaviour change, no migration. Routing changes on an existing install:

@@ -634,9 +634,21 @@ class RoutingDecision:
     # "any": the policy's own value, else `TRET_ROUTER_OPEN_WEIGHTS`). Null on
     # the override/pin paths, which the open-weights policy does not govern.
     open_weights: str | None = None
+    # Batch-family evidence (E4b). Both stay None, and are left OUT of `to_json`,
+    # unless the run belongs to a family whose human-agreement gate was open and
+    # the decision was made against family priors — so every other decision
+    # serialises exactly as it did before this field existed.
+    #   task_family: "<family_key>@<workspace_id>"
+    #   family_priors: {"used": True, "gate": {"open", "spot_checks", "agreement"}}
+    task_family: str | None = None
+    family_priors: dict | None = None
 
     def to_json(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        if self.task_family is None and self.family_priors is None:
+            data.pop("task_family", None)
+            data.pop("family_priors", None)
+        return data
 
 
 class RoutingUnavailable(Exception):
@@ -1101,9 +1113,33 @@ class ModelRouter:
             "reason": "untried model within exploration tier",
         }
 
-    async def route(
+    async def route(self, *, task_family: str | None = None, **kwargs) -> RoutingDecision:
+        """Choose a model for one run (see `_route` for every parameter).
+
+        `task_family` (`<family_key>@<workspace_id>`, derived by the engine from the run's batch)
+        lets a family's own evidence, behind its human-agreement gate, refine the
+        priors. Without it, with the gate closed, or with
+        `TRET_ROUTER_FAMILY_PRIORS=off`, this is exactly `_route` and the decision
+        is unchanged; the override and pinned paths never read family priors.
+        """
+        if not task_family:
+            return await self._route(**kwargs)
+        note: dict = {}
+        decision = await self._route(task_family=task_family, family_note=note, **kwargs)
+        if note.get("used"):
+            decision.task_family = task_family
+            decision.family_priors = {
+                "used": True,
+                "gate": note.get("gate") or {},
+                "adjusted": note.get("adjusted") or {},
+            }
+        return decision
+
+    async def _route(
         self,
         *,
+        task_family: str | None = None,
+        family_note: dict | None = None,
         model_policy: dict,
         task_type: str,
         task_shape: str,
@@ -1179,11 +1215,32 @@ class ModelRouter:
         # the aggregate moves mid-decision.
         priors: dict[str, ModelPrior] = {}
         if learning:
-            priors = await self._priors.for_key(
-                task_shape=task_shape,
-                objective=objective,
-                size_band=size_band(est_input_tokens),
-            )
+            if task_family:
+                family_fn = getattr(self._priors, "for_key_family", None)
+                if family_fn is None:  # a provider without family support: no adjustment
+                    priors, status = (
+                        await self._priors.for_key(
+                            task_shape=task_shape,
+                            objective=objective,
+                            size_band=size_band(est_input_tokens),
+                        ),
+                        None,
+                    )
+                else:
+                    priors, status = await family_fn(
+                        task_shape=task_shape,
+                        objective=objective,
+                        size_band=size_band(est_input_tokens),
+                        task_family=task_family,
+                    )
+                if family_note is not None and status and status.get("used"):
+                    family_note.update(status)
+            else:
+                priors = await self._priors.for_key(
+                    task_shape=task_shape,
+                    objective=objective,
+                    size_band=size_band(est_input_tokens),
+                )
 
         candidates, context_fit = self._candidates_with_fit(
             model_policy, priors, min_context_window

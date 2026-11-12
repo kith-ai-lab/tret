@@ -16,6 +16,7 @@ import {
   metricLabel,
   fmtMetric,
   plural,
+  routerGateNote,
 } from './evalHelpers'
 import { errText } from './shared'
 
@@ -209,6 +210,7 @@ export function Scorecard({
             {ev.agreement != null
               ? ` · spot-check agreement ${fmtPct(ev.agreement)} (${ev.spot_checks} checks)`
               : ` · no spot checks yet`}
+            {!compact && routerGateNote(ev.router_gate) && ` · ${routerGateNote(ev.router_gate)}`}
             {(counts.not_evaluated_budget ?? 0) > 0 && ` · ${counts.not_evaluated_budget} not evaluated (budget)`}
             {(counts.failed ?? 0) > 0 && ` · ${counts.failed} failed`}
             {ev.error && <span className="error-text"> · {ev.error}</span>}
