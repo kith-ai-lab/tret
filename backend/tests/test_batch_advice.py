@@ -207,9 +207,20 @@ async def test_a_newer_batch_outside_the_pooled_interval_gets_a_note_but_no_new_
     out = await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025)
     cheap = next(m for m in out["evidence"]["models"] if m["model"] == "m/cheap")
     assert cheap["latest_batch"]["name"] == "B2" and cheap["latest_batch"]["quality_mean"] == 60
-    note = next(n for n in out["notes"] if n.startswith("m/cheap: its most recent batch scored 60 over 5 rows"))
+    note = next(n for n in out["notes"] if n.startswith('m/cheap: its most recent batch with at least 5 scored rows, "B2", scored 60 over 5 rows'))
     assert note.endswith("pooled over 2 batches. The recommendation uses the pooled figure.")
     assert not any(n.startswith("m/best: its most recent") for n in out["notes"])
+
+
+async def test_a_tiny_newer_batch_does_not_hide_the_large_batch_note(w):
+    await model_batch(w, "B1", "b1", FAMILY, minutes=0)
+    await collector(w, "balanced")
+    await model_batch(w, "B2", "b2", {"m/cheap": [(60, 0.04, 4)] * 6}, minutes=60)
+    await model_batch(w, "B3", "b3", {"m/cheap": [(60, 0.04, 4)] * 2}, minutes=120)
+    out = await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025)
+    cheap = next(m for m in out["evidence"]["models"] if m["model"] == "m/cheap")
+    assert cheap["latest_batch"]["name"] == "B2"
+    assert any(n.startswith('m/cheap: its most recent batch with at least 5 scored rows, "B2", scored 60 over 6 rows') for n in out["notes"])
 
 
 async def test_advice_harness_id_is_null_without_a_collector_harness(w):
@@ -220,9 +231,28 @@ async def test_advice_harness_id_is_null_without_a_collector_harness(w):
 async def test_the_recent_batch_note_needs_enough_scored_rows_in_that_batch(w):
     await model_batch(w, "B1", "b1", FAMILY, minutes=0)
     await collector(w, "balanced")
-    await model_batch(w, "B2", "b2", {"m/cheap": [(60, 0.04, 4)] * 2}, minutes=60)
+    await model_batch(w, "B2", "b2", {"m/cheap": [(89, 0.04, 4)] * 2}, minutes=60)
     out = await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025)
-    assert not any("most recent batch" in n for n in out["notes"])
+    cheap = next(m for m in out["evidence"]["models"] if m["model"] == "m/cheap")
+    # the 2-row batch is too thin to be the latest: the 5-row one is, and it sits inside the pooled interval
+    lo, hi = cheap["quality_interval90"]
+    assert cheap["latest_batch"]["name"] == "B1" and lo < cheap["latest_batch"]["quality_mean"] < hi
+    assert not any(n.startswith("m/cheap:") for n in out["notes"])
     await model_batch(w, "B3", "b3", {"m/cheap": [(60, 0.04, 4)] * 5}, minutes=120)
     out = await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025)
-    assert any(n.startswith("m/cheap: its most recent batch scored 60 over 5 rows") for n in out["notes"])
+    assert any(
+        n.startswith('m/cheap: its most recent batch with at least 5 scored rows, "B3", scored 60 over 5 rows')
+        for n in out["notes"]
+    )
+
+
+async def test_no_recent_batch_note_when_no_batch_reaches_the_row_floor(w):
+    await model_batch(w, "B1", "b1", {"m/g": [(99, 0.04, 4)] * 4}, minutes=0)
+    await collector(w, "balanced")
+    await model_batch(w, "B2", "b2", {"m/g": [(60, 0.04, 4)] * 2}, minutes=60)
+    out = await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025)
+    g = next(m for m in out["evidence"]["models"] if m["model"] == "m/g")
+    lo, hi = g["quality_interval90"]
+    assert g["latest_batch"]["name"] == "B2" and g["latest_batch"]["scored"] == 2
+    assert not lo <= g["latest_batch"]["quality_mean"] <= hi
+    assert not any(n.startswith("m/g:") for n in out["notes"])

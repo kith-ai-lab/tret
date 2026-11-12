@@ -100,8 +100,9 @@ one that needs action on an existing install.
 ### Changed
 
 - **Each model's most recent batch is shown beside its pooled figure.** Family models and
-  the advice evidence carry `latest_batch`, and the advice adds a note when a model's most
-  recent batch lies outside its pooled interval. The recommendation rule is unchanged. The
+  the advice evidence carry `latest_batch` (the model's most recent batch with at least five
+  scored rows for it, so a tiny check batch does not displace a large one), and the advice
+  adds a note when that batch lies outside the model's pooled interval. The recommendation rule is unchanged. The
   advice response also returns the family's `harness_id`.
 
 - **Approvals now carry a purpose, and only a review counts as quality evidence.** An
