@@ -598,6 +598,75 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batches/experiments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Experiments */
+        get: operations["list_experiments_api_batches_experiments_get"];
+        put?: never;
+        /** Create Experiment */
+        post: operations["create_experiment_api_batches_experiments_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/experiments/{experiment_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Experiment */
+        get: operations["get_experiment_api_batches_experiments__experiment_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/experiments/{experiment_id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Promote Experiment */
+        post: operations["promote_experiment_api_batches_experiments__experiment_id__promote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/batches/experiments/{experiment_id}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Experiment */
+        post: operations["start_experiment_api_batches_experiments__experiment_id__start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/batches/families": {
         parameters: {
             query?: never;
@@ -2183,6 +2252,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/harnesses/{harness_id}/policy-history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Policy History */
+        get: operations["get_policy_history_api_harnesses__harness_id__policy_history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/harnesses/{harness_id}/policy-history/{history_id}/revert": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revert Policy */
+        post: operations["revert_policy_api_harnesses__harness_id__policy_history__history_id__revert_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/healthz": {
         parameters: {
             query?: never;
@@ -3330,6 +3433,8 @@ export interface components {
             model_override?: string | null;
             /** Name */
             name: string;
+            /** Objective */
+            objective?: string | null;
             /**
              * Profile
              * @default disclosure
@@ -3364,6 +3469,25 @@ export interface components {
         CreateDraftBody: {
             /** Slug */
             slug: string;
+        };
+        /**
+         * CreateExperimentBody
+         * @description `batch` is the normal create body (either profile); every arm batch is a copy of it.
+         */
+        CreateExperimentBody: {
+            /** Arms */
+            arms: components["schemas"]["ExperimentArmBody"][];
+            /** Batch */
+            batch: components["schemas"]["CreateCollectionBody"] | components["schemas"]["CreatePromptBatchBody"];
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "replicate" | "split";
+            /** Name */
+            name: string;
+            /** Sample N */
+            sample_n?: number | null;
         };
         /** CreateInviteBody */
         CreateInviteBody: {
@@ -3405,6 +3529,8 @@ export interface components {
             model_override?: string | null;
             /** Name */
             name: string;
+            /** Objective */
+            objective?: string | null;
             /**
              * Profile
              * @default prompt
@@ -3568,6 +3694,17 @@ export interface components {
             rubric?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /** ExperimentArmBody */
+        ExperimentArmBody: {
+            /** Label */
+            label?: string | null;
+            /** Max Iterations */
+            max_iterations?: number | null;
+            /** Model Override */
+            model_override?: string | null;
+            /** Objective */
+            objective?: string | null;
         };
         /** FinalizeBody */
         FinalizeBody: {
@@ -3791,6 +3928,16 @@ export interface components {
             workspace_id: string;
             /** Workspace Name */
             workspace_name: string;
+        };
+        /** PromoteExperimentBody */
+        PromoteExperimentBody: {
+            /**
+             * Arm
+             * @enum {string}
+             */
+            arm: "A" | "B" | "C";
+            /** Token */
+            token?: string | null;
         };
         /** PublishDeliverableBody */
         PublishDeliverableBody: {
@@ -4889,6 +5036,156 @@ export interface operations {
                 "application/json": components["schemas"]["PairwiseCancelBody"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_experiments_api_batches_experiments_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    create_experiment_api_batches_experiments_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateExperimentBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_experiment_api_batches_experiments__experiment_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                experiment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    promote_experiment_api_batches_experiments__experiment_id__promote_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                experiment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PromoteExperimentBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_experiment_api_batches_experiments__experiment_id__start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                experiment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {
@@ -7466,6 +7763,69 @@ export interface operations {
                 "application/json": components["schemas"]["LessonReviewBody"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_policy_history_api_harnesses__harness_id__policy_history_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                harness_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revert_policy_api_harnesses__harness_id__policy_history__history_id__revert_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                harness_id: string;
+                history_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

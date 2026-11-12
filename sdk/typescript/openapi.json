@@ -253,6 +253,18 @@
             "title": "Name",
             "type": "string"
           },
+          "objective": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objective"
+          },
           "profile": {
             "const": "disclosure",
             "default": "disclosure",
@@ -342,6 +354,65 @@
           "slug"
         ],
         "title": "CreateDraftBody",
+        "type": "object"
+      },
+      "CreateExperimentBody": {
+        "additionalProperties": false,
+        "description": "`batch` is the normal create body (either profile); every arm batch is a copy of it.",
+        "properties": {
+          "arms": {
+            "items": {
+              "$ref": "#/components/schemas/ExperimentArmBody"
+            },
+            "maxItems": 3,
+            "minItems": 2,
+            "title": "Arms",
+            "type": "array"
+          },
+          "batch": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CreateCollectionBody"
+              },
+              {
+                "$ref": "#/components/schemas/CreatePromptBatchBody"
+              }
+            ],
+            "title": "Batch"
+          },
+          "mode": {
+            "enum": [
+              "replicate",
+              "split"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "sample_n": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample N"
+          }
+        },
+        "required": [
+          "name",
+          "mode",
+          "arms",
+          "batch"
+        ],
+        "title": "CreateExperimentBody",
         "type": "object"
       },
       "CreateInviteBody": {
@@ -457,6 +528,18 @@
             "minLength": 1,
             "title": "Name",
             "type": "string"
+          },
+          "objective": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objective"
           },
           "profile": {
             "const": "prompt",
@@ -872,6 +955,60 @@
           }
         },
         "title": "EvaluationIn",
+        "type": "object"
+      },
+      "ExperimentArmBody": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "max_iterations": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Iterations"
+          },
+          "model_override": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Override"
+          },
+          "objective": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Objective"
+          }
+        },
+        "title": "ExperimentArmBody",
         "type": "object"
       },
       "FinalizeBody": {
@@ -1355,6 +1492,37 @@
           "expires_at"
         ],
         "title": "PendingInviteOut",
+        "type": "object"
+      },
+      "PromoteExperimentBody": {
+        "additionalProperties": false,
+        "properties": {
+          "arm": {
+            "enum": [
+              "A",
+              "B",
+              "C"
+            ],
+            "title": "Arm",
+            "type": "string"
+          },
+          "token": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Token"
+          }
+        },
+        "required": [
+          "arm"
+        ],
+        "title": "PromoteExperimentBody",
         "type": "object"
       },
       "PublishDeliverableBody": {
@@ -3361,6 +3529,195 @@
           }
         },
         "summary": "Cancel Pairwise",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/experiments": {
+      "get": {
+        "operationId": "list_experiments_api_batches_experiments_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Experiments",
+        "tags": [
+          "batches"
+        ]
+      },
+      "post": {
+        "operationId": "create_experiment_api_batches_experiments_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateExperimentBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Experiment",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/experiments/{experiment_id}": {
+      "get": {
+        "operationId": "get_experiment_api_batches_experiments__experiment_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "experiment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Experiment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Experiment",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/experiments/{experiment_id}/promote": {
+      "post": {
+        "operationId": "promote_experiment_api_batches_experiments__experiment_id__promote_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "experiment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Experiment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromoteExperimentBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Promote Experiment",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/experiments/{experiment_id}/start": {
+      "post": {
+        "operationId": "start_experiment_api_batches_experiments__experiment_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "experiment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Experiment Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Experiment",
         "tags": [
           "batches"
         ]
@@ -7101,6 +7458,98 @@
         "summary": "Review Harness Lesson",
         "tags": [
           "lessons"
+        ]
+      }
+    },
+    "/api/harnesses/{harness_id}/policy-history": {
+      "get": {
+        "operationId": "get_policy_history_api_harnesses__harness_id__policy_history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "harness_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Harness Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Policy History",
+        "tags": [
+          "harnesses"
+        ]
+      }
+    },
+    "/api/harnesses/{harness_id}/policy-history/{history_id}/revert": {
+      "post": {
+        "operationId": "revert_policy_api_harnesses__harness_id__policy_history__history_id__revert_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "harness_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Harness Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "history_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "History Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revert Policy",
+        "tags": [
+          "harnesses"
         ]
       }
     },

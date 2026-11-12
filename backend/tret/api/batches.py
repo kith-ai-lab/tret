@@ -25,8 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
 from tret.api.findings import _finding_out
-from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_approver
-from tret.batches import advice, evaluation, families, pairwise, scoring
+from tret.api.workspace import (
+    WorkspaceContext,
+    current_workspace,
+    require_workspace_admin,
+    require_workspace_approver,
+)
+from tret.batches import advice, evaluation, experiments, families, pairwise, scoring
 from tret.batches.core import written_files_latest
 from tret.batches.rubrics import default_rubric
 from tret.batches.profiles.prompt import CreatePromptBatchBody
@@ -322,6 +327,99 @@ class AdviceBody(BaseModel):
     fiscal_year: int | None = Field(default=None, ge=2000, le=2100)
     harness_id: uuid.UUID | None = None
     template: str | None = Field(default=None, max_length=50_000)
+
+
+class ExperimentArmBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str | None = Field(default=None, max_length=80)
+    model_override: str | None = Field(default=None, max_length=200)
+    objective: str | None = Field(default=None, max_length=40)
+    max_iterations: int | None = None
+
+
+class CreateExperimentBody(BaseModel):
+    """`batch` is the normal create body (either profile); every arm batch is a copy of it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    mode: Literal["replicate", "split"]
+    arms: list[ExperimentArmBody] = Field(min_length=2, max_length=3)
+    sample_n: int | None = None
+    batch: CreateBatchBody
+
+
+class PromoteExperimentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    arm: Literal["A", "B", "C"]
+    # The `token` of the arm's `promotion` as the person saw it; a stale one is a 409.
+    token: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/batches/experiments")
+async def create_experiment(
+    body: CreateExperimentBody,
+    request: Request,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    lifecycle.refuse_if_draining(request)
+    spec = experiments.ExperimentSpec(
+        name=body.name,
+        mode=body.mode,
+        arms=[a.model_dump(exclude_none=True) for a in body.arms],
+        batch=body.batch,
+        sample_n=body.sample_n,
+    )
+    e = await experiments.create_experiment(db, ctx, user, spec)
+    return await experiments.experiment_result(db, e)
+
+
+@router.get("/batches/experiments")
+async def list_experiments(
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    return {"experiments": await experiments.list_experiments(db, ctx.id)}
+
+
+@router.get("/batches/experiments/{experiment_id}")
+async def get_experiment(
+    experiment_id: uuid.UUID,
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    e = await experiments.get_experiment(db, experiment_id, ctx.id)
+    return await experiments.experiment_result(db, e)
+
+
+@router.post("/batches/experiments/{experiment_id}/start")
+async def start_experiment(
+    experiment_id: uuid.UUID,
+    request: Request,
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    lifecycle.refuse_if_draining(request)
+    e = await experiments.get_experiment(db, experiment_id, ctx.id)
+    await experiments.start_experiment(db, e)
+    await db.refresh(e)
+    return await experiments.experiment_result(db, e)
+
+
+@router.post("/batches/experiments/{experiment_id}/promote")
+async def promote_experiment(
+    experiment_id: uuid.UUID,
+    body: PromoteExperimentBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    e = await experiments.get_experiment(db, experiment_id, ctx.id)
+    return await experiments.promote(db, e, body.arm, user, body.token)
 
 
 @router.post("/batches/advice")

@@ -125,7 +125,7 @@ def test_csv_create_returns_targets_settings_and_columns(client, world, engine):
         "harness_id": str(world.harness.id), "harness_name": world.harness.name, "template": TEMPLATE,
         "label_column": "company", "slug_column": None, "review_schema": None, "concurrency": 2,
         "first_batch_size": 0, "target_slug": None, "write_root": None, "model_override": None,
-        "max_iterations": None, "max_cost_usd": None, "row_memory": False,
+        "max_iterations": None, "objective": None, "max_cost_usd": None, "row_memory": False,
         "columns": ["company", "country", "note"],
     }
     assert [t["label"] for t in d["targets"]] == ["Acme Ltd", "Globex", "Initech"]

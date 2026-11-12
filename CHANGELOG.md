@@ -10,6 +10,13 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Batch experiments.** Compare two or three arms (a model, an objective, an iteration limit)
+  as one batch per arm over the same rows or one batch split across arms, read the comparison
+  with intervals, and let an admin make the winning arm the harness default. A batch also
+  accepts an `objective`. Every harness policy or loop change (edit, experiment, revert) is now
+  recorded with who, when and the previous value, and an admin can revert it. New
+  `/api/batches/experiments` routes, `GET /api/harnesses/{id}/policy-history`, and an
+  `experiment` option on `start_batch`. See docs/batch-runs.md.
 - **Batch-review lessons with a harness scope.** A batch review's lessons are proposed
   (never approved) as harness-scoped lessons for the batch's harness; once a person approves
   them they are added to every later run of that harness, with or without a pack, except

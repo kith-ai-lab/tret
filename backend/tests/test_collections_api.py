@@ -281,7 +281,7 @@ def test_create_returns_the_collection_with_targets_and_warnings(client, world):
     assert d["status"] == "draft"
     assert d["settings"] == {
         "target_slug": "test-output", "write_root": "runs", "concurrency": 2, "first_batch_size": 2,
-        "fiscal_year": 2025, "auto_write": True, "model_override": None, "max_iterations": None,
+        "fiscal_year": 2025, "auto_write": True, "model_override": None, "max_iterations": None, "objective": None,
         "max_cost_usd": None, "row_memory": False,
     }
     assert [t["slug"] for t in d["targets"]] == ["allianz", "shell", "apple", "siemens", "hsbc-holdings"]

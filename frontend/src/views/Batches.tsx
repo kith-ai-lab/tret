@@ -12,9 +12,11 @@ import {
   type BatchTarget,
   type CreateBatchBody,
   type CreateDisclosureBatchBody,
+  type CreateExperimentBody,
   type DisclosureTargetOutcome,
 } from '../api/client'
 import { AdvicePanel, CostCapField, RowMemoryField, parseCostCap } from '../components/batches/AdvicePanel'
+import { ObjectiveSelect, useExperimentForm } from '../components/batches/ExperimentSection'
 import { DisclosurePanels } from '../components/batches/DisclosurePanels'
 import { EvaluationDrawer } from '../components/batches/EvaluationDrawer'
 import { useEvaluationForm } from '../components/batches/EvaluationSection'
@@ -49,6 +51,22 @@ const PROFILE_LABEL: Record<string, string> = {
   prompt: 'Prompt',
 }
 
+/** "experiment · arm A" (or "· split") linking to the experiment page; nothing for an ordinary batch. */
+export function ExperimentChip({ batch }: { batch: Batch }) {
+  const ref = batch.experiment ?? batch.settings?.experiment
+  if (!ref?.id) return null
+  return (
+    <Link
+      to={`/batches/experiments/${ref.id}`}
+      className="badge badge-blue"
+      style={{ marginLeft: 8, fontSize: 'var(--fs-2xs)', padding: '1px 6px' }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      experiment · {ref.arm ? `arm ${ref.arm}` : 'split'}
+    </Link>
+  )
+}
+
 function isLive(c: Batch): boolean {
   if (c.status === 'running' || c.evaluation_status === 'running') return true
   return (c.targets ?? []).some((t) => t.status === 'running' || t.status === 'packaging')
@@ -77,6 +95,17 @@ function BatchList() {
     enabled: showFamilies,
     retry: false,
   })
+  const [showExperiments, setShowExperiments] = useState(false)
+  // Lazy, and quiet on an older server: a 404/405 simply hides the list.
+  const experimentsQuery = useQuery({
+    queryKey: ['batch-experiments'],
+    queryFn: api.listExperiments,
+    enabled: showExperiments,
+    retry: false,
+  })
+  const experimentsUnavailable =
+    experimentsQuery.error instanceof ApiError &&
+    (experimentsQuery.error.status === 404 || experimentsQuery.error.status === 405)
   const toggleSelected = (id: string) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   const listQuery = useQuery({
@@ -114,6 +143,13 @@ function BatchList() {
           >
             Families
           </button>
+          <button
+            className="btn"
+            aria-expanded={showExperiments}
+            onClick={() => setShowExperiments((v) => !v)}
+          >
+            Experiments
+          </button>
           <button className="btn btn-primary" onClick={() => setCreating(true)}>
             New batch
           </button>
@@ -141,6 +177,34 @@ function BatchList() {
                   </Link>{' '}
                   <span className="fine-print">
                     {f.batches} {f.batches === 1 ? 'batch' : 'batches'} · {f.evaluated_batches} evaluated
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
+      {showExperiments && !experimentsUnavailable && (
+        <div className="panel" style={{ margin: '14px 0' }}>
+          <div className="mono-label">Experiments</div>
+          <div className="fine-print">
+            Two or three ways of running the same work, side by side. A person starts them and picks a winner.
+          </div>
+          {experimentsQuery.isLoading ? (
+            <div className="fine-print pulse">Loading…</div>
+          ) : experimentsQuery.error ? (
+            <span className="error-text">{errText(experimentsQuery.error)}</span>
+          ) : (experimentsQuery.data ?? []).length === 0 ? (
+            <div className="fine-print">No experiments yet. Use New batch, then Run as an experiment.</div>
+          ) : (
+            <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+              {(experimentsQuery.data ?? []).map((x) => (
+                <li key={x.id} className="mono-body">
+                  <Link to={`/batches/experiments/${x.id}`}>{x.name}</Link>{' '}
+                  <span className="fine-print">
+                    {x.mode} · {(x.arms ?? []).map((a) => `${a.key} ${a.batch_status ?? '—'}`).join(' · ')}
+                    {x.promoted ? ` · promoted arm ${x.promoted.arm}` : ''}
                   </span>
                 </li>
               ))}
@@ -200,7 +264,10 @@ function BatchList() {
                       onChange={() => toggleSelected(c.id)}
                     />
                   </td>
-                  <td>{c.name}</td>
+                  <td>
+                    {c.name}
+                    <ExperimentChip batch={c} />
+                  </td>
                   <td>{PROFILE_LABEL[c.profile] ?? c.profile}</td>
                   <td>{c.run_slug}</td>
                   <td>
@@ -255,6 +322,7 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
   const [fiscalYear, setFiscalYear] = useState(2025)
   const [autoWrite, setAutoWrite] = useState(true)
   const [model, setModel] = useState('')
+  const [objective, setObjective] = useState('')
   const [maxIterations, setMaxIterations] = useState('')
   const [costCap, setCostCap] = useState('')
   const [rowMemory, setRowMemory] = useState(false)
@@ -266,6 +334,18 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
   const disclosureEval = useEvaluationForm(open && profile === 'disclosure', 'disclosure')
 
   const effectiveTarget = targetSlug || targets[0]?.slug || ''
+  const csvRowCount = Math.max(0, csv.split('\n').filter((l) => l.trim() !== '').length - 1)
+  const experiment = useExperimentForm(open, profile === 'prompt' ? prompt.rowCount : csvRowCount)
+
+  const experimentMutation = useMutation({
+    mutationFn: (body: CreateExperimentBody) => api.createExperiment(body),
+    onSuccess: (r) => {
+      void queryClient.invalidateQueries({ queryKey: ['batches'] })
+      void queryClient.invalidateQueries({ queryKey: ['batch-experiments'] })
+      onClose()
+      navigate(`/batches/experiments/${r.experiment.id}`)
+    },
+  })
 
   const createMutation = useMutation({
     mutationFn: (body: CreateBatchBody) => api.createBatch(body),
@@ -279,6 +359,11 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
       }
     },
   })
+
+  const submitBody = (body: CreateBatchBody) => {
+    if (experiment.enabled) experimentMutation.mutate(experiment.buildBody(body))
+    else createMutation.mutate(body)
+  }
 
   const submitDisclosure = () => {
     const body: CreateDisclosureBatchBody = {
@@ -294,11 +379,12 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
       auto_write: autoWrite,
       model_override: model.trim() || null,
       max_iterations: maxIterations.trim() ? Number(maxIterations) : null,
+      ...(objective ? { objective } : {}),
       ...(parseCostCap(costCap) != null ? { max_cost_usd: parseCostCap(costCap) as number } : {}),
       ...(rowMemory ? { row_memory: true } : {}),
       ...(disclosureEval.value ? { evaluation: disclosureEval.value } : {}),
     }
-    createMutation.mutate(body)
+    submitBody(body)
   }
 
   const loadFile = (file: File | undefined) => {
@@ -314,6 +400,8 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
 
   const canSubmit =
     !createMutation.isPending &&
+    !experimentMutation.isPending &&
+    experiment.valid &&
     (profile === 'prompt'
       ? prompt.body !== null
       : name.trim() !== '' &&
@@ -321,7 +409,7 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
         effectiveTarget !== '' &&
         parseCostCap(costCap) !== undefined &&
         disclosureEval.valid)
-  const createError = createMutation.error
+  const createError = createMutation.error ?? experimentMutation.error
 
   if (created) {
     return (
@@ -368,13 +456,17 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
             disabled={!canSubmit}
             onClick={() => {
               if (profile === 'prompt') {
-                if (prompt.body) createMutation.mutate(prompt.body)
+                if (prompt.body) submitBody(prompt.body)
               } else {
                 submitDisclosure()
               }
             }}
           >
-            {createMutation.isPending ? 'Creating…' : 'Create batch'}
+            {createMutation.isPending || experimentMutation.isPending
+              ? 'Creating…'
+              : experiment.enabled
+                ? 'Create experiment'
+                : 'Create batch'}
           </button>
         </div>
       }
@@ -527,6 +619,13 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
             <label className="mono-label">Model override (optional)</label>
             <input type="text" value={model} onChange={(e) => setModel(e.target.value)} />
           </div>
+          <div className="field">
+            <label className="mono-label">Objective (optional)</label>
+            <ObjectiveSelect value={objective} onChange={setObjective} />
+            <span className="fine-print">
+              What the router optimizes for on every run. Blank uses the harness setting.
+            </span>
+          </div>
           <RowMemoryField checked={rowMemory} onChange={setRowMemory} />
           <label className="check-row" style={{ marginBottom: 14 }}>
             <input
@@ -561,6 +660,7 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
           {disclosureEval.fields}
         </>
       )}
+      {experiment.fields}
       {createError && <div className="error-text">{errText(createError)}</div>}
     </Modal>
   )
@@ -718,6 +818,7 @@ function BatchDetail({ id }: { id: string }) {
           {c.name}
         </h1>
         <StatusBadge status={c.status} />
+        <ExperimentChip batch={c} />
       </div>
       <div className="view-sub" style={{ marginTop: 6 }}>
         {settingsLine(c)}
@@ -855,6 +956,9 @@ function TargetsTable({
   const isDisclosure = batch.profile === 'disclosure'
   const [drawerTarget, setDrawerTarget] = useState<string | null>(null)
   const anyEvaluation = targets.some((t) => t.evaluation)
+  const anyArm = targets.some((t) => t.arm)
+  const armHead = anyArm ? <th>Arm</th> : null
+  const armCell = (t: BatchTarget) => (anyArm ? <td>{t.arm ?? '—'}</td> : null)
   const evalQuery = useQuery({
     queryKey: ['batch-evaluation', batch.id],
     queryFn: () => api.getBatchEvaluation(batch.id),
@@ -1009,6 +1113,7 @@ function TargetsTable({
                 <th>Market</th>
                 <th>Sector / category / form</th>
                 <th>Status</th>
+                {armHead}
                 <th className="num">Tries</th>
                 <th>Packages</th>
                 <th>Outcome</th>
@@ -1024,6 +1129,7 @@ function TargetsTable({
                 <th>#</th>
                 <th>Label</th>
                 <th>Status</th>
+                {armHead}
                 <th className="num">Tries</th>
                 <th>Outcome</th>
                 {evalHeads}
@@ -1052,6 +1158,7 @@ function TargetsTable({
                       <td>
                         <StatusBadge status={t.status} />
                       </td>
+                      {armCell(t)}
                       <td className="num">{t.attempts}</td>
                       <td style={{ maxWidth: 320, overflowWrap: 'anywhere' }}>
                         {o ? shorten(o.answer, 120) || '—' : '—'}
@@ -1068,7 +1175,7 @@ function TargetsTable({
                     {expanded && (
                       <tr>
                         <td />
-                        <td colSpan={13}>
+                        <td colSpan={14}>
                           <PromptTargetExtras target={t} />
                         </td>
                       </tr>
@@ -1094,6 +1201,7 @@ function TargetsTable({
                     <td>
                       <StatusBadge status={t.status} />
                     </td>
+                    {armCell(t)}
                     <td className="num">{t.attempts}</td>
                     <td>
                       {packages.length === 0
@@ -1129,7 +1237,7 @@ function TargetsTable({
                   {expanded && (
                     <tr>
                       <td />
-                      <td colSpan={16}>
+                      <td colSpan={17}>
                         <TargetExtras target={t} />
                       </td>
                     </tr>

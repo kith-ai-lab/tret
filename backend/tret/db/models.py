@@ -300,6 +300,39 @@ class HarnessPack(Base):
     position: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
 
 
+class HarnessPolicyHistory(Base):
+    """One recorded change to a harness's `model_policy` / `loop_config`: who,
+    when, and the value before and after, so an admin can see and revert it.
+    `source` is "edit" (the harness PUT), "experiment" (a batch experiment's
+    winner promoted) or "revert" (an earlier row's previous value restored);
+    `source_id` points at the experiment or the reverted row.
+    """
+
+    __tablename__ = "harness_policy_history"
+    __table_args__ = (
+        Index("ix_harness_policy_history_harness_changed", "harness_id", "changed_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    harness_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("harnesses.id", ondelete="CASCADE"), nullable=False
+    )
+    changed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    changed_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    previous_model_policy: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    previous_loop_config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    new_model_policy: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    new_loop_config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class Conversation(Base):
     """A chat thread. Each user turn executes as a Run (task_type='chat');
     messages here are the display/history record, with run ids per turn."""
@@ -1133,6 +1166,8 @@ class BatchTarget(Base):
     # Earlier attempts, oldest first: {attempt, run_id, status, error, outcome,
     # cost_usd, model_used, started_at, finished_at}, pushed at each relaunch.
     history: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # The experiment arm ("A".."C") a row of a split experiment runs under.
+    arm: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column()
     finished_at: Mapped[datetime | None] = mapped_column()
 
@@ -1290,3 +1325,29 @@ class PairwiseJudgment(Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = created_at_col()
     finished_at: Mapped[datetime | None] = mapped_column()
+
+
+class BatchExperiment(Base):
+    """A person-started comparison of two or three arms (`tret/batches/experiments.py`).
+    `replicate` runs one batch per arm over the same rows; `split` runs one batch whose
+    rows alternate between arms (`BatchTarget.arm`). `arms` is a list of `{key: "A".."C",
+    label, model_override, objective, max_iterations, batch_id}`. `promoted` is
+    `{arm, by, by_name, at, history_id}` once a person made an arm the harness default."""
+
+    __tablename__ = "batch_experiments"
+    __table_args__ = (Index("ix_batch_experiments_workspace_created", "workspace_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)  # replicate | split
+    profile: Mapped[str] = mapped_column(Text, nullable=False)
+    family_key: Mapped[str] = mapped_column(Text, nullable=False)
+    harness_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("harnesses.id", ondelete="SET NULL"))
+    arms: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    sample_n: Mapped[int | None] = mapped_column(Integer)
+    promoted: Mapped[dict | None] = mapped_column(JSONB)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = created_at_col()

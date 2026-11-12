@@ -12,6 +12,7 @@ import {
 } from './csv'
 import { AdvicePanel, CostCapField, RowMemoryField, parseCostCap } from './AdvicePanel'
 import { useEvaluationForm } from './EvaluationSection'
+import { ObjectiveSelect } from './ExperimentSection'
 import { errText } from './shared'
 
 interface Shared {
@@ -53,6 +54,7 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
   const [targetSlug, setTargetSlug] = useState('')
   const [writeRoot, setWriteRoot] = useState('runs')
   const [model, setModel] = useState('')
+  const [objective, setObjective] = useState('')
   const [maxIterations, setMaxIterations] = useState('')
   const [costCap, setCostCap] = useState('')
   const [rowMemory, setRowMemory] = useState(false)
@@ -116,6 +118,7 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
         target_slug: targetSlug || null,
         write_root: targetSlug ? writeRoot.trim() || 'runs' : null,
         model_override: model.trim() || null,
+        ...(objective ? { objective } : {}),
         max_iterations: maxIterations.trim() ? Number(maxIterations) : null,
         ...(costCapValue != null ? { max_cost_usd: costCapValue } : {}),
         ...(rowMemory ? { row_memory: true } : {}),
@@ -316,6 +319,11 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
         <label className="mono-label">Model override (optional)</label>
         <input type="text" value={model} onChange={(e) => setModel(e.target.value)} />
       </div>
+      <div className="field">
+        <label className="mono-label">Objective (optional)</label>
+        <ObjectiveSelect value={objective} onChange={setObjective} />
+        <span className="fine-print">What the router optimizes for on every run. Blank uses the harness setting.</span>
+      </div>
 
       <RowMemoryField checked={rowMemory} onChange={setRowMemory} />
 
@@ -348,5 +356,5 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
     </>
   )
 
-  return { fields, body }
+  return { fields, body, rowCount: rows.length }
 }

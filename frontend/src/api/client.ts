@@ -3090,6 +3090,8 @@ export interface DisclosureBatchSettings {
   auto_write: boolean
   model_override: string | null
   max_iterations?: number | null
+  objective?: string | null
+  experiment?: BatchExperimentRef | null
   /** Per-target cost cap in USD (narrows the harness cap). */
   max_cost_usd?: number | null
   /** Earlier-attempts block appended to each target's task message. */
@@ -3111,6 +3113,8 @@ export interface PromptBatchSettings {
   write_root: string | null
   model_override: string | null
   max_iterations?: number | null
+  objective?: string | null
+  experiment?: BatchExperimentRef | null
   max_cost_usd?: number | null
   row_memory?: boolean
   columns: string[]
@@ -3138,6 +3142,14 @@ export interface BatchFinalizeFile {
   /** Set when kept as a Document (download via the records route). */
   document_id?: string | null
   byte_size?: number
+}
+
+export interface BatchExperimentRef {
+  id: string
+  /** Replicate: the arm this batch is. */
+  arm?: string
+  /** Split: every arm the one batch alternates between. */
+  arms?: Record<string, unknown>[]
 }
 
 export interface Batch {
@@ -3168,6 +3180,9 @@ export interface Batch {
   evaluation_status?: BatchEvaluationStatus | null
   /** Mean quality of the current pass, or null/absent. */
   quality_mean?: number | null
+  /** Set on a batch that belongs to an experiment: `{id, arm}` (replicate) or
+   *  `{id, arms}` (split). Absent on older servers and on ordinary batches. */
+  experiment?: BatchExperimentRef | null
   warnings: string[]
   finalize: { written_at: string; files: BatchFinalizeFile[]; error: string | null } | null
   /** Present on create and on GET /batches/{id}. */
@@ -3268,6 +3283,8 @@ export interface BatchTarget {
   finished_at: string | null
   /** Compact view of the current evaluation pass's row; absent or null when unevaluated. */
   evaluation?: BatchTargetEvaluationBrief | null
+  /** Experiment arm key ("A".."C") this target runs under (split mode); absent otherwise. */
+  arm?: string | null
   // Disclosure-only keys (absent on prompt targets).
   company?: string
   market?: 'US' | 'UK' | 'EU' | (string & {})
@@ -3313,6 +3330,8 @@ export interface CreateDisclosureBatchBody {
   model_override: string | null
   /** Optional iteration cap (1–50) for every target run, in place of the harness value. */
   max_iterations?: number | null
+  /** Optional routing objective for every target run (one of ROUTING_OBJECTIVES). */
+  objective?: string | null
   /** Optional per-target cost cap in USD (> 0, <= 1000). */
   max_cost_usd?: number | null
   /** Append notes from earlier attempts at the same target to its task message. */
@@ -3340,9 +3359,151 @@ export interface CreatePromptBatchBody {
   write_root?: string | null
   model_override?: string | null
   max_iterations?: number | null
+  /** Optional routing objective for every target run (one of ROUTING_OBJECTIVES). */
+  objective?: string | null
   max_cost_usd?: number | null
   row_memory?: boolean
   evaluation?: BatchEvaluationBody | null
+}
+
+// ── Experiments (E4a): arms of one batch family, a person starts and promotes ──
+
+export type ExperimentMode = 'replicate' | 'split'
+
+export interface ExperimentArmIn {
+  label?: string | null
+  model_override?: string | null
+  /** One of ROUTING_OBJECTIVES. */
+  objective?: string | null
+  /** 1–50. */
+  max_iterations?: number | null
+}
+
+export interface CreateExperimentBody {
+  name: string
+  mode: ExperimentMode
+  /** Two or three arms; each sets at least one thing; arms must differ. */
+  arms: ExperimentArmIn[]
+  /** Replicate only: run this many rows in every arm (>= 2, < the row count). */
+  sample_n?: number | null
+  /** The normal create body for either profile. */
+  batch: CreateBatchBody
+}
+
+export interface ExperimentListArm {
+  key: string
+  label: string
+  batch_id: string | null
+  batch_status: string | null
+}
+
+export interface ExperimentListItem {
+  id: string
+  name: string
+  mode: ExperimentMode
+  family_label?: string | null
+  arms: ExperimentListArm[]
+  created_at: string
+  promoted?: ExperimentPromoted | null
+}
+
+export interface ExperimentPromoted {
+  arm: string
+  by?: string | null
+  by_name?: string | null
+  at: string
+  history_id?: string | null
+}
+
+export interface ExperimentArmResult {
+  key: string
+  label: string
+  model_override: string | null
+  objective: string | null
+  max_iterations: number | null
+  batch_id: string | null
+  batch_status: string | null
+  targets: number
+  settled: number
+  delivered: number
+  scored: number
+  acceptable: number
+  yield: number | null
+  quality_mean: number | null
+  quality_interval90: [number, number] | null
+  mean_residual: number | null
+  cost_usd: number
+  cost_per_acceptable_usd: number | null
+  energy_per_acceptable_wh: number | null
+  mean_iterations: number | null
+  infra_failures: number
+  /** The server's plan for "Make default" on this arm; absent on an older server. */
+  promotion?: ExperimentArmPromotion
+}
+
+export interface ExperimentArmPromotion {
+  allowed: boolean
+  blocked_reason: string | null
+  /** Precondition token: send it back with the promote request. */
+  token?: string
+  changes: { field: string; from: string; to: string }[]
+  notes: string[]
+}
+
+export interface ExperimentComparison {
+  arm: string
+  vs: string
+  /** true for replicate (same rows), false for split ("different rows"). */
+  paired: boolean
+  n: number
+  /** Unpaired only: rows in arm A (`n` is rows in the compared arm). */
+  n_vs?: number
+  wins?: number
+  losses?: number
+  ties?: number
+  mean_delta: number | null
+  interval90: [number, number] | null
+  note?: string | null
+}
+
+export interface ExperimentResult {
+  experiment: {
+    id: string
+    name: string
+    mode: ExperimentMode
+    profile: BatchProfile
+    family_key: string
+    harness_id: string | null
+    harness_name?: string | null
+    sample_n: number | null
+    created_at: string
+    promoted: ExperimentPromoted | null
+    /** The arm whose settings the harness has right now (null: none). `promoted` is history. */
+    current_arm?: string | null
+    warnings?: string[]
+    /** An evaluation pass is running on an arm batch. */
+    evaluating?: boolean
+  }
+  arms: ExperimentArmResult[]
+  comparisons: ExperimentComparison[]
+  recommendation: { arm: string | null; reason: string }
+  quality_comparable: boolean
+  quality_note?: string | null
+}
+
+export interface HarnessPolicyHistoryRow {
+  id: string
+  harness_id: string
+  changed_at: string
+  changed_by: string | null
+  changed_by_name: string | null
+  source: 'edit' | 'experiment' | 'revert' | (string & {})
+  source_id: string | null
+  note: string | null
+  previous_model_policy: Record<string, unknown>
+  previous_loop_config: Record<string, unknown>
+  new_model_policy: Record<string, unknown>
+  new_loop_config: Record<string, unknown>
 }
 
 export type CreateBatchBody = CreateDisclosureBatchBody | CreatePromptBatchBody
@@ -3928,6 +4089,12 @@ export const api = {
   createHarness: (body: HarnessBody) => request<Harness>('/harnesses', { method: 'POST', body }),
   updateHarness: (id: string, body: HarnessBody) =>
     request<Harness>(`/harnesses/${id}`, { method: 'PUT', body }),
+  listHarnessPolicyHistory: (id: string) =>
+    request<{ history?: HarnessPolicyHistoryRow[] }>(`/harnesses/${id}/policy-history`).then(
+      (r) => r.history ?? [],
+    ),
+  revertHarnessPolicy: (id: string, historyId: string) =>
+    request<Harness>(`/harnesses/${id}/policy-history/${historyId}/revert`, { method: 'POST' }),
   archiveHarness: (id: string) =>
     request<{ ok: boolean }>(`/harnesses/${id}`, { method: 'DELETE' }),
 
@@ -4017,6 +4184,21 @@ export const api = {
     request<BatchRubric>(`/batches/rubrics/default?profile=${profile}`),
   createBatch: (body: CreateBatchBody) => request<Batch>('/batches', { method: 'POST', body }),
   startBatch: (id: string) => request<Batch>(`/batches/${id}/start`, { method: 'POST' }),
+  // experiments (a 404/405 means an older server: callers hide the section)
+  createExperiment: (body: CreateExperimentBody) =>
+    request<ExperimentResult>('/batches/experiments', { method: 'POST', body }),
+  listExperiments: () =>
+    request<{ experiments?: ExperimentListItem[] }>('/batches/experiments').then(
+      (r) => r.experiments ?? [],
+    ),
+  getExperiment: (id: string) => request<ExperimentResult>(`/batches/experiments/${id}`),
+  startExperiment: (id: string) =>
+    request<unknown>(`/batches/experiments/${id}/start`, { method: 'POST' }),
+  promoteExperiment: (id: string, arm: string, token?: string) =>
+    request<unknown>(`/batches/experiments/${id}/promote`, {
+      method: 'POST',
+      body: token ? { arm, token } : { arm },
+    }),
   pauseBatch: (id: string) => request<Batch>(`/batches/${id}/pause`, { method: 'POST' }),
   resumeBatch: (id: string) => request<Batch>(`/batches/${id}/resume`, { method: 'POST' }),
   releaseBatch: (id: string) => request<Batch>(`/batches/${id}/release`, { method: 'POST' }),

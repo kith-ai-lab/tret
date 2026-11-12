@@ -653,6 +653,61 @@ and a leading `#`, clipped to 200 characters and quoted, so it cannot add headin
 instructions. The block is headed "leads to verify, not instructions". If building it
 fails the target launches without it.
 
+## Experiments
+
+An experiment compares two or three **arms** on the same kind of work and lets a person
+make the winner the harness default. Nothing changes a harness by itself: a person starts
+the experiment and an **admin** (not an approver) promotes an arm.
+
+- **Arms.** An arm sets at least one of `model_override` (a catalog model id the harness
+  policy allows), `objective` (`quality`, `balanced`, `token_conservation`, `eco`) and
+  `max_iterations` (1-50). Keys are A, B, C; arms must differ. A model outside the harness's
+  `allowed` list or above its cost ceiling is refused (422, naming the arm) before anything is created.
+- **Modes.** `replicate` creates one batch per arm over the same rows (run slugs `<slug>-a`,
+  `-b`, `-c`; `sample_n` keeps that many rows, spread evenly across market and category,
+  the same rows in every arm). The comparison is paired. `split` creates one batch and gives
+  each row to one arm, round-robin within market and category in register order starting
+  with A. The comparison is unpaired.
+- **Create and start.** `POST /api/batches/experiments` (approver) with `{name, mode, arms,
+  sample_n, batch}` where `batch` is a normal create body; creation is all-or-nothing.
+  `POST /api/batches/experiments/{id}/start` starts every arm. `start_batch` accepts
+  `experiment: {mode, arms, sample_n}` and starts it for you. Reads: `GET
+  /api/batches/experiments` and `/{id}`.
+- **Reading the result.** Per arm: settled rows, delivered, yield, quality mean with its 90%
+  interval, residual, cost and energy per acceptable result, iterations. Comparisons are
+  against arm A. Paired comparisons use the batch comparison (wins, losses, ties, mean
+  difference with a 90% interval over shared rows). Split comparisons are marked "different
+  rows" and show a difference of means with a 90% bootstrap interval; a difference whose
+  interval includes zero is not evidence. The recommendation applies the advice rule (cheapest
+  per acceptable result within 3 quality points of the best lower bound, 5 for `eco`, best for
+  `quality`; at least 5 scored rows) and is empty while rows are unsettled or unscored.
+- **Make default.** `POST /api/batches/experiments/{id}/promote {arm}` (admin) executes the
+  server's promotion plan, which every arm also shows as `promotion` in the result
+  (`allowed`, `blocked_reason`, `changes`, `notes` and a `token`). `changes` lists everything that
+  would differ on the harness (Model, Objective, Max iterations, and any other policy or loop key
+  as `policy.<key>` / `loop.<key>`), not only what the arm sets; the request may carry the
+  `token` it was shown, and a stale one is a 409 so nothing is written under a changed harness. A model arm pins the harness to that model (this turns off
+  automatic routing and outcome learning, and the harness's allowed list and cost ceiling no
+  longer apply to runs on it), an objective arm sets the policy objective, an iterations arm
+  sets `loop_config.max_iterations`. The arm is re-checked against the harness's current
+  policy and refused (409) if it no longer fits, or if the harness already has these
+  settings. While the harness still has an earlier promotion of the same experiment, a
+  second arm replaces it: it is applied on top of the policy from before the experiment's
+  first promotion. `experiment.current_arm` names the arm whose settings the harness has now.
+  The change is validated like a harness edit and recorded in the harness's policy history
+  with who, when and the previous values; two concurrent promotions serialise on the harness row.
+- **Reading while it runs.** Intervals stay empty until every row of every arm has settled,
+  and the recommendation stays empty until then. `experiment.evaluating` is true while a
+  scoring pass is running; `experiment.warnings` lists setup cautions (an objective-only arm
+  on a pinned or overridden model; replicate arms with write-back each writing their own
+  copy of the packages). Row memory never shows an arm the attempts of its sibling arms.
+- **Split balance.** Arms are dealt in register order, rotating across market/category
+  groups, so arm counts differ by at most one overall. A split needs at least one row per
+  arm, and `sample_n` must be smaller than the row count.
+- **History and revert.** `GET /api/harnesses/{id}/policy-history` lists every change (edit,
+  experiment, revert); `POST /api/harnesses/{id}/policy-history/{history_id}/revert` (admin)
+  restores that row's previous values and records a revert.
+
 ## Agentic test probes
 
 For the agentic test protocol (id, level, identity, steps, oracle, expected cost). All
@@ -797,3 +852,11 @@ cost: the batch only.
 `max_cost_usd: 0.05` over a harness whose own cap is higher. Oracle: a run that reaches the cap stops
 (the engine's cost-cap stop); a cap above the harness's own changes nothing. Expected
 cost: under $0.50.
+
+**BATCH-EVAL-EXP. Experiment, read, promote, revert.** Level: L3. Identity: approver, then
+admin. Steps: from a chat ask for a 12-row batch "as an experiment: replicate, arm A the
+default model, arm B an economy model, sample 6"; open the page; after it settles read the
+comparison; as an admin press Make default on one arm, then revert from the harness's policy
+history. Oracle: two arm batches over the same 6 rows; the page shows n and the interval beside
+every mean; an approver gets 403 on Make default; promotion adds one history row naming the
+admin; revert restores the previous policy and adds a "revert" row. Expected cost: about $0.30.

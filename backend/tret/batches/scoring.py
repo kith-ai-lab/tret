@@ -739,6 +739,39 @@ def _quality_note(a: BatchData, b: BatchData) -> str | None:
     return None
 
 
+def paired_summary(data_a: BatchData, data_b: BatchData, *, bootstrap: bool = True) -> dict:
+    """The paired quality numbers of two already-collected batches (B minus A over the
+    rows both delivered or gapped): `{quality_comparable, quality_note, n, wins_a, wins_b,
+    ties, mean_quality_delta, interval90}`. The numbers are None when the batches are not
+    comparable; `bootstrap=False` leaves the interval None. `compare_batches` uses it."""
+    note = _quality_note(data_a, data_b)
+    comparable = note is None
+    picked_a, picked_b = picked_rows(data_a), picked_rows(data_b)
+    shared = sorted((k for k in picked_a if k in picked_b), key=lambda k: picked_a[k].target.position)
+    deltas = []
+    for key in shared:
+        d = _delta(_side(picked_a[key])["quality"], _side(picked_b[key])["quality"], 2)
+        if d is not None:
+            deltas.append(d)
+    out: dict[str, Any] = {
+        "quality_comparable": comparable,
+        "quality_note": note,
+        "n": len(deltas) if comparable else 0,
+        "wins_a": None,
+        "wins_b": None,
+        "ties": None,
+        "mean_quality_delta": None,
+        "interval90": None,
+    }
+    if comparable:
+        out["wins_a"] = sum(1 for d in deltas if d <= -TIE_POINTS)
+        out["wins_b"] = sum(1 for d in deltas if d >= TIE_POINTS)
+        out["ties"] = len(deltas) - out["wins_a"] - out["wins_b"]
+        out["mean_quality_delta"] = round(statistics.fmean(deltas), 2) if deltas else None
+        out["interval90"] = bootstrap_interval(deltas) if bootstrap else None
+    return out
+
+
 async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
     data_a, data_b = await collect(db, a), await collect(db, b)
     card_a, card_b = await scorecard_from(db, data_a), await scorecard_from(db, data_b)
@@ -791,15 +824,10 @@ async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
                 },
             }
         )
-    deltas = [r["delta"]["quality"] for r in rows if r["delta"]["quality"] is not None]
-    wins_a = wins_b = ties = None
-    mean_delta = interval = None
+    pair = paired_summary(data_a, data_b)
+    wins_a, wins_b, ties = pair["wins_a"], pair["wins_b"], pair["ties"]
+    mean_delta, interval = pair["mean_quality_delta"], pair["interval90"]
     if comparable:
-        wins_a = sum(1 for d in deltas if d <= -TIE_POINTS)
-        wins_b = sum(1 for d in deltas if d >= TIE_POINTS)
-        ties = len(deltas) - wins_a - wins_b
-        mean_delta = round(statistics.fmean(deltas), 2) if deltas else None
-        interval = bootstrap_interval(deltas)
         rows.sort(key=lambda r: abs(r["delta"]["quality"]) if r["delta"]["quality"] is not None else -1, reverse=True)
     both = [r for r in rows if r["both_delivered"]]
     delivered: dict[str, Any] = {

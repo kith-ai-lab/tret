@@ -231,7 +231,14 @@ async def earlier_attempts(db: AsyncSession, batch: Batch, targets: list[BatchTa
     keys = {t.id: scoring.row_key(batch, t) for t in targets}
     wanted = set(keys.values())
     family = scoring.family_key(batch)
-    others = [b for b in await families.family_batches(db, batch.workspace_id, family) if b.id != batch.id]
+    # The arms of one experiment never see each other's attempts.
+    experiment_id = ((batch.settings or {}).get("experiment") or {}).get("id")
+    others = [
+        b
+        for b in await families.family_batches(db, batch.workspace_id, family)
+        if b.id != batch.id
+        and not (experiment_id and ((b.settings or {}).get("experiment") or {}).get("id") == experiment_id)
+    ]
     by_batch = {b.id: b for b in others}
     other_targets = [
         t for t in await core.load_targets(db, list(by_batch)) if scoring.row_key(by_batch[t.collection_id], t) in wanted
