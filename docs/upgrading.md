@@ -30,12 +30,16 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
-## 2026-11-12 · per-agent routing record (shadow)
+## 2026-11-12 · per-agent routing record
 
-New setting `TRET_ROUTER_AGENT_SCORING` (`off` or `shadow`, default `off`). With `shadow`, each
+New setting `TRET_ROUTER_AGENT_SCORING` (`off`, `shadow` or `live`; default `off`) and new
+harness policy key `adaptive.ranking` (`tiered`, the default, or `scored`). With `shadow`, each
 routing decision also stores in `runs.routing.shadow` what a per-agent scored ranking would
-have picked and why. It never changes the model that runs. No migration; with the default
-nothing is recorded and routing is byte-identical to before.
+have picked and why; it never changes the model that runs. With `live`, an agent whose policy
+sets `adaptive.ranking: scored` is routed by that ranking with no router call, and the block is
+stored in `runs.routing.scored`; every other agent is as under `shadow`. The `quality` and
+`token_conservation` objectives are not scored. No migration; with the default nothing is
+recorded and routing is byte-identical to before.
 
 ## 2026-11-12 · router learning per batch family (gated)
 

@@ -29,6 +29,10 @@ from dataclasses import asdict, dataclass
 from tret.router_llm.objectives import TIER_ORDER
 
 COMPACTION_MODES = ("auto", "off")
+# tiered = today's evidence-tier order with the router model picking; scored = the
+# pick is computed from this agent's own results (router_llm/scoring.py). It takes
+# effect only when the deployment allows it (TRET_ROUTER_AGENT_SCORING=live).
+RANKING_MODES = ("tiered", "scored")
 # What the supervisor (engine/supervisor.py) is allowed to do about a run that
 # is not going well, from least to most willing to act:
 #
@@ -95,6 +99,7 @@ class AdaptivePolicy:
     | `max_switches`               | `1`       | 0–3                          |
     | `exploration`                | `0.05`    | 0.0–0.2                      |
     | `exploration_max_cost_tier`  | `"economy"` | `local` \\| `economy` \\| `standard` \\| `premium` |
+    | `ranking`                    | `"tiered"` | `tiered` \\| `scored`      |
 
     `exploration` and `exploration_max_cost_tier` govern the same coin flip
     described in `router_llm.router.ModelRouter.route`: with probability
@@ -113,6 +118,7 @@ class AdaptivePolicy:
     max_switches: int = DEFAULT_MAX_SWITCHES
     exploration: float = DEFAULT_EXPLORATION
     exploration_max_cost_tier: str = DEFAULT_EXPLORATION_MAX_COST_TIER
+    ranking: str = "tiered"
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -123,7 +129,7 @@ DEFAULT_ADAPTIVE = AdaptivePolicy()
 # replayed run depends on the replay and nothing else. Exploration is a
 # routing behavior like the rest of this block, so a reproducible replay pins
 # it to 0 too — a golden run must never pick a model the replay did not ask
-# for.
+# for. Ranking stays at its "tiered" default.
 STATIC_ADAPTIVE = AdaptivePolicy(
     learn_from_outcomes=False,
     compaction="off",
@@ -193,6 +199,11 @@ def adaptive_of(model_policy: dict | None) -> AdaptivePolicy:
     if exploration_max_cost_tier not in TIER_ORDER:
         exploration_max_cost_tier = DEFAULT_ADAPTIVE.exploration_max_cost_tier
 
+    ranking = block.get("ranking", DEFAULT_ADAPTIVE.ranking)
+    # Fails closed: anything unreadable keeps today's router in charge.
+    if not isinstance(ranking, str) or ranking not in RANKING_MODES:
+        ranking = DEFAULT_ADAPTIVE.ranking
+
     return AdaptivePolicy(
         learn_from_outcomes=bool(block.get("learn_from_outcomes", True)),
         context_headroom=headroom,
@@ -201,6 +212,7 @@ def adaptive_of(model_policy: dict | None) -> AdaptivePolicy:
         max_switches=switches,
         exploration=exploration,
         exploration_max_cost_tier=exploration_max_cost_tier,
+        ranking=ranking,
     )
 
 
@@ -227,6 +239,8 @@ def validation_error(block) -> str | None:
         return "model_policy.adaptive.learn_from_outcomes must be a boolean"
     if "compaction" in block and block["compaction"] not in COMPACTION_MODES:
         return f"model_policy.adaptive.compaction must be one of {'|'.join(COMPACTION_MODES)}"
+    if "ranking" in block and block["ranking"] not in RANKING_MODES:
+        return f"model_policy.adaptive.ranking must be one of {'|'.join(RANKING_MODES)}"
     if "escalation" in block and block["escalation"] not in ESCALATION_MODES:
         return f"model_policy.adaptive.escalation must be one of {'|'.join(ESCALATION_MODES)}"
     if "context_headroom" in block:

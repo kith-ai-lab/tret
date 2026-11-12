@@ -2,7 +2,7 @@
 
 An "agent" is a harness. Its record is its own `run_outcomes` rows, each marked
 acceptable or not. The score of a model is what one *acceptable* result is
-expected to cost it on this agent (USD, Wh or tokens, by objective), using a
+expected to cost it on this agent (USD or Wh, by objective), using a
 cautious acceptable rate so a thin record cannot win on luck. The pooled priors
 (`priors_base`) only seed models the agent has not tried enough.
 
@@ -51,8 +51,9 @@ SHOWN_MODELS = 8
 CALIBRATION_MIN = 0.1
 CALIBRATION_MAX = 20.0
 # Objective to the unit its resource is measured in. "quality" is deliberately
-# absent: it is not scored.
-UNITS = {"balanced": "usd", "eco": "wh", "token_conservation": "tokens"}
+# absent: it is not scored. So is "token_conservation": recorded token counts leave
+# out cache reads, so tokens per acceptable result is not comparable across models.
+UNITS = {"balanced": "usd", "eco": "wh"}
 
 _EXCLUDED_CLASSES = ("infra", "timeout", "unsettled")
 
@@ -183,10 +184,8 @@ def _estimate(m: ModelInfo, objective: str, in_tok: int, out_tok: int) -> float 
         unit = UNITS[objective]
         if unit == "usd":
             v = float(m.cost_usd(in_tok, out_tok))
-        elif unit == "wh":
-            v = float(m.energy_wh(in_tok, out_tok))
         else:
-            v = float(in_tok + out_tok)
+            v = float(m.energy_wh(in_tok, out_tok))
     except Exception:  # noqa: BLE001 - a model with no estimate is excluded, not fatal
         return None
     return v if math.isfinite(v) else None
@@ -201,8 +200,6 @@ def _calibration(accs: dict[str, _Acc], with_record, models, objective: str) -> 
     """Observed cost over list-price estimate, for the tried models, each at its own
     mean tokens, so a list-price estimate is in the same terms as an observed cost."""
     unit = UNITS[objective]
-    if unit == "tokens":
-        return 1.0
     num = den = 0.0
     for m in models:
         a = accs.get(m.id)
@@ -251,6 +248,7 @@ def decide(
     draw: float | None,
     live_choice: str | None,
     now: datetime,
+    exploration_live: bool = True,
 ) -> dict:
     """What the scored ranking would pick for this agent, with every number."""
     if objective not in UNITS:
@@ -307,9 +305,7 @@ def decide(
                 observed = a.cost / a.weight
             elif unit == "wh" and a.energy_w > 0:
                 observed = a.energy / a.energy_w
-            if unit == "tokens":
-                resource, resource_basis = (a.inp + a.out) / a.weight, "observed"
-            elif observed is not None and (
+            if observed is not None and (
                 observed > 0
                 # An observed zero is real only for a model that lists at zero too;
                 # for a paid model it is a missing cost, not a free run.
@@ -398,7 +394,8 @@ def decide(
     fired = bool(
         exploration_share > 0 and candidate is not None and draw is not None and draw < exploration_share
     )
-    pick = candidate if fired else ranked_pick
+    # With exploration not live the draw is still recorded, but the pick is the ranking's.
+    pick = candidate if fired and exploration_live else ranked_pick
 
     # Listing: the ranking in order, with room kept for the models the reader
     # needs to see whatever their rank.
@@ -435,6 +432,7 @@ def decide(
             "share": exploration_share,
             "draw": None if draw is None else round(draw, 6),
             "fired": fired,
+            "applied": fired and exploration_live,
             "candidate": candidate,
             "open_weights_applied": cand_applied,
         },
@@ -457,14 +455,18 @@ def decide(
             "acceptable_rate": _rate(agent_rate),
             "list_price_calibration": round(calibration, 4),
         },
+        "ranking": ranking_ids,
         "models": shown,
         "reason": _reason(
-            main, ranking, main_applied, candidate, fired, exploration_share, draw, unit
+            main, ranking, main_applied, candidate, fired, exploration_share, draw, unit,
+            exploration_live,
         ),
     }
 
 
-def _reason(main, ranking, main_applied, candidate, fired, share, draw, unit) -> str:
+def _reason(
+    main, ranking, main_applied, candidate, fired, share, draw, unit, exploration_live=True
+) -> str:
     if main is None:
         head = "No model had a usable estimate, so nothing was ranked."
     else:
@@ -480,6 +482,11 @@ def _reason(main, ranking, main_applied, candidate, fired, share, draw, unit) ->
         head += "."
     if candidate is None:
         tail = "No untried model was eligible for exploration."
+    elif fired and not exploration_live:
+        tail = (
+            f"The exploration draw {round(draw, 4)} was under {share}, so {candidate} would "
+            "have been tried but the exploration share is not live for this agent yet."
+        )
     elif fired:
         tail = f"The exploration draw {round(draw, 4)} was under {share}, so {candidate} was picked to try."
     elif share > 0 and draw is not None:

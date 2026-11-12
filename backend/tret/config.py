@@ -721,15 +721,17 @@ class Settings(BaseSettings):
 
     # Per-agent scored ranking (docs/architecture.md, "Per-agent routing record").
     # "off" is today's behaviour; "shadow" records beside each routing decision
-    # what the scored ranking would have picked and never changes the model that runs.
-    router_agent_scoring: Literal["off", "shadow"] = "off"
+    # what the scored ranking would have picked and never changes the model that runs;
+    # "live" does the same and also routes an agent whose policy sets
+    # `adaptive.ranking: scored` by the scored ranking, with no router call.
+    router_agent_scoring: Literal["off", "shadow", "live"] = "off"
 
     @field_validator("router_agent_scoring", mode="before")
     @classmethod
     def _validate_router_agent_scoring(cls, value):
         text = str(value if value is not None else "").strip().lower()
-        if text not in ("off", "shadow"):
-            raise ValueError(f"router_agent_scoring must be off|shadow, got {value!r}")
+        if text not in ("off", "shadow", "live"):
+            raise ValueError(f"router_agent_scoring must be off|shadow|live, got {value!r}")
         return text
 
     @field_validator("router_family_priors", mode="before")

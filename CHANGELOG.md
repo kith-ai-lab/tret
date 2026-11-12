@@ -10,6 +10,14 @@ one that needs action on an existing install.
 
 ### Added
 
+- Scored ranking, live for agents that opt in. With `TRET_ROUTER_AGENT_SCORING=live`, an agent
+  whose policy sets `adaptive.ranking: scored` is routed by the per-agent ranking: the ranked
+  pick runs with no router call, and the decision stores its numbers in `runs.routing.scored`.
+  With no record on the agent, an unscored objective (`quality`, `token_conservation`), learning
+  off, or nothing fitting the context window, today's router decides. Every other agent is as
+  under `shadow`, and the exploration share is recorded but not acted on yet.
+  `token_conservation` no longer gets a shadow score, because recorded token counts leave out
+  cache reads. No migration.
 - Per-agent routing record, shadow only. With `TRET_ROUTER_AGENT_SCORING=shadow` each routing
   decision also stores, in `runs.routing.shadow`, what a ranking built on the agent's own
   results would have picked: expected cost, Wh or tokens per acceptable result on a cautious

@@ -390,7 +390,7 @@ exactly as it was; an applied adjustment is recorded in `run.routing` (`task_fam
 family evidence. Settings: `TRET_ROUTER_FAMILY_PRIORS` (`gated`|`off`),
 `TRET_ROUTER_FAMILY_GATE_MIN_CHECKS` (>= 1), `TRET_ROUTER_FAMILY_GATE_MIN_AGREEMENT` (0-1].
 
-### Per-agent routing record (shadow)
+### Per-agent routing record
 
 An agent is a harness. Its record is its own `run_outcomes` rows from the last 180 days. A
 result counts as acceptable when the run delivered and no finding was rejected. A batch run
@@ -399,18 +399,30 @@ recorded before batch families existed are handled the same way; its result is a
 when the target is a success by the batch scorecard's rule, and it is left out when the
 target is infrastructure, timeout or unsettled, or when no current target points at it. A
 model needs about five decayed runs on the agent before its own results count; below that its
-estimate is the pooled prior alone, or the agent's average rate when the model has no pooled record. The score is the expected cost (USD), energy (Wh) or
-tokens per acceptable result, using a cautious acceptable rate (mean minus 1.28 standard
+estimate is the pooled prior alone, or the agent's average rate when the model has no pooled record. The score is the expected cost (USD) or energy (Wh)
+per acceptable result, using a cautious acceptable rate (mean minus 1.28 standard
 deviations), so a thin record cannot win on luck. A recorded cost of zero counts only for a model whose list price is also zero; for a paid model it is treated as missing. A tried
 model whose cautious rate is under 80% of the best tried model's is kept out of the main
 ranking. A model with no record on the agent enters the main ranking only when its cautious
 rate is at least the best tried model's, and otherwise is reached only through the
 exploration share of 10%, decided by a separate random draw (no draw is made when
 exploration is off). List-price estimates are scaled by how much the agent's tried models cost
-against their own list-price estimates, because token counts leave out cache reads. This is
-shadow only in this release: with `TRET_ROUTER_AGENT_SCORING=shadow` each routing decision
-stores what the ranking would have picked, with the numbers, in `runs.routing.shadow`, and
-the model that runs is unchanged. The `quality` objective is not scored.
+against their own list-price estimates, because token counts leave out cache reads. With
+`TRET_ROUTER_AGENT_SCORING=shadow` each routing decision stores what the ranking would have
+picked, with the numbers, in `runs.routing.shadow`, and the model that runs is unchanged.
+The `quality` objective is not scored, and neither is `token_conservation`: recorded token
+counts leave out cache reads, so tokens per result is not comparable across models.
+
+With `TRET_ROUTER_AGENT_SCORING=live`, an agent whose policy sets `adaptive.ranking: scored`
+is routed by this ranking: the ranked pick runs (the top of the ranking, or under
+`open_weights: prefer` an open-weight model within 15% of it), no router model is called, the block is
+stored as `runs.routing.scored`, and the decision's reasoning states the numbers. When the
+agent has no record yet, the objective is not scored (`quality`, `token_conservation`),
+learning is off for the policy, or nothing fits the context window, today's router decides. In
+the first three cases the shadow block's status says why; the last shows in the decision's
+`context_fit`. Every other agent under `live` is as under `shadow`. The
+exploration share is recorded but not acted on yet. A model switch made mid-run by the
+supervisor still uses today's ordering.
 
 ## Outbound network
 
