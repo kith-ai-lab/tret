@@ -53,6 +53,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from tret.batches import search_outage
 from tret.batches.profiles import BatchProfile, RegisterError, get_profile, profile_for
 from tret.config import get_settings
 from tret.db.models import (
@@ -421,6 +422,9 @@ def collection_out(
             sum(target_cost(t, runs.get(t.run_id) if t.run_id else None) for t in targets), 6
         ),
         "warnings": list(c.warnings or []),
+        "search_outage_targets": sum(
+            1 for t in targets if search_outage.is_search_outage_error(t.error)
+        ),
         "finalize": c.finalize,
         "last_error": (c.settings or {}).get("last_error"),
         "family_key": family_key(c),
@@ -875,6 +879,19 @@ async def _settle_target(
             auto_write=auto_write or force_write,
             written=profile.all_written(t, maps),
         )
+        if status in ("gap", "failed") and not maps and t.run_id and not str(error or "").startswith("timeout"):
+            # Nothing delivered and every web search got no answer because the
+            # backend was down: an infrastructure failure, whatever the model
+            # reported. The status stays; the marker in `error` is what scoring
+            # and finalize read. A timeout stays a timeout.
+            started = run.started_at or run.created_at if run else None
+            stats = await search_outage.search_stats(db, t.run_id, since=_aware(started))
+            if search_outage.is_outage(stats):
+                # The no-map note is not a run error and adds nothing after the marker.
+                from tret.batches.profiles.disclosure import NO_MAP_ERROR
+
+                shown = None if error == NO_MAP_ERROR else error
+                error = search_outage.outage_error(stats, run_error=shown)
         if status == WRITE_PENDING:
             if c.status == "finalized" and not force_write:
                 status, error = "completed", FINALIZED_BEFORE_WRITE
@@ -1318,12 +1335,18 @@ async def finalize(db: AsyncSession, c: Batch, *, force: bool = False) -> None:
             409,
             f"{len(busy)} target(s) are still running, pending or packaging; finalize when they settle",
         )
-    infra = [t for t in targets if t.status == "failed" and is_infra_error(t.error)]
+    infra = [
+        t
+        for t in targets
+        if (t.status == "failed" and is_infra_error(t.error))
+        or (t.status in ("failed", "gap") and search_outage.is_search_outage_error(t.error))
+    ]
     if infra and not force:
         raise HTTPException(
             409,
-            f"{len(infra)} target(s) failed on an I/O or storage error "
-            f"(first: {infra[0].slug}: {infra[0].error}); fix the cause and retry them, "
+            f"{len(infra)} target(s) failed on an I/O or storage error"
+            + (" or a search-backend outage" if any(search_outage.is_search_outage_error(t.error) for t in infra) else "")
+            + f" (first: {infra[0].slug}: {infra[0].error}); fix the cause and retry them, "
             "or finalize with force=true",
         )
     maps = await load_review_findings(db, profile, targets, c)

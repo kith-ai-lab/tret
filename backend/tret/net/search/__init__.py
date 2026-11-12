@@ -7,12 +7,24 @@ restart and without a stale object holding an old API key.
 from __future__ import annotations
 
 from tret.config import get_settings
-from tret.net.search.base import SearchProvider, SearchResult, SearchUnavailable
+from tret.net.search.base import (
+    SEARCH_DEGRADED_MIN_ENGINES,
+    SearchNotConfigured,
+    SearchProvider,
+    SearchResponse,
+    SearchResult,
+    SearchUnavailable,
+    search_detailed,
+)
 from tret.net.search.brave import BraveSearchProvider
 from tret.net.search.null import NullSearchProvider
 from tret.net.search.searxng import SearxngSearchProvider
 
 __all__ = [
+    "SEARCH_DEGRADED_MIN_ENGINES",
+    "SearchNotConfigured",
+    "SearchResponse",
+    "search_detailed",
     "SearchProvider",
     "SearchResult",
     "SearchUnavailable",
@@ -36,7 +48,7 @@ def get_search_provider(settings=None) -> SearchProvider:
         return BraveSearchProvider(s.search_api_key)
     if name == "searxng":
         return SearxngSearchProvider(s.searxng_base_url)
-    raise SearchUnavailable(
+    raise SearchNotConfigured(
         f"TRET_SEARCH_PROVIDER={name!r} is not a backend tret implements "
         "(brave, searxng, or empty for none)."
     )

@@ -371,6 +371,18 @@ allowlist is one host, not a category, so pointing `fetch_url` (which stays on
 `research`) at your SearXNG instance is governed by `research`'s own allowlist,
 not by this trust.
 
+When the backend answers but its engines are down, `web_search` does not let the
+silence read as an answer. SearXNG lists the engines that failed under
+`unresponsive_engines`; with zero results and at least two of them failing, the tool
+tells the model that the search backend may be unavailable, that this is not evidence
+the document does not exist, and to say so in its outcome. Each call's audit row records
+which case it was: `search_results: <n>` when there were results, `search_empty` for an
+honest empty answer, `search_degraded: <engines>` when the engines were down, denied
+`search_unavailable: ...` when the backend could not be reached at all, and denied
+`search_unconfigured: ...` when no search provider is set up. One unresponsive engine is
+not enough to call an empty answer degraded, so a single flaky engine does not turn an
+honest empty result into a suspected outage.
+
 ### What the research class checks
 
 `fetch_url` takes a URL a **model** chose, and the model's context includes

@@ -21,7 +21,13 @@ import httpx
 from tret.config import get_settings
 from tret.net.client import USER_AGENT, open_client
 from tret.net.policy import CLASS_SEARCH
-from tret.net.search.base import SearchResult, SearchUnavailable
+from tret.net.search.base import (
+    SearchNotConfigured,
+    SearchResponse,
+    SearchResult,
+    SearchUnavailable,
+    parse_unresponsive,
+)
 
 
 class SearxngSearchProvider:
@@ -30,13 +36,16 @@ class SearxngSearchProvider:
 
     def __init__(self, base_url: str):
         if not base_url:
-            raise SearchUnavailable(
+            raise SearchNotConfigured(
                 "TRET_SEARCH_PROVIDER=searxng but TRET_SEARXNG_BASE_URL is empty."
             )
         self._base_url = base_url.rstrip("/")
         self.host = urlsplit(self._base_url).hostname or "searxng"
 
     async def search(self, query: str, *, max_results: int) -> list[SearchResult]:
+        return (await self.search_detailed(query, max_results=max_results)).results
+
+    async def search_detailed(self, query: str, *, max_results: int) -> SearchResponse:
         settings = get_settings()
         headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
         try:
@@ -63,4 +72,7 @@ class SearxngSearchProvider:
             for item in results
             if isinstance(item, dict) and item.get("url")
         ]
-        return out[: max(1, int(max_results))]
+        return SearchResponse(
+            results=out[: max(1, int(max_results))],
+            unresponsive=parse_unresponsive((payload or {}).get("unresponsive_engines")),
+        )
