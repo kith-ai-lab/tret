@@ -372,6 +372,8 @@ in the batch's current live pass (not stale): `0.5 evaluator + 0.3 human finding
 + 0.2 automatic` renormalised over the terms present (the automatic term is judged
 against the iteration ceiling the engine enforced). A human "adjust" replaces the
 judge's number; "disagree" removes the term. `quality_score` is byte-identical to before.
+Only approvals with purpose `review` count as the human verdict: an approval with purpose
+`packaging` (a page map approved just to be packaged) is excluded from both scores.
 
 **Nothing changes for routing until the gate opens**, and the base priors never read the
 evaluated score. The gate opens only when at least 15 scored rows of the family's

@@ -79,6 +79,22 @@
             ],
             "description": "Optional reviewer comment",
             "title": "Note"
+          },
+          "purpose": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "'review' (default, also when null) or 'packaging'. Only a review counts as quality evidence for the run's model; 'packaging' is valid only for approving a package_map finding that is being approved just to be packaged.",
+            "enum": [
+              "review",
+              "packaging"
+            ],
+            "title": "Purpose"
           }
         },
         "required": [
@@ -788,6 +804,22 @@
             ],
             "description": "Optional reviewer comment",
             "title": "Note"
+          },
+          "purpose": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "'review' (default, also when null) or 'packaging'. Only a review counts as quality evidence for the run's model; 'packaging' is valid only for approving a package_map finding that is being approved just to be packaged.",
+            "enum": [
+              "review",
+              "packaging"
+            ],
+            "title": "Purpose"
           }
         },
         "required": [

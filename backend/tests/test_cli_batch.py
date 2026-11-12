@@ -220,6 +220,23 @@ def test_approve_all_finding_and_reject(monkeypatch, capsys):
 
 
 @respx.mock
+def test_approve_packaging_only_sends_the_purpose_and_the_plain_command_does_not(monkeypatch, capsys):
+    respx.get(f"{BASE}/api/batches/{BID}").respond(200, json=batch("review", pending_reviews=[{"id": "f1"}]))
+    decide = respx.post(f"{BASE}/api/findings/decide-batch").respond(
+        200, json={"results": [{"id": "f1", "ok": True, "status": "approved"}]}
+    )
+    code, _, _ = run_cli(monkeypatch, capsys, "approve", BID, "--all", "--url", BASE, "--token", "t")
+    assert code == 0 and "purpose" not in json.loads(decide.calls.last.request.content)
+    code, _, _ = run_cli(monkeypatch, capsys, "approve", BID, "--all", "--packaging-only", "--url", BASE, "--token", "t")
+    assert code == 0 and json.loads(decide.calls.last.request.content)["purpose"] == "packaging"
+    calls = decide.call_count
+    code, _, err = run_cli(
+        monkeypatch, capsys, "approve", BID, "--all", "--packaging-only", "--reject", "--url", BASE, "--token", "t"
+    )
+    assert code == 2 and "--packaging-only" in err and decide.call_count == calls
+
+
+@respx.mock
 def test_approve_reports_findings_the_server_refused(monkeypatch, capsys):
     respx.get(f"{BASE}/api/batches/{BID}").respond(200, json=batch("review", pending_reviews=[{"id": "f1"}]))
     respx.post(f"{BASE}/api/findings/decide-batch").respond(

@@ -117,6 +117,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     which.add_argument("--all", action="store_true", help="Every pending review of the batch")
     which.add_argument("--finding", action="append", metavar="ID", help="One pending finding (repeatable)")
     approve.add_argument("--reject", action="store_true")
+    approve.add_argument(
+        "--packaging-only", action="store_true",
+        help="Approve only so the page maps can be packaged: recorded as a packaging approval, not a quality review",
+    )
     approve.add_argument("--note")
     finalize = command("finalize", "Write the batch's records")
     finalize.add_argument("batch_id")
@@ -315,6 +319,8 @@ def _cmd_status(api: Api, args: argparse.Namespace) -> None:
 
 
 def _cmd_approve(api: Api, args: argparse.Namespace) -> None:
+    if args.packaging_only and args.reject:
+        raise CliError("--packaging-only cannot be combined with --reject: a rejection is always a review", 2)
     if not args.all and not args.finding:
         raise CliError("choose --all or --finding ID", 2)
     batch = api.request("GET", f"/api/batches/{args.batch_id}")
@@ -335,7 +341,12 @@ def _cmd_approve(api: Api, args: argparse.Namespace) -> None:
         out = api.request(
             "POST",
             "/api/findings/decide-batch",
-            json={"finding_ids": ids[i : i + DECIDE_CHUNK], "action": action, "note": args.note},
+            json={
+                "finding_ids": ids[i : i + DECIDE_CHUNK],
+                "action": action,
+                "note": args.note,
+                **({"purpose": "packaging"} if args.packaging_only else {}),
+            },
         )
         results.extend(out.get("results") or [])
     bad = [r for r in results if not r.get("ok")]

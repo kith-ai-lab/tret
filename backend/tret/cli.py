@@ -121,6 +121,74 @@ def _backfill_outcomes(limit: int | None) -> None:
     print(f"  skipped: {stats['skipped']} (never routed, or carrying no lesson)")
 
 
+def _mark_packaging_approvals(batch_ids: list[str], dry_run: bool) -> None:
+    """Re-mark approved page-map approvals in the named batches as packaging-only
+    and re-score the affected runs (`services.outcomes.mark_packaging_approvals`)."""
+    import asyncio
+
+    from tret.db.engine import get_session_factory
+    from tret.services.outcomes import mark_packaging_approvals
+
+    async def run() -> dict:
+        async with get_session_factory()() as db:
+            return await mark_packaging_approvals(db, batch_ids, dry_run=dry_run)
+
+    res = asyncio.run(run())
+    changed = rescored = 0
+    failed: list[str] = []
+    for b in res["batches"]:
+        if not b["found"]:
+            print(f"{b['batch_id']}: not found, nothing changed")
+            continue
+        changed += b["approvals_changed"]
+        rescored += b["runs_rescored"]
+        failed += b["runs_failed"]
+        if dry_run:
+            print(
+                f"{b['batch_id']}: would change {b['approvals_changed']} approvals, "
+                f"would re-score {b['runs_rescored']} runs"
+            )
+        else:
+            tail = f", {len(b['runs_failed'])} failed" if b["runs_failed"] else ""
+            print(
+                f"{b['batch_id']}: {b['approvals_changed']} approvals changed, "
+                f"{b['runs_rescored']} runs re-scored{tail}"
+            )
+        if b["runs_failed"]:
+            print(f"  re-score FAILED for run(s): {', '.join(b['runs_failed'])}", file=sys.stderr)
+    if res["models"]:
+        def cell(v: float | None) -> str:
+            return "-" if v is None else f"{v:.4f}"
+
+        header = f"{'model_id':<40} {'rows':>5} {'quality before':>15}"
+        if not dry_run:
+            header += f" {'quality after':>14}"
+        header += f" {'eval rows':>10} {'eval before':>12}"
+        if not dry_run:
+            header += f" {'eval after':>11}"
+        print(header)
+        for m in res["models"]:
+            line = f"{m['model_id']:<40} {m['rows']:>5} {cell(m['mean_before']):>15}"
+            if not dry_run:
+                line += f" {cell(m['mean_after']):>14}"
+            line += f" {m['evaluated_rows']:>10} {cell(m['evaluated_mean_before']):>12}"
+            if not dry_run:
+                line += f" {cell(m['evaluated_mean_after']):>11}"
+            print(line)
+    if dry_run:
+        print("dry run: no changes written" if (changed or rescored) else "nothing to change")
+    elif changed or rescored:
+        print(
+            "A running server picks up the re-scored record within about 60 seconds "
+            "(its priors cache lifetime)."
+        )
+    else:
+        print("nothing to change")
+    if failed:
+        print(f"{len(failed)} run(s) could not be re-scored; run the command again", file=sys.stderr)
+        sys.exit(1)
+
+
 _PROCESS_LOCAL_WARNING = (
     "this override lives in THIS CLI process's memory only — it does NOT reach a "
     "running server. To cut egress on a live deployment, use the settings UI or "
@@ -506,6 +574,20 @@ def main() -> None:
         "--limit", type=int, default=None, help="Only score the N most recent runs"
     )
 
+    approvals = sub.add_parser("approvals", help="Approval bookkeeping")
+    approvals_sub = approvals.add_subparsers(dest="approvals_command", required=True)
+    mark_cmd = approvals_sub.add_parser(
+        "mark-packaging",
+        help="Re-mark approved page-map approvals of batches as packaging-only (not quality evidence)",
+    )
+    mark_cmd.add_argument(
+        "--batch", action="append", required=True, metavar="BATCH_ID",
+        help="Batch to re-mark (repeatable)",
+    )
+    mark_cmd.add_argument(
+        "--dry-run", action="store_true", help="Report what would change; write nothing"
+    )
+
     egress = sub.add_parser("egress", help="Inspect and cut outbound network access")
     egress_sub = egress.add_subparsers(dest="egress_command", required=True)
     egress_sub.add_parser("status", help="Show egress mode for every class, master switch included")
@@ -649,6 +731,10 @@ def main() -> None:
     if args.command == "outcomes":
         if args.outcomes_command == "backfill":
             _backfill_outcomes(args.limit)
+        return
+    if args.command == "approvals":
+        if args.approvals_command == "mark-packaging":
+            _mark_packaging_approvals(args.batch, args.dry_run)
         return
     if args.command == "packs":
         if args.packs_command == "validate":

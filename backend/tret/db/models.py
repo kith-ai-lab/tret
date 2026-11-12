@@ -687,6 +687,12 @@ class Approval(Base):
     # Stamped server-side from the session. There is deliberately no API field for this.
     approver_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     note: Mapped[str | None] = mapped_column(Text)
+    # review|packaging. Only a 'review' decision is quality evidence about the
+    # run's model; a 'packaging' approval exists so an approved page map can be
+    # packaged (see `APPROVAL_PURPOSES` in tret/api/findings.py).
+    purpose: Mapped[str] = mapped_column(
+        Text, nullable=False, default="review", server_default="review"
+    )
     created_at: Mapped[datetime] = created_at_col()
 
 

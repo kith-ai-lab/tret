@@ -64,6 +64,13 @@ one that needs action on an existing install.
 
 ### Changed
 
+- **Approvals now carry a purpose, and only a review counts as quality evidence.** An
+  approval is `review` (the default) or `packaging`; a page map approved only so it can be
+  packaged is recorded with `purpose: "packaging"` (`tret batch approve --packaging-only`) and
+  no longer counts toward `quality_score` or the human term of `evaluated_quality_score`.
+  Rejections are always reviews. Existing approvals default to `review`, so re-scoring changes
+  existing scores only for runs whose approvals you re-mark with
+  `tret approvals mark-packaging --batch <id> [--dry-run]`. Migration `a7c3e1d94b62`.
 - Experiments never pin a model. Make default applies only an arm's objective and iteration
   limit; an arm's model stays with the router, its evaluated runs being evidence for the
   family gate, and a model-only arm is not promotable. Experiment results gain

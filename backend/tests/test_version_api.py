@@ -171,9 +171,11 @@ def test_openapi_documents_the_sdk_surface():
         "application/json"
     ]["schema"] == {"$ref": "#/components/schemas/VersionOut"}
     approval = schema["components"]["schemas"]["ApprovalBody"]
-    # Field names unchanged (the frontend sends {action, note}); the two
+    # Field names unchanged (the frontend sends {action, note} and may add the
+    # optional purpose, null meaning 'review'); the two
     # accepted actions are now in the schema, and unknown fields still refused.
-    assert set(approval["properties"]) == {"action", "note"}
+    assert set(approval["properties"]) == {"action", "note", "purpose"}
+    assert approval["properties"]["purpose"]["enum"] == ["review", "packaging"]
     assert approval["properties"]["action"]["enum"] == ["approve", "reject"]
     assert approval["additionalProperties"] is False
     body_ref = schema["paths"]["/api/findings/{finding_id}/approval"]["post"]["requestBody"]

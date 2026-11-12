@@ -284,6 +284,7 @@ def test_approvers_and_admins_can_approve(client, db, draft, people, role):
         "ok": True,
         "status": "approved",
         "approver": people[role].display_name,
+        "purpose": "review",
     }
 
 
@@ -486,6 +487,7 @@ def test_the_detail_view_reports_the_recorded_approver(client, db, draft, people
         action="approve",
         approver_id=people["approver"].id,
         note="ok",
+        purpose="review",
     )
     db.store["Approval"][approval.id] = approval
     draft.status = "approved"
@@ -498,6 +500,7 @@ def test_the_detail_view_reports_the_recorded_approver(client, db, draft, people
             "action": "approve",
             "approver_id": str(people["approver"].id),
             "note": "ok",
+            "purpose": "review",
             "created_at": None,
         }
     ]
@@ -506,3 +509,110 @@ def test_the_detail_view_reports_the_recorded_approver(client, db, draft, people
 def test_an_anonymous_request_cannot_read_findings(client, draft):
     assert client.get(f"/api/findings/{draft.id}").status_code == 401
     assert client.get("/api/findings").status_code == 401
+
+
+# ── approval purpose: only a 'review' is a verdict on the output ─────────────
+@pytest.fixture
+def page_map(db, monkeypatch) -> Finding:
+    """A draft `package_map` finding; the background packager is stubbed out."""
+    f = _finding(schema_slug="package_map", payload={"pages": []})
+    db.store["Finding"][f.id] = f
+    monkeypatch.setattr(findings, "_start_packaging", lambda *a, **k: None)
+    return f
+
+
+def test_the_default_purpose_is_review_everywhere(client, db, draft, people):
+    login_as(client, people["approver"])
+    response = decide(client, draft.id, action="approve")
+    assert response.status_code == 200
+    assert response.json()["purpose"] == "review"
+    approval = [a for a in db.added if isinstance(a, Approval)][0]
+    assert approval.purpose == "review"
+    detail = client.get(f"/api/findings/{draft.id}").json()
+    assert [a["purpose"] for a in detail["approvals"]] == ["review"]
+
+
+def test_a_page_map_can_be_approved_for_packaging_only(client, db, page_map, people):
+    login_as(client, people["approver"])
+    response = decide(client, page_map.id, action="approve", purpose="packaging")
+    assert response.status_code == 200
+    assert response.json()["purpose"] == "packaging"
+    assert page_map.status == "approved"
+    approval = [a for a in db.added if isinstance(a, Approval)][0]
+    assert approval.purpose == "packaging"
+
+
+def test_a_packaging_approval_still_starts_packaging(client, db, page_map, people, monkeypatch):
+    started = []
+    monkeypatch.setattr(findings, "_start_packaging", lambda *a, **k: started.append(a))
+    login_as(client, people["approver"])
+    assert decide(client, page_map.id, action="approve", purpose="packaging").status_code == 200
+    assert started and started[0][0] == page_map.id
+
+
+def test_a_rejection_can_never_be_packaging(client, db, page_map, people):
+    login_as(client, people["approver"])
+    response = decide(client, page_map.id, action="reject", purpose="packaging")
+    assert response.status_code == 422
+    assert "rejection" in response.text
+    assert page_map.status == "draft"
+    assert db.wrote_nothing()
+
+
+def test_packaging_is_only_for_page_maps(client, db, draft, people):
+    login_as(client, people["approver"])
+    response = decide(client, draft.id, action="approve", purpose="packaging")
+    assert response.status_code == 422
+    assert "package_map" in response.text
+    assert draft.status == "draft"
+    assert db.wrote_nothing()
+
+
+def test_an_unknown_purpose_decides_nothing(client, db, page_map, people):
+    login_as(client, people["approver"])
+    response = decide(client, page_map.id, action="approve", purpose="audit")
+    assert response.status_code == 422
+    assert page_map.status == "draft"
+    assert db.wrote_nothing()
+
+
+def test_the_decision_body_still_refuses_extra_fields(client, db, page_map, people):
+    login_as(client, people["approver"])
+    response = decide(client, page_map.id, action="approve", purposes="packaging")
+    assert response.status_code == 422
+    assert db.wrote_nothing()
+
+
+def test_decide_batch_passes_the_purpose_and_reports_refusals_per_finding(
+    client, db, page_map, draft, people
+):
+    login_as(client, people["approver"])
+    other_map = _finding(schema_slug="package_map", payload={"pages": []})
+    db.store["Finding"][other_map.id] = other_map
+    response = client.post(
+        "/api/findings/decide-batch",
+        json={
+            "finding_ids": [str(page_map.id), str(draft.id), str(other_map.id)],
+            "action": "approve",
+            "purpose": "packaging",
+        },
+    )
+    assert response.status_code == 200
+    by_id = {r["id"]: r for r in response.json()["results"]}
+    assert by_id[str(page_map.id)]["ok"] is True
+    assert by_id[str(other_map.id)]["ok"] is True
+    assert by_id[str(draft.id)]["ok"] is False
+    assert "package_map" in by_id[str(draft.id)]["error"]
+    assert draft.status == "draft"
+    purposes = [a.purpose for a in db.added if isinstance(a, Approval)]
+    assert purposes == ["packaging", "packaging"]
+
+
+def test_decide_batch_refuses_an_unknown_purpose_as_a_whole(client, db, page_map, people):
+    login_as(client, people["approver"])
+    response = client.post(
+        "/api/findings/decide-batch",
+        json={"finding_ids": [str(page_map.id)], "action": "approve", "purpose": "audit"},
+    )
+    assert response.status_code == 422
+    assert db.wrote_nothing()
