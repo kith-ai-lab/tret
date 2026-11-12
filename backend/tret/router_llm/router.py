@@ -56,6 +56,7 @@ from tret.router_llm.objectives import (
     objective_of,
     within_cost_tier,
 )
+from tret.router_llm import scoring
 from tret.router_llm.outcomes import size_band
 from tret.router_llm.priors_base import (
     MIN_EFFECTIVE_SAMPLES,
@@ -642,9 +643,15 @@ class RoutingDecision:
     #   family_priors: {"used": True, "gate": {"open", "spot_checks", "agreement"}}
     task_family: str | None = None
     family_priors: dict | None = None
+    # Per-agent scored ranking, shadow only (`TRET_ROUTER_AGENT_SCORING=shadow`):
+    # what `router_llm.scoring` would have picked, with its numbers. Never changes
+    # `chosen_model`. None, and left OUT of `to_json`, whenever the setting is off.
+    shadow: dict | None = None
 
     def to_json(self) -> dict:
         data = asdict(self)
+        if self.shadow is None:
+            data.pop("shadow", None)
         if self.task_family is None and self.family_priors is None:
             data.pop("task_family", None)
             data.pop("family_priors", None)
@@ -667,6 +674,7 @@ class ModelRouter:
         registry: ProviderRegistry,
         priors: PriorsProvider | None = None,
         rng: random.Random | None = None,
+        shadow_rng: random.Random | None = None,
     ):
         self._catalog = catalog
         self._registry = registry
@@ -679,6 +687,9 @@ class ModelRouter:
         # `random.Random()` seeds from the OS the same as the bare `random`
         # module would.
         self._rng = rng or random.Random()
+        # The shadow decision's own exploration draw. Separate from `_rng` so that
+        # turning the shadow on can never change the live exploration sequence.
+        self._shadow_rng = shadow_rng or random.Random()
 
     def _candidates(
         self,
@@ -1113,7 +1124,9 @@ class ModelRouter:
             "reason": "untried model within exploration tier",
         }
 
-    async def route(self, *, task_family: str | None = None, **kwargs) -> RoutingDecision:
+    async def route(
+        self, *, task_family: str | None = None, harness_id=None, **kwargs
+    ) -> RoutingDecision:
         """Choose a model for one run (see `_route` for every parameter).
 
         `task_family` (`<family_key>@<workspace_id>`, derived by the engine from the run's batch)
@@ -1121,19 +1134,103 @@ class ModelRouter:
         priors. Without it, with the gate closed, or with
         `TRET_ROUTER_FAMILY_PRIORS=off`, this is exactly `_route` and the decision
         is unchanged; the override and pinned paths never read family priors.
+
+        `harness_id` only matters with `TRET_ROUTER_AGENT_SCORING=shadow`: the
+        decision then also records what the per-agent scored ranking would have
+        picked (`RoutingDecision.shadow`). It is recorded after the live pick is made
+        and never changes it.
         """
         if not task_family:
-            return await self._route(**kwargs)
-        note: dict = {}
-        decision = await self._route(task_family=task_family, family_note=note, **kwargs)
-        if note.get("used"):
-            decision.task_family = task_family
-            decision.family_priors = {
-                "used": True,
-                "gate": note.get("gate") or {},
-                "adjusted": note.get("adjusted") or {},
-            }
+            decision = await self._route(**kwargs)
+        else:
+            note: dict = {}
+            decision = await self._route(task_family=task_family, family_note=note, **kwargs)
+            if note.get("used"):
+                decision.task_family = task_family
+                decision.family_priors = {
+                    "used": True,
+                    "gate": note.get("gate") or {},
+                    "adjusted": note.get("adjusted") or {},
+                }
+        if (
+            harness_id is not None
+            and not decision.override
+            and get_settings().router_agent_scoring == "shadow"
+        ):
+            decision.shadow = await self._shadow_block(decision, harness_id, kwargs)
         return decision
+
+    async def _shadow_block(self, decision: RoutingDecision, harness_id, kwargs: dict) -> dict:
+        """What the per-agent scored ranking would pick for `decision`'s run. Wrapped
+        so that nothing in here can break routing."""
+        try:
+            model_policy = kwargs["model_policy"]
+            adaptive = adaptive_of(model_policy)
+            if not adaptive.learn_from_outcomes:
+                return {"version": scoring.SCORING_VERSION, "status": "learning_off"}
+            agent_fn = getattr(self._priors, "for_agent", None)
+            rows = await agent_fn(harness_id) if agent_fn is not None else None
+            if rows is None:
+                return {"version": scoring.SCORING_VERSION, "status": "unavailable"}
+            objective = objective_of(model_policy)
+            now = datetime.now(timezone.utc)
+            pooled = await self._priors.for_key(
+                task_shape=kwargs["task_shape"],
+                objective=objective,
+                size_band=size_band(kwargs["est_input_tokens"]),
+            )
+            pool: list[ModelInfo] = []
+            for mid in decision.candidates:
+                m = self._catalog.get(mid)
+                if m is not None and all(m.id != p.id for p in pool):
+                    pool.append(m)
+            # A model the agent has a record of belongs in the pool even when this
+            # decision's candidate list (capped, ordered) left it out, provided the
+            # policy still permits it.
+            in_pool = {m.id for m in pool}
+            have = scoring.models_with_record(rows, objective, now) - in_pool
+            allowed = model_policy.get("allowed") or None
+            max_tier = _max_cost_tier(model_policy)
+            min_tier = _min_cost_tier(model_policy)
+            open_weights = _open_weights_policy(model_policy)
+            require_zdr = _zdr_required()
+            min_window = kwargs.get("min_context_window")
+            extras: list[ModelInfo] = []
+            for mid in sorted(have):
+                m = self._catalog.get(mid)
+                if m is None:
+                    continue
+                if (
+                    self._exclusion_reason(m, allowed, max_tier, min_tier, open_weights, require_zdr)
+                    is not None
+                ):
+                    continue
+                if min_window is not None and not _fits_window(m, min_window):
+                    continue
+                extras.append(m)
+            if extras and get_settings().router_cooldown_minutes > 0:
+                cooling = {e["model"] for e in await self._cooldown_for([m.id for m in extras])}
+                extras = [m for m in extras if m.id not in cooling]
+            share = 0.0 if not adaptive.exploration else scoring.EXPLORATION_SHARE
+            # No draw when exploration is off, so a preview (exploration forced to
+            # 0) is deterministic and never advances the shadow generator.
+            draw = self._shadow_rng.random() if share > 0 else None
+            block = scoring.decide(
+                rows=rows,
+                pooled=pooled,
+                models=[*pool, *extras],
+                objective=objective,
+                open_weights=open_weights,
+                exploration_share=share,
+                draw=draw,
+                live_choice=decision.chosen_model,
+                now=now,
+            )
+            block["harness_id"] = str(harness_id)
+            return block
+        except Exception:  # noqa: BLE001 - the shadow must never break routing
+            logger.exception("routing: shadow decision failed")
+            return {"version": scoring.SCORING_VERSION, "status": "error"}
 
     async def _route(
         self,

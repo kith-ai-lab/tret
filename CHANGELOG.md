@@ -10,6 +10,13 @@ one that needs action on an existing install.
 
 ### Added
 
+- Per-agent routing record, shadow only. With `TRET_ROUTER_AGENT_SCORING=shadow` each routing
+  decision also stores, in `runs.routing.shadow`, what a ranking built on the agent's own
+  results would have picked: expected cost, Wh or tokens per acceptable result on a cautious
+  acceptable rate, a reliability floor measured against the best tried model, and a 10%
+  exploration share for models the agent has not run. The routing preview returns the same
+  block. It never changes the model that runs, and the default `off` is identical to before.
+  No migration. See docs/architecture.md, "Per-agent routing record (shadow)".
 - Router learning per batch family, behind a human-agreement gate: run outcomes gain
   `task_family` (derived from the batch, per workspace; never stamped) and an
   evaluator-blended `evaluated_quality_score`. Once 15 spot checks agree at 80% the family
