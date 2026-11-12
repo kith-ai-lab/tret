@@ -1,5 +1,5 @@
 import { useMutation } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import {
@@ -31,6 +31,8 @@ export function PendingReviews({
 }) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [note, setNote] = useState('')
+  const [packagingOnly, setPackagingOnly] = useState(false)
+  const [packagingError, setPackagingError] = useState(false)
   const [results, setResults] = useState<BatchDecideResult[]>([])
   const labelById = useMemo(
     () => new Map(targets.map((t) => [t.id, t.label || t.company || t.slug])),
@@ -38,10 +40,23 @@ export function PendingReviews({
   )
   const packageMaps = reviews.length > 0 && reviews.every((m) => m.schema_slug === 'package_map')
 
+  const hasPackageMap = reviews.some((m) => m.schema_slug === 'package_map')
+  // The checkbox is hidden when no page map is pending; never leave it ticked.
+  useEffect(() => {
+    if (!hasPackageMap) setPackagingOnly(false)
+  }, [hasPackageMap])
+
   const decide = useMutation({
     mutationFn: ({ ids, action }: { ids: string[]; action: 'approve' | 'reject' }) =>
-      api.decideFindingsBatch(ids, action, note.trim() || undefined),
+      api.decideFindingsBatch(
+        ids,
+        action,
+        note.trim() || undefined,
+        action === 'approve' && packagingOnly && hasPackageMap ? 'packaging' : undefined,
+      ),
     onSuccess: (r) => {
+      setPackagingOnly(false)
+      setPackagingError(false)
       setResults(r.results)
       setSelected(new Set())
       onDecided()
@@ -84,7 +99,18 @@ export function PendingReviews({
         <button
           className="btn btn-approve"
           disabled={chosen.length === 0 || decide.isPending}
-          onClick={() => decide.mutate({ ids: chosen, action: 'approve' })}
+          onClick={() => {
+            const packaging = packagingOnly && hasPackageMap
+            if (
+              packaging &&
+              !chosen.every((id) => reviews.find((m) => m.id === id)?.schema_slug === 'package_map')
+            ) {
+              setPackagingError(true)
+              return
+            }
+            setPackagingError(false)
+            decide.mutate({ ids: chosen, action: 'approve' })
+          }}
         >
           Approve selected ({chosen.length})
         </button>
@@ -96,6 +122,28 @@ export function PendingReviews({
           Reject selected
         </button>
       </div>
+      {hasPackageMap && (
+        <label
+          className="check-row"
+          style={{ marginBottom: 8 }}
+          title="Use when you are approving page maps only to package them for scoring. These approvals are not counted as quality evidence for the model."
+        >
+          <input
+            type="checkbox"
+            checked={packagingOnly}
+            onChange={(e) => {
+                setPackagingOnly(e.target.checked)
+                setPackagingError(false)
+              }}
+          />
+          <span>Approve for packaging only (does not count as a review)</span>
+        </label>
+      )}
+      {packagingError && (
+        <div className="error-text">
+          Packaging-only approval applies to page maps. Deselect the other items or untick the box.
+        </div>
+      )}
       {decide.error && <div className="error-text">{errText(decide.error)}</div>}
       {failures.map((f) => (
         <div key={f.id} className="error-text">

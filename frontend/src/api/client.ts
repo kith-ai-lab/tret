@@ -1173,8 +1173,13 @@ export interface Dataset {
 
 export type DatasetRow = Record<string, unknown>
 
+/** `packaging` = page map approved only so its pages can be packaged; not a
+ *  quality review. Server default (and absent value) is `review`. */
+export type ApprovalPurpose = 'review' | 'packaging'
+
 export interface ApprovalRecord {
   action: string // approve | reject
+  purpose?: ApprovalPurpose
   approver_id: string
   note: string | null
   created_at: string | null
@@ -4162,7 +4167,7 @@ export const api = {
   },
   getFinding: (id: string) => request<FindingDetail>(`/findings/${id}`),
   decideFinding: (id: string, action: 'approve' | 'reject', note?: string) =>
-    request<{ ok: boolean; status: string; approver: string }>(`/findings/${id}/approval`, {
+    request<{ ok: boolean; status: string; approver: string; purpose?: ApprovalPurpose }>(`/findings/${id}/approval`, {
       method: 'POST',
       body: { action, note: note || null },
     }),
@@ -4287,10 +4292,20 @@ export const api = {
     }
     return await res.blob()
   },
-  decideFindingsBatch: (ids: string[], action: 'approve' | 'reject', note?: string) =>
+  decideFindingsBatch: (
+    ids: string[],
+    action: 'approve' | 'reject',
+    note?: string,
+    purpose?: ApprovalPurpose,
+  ) =>
     request<{ results: BatchDecideResult[] }>('/findings/decide-batch', {
       method: 'POST',
-      body: { finding_ids: ids, action, note: note || null },
+      body: {
+        finding_ids: ids,
+        action,
+        note: note || null,
+        ...(purpose === 'packaging' ? { purpose } : {}),
+      },
     }),
   listDataRequests: (status?: string) =>
     request<DataRequest[]>(`/data-requests${status ? `?status=${status}` : ''}`),

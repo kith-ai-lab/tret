@@ -3368,6 +3368,12 @@ export interface components {
              * @description Optional reviewer comment
              */
             note?: string | null;
+            /**
+             * Purpose
+             * @description 'review' (default, also when null) or 'packaging'. Only a review counts as quality evidence for the run's model; 'packaging' is valid only for approving a package_map finding that is being approved just to be packaged.
+             * @enum {unknown}
+             */
+            purpose?: "review" | "packaging";
         };
         /** ArchiveWorkspaceBody */
         ArchiveWorkspaceBody: {
@@ -3627,6 +3633,12 @@ export interface components {
              * @description Optional reviewer comment
              */
             note?: string | null;
+            /**
+             * Purpose
+             * @description 'review' (default, also when null) or 'packaging'. Only a review counts as quality evidence for the run's model; 'packaging' is valid only for approving a package_map finding that is being approved just to be packaged.
+             * @enum {unknown}
+             */
+            purpose?: "review" | "packaging";
         };
         /** EgressOverride */
         EgressOverride: {

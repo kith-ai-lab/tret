@@ -261,6 +261,11 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
                   <td>{a.created_at ? formatDateTime(a.created_at) : '—'}</td>
                   <td>
                     <StatusBadge status={a.action === 'approve' ? 'approved' : 'rejected'} />
+                    {a.purpose === 'packaging' && (
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 6 }}>
+                        packaging only
+                      </span>
+                    )}
                   </td>
                   <td title={a.approver_id}>{a.approver_id.slice(0, 8)}</td>
                   <td>{a.note ?? '—'}</td>

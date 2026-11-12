@@ -46,6 +46,9 @@ router = APIRouter(prefix="/api", tags=["findings"])
 log = logging.getLogger("tret.findings")
 
 APPROVAL_ACTIONS = ("approve", "reject")
+# Why a decision was made. Only 'review' is a verdict on the output and counts as
+# quality evidence; 'packaging' approves a page map solely so it can be packaged.
+APPROVAL_PURPOSES = ("review", "packaging")
 
 # Wall-clock bound on one approval-time packaging run (Poppler per mode plus the
 # pypdf verification pass over a few hundred pages). `packaging.run_packaging`
@@ -108,6 +111,7 @@ def _finding_out(f: Finding, approvals: list[Approval] | None = None) -> dict:
                 "action": a.action,
                 "approver_id": str(a.approver_id),
                 "note": a.note,
+                "purpose": a.purpose,
                 "created_at": a.created_at.isoformat() if a.created_at else None,
             }
             for a in approvals
@@ -178,6 +182,15 @@ class ApprovalBody(BaseModel):
         json_schema_extra={"enum": list(APPROVAL_ACTIONS)},
     )
     note: str | None = Field(default=None, description="Optional reviewer comment")
+    purpose: str | None = Field(
+        default=None,
+        description=(
+            "'review' (default, also when null) or 'packaging'. Only a review counts as quality "
+            "evidence for the run's model; 'packaging' is valid only for approving "
+            "a package_map finding that is being approved just to be packaged."
+        ),
+        json_schema_extra={"enum": list(APPROVAL_PURPOSES)},
+    )
 
 
 @router.post("/findings/{finding_id}/approval")
@@ -188,7 +201,12 @@ async def decide_finding(
     ctx: WorkspaceContext = Depends(require_workspace_approver),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await _decide(db, finding_id, body.action, body.note, user=user, workspace_id=ctx.id)
+    # Plain values, read before any decision work (see `_decide`).
+    result = await _decide(
+        db, finding_id, body.action, body.note,
+        approver_id=user.id, approver_name=user.display_name, workspace_id=ctx.id,
+        purpose=body.purpose,
+    )
     await _notify_collections_decided(db, [finding_id])
     return result
 
@@ -205,6 +223,15 @@ class DecideBatchBody(BaseModel):
         json_schema_extra={"enum": list(APPROVAL_ACTIONS)},
     )
     note: str | None = Field(default=None, description="Optional reviewer comment")
+    purpose: str | None = Field(
+        default=None,
+        description=(
+            "'review' (default, also when null) or 'packaging'. Only a review counts as quality "
+            "evidence for the run's model; 'packaging' is valid only for approving "
+            "a package_map finding that is being approved just to be packaged."
+        ),
+        json_schema_extra={"enum": list(APPROVAL_PURPOSES)},
+    )
 
 
 @router.post("/findings/decide-batch")
@@ -220,6 +247,15 @@ async def decide_findings_batch(
     decided, not found) reports its own error and never stops the others."""
     if body.action not in APPROVAL_ACTIONS:
         raise HTTPException(422, "action must be 'approve' or 'reject'")
+    purpose = "review" if body.purpose is None else body.purpose
+    if purpose not in APPROVAL_PURPOSES:
+        raise HTTPException(422, "purpose must be 'review' or 'packaging'")
+    if purpose == "packaging" and body.action != "approve":
+        raise HTTPException(422, "purpose 'packaging' is only valid with action 'approve': a rejection is always a review")
+    # A refused item rolls the session back, which expires every ORM object it
+    # holds, `user` and `ctx` included; touching them for the next item would
+    # lazy-load outside a greenlet (MissingGreenlet). Read what is needed once.
+    approver_id, approver_name, workspace_id = user.id, user.display_name, ctx.id
     results: list[dict] = []
     decided: list[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
@@ -228,7 +264,11 @@ async def decide_findings_batch(
             continue
         seen.add(finding_id)
         try:
-            out = await _decide(db, finding_id, body.action, body.note, user=user, workspace_id=ctx.id)
+            out = await _decide(
+                db, finding_id, body.action, body.note,
+                approver_id=approver_id, approver_name=approver_name,
+                workspace_id=workspace_id, purpose=purpose,
+            )
             results.append({"id": str(finding_id), "ok": True, "status": out["status"]})
             decided.append(finding_id)
         except HTTPException as e:
@@ -266,14 +306,24 @@ async def _decide(
     action: str,
     note: str | None,
     *,
-    user: User,
+    approver_id: uuid.UUID,
+    approver_name: str,
     workspace_id: uuid.UUID,
+    purpose: str | None = None,
 ) -> dict:
     """Decide one finding: the body of `decide_finding`, shared with
     `decide_findings_batch`. Raises `HTTPException` (404/409/422) for a finding
-    that cannot be decided."""
+    that cannot be decided. Takes plain values, never ORM objects: a refused
+    item in a batch rolls the session back, which expires `User`/`Workspace`
+    objects the next item would otherwise read. `None` purpose means 'review'."""
+    if purpose is None:
+        purpose = "review"
     if action not in APPROVAL_ACTIONS:
         raise HTTPException(422, "action must be 'approve' or 'reject'")
+    if purpose not in APPROVAL_PURPOSES:
+        raise HTTPException(422, "purpose must be 'review' or 'packaging'")
+    if purpose == "packaging" and action != "approve":
+        raise HTTPException(422, "purpose 'packaging' is only valid with action 'approve': a rejection is always a review")
     # Locked for the length of the decision: two approvers deciding the same
     # draft at the same moment would otherwise both read 'draft', both write an
     # approvals row, and the later commit would decide the status — so a reject
@@ -283,16 +333,20 @@ async def _decide(
     f = await db.get(Finding, finding_id, with_for_update=True)
     if f is None or await project_in_workspace(db, f.project_id, workspace_id) is None:
         raise HTTPException(404, "Finding not found")
+    if purpose == "packaging" and f.schema_slug != "package_map":
+        raise HTTPException(422, "purpose 'packaging' is only valid for a package_map finding")
     if f.status != "draft":
         raise HTTPException(409, f"Finding is already '{f.status}'")
     approval = Approval(
         finding_id=f.id,
         action=action,
-        approver_id=user.id,  # session-stamped
+        purpose=purpose,
+        approver_id=approver_id,  # session-stamped
         note=note,
     )
     db.add(approval)
-    f.status = "approved" if action == "approve" else "rejected"
+    f.status = new_status = "approved" if action == "approve" else "rejected"
+    fid, slug = f.id, f.schema_slug
     if action == "approve" and f.schema_slug == "draft_section":
         # A stale "this is a draft" banner must not survive approval — see
         # `services/export.py::strip_draft_status_banner`.
@@ -316,23 +370,23 @@ async def _decide(
     # SharePoint upload — `propose_connected_write` (engine/tools.py) never
     # touches Graph itself, only this does, and only once the status flip
     # above has already committed. A rejected finding is never uploaded.
-    if action == "approve" and f.schema_slug == "connected_write":
-        await _upload_connected_write(db, f, workspace_id, actor_user_id=user.id)
+    if action == "approve" and slug == "connected_write":
+        await _upload_connected_write(db, f, workspace_id, actor_user_id=approver_id)
     # Approving a `package_map` finding runs the deterministic packager over the
     # approved page map (`propose_package_map` itself packages nothing). It can
     # take minutes, so the request returns now, with the `running` record the
     # commit above already holds, and the packager runs in a background task on
     # its own session. Outcome recorded in `payload["package"]`, which the
     # Approvals page polls; retryable via `package-retry`.
-    if action == "approve" and f.schema_slug == "package_map":
-        _start_packaging(f.id, approver_user_id=user.id)
+    if action == "approve" and slug == "package_map":
+        _start_packaging(fid, approver_user_id=approver_id)
     # A human just said whether this output was right, which is the strongest
     # signal tret has about the model that produced it — re-score the run behind
     # it so routing can learn from the verdict. After the commit, deliberately:
     # the approval is the thing that must succeed, and outcome bookkeeping is
     # rebuildable (`tret outcomes backfill`). It never raises.
-    await record_outcome_for_finding(db, f.id)
-    return {"ok": True, "status": f.status, "approver": user.display_name}
+    await record_outcome_for_finding(db, fid)
+    return {"ok": True, "status": new_status, "approver": approver_name, "purpose": purpose}
 
 
 async def _render_write_bytes(

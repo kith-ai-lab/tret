@@ -22,14 +22,15 @@ from __future__ import annotations
 
 from datetime import timezone
 
+import contextlib
 import logging
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.batches.rubrics import is_evaluator_run
-from tret.db.models import Finding, Harness, Pack, Run, RunOutcome
+from tret.db.models import Approval, Batch, BatchTarget, Finding, Harness, Pack, Run, RunOutcome
 from tret.engine.context import task_config
 from tret.router_llm.objectives import DEFAULT_MAX_COST_TIER, DEFAULT_OBJECTIVE
 from tret.router_llm.outcomes import (
@@ -49,14 +50,33 @@ MAX_ITERATIONS_CEILING = 50
 
 
 async def _finding_counts(db: AsyncSession, run_id: uuid.UUID) -> dict[str, int]:
+    """`{status: count}` over the run's findings, where "approved"/"rejected"
+    count only human *reviews*. A finding approved with purpose "packaging" (a
+    page map approved just so it could be packaged) is counted under
+    "approved_packaging" instead, so it is not quality evidence. A decided
+    finding with no approvals row (legacy data) counts as a review; with several,
+    the most recent one decides."""
     rows = (
-        await db.execute(
-            select(Finding.status, func.count())
-            .where(Finding.run_id == run_id)
-            .group_by(Finding.status)
-        )
+        await db.execute(select(Finding.id, Finding.status).where(Finding.run_id == run_id))
     ).all()
-    return {status: count for status, count in rows}
+    decided = [fid for fid, status in rows if status in ("approved", "rejected")]
+    purposes: dict[uuid.UUID, str] = {}
+    if decided:
+        for fid, purpose in (
+            await db.execute(
+                select(Approval.finding_id, Approval.purpose)
+                .where(Approval.finding_id.in_(decided))
+                .order_by(Approval.created_at, Approval.id)
+            )
+        ).all():
+            purposes[fid] = purpose  # ascending, so the last write is the latest
+    counts: dict[str, int] = {}
+    for fid, status in rows:
+        key = status
+        if status == "approved" and purposes.get(fid, "review") != "review":
+            key = "approved_packaging"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def _explored(routing: dict) -> bool:
@@ -518,6 +538,176 @@ async def rescore_evaluated_runs(db: AsyncSession, run_ids) -> None:
         log.exception("failed to re-score evaluated runs")
     finally:
         _invalidate_priors()
+
+
+def _batch_run_ids(targets: list[BatchTarget]) -> set[uuid.UUID]:
+    """The current run and every earlier attempt's run (`history`) of the targets."""
+    ids: set[uuid.UUID] = set()
+    for t in targets:
+        if t.run_id:
+            ids.add(t.run_id)
+        for h in t.history or []:
+            try:
+                if h.get("run_id"):
+                    ids.add(uuid.UUID(str(h["run_id"])))
+            except (AttributeError, ValueError):
+                continue
+    return ids
+
+
+async def _quality_by_model(db: AsyncSession, run_ids: set[uuid.UUID]) -> dict[str, list[float]]:
+    rows = (
+        await db.execute(
+            select(RunOutcome.model_id, RunOutcome.quality_score).where(
+                RunOutcome.run_id.in_(run_ids)
+            )
+        )
+    ).all()
+    out: dict[str, list[float]] = {}
+    for model_id, q in rows:
+        out.setdefault(model_id, []).append(float(q))
+    return out
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+async def mark_packaging_approvals(
+    db: AsyncSession, batch_ids: list[str], *, dry_run: bool
+) -> dict:
+    """Re-mark the 'review' approvals of approved `package_map` findings in the
+    named batches as 'packaging', so they stop counting as quality evidence, then
+    re-score every run of those batches that holds a packaging approval (whether
+    re-marked now or by an earlier call). Safe to re-run: a second run changes no
+    approvals and re-scores the same runs again, which repairs a re-score that
+    failed the first time. A dry run performs no writes.
+
+    A re-score is checked, not trusted: `record_outcome` swallows its own errors,
+    so the stored `findings_approved` must equal the run's review-only count or the
+    run is reported in `runs_failed`. A run with no outcome rows gets none.
+
+    Returns `{"dry_run", "batches": [{"batch_id", "found", "approvals_changed",
+    "runs_rescored", "runs_failed"}], "models": [{"model_id", "rows",
+    "mean_before", "mean_after"}]}`; `mean_after` is None on a dry run."""
+    per_batch: list[dict] = []
+    marks: dict[uuid.UUID, Approval] = {}  # approval id -> row to flip
+    rescore: dict[str, list[uuid.UUID]] = {}  # batch id -> runs to re-score
+    for raw in dict.fromkeys(batch_ids):
+        entry = {
+            "batch_id": raw, "found": False, "approvals_changed": 0,
+            "runs_rescored": 0, "runs_failed": [],
+        }
+        per_batch.append(entry)
+        try:
+            batch = await db.get(Batch, uuid.UUID(str(raw)))
+        except ValueError:
+            batch = None
+        if batch is None:
+            continue
+        entry["found"] = True
+        targets = (
+            await db.execute(select(BatchTarget).where(BatchTarget.collection_id == batch.id))
+        ).scalars().all()
+        run_ids = _batch_run_ids(list(targets))
+        if not run_ids:
+            continue
+        rows = (
+            await db.execute(
+                select(Finding.id, Finding.run_id).where(
+                    Finding.run_id.in_(run_ids),
+                    Finding.schema_slug == "package_map",
+                    Finding.status == "approved",
+                )
+            )
+        ).all()
+        finding_run = {fid: rid for fid, rid in rows}
+        deciding: dict[uuid.UUID, Approval] = {}
+        if finding_run:
+            for a in (
+                await db.execute(
+                    select(Approval)
+                    .where(Approval.finding_id.in_(finding_run))
+                    .order_by(Approval.created_at, Approval.id)
+                )
+            ).scalars():
+                deciding[a.finding_id] = a  # latest wins
+        touched: dict[uuid.UUID, None] = {}
+        for fid, a in deciding.items():
+            if a.action != "approve":
+                continue
+            if a.purpose == "review":
+                marks[a.id] = a
+                entry["approvals_changed"] += 1
+                touched[finding_run[fid]] = None
+            elif a.purpose == "packaging":
+                touched[finding_run[fid]] = None  # re-marked earlier: still re-score
+        # Only runs that already have outcome rows: a first write is the engine's job.
+        # Plain ids in a deterministic order (never ORM objects, which a rollback
+        # in a later re-score would expire).
+        rescore[raw] = [
+            r for r in sorted(touched, key=str) if await db.get(RunOutcome, (r, 0)) is not None
+        ]
+
+    affected = {r for runs in rescore.values() for r in runs}
+    before = await _quality_by_model(db, affected) if affected else {}
+    after: dict[str, list[float]] | None = None
+    if not dry_run:
+        for a in marks.values():
+            a.purpose = "packaging"
+        if marks:
+            await db.commit()
+        done: dict[uuid.UUID, bool] = {}
+        for entry in per_batch:
+            for run_id in rescore.get(entry["batch_id"], []):
+                if run_id not in done:
+                    done[run_id] = await _rescore_checked(db, run_id)
+                if done[run_id]:
+                    entry["runs_rescored"] += 1
+                else:
+                    entry["runs_failed"].append(str(run_id))
+        if marks or affected:
+            _invalidate_priors()
+        after = await _quality_by_model(db, affected) if affected else {}
+    else:
+        for entry in per_batch:
+            entry["runs_rescored"] = len(rescore.get(entry["batch_id"], []))
+    models = [
+        {
+            "model_id": m,
+            "rows": len(vals),
+            "mean_before": _mean(vals),
+            "mean_after": None if after is None else _mean(after.get(m, [])),
+        }
+        for m, vals in sorted(before.items())
+    ]
+    return {"dry_run": dry_run, "batches": per_batch, "models": models}
+
+
+async def _rescore_checked(db: AsyncSession, run_id: uuid.UUID) -> bool:
+    """Re-score one run in isolation and verify the stored result counts only
+    review approvals. Rolls back and returns False on any failure."""
+    try:
+        run = await db.get(Run, run_id)
+        if run is None:
+            return False
+        rows = await record_outcome(db, run, commit=True)
+        if not rows:
+            raise RuntimeError("no outcome rows were written")
+        expected = (await _finding_counts(db, run_id)).get("approved", 0)
+        stored = (
+            await db.execute(
+                select(RunOutcome.findings_approved).where(RunOutcome.run_id == run_id)
+            )
+        ).scalars().all()
+        if sum(stored) != expected:
+            raise RuntimeError(f"stored findings_approved {sum(stored)} != review count {expected}")
+        return True
+    except Exception:  # noqa: BLE001 - reported per run, never aborts the others
+        log.exception("re-score after marking packaging approvals failed for run %s", run_id)
+        with contextlib.suppress(Exception):
+            await db.rollback()
+        return False
 
 
 async def backfill(db: AsyncSession, *, limit: int | None = None) -> dict:

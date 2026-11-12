@@ -123,6 +123,23 @@ with no finding of that type is simply `completed`. The detail's `pending_review
 lists the drafts (`pending_maps` is the same list under its old name, for one
 release). A batch with a pending review cannot be finalized.
 
+Both decision endpoints take an optional `purpose`: `review` (the default) or
+`packaging`. Only a review is quality evidence about the model that produced the
+finding. `packaging` exists so a disclosure page map can be approved just to be packaged
+without inflating that model's record; it is valid only with `approve` and only for a
+`package_map` finding. `decide-batch` refuses the whole request when `packaging` is sent with
+`reject`, and refuses a finding that is not a page map on its own, leaving the rest of the
+request to proceed. A packaging
+approval otherwise behaves exactly like any approval. For a batch whose maps were already
+approved as reviews, `tret approvals mark-packaging --batch <id> [--batch <id> ...]
+[--dry-run]` (run where the database is reachable) re-marks them as `packaging` and
+re-scores the affected runs, printing the before and after mean `quality_score` per model.
+It is safe to re-run: a second run changes no approvals and re-scores the same runs again,
+which repairs a re-score that failed the first time (failed runs are listed and the command
+exits non-zero). `--dry-run` prints what would change and the current means only. The command
+clears only its own process's priors cache, so a running server picks up the re-scored
+records within its priors cache lifetime (about 60 seconds).
+
 ### What a target holds
 
 A prompt target's `task_input` is the row (`{column: value}`). Once its run has
@@ -368,6 +385,7 @@ tret batch start <id>
 tret batch status <id> --watch          # polls every 10 s until completed/finalized/failed/paused, or gate/review (waiting for a person)
 tret batch release <id>                 # after checking the first 5 targets
 tret batch approve <id> --all           # when review is on and findings are waiting
+tret batch approve <id> --all --packaging-only   # approve page maps only to package them (not a quality review)
 tret batch finalize <id>
 ```
 

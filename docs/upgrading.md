@@ -41,6 +41,13 @@ base priors are byte-identical to before. At least `TRET_ROUTER_FAMILY_GATE_MIN_
 the family has compared (two or more, five evaluated rows each), by at most 0.25.
 `TRET_ROUTER_FAMILY_PRIORS=off` (default `gated`) disables it entirely.
 
+Migration `a7c3e1d94b62` adds `approvals.purpose` (`review` or `packaging`). Only a
+`review` approval is quality evidence for a run's model; a page map approved just so it
+can be packaged is `packaging` and is left out of `quality_score` and the human term of
+`evaluated_quality_score`. Existing rows default to `review`, so **nothing changes until
+approvals are re-marked**: run `tret approvals mark-packaging --batch <id> --dry-run`, then
+without `--dry-run`, to re-mark a batch's approved page maps and re-score its runs.
+
 ## 2026-11-06 · live model catalog and open-weight preference
 
 Behaviour change, no migration. Routing changes on an existing install:
