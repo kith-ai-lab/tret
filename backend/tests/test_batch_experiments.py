@@ -326,6 +326,38 @@ async def test_arms_scored_by_different_judges_are_not_comparable(w):
     assert out["comparisons"][0]["mean_delta"] is None and out["comparisons"][0]["n"] == 0
 
 
+async def _unscored_batch(w, slug):
+    batch = await mk_batch(w, f"Batch {slug}", slug)
+    batch.settings = {"fiscal_year": 2025}
+    await mk_target(w, batch, "t0", position=0)
+    await w.db.commit()
+    return batch
+
+
+async def test_a_comparison_note_names_the_arm(w):
+    """`paired_summary` calls its two sides Batch A and Batch B; in an experiment the
+    second side of "C vs A" is arm C, and the note must say so."""
+    a = await _arm_batch(w, "na-a", _rows([90] * 3, 0.10))
+    b = await _arm_batch(w, "na-b", _rows([88] * 3, 0.02))
+    c = await _unscored_batch(w, "na-c")
+    e = await _experiment(w, "replicate", [a, b, c], [{}, {}, {}])
+    out = await experiments.experiment_result(w.db, e)
+    notes = {x["arm"]: x["note"] for x in out["comparisons"]}
+    assert notes == {"B": None, "C": "Arm C has no evaluation yet."}
+    assert out["quality_note"] == "Arm C has no evaluation yet." and out["quality_comparable"] is False
+
+
+async def test_comparison_notes_when_arm_a_or_both_are_unscored(w):
+    a = await _unscored_batch(w, "nb-a")
+    b = await _arm_batch(w, "nb-b", _rows([88] * 3, 0.02))
+    c = await _unscored_batch(w, "nb-c")
+    e = await _experiment(w, "replicate", [a, b, c], [{}, {}, {}])
+    out = await experiments.experiment_result(w.db, e)
+    notes = {x["arm"]: x["note"] for x in out["comparisons"]}
+    assert notes == {"B": "Arm A has no evaluation yet.", "C": "Arms A and C have no evaluation yet."}
+    assert "Batch" not in out["quality_note"]
+
+
 @pytest.mark.parametrize(("qa", "qb", "sign"), [([80, 82, 84, 86], [90, 92, 94, 96], 1), ([90, 92, 94, 96], [80, 82, 84, 86], -1)])
 async def test_split_result_is_unpaired_with_a_deterministic_interval(w, qa, qb, sign):
     rows = []

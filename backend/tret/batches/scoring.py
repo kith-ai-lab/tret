@@ -731,15 +731,20 @@ def bootstrap_interval(deltas: list[float]) -> list[float] | None:
     return [round(lo, 2), round(hi, 2)]
 
 
+NOTE_NEITHER_EVALUATED = "Neither batch has an evaluation."
+NOTE_A_NOT_EVALUATED = "Batch A has no evaluation."
+NOTE_B_NOT_EVALUATED = "Batch B has no evaluation."
+
+
 def _quality_note(a: BatchData, b: BatchData) -> str | None:
     if family_key(a.batch) != family_key(b.batch):
         return "The batches are not the same family (different task or fiscal year)."
     if a.current is None and b.current is None:
-        return "Neither batch has an evaluation."
+        return NOTE_NEITHER_EVALUATED
     if a.current is None:
-        return "Batch A has no evaluation."
+        return NOTE_A_NOT_EVALUATED
     if b.current is None:
-        return "Batch B has no evaluation."
+        return NOTE_B_NOT_EVALUATED
     if (a.current.rubric_key, a.current.rubric_version) != (b.current.rubric_key, b.current.rubric_version):
         return "The batches were scored against different rubrics."
     if a.current.judge_model != b.current.judge_model:

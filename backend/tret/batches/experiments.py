@@ -403,6 +403,18 @@ MODEL_ARM_NOTE = (
 MODEL_ONLY_REASON = "A model arm changes no harness setting: its runs are evidence for the router."
 
 
+def _arm_note(note: str | None, key: str) -> str | None:
+    """A comparison note in the experiment's own words: `scoring.paired_summary` calls its
+    two sides "Batch A" and "Batch B", and here the second side is arm `key`."""
+    if note == scoring.NOTE_NEITHER_EVALUATED:
+        return f"Arms A and {key} have no evaluation yet."
+    if note == scoring.NOTE_A_NOT_EVALUATED:
+        return "Arm A has no evaluation yet."
+    if note == scoring.NOTE_B_NOT_EVALUATED:
+        return f"Arm {key} has no evaluation yet."
+    return note
+
+
 def _describe_model(policy: dict) -> str:
     return f"pinned to {policy.get('model')}" if policy.get("mode") == "pinned" else "automatic routing"
 
@@ -627,12 +639,13 @@ async def experiment_result(db: AsyncSession, e: BatchExperiment) -> dict:
                 continue
             s = scoring.paired_summary(base, x, bootstrap=bootstrap)
             comparable = comparable and s["quality_comparable"]
-            if s["quality_note"]:
-                notes.append(s["quality_note"])
+            arm_note = _arm_note(s["quality_note"], a["key"])
+            if arm_note:
+                notes.append(arm_note)
             comparisons.append(
                 {"arm": a["key"], "vs": "A", "paired": True, "n": s["n"], "n_vs": s["n"], "wins": s["wins_b"],
                  "losses": s["wins_a"], "ties": s["ties"], "mean_delta": s["mean_quality_delta"],
-                 "interval90": s["interval90"], "note": s["quality_note"]}
+                 "interval90": s["interval90"], "note": arm_note}
             )
     else:
         if split_data is None or split_data.current is None or split_data.current.status in scoring.DEAD_PASS_STATUSES:
