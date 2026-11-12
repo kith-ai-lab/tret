@@ -63,9 +63,9 @@ def _approver(world):
     _USER["id"] = world.user.id
 
 
-async def _batch(db, world, runs, *, slug="b1", history=()) -> Batch:
+async def _batch(db, world, runs, *, slug="b1", history=(), batch_id=None) -> Batch:
     b = Batch(
-        id=uuid.uuid4(), workspace_id=world.ws.id, project_id=world.project.id,
+        id=batch_id or uuid.uuid4(), workspace_id=world.ws.id, project_id=world.project.id,
         name=slug, run_slug=slug, status="completed", settings={}, warnings=[],
     )
     db.add(b)
@@ -303,8 +303,10 @@ def test_the_cli_command_prints_the_summary(client, world, monkeypatch, capsys):
     )
     cli.main()
     out = capsys.readouterr().out
-    assert "would change 2 approval(s)" in out and "not found" in out and "dry run" in out
-    assert "mean after" not in out and "mean before" in out
+    assert "would change 2 approvals, would re-score 2 runs" in out and "not found" in out
+    assert "dry run" in out and "quality after" not in out and "quality before" in out
+    assert "eval before" in out and "eval after" not in out
+    print(out)
 
 
 # ── the real handler on a real session ───────────────────────────────────────
@@ -566,3 +568,162 @@ def test_the_cli_exits_non_zero_when_a_rescore_failed(client, world, monkeypatch
     with pytest.raises(SystemExit) as e:
         cli.main()
     assert e.value.code == 1 and "r1" in capsys.readouterr().err
+
+
+# ── a run with a task family, a live evaluation and two segments ─────────────
+JUDGE_QUALITY = 80  # the evaluation's `quality`, on the 0-100 scale
+
+
+async def _seed_evaluated_run(db, world):
+    """A batch target run in a task family, with a scored, current, non-stale
+    evaluation, a two-segment model timeline and one approved page map (a review).
+    Outcomes are recorded before returning. Returns plain ids."""
+    from tret.db.models import BatchEvaluation, TargetEvaluation
+
+    batch_id = uuid.uuid4()
+    run = await _run(db, world, "test/model-b")
+    run.model_timeline = [
+        {"model": "test/model-a", "provider": "test", "from_iteration": 1, "to_iteration": 1,
+         "cost_usd": 0.01},
+        {"model": "test/model-b", "provider": "test", "from_iteration": 2, "to_iteration": 2,
+         "reason": "capability_stall", "cost_usd": 0.02},
+    ]
+    run.task_input = {"_collection_id": str(batch_id)}
+    f = await _finding(db, run, status="approved", action="approve")
+    await db.commit()
+    batch = await _batch(db, world, [run], slug="fam", batch_id=batch_id)
+    target = (await db.execute(select(BatchTarget).where(BatchTarget.collection_id == batch.id))).scalars().one()
+    ev = BatchEvaluation(
+        id=uuid.uuid4(), collection_id=batch.id, workspace_id=world.ws.id, family_key="fam",
+        rubric_key="r", rubric_version="1", rubric={}, judge_model="test/judge", status="completed",
+    )
+    db.add(ev)
+    await db.flush()
+    db.add(TargetEvaluation(
+        id=uuid.uuid4(), evaluation_id=ev.id, collection_id=batch.id, workspace_id=world.ws.id,
+        target_id=target.id, row_key="t0", rubric_key="r", family_key="fam", attempt=0,
+        evaluated_run_id=run.id, status="scored", quality=JUDGE_QUALITY,
+    ))
+    await db.commit()
+    ids = {"run": run.id, "finding": f.id, "batch": batch.id}
+    await record_outcome(db, await db.get(Run, ids["run"]), commit=True)
+    return ids
+
+
+async def _rows(db, run_id):
+    return {
+        r.segment_index: r
+        for r in (await db.execute(select(RunOutcome).where(RunOutcome.run_id == run_id))).scalars()
+    }
+
+
+def _plain(row):
+    return {c.name: getattr(row, c.name) for c in row.__table__.columns}
+
+
+async def _eval_snapshot(db):
+    from tret.db.models import BatchEvaluation, TargetEvaluation
+
+    out = []
+    for model in (BatchEvaluation, TargetEvaluation):
+        for r in (await db.execute(select(model).order_by(model.id))).scalars():
+            out.append(_plain(r))
+    return out
+
+
+def test_marking_an_evaluated_two_segment_run_drops_only_the_human_term(client, world, monkeypatch):
+    monkeypatch.setattr(outcomes_service, "_invalidate_priors", lambda: None)
+
+    async def go(db):
+        ids = await _seed_evaluated_run(db, world)
+        before = {i: _plain(r) for i, r in (await _rows(db, ids["run"])).items()}
+        evals_before = await _eval_snapshot(db)
+        res = await mark_packaging_approvals(db, [str(ids["batch"])], dry_run=False)
+        after = {i: _plain(r) for i, r in (await _rows(db, ids["run"])).items()}
+        return before, after, evals_before, await _eval_snapshot(db), res
+
+    before, after, evals_before, evals_after, res = run_db(client, world, go)
+    assert res["batches"][0]["approvals_changed"] == 1 and res["batches"][0]["runs_failed"] == []
+    assert sorted(before) == sorted(after) == [0, 1]  # no outcome row added or removed
+    # the setup really was evaluated, in a family, with the human term present
+    assert before[1]["evaluated_quality_score"] is not None and before[0]["evaluated_quality_score"] is None
+    assert before[1]["task_family"] and before[1]["components"]["human"]
+    assert before[1]["findings_approved"] == 1 and before[0]["findings_approved"] == 0
+    # after: the last segment lost exactly the human term, nothing else about the family changed
+    assert after[0]["findings_approved"] == 0 and after[1]["findings_approved"] == 0
+    assert "human" not in after[1]["components"]
+    assert after[0]["task_family"] == before[0]["task_family"]
+    assert after[1]["task_family"] == before[1]["task_family"]
+    expected = evaluated_quality(
+        auto=float(after[1]["components"]["automatic_score"]),
+        human_rate=None,
+        evaluator=JUDGE_QUALITY / 100,
+    )
+    assert float(after[1]["evaluated_quality_score"]) == pytest.approx(expected, abs=1e-4)
+    assert float(after[1]["evaluated_quality_score"]) != float(before[1]["evaluated_quality_score"])
+    assert after[0]["evaluated_quality_score"] is None
+    assert evals_after == evals_before  # the evaluation rows are untouched
+    m = {x["model_id"]: x for x in res["models"]}["test/model-b"]
+    assert m["evaluated_rows"] == 1
+    assert m["evaluated_mean_before"] == pytest.approx(float(before[1]["evaluated_quality_score"]))
+    assert m["evaluated_mean_after"] == pytest.approx(float(after[1]["evaluated_quality_score"]))
+
+
+def test_a_run_whose_approvals_are_all_reviews_is_left_exactly_as_it_was(client, world, monkeypatch):
+    monkeypatch.setattr(outcomes_service, "_invalidate_priors", lambda: None)
+
+    async def go(db):
+        ids = await _seed_evaluated_run(db, world)
+        # the approved finding is not a page map, so there is nothing to flip
+        f = await db.get(Finding, ids["finding"])
+        f.schema_slug = "draft_section"
+        await db.commit()
+        run = await db.get(Run, ids["run"])
+        await record_outcome(db, run, commit=True)
+        before = {i: _plain(r) for i, r in (await _rows(db, ids["run"])).items()}
+        res = await mark_packaging_approvals(db, [str(ids["batch"])], dry_run=False)
+        return ids, before, {i: _plain(r) for i, r in (await _rows(db, ids["run"])).items()}, res
+
+    _, before, after, res = run_db(client, world, go)
+    assert before[1]["evaluated_quality_score"] is not None and before[1]["findings_approved"] == 1
+    assert res["batches"][0]["approvals_changed"] == 0 and res["batches"][0]["runs_rescored"] == 0
+    assert after == before  # quality_score and evaluated_quality_score included
+
+
+def test_the_same_batch_in_two_spellings_is_processed_once(client, world, monkeypatch):
+    monkeypatch.setattr(outcomes_service, "_invalidate_priors", lambda: None)
+
+    async def go(db):
+        s = await _seed_world(db, world)
+        canonical = str(s["b1"])
+        return await mark_packaging_approvals(
+            db, [canonical.upper(), canonical.replace("-", ""), canonical], dry_run=False
+        ), canonical
+
+    res, canonical = run_db(client, world, go)
+    assert [b["batch_id"] for b in res["batches"]] == [canonical]
+    assert res["batches"][0]["approvals_changed"] == 2 and res["batches"][0]["runs_rescored"] == 2
+
+
+def test_the_cli_real_run_output(client, world, monkeypatch, capsys):
+    import sys
+
+    from tret.db import engine as engine_mod
+
+    monkeypatch.setattr(outcomes_service, "_invalidate_priors", lambda: None)
+
+    async def seed(db):
+        return str((await _seed_world(db, world))["b1"])
+
+    bid = run_db(client, world, seed)
+    monkeypatch.setattr(engine_mod, "get_session_factory", lambda: world.factory)
+    out = []
+    for _ in range(2):
+        monkeypatch.setattr(sys, "argv", ["tret", "approvals", "mark-packaging", "--batch", bid])
+        cli.main()
+        out.append(capsys.readouterr().out)
+    print(out[0], out[1], sep="\n--- second run ---\n")
+    assert f"{bid}: 2 approvals changed, 2 runs re-scored" in out[0]
+    assert "quality after" in out[0] and "eval after" in out[0]
+    assert out[0].rstrip().endswith("A running server picks up the re-scored record within about 60 seconds (its priors cache lifetime).")
+    assert f"{bid}: 0 approvals changed, 2 runs re-scored" in out[1]

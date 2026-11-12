@@ -134,35 +134,56 @@ def _mark_packaging_approvals(batch_ids: list[str], dry_run: bool) -> None:
             return await mark_packaging_approvals(db, batch_ids, dry_run=dry_run)
 
     res = asyncio.run(run())
-    verb = "would change" if dry_run else "changed"
-    total = rescored = 0
+    changed = rescored = 0
     failed: list[str] = []
     for b in res["batches"]:
         if not b["found"]:
-            print(f"batch {b['batch_id']}: not found, nothing changed")
+            print(f"{b['batch_id']}: not found, nothing changed")
             continue
-        total += b["approvals_changed"]
+        changed += b["approvals_changed"]
         rescored += b["runs_rescored"]
         failed += b["runs_failed"]
-        print(
-            f"batch {b['batch_id']}: {verb} {b['approvals_changed']} approval(s), "
-            f"{'would re-score' if dry_run else 're-scored'} {b['runs_rescored']} run(s)"
-        )
+        if dry_run:
+            print(
+                f"{b['batch_id']}: would change {b['approvals_changed']} approvals, "
+                f"would re-score {b['runs_rescored']} runs"
+            )
+        else:
+            tail = f", {len(b['runs_failed'])} failed" if b["runs_failed"] else ""
+            print(
+                f"{b['batch_id']}: {b['approvals_changed']} approvals changed, "
+                f"{b['runs_rescored']} runs re-scored{tail}"
+            )
         if b["runs_failed"]:
             print(f"  re-score FAILED for run(s): {', '.join(b['runs_failed'])}", file=sys.stderr)
     if res["models"]:
-        header = f"{'model_id':<40} {'rows':>5} {'mean before':>12}"
-        print(header if dry_run else header + f" {'mean after':>11}")
+        def cell(v: float | None) -> str:
+            return "-" if v is None else f"{v:.4f}"
+
+        header = f"{'model_id':<40} {'rows':>5} {'quality before':>15}"
+        if not dry_run:
+            header += f" {'quality after':>14}"
+        header += f" {'eval rows':>10} {'eval before':>12}"
+        if not dry_run:
+            header += f" {'eval after':>11}"
+        print(header)
         for m in res["models"]:
-            line = f"{m['model_id']:<40} {m['rows']:>5} {m['mean_before']:>12.4f}"
+            line = f"{m['model_id']:<40} {m['rows']:>5} {cell(m['mean_before']):>15}"
             if not dry_run:
-                after = m["mean_after"]
-                line += f" {(f'{after:.4f}' if after is not None else '-'):>11}"
+                line += f" {cell(m['mean_after']):>14}"
+            line += f" {m['evaluated_rows']:>10} {cell(m['evaluated_mean_before']):>12}"
+            if not dry_run:
+                line += f" {cell(m['evaluated_mean_after']):>11}"
             print(line)
-    if total == 0 and rescored == 0 and not failed:
+    if dry_run:
+        print("dry run: no changes written" if (changed or rescored) else "nothing to change")
+    elif changed or rescored:
+        print(
+            "A running server picks up the re-scored record within about 60 seconds "
+            "(its priors cache lifetime)."
+        )
+    else:
         print("nothing to change")
-    elif dry_run:
-        print("dry run: no changes written")
     if failed:
         print(f"{len(failed)} run(s) could not be re-scored; run the command again", file=sys.stderr)
         sys.exit(1)

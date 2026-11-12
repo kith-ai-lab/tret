@@ -133,7 +133,9 @@ request to proceed. A packaging
 approval otherwise behaves exactly like any approval. For a batch whose maps were already
 approved as reviews, `tret approvals mark-packaging --batch <id> [--batch <id> ...]
 [--dry-run]` (run where the database is reachable) re-marks them as `packaging` and
-re-scores the affected runs, printing the before and after mean `quality_score` per model.
+re-scores the affected runs, printing per model the before and after mean `quality_score` and
+mean `evaluated_quality_score` (the value batch-family routing evidence reads; `-` when the model
+has no evaluated rows).
 It is safe to re-run: a second run changes no approvals and re-scores the same runs again,
 which repairs a re-score that failed the first time (failed runs are listed and the command
 exits non-zero). `--dry-run` prints what would change and the current means only. The command

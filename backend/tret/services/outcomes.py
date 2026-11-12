@@ -555,17 +555,24 @@ def _batch_run_ids(targets: list[BatchTarget]) -> set[uuid.UUID]:
     return ids
 
 
-async def _quality_by_model(db: AsyncSession, run_ids: set[uuid.UUID]) -> dict[str, list[float]]:
+async def _quality_by_model(
+    db: AsyncSession, run_ids: set[uuid.UUID]
+) -> dict[str, dict[str, list[float]]]:
+    """Per model: `quality` (every outcome row's quality_score) and `evaluated`
+    (the non-null evaluated_quality_score values)."""
     rows = (
         await db.execute(
-            select(RunOutcome.model_id, RunOutcome.quality_score).where(
-                RunOutcome.run_id.in_(run_ids)
-            )
+            select(
+                RunOutcome.model_id, RunOutcome.quality_score, RunOutcome.evaluated_quality_score
+            ).where(RunOutcome.run_id.in_(run_ids))
         )
     ).all()
-    out: dict[str, list[float]] = {}
-    for model_id, q in rows:
-        out.setdefault(model_id, []).append(float(q))
+    out: dict[str, dict[str, list[float]]] = {}
+    for model_id, q, e in rows:
+        m = out.setdefault(model_id, {"quality": [], "evaluated": []})
+        m["quality"].append(float(q))
+        if e is not None:
+            m["evaluated"].append(float(e))
     return out
 
 
@@ -589,11 +596,21 @@ async def mark_packaging_approvals(
 
     Returns `{"dry_run", "batches": [{"batch_id", "found", "approvals_changed",
     "runs_rescored", "runs_failed"}], "models": [{"model_id", "rows",
-    "mean_before", "mean_after"}]}`; `mean_after` is None on a dry run."""
+    "mean_before", "mean_after", "evaluated_rows", "evaluated_mean_before",
+    "evaluated_mean_after"}]}`; the "after" values are None on a dry run. The
+    evaluated means cover only rows whose evaluated_quality_score is not null."""
     per_batch: list[dict] = []
     marks: dict[uuid.UUID, Approval] = {}  # approval id -> row to flip
     rescore: dict[str, list[uuid.UUID]] = {}  # batch id -> runs to re-score
-    for raw in dict.fromkeys(batch_ids):
+    names: list[str] = []
+    for given in batch_ids:
+        try:
+            name = str(uuid.UUID(str(given)))  # one spelling per batch
+        except ValueError:
+            name = str(given)
+        if name not in names:
+            names.append(name)
+    for raw in names:
         entry = {
             "batch_id": raw, "found": False, "approvals_changed": 0,
             "runs_rescored": 0, "runs_failed": [],
@@ -651,7 +668,7 @@ async def mark_packaging_approvals(
 
     affected = {r for runs in rescore.values() for r in runs}
     before = await _quality_by_model(db, affected) if affected else {}
-    after: dict[str, list[float]] | None = None
+    after: dict[str, dict[str, list[float]]] | None = None
     if not dry_run:
         for a in marks.values():
             a.purpose = "packaging"
@@ -672,15 +689,22 @@ async def mark_packaging_approvals(
     else:
         for entry in per_batch:
             entry["runs_rescored"] = len(rescore.get(entry["batch_id"], []))
-    models = [
-        {
-            "model_id": m,
-            "rows": len(vals),
-            "mean_before": _mean(vals),
-            "mean_after": None if after is None else _mean(after.get(m, [])),
-        }
-        for m, vals in sorted(before.items())
-    ]
+    models = []
+    for m, vals in sorted(before.items()):
+        post = None if after is None else after.get(m, {"quality": [], "evaluated": []})
+        models.append(
+            {
+                "model_id": m,
+                "rows": len(vals["quality"]),
+                "mean_before": _mean(vals["quality"]),
+                "mean_after": None if post is None else _mean(post["quality"]),
+                # evaluated_quality_score is what batch-family routing evidence reads;
+                # means are over the rows where it is not null.
+                "evaluated_rows": len(vals["evaluated"]),
+                "evaluated_mean_before": _mean(vals["evaluated"]),
+                "evaluated_mean_after": None if post is None else _mean(post["evaluated"]),
+            }
+        )
     return {"dry_run": dry_run, "batches": per_batch, "models": models}
 
 
