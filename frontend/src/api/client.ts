@@ -3754,7 +3754,8 @@ export interface BatchScorecard {
   energy_per_acceptable_wh: number | null
   wall_seconds: number | null
   reliability: { infra_failures: number; timeouts: number; retries: number }
-  human: { decided_reviews: number; rejections: number }
+  /** `packaging_approvals`: page maps approved only so they could be packaged; not reviews. */
+  human: { decided_reviews: number; rejections: number; packaging_approvals?: number }
   models: { model: string; targets: number }[]
   outliers: ScorecardOutlier[]
   quality: {

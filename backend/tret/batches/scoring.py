@@ -43,6 +43,7 @@ from tret.batches import core
 from tret.batches.profiles import profile_for
 from tret.batches.rubrics import DEFAULT_ACCEPTABLE_QUALITY
 from tret.db.models import Batch, BatchEvaluation, BatchTarget, Finding, Harness, Run, TargetEvaluation
+from tret.services.outcomes import latest_approval_purposes
 
 CLASSES = ("success", "gap", "rejected", "failed", "infra", "timeout", "unsettled")
 UNSETTLED_STATUSES = frozenset({"pending", "held", "running", "review", "packaging"})
@@ -217,14 +218,17 @@ def target_metrics(
     findings: list[Finding],
     *,
     max_iterations: int | None = None,
+    packaging_ids: frozenset[uuid.UUID] | set[uuid.UUID] = frozenset(),
 ) -> dict:
-    """The numbers the scorecard, outliers and comparison read for one target."""
+    """The numbers the scorecard, outliers and comparison read for one target.
+    `packaging_ids` are findings whose latest approval is not a review (page maps
+    approved only so they could be packaged); they are not counted as reviews."""
     settings = batch.settings or {}
     cap = settings.get("max_iterations") or max_iterations
     retained = source = None
     if (batch.profile or "disclosure") == "disclosure":
         retained, source = _disclosure_pages(findings)
-    decided = [f for f in findings if f.status in ("approved", "rejected")]
+    decided = [f for f in findings if f.status in ("approved", "rejected") and f.id not in packaging_ids]
     return {
         "class": target_class(target),
         "cost_usd": round(core.target_cost(target, run), 6),
@@ -237,6 +241,7 @@ def target_metrics(
         "retained_pages": retained,
         "source_pages": source,
         "decided_reviews": len(decided),
+        "packaging_approvals": sum(1 for f in findings if f.status == "approved" and f.id in packaging_ids),
         "rejections": sum(1 for f in decided if f.status == "rejected"),
     }
 
@@ -309,6 +314,10 @@ async def collect(db: AsyncSession, batch: Batch) -> BatchData:
     targets = await core.load_targets(db, [batch.id])
     runs = await core.load_runs(db, targets)
     findings = await core.load_review_findings(db, profile, targets, batch)
+    approved_ids = [f.id for fs in findings.values() for f in fs if f.status == "approved"]
+    packaging_ids = frozenset(
+        fid for fid, purpose in (await latest_approval_purposes(db, approved_ids)).items() if purpose != "review"
+    )
     harness_cap = None
     if batch.harness_id is not None:
         harness = await db.get(Harness, batch.harness_id)
@@ -325,7 +334,7 @@ async def collect(db: AsyncSession, batch: Batch) -> BatchData:
             target=t,
             run=run,
             findings=fs,
-            metrics=target_metrics(batch, t, run, fs, max_iterations=harness_cap),
+            metrics=target_metrics(batch, t, run, fs, max_iterations=harness_cap, packaging_ids=packaging_ids),
             row=row_key(batch, t),
         )
         ev = by_target.get(t.id)
@@ -644,6 +653,7 @@ async def scorecard_from(db: AsyncSession, data: BatchData, *, router_gate: dict
         },
         "human": {
             "decided_reviews": sum(d.metrics["decided_reviews"] for d in data.targets),
+            "packaging_approvals": sum(d.metrics["packaging_approvals"] for d in data.targets),
             "rejections": sum(d.metrics["rejections"] for d in data.targets),
         },
         "models": [
