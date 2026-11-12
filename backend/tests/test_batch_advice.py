@@ -142,7 +142,7 @@ async def test_api_shape_and_validation(w, api):
     r = await api.post("/api/batches/advice", json={"profile": "disclosure", "fiscal_year": 2025})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert set(body) == {"family_key", "family_label", "objective", "evidence", "recommendation", "notes"}
+    assert set(body) == {"family_key", "family_label", "objective", "harness_id", "evidence", "recommendation", "notes"}
     assert set(body["evidence"]) == {"batches", "comparable", "models"}
     assert set(body["evidence"]["comparable"]) == {"rubric_key", "rubric_version", "judge_model"}
     assert set(body["recommendation"]) == {
@@ -192,3 +192,37 @@ async def test_a_free_model_gets_no_cost_cap_but_small_costs_keep_the_floor(w):
     await model_batch(w, "B1", "b1", {"m/a": [(90, 0.0, 3)] * 6})
     rec = (await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025))["recommendation"]
     assert rec["cost_cap_usd"] is None and rec["cost_cap_basis"] is None
+
+
+async def test_a_newer_batch_outside_the_pooled_interval_gets_a_note_but_no_new_pick(w):
+    await model_batch(w, "B1", "b1", FAMILY, minutes=0)
+    await collector(w, "balanced")
+    before = await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025)
+    assert before["recommendation"]["model"] == "m/cheap"
+    assert not any("most recent batch" in n for n in before["notes"])
+    assert before["harness_id"] is not None
+    cheap = next(m for m in before["evidence"]["models"] if m["model"] == "m/cheap")
+    assert cheap["batches"] == 1 and cheap["latest_batch"]["quality_mean"] == cheap["quality_mean"]
+    await model_batch(w, "B2", "b2", {"m/cheap": [(60, 0.04, 4)] * 5}, minutes=60)
+    out = await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025)
+    cheap = next(m for m in out["evidence"]["models"] if m["model"] == "m/cheap")
+    assert cheap["latest_batch"]["name"] == "B2" and cheap["latest_batch"]["quality_mean"] == 60
+    note = next(n for n in out["notes"] if n.startswith("m/cheap: its most recent batch scored 60 over 5 rows"))
+    assert note.endswith("pooled over 2 batches. The recommendation uses the pooled figure.")
+    assert not any(n.startswith("m/best: its most recent") for n in out["notes"])
+
+
+async def test_advice_harness_id_is_null_without_a_collector_harness(w):
+    out = await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025)
+    assert "harness_id" in out
+
+
+async def test_the_recent_batch_note_needs_enough_scored_rows_in_that_batch(w):
+    await model_batch(w, "B1", "b1", FAMILY, minutes=0)
+    await collector(w, "balanced")
+    await model_batch(w, "B2", "b2", {"m/cheap": [(60, 0.04, 4)] * 2}, minutes=60)
+    out = await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025)
+    assert not any("most recent batch" in n for n in out["notes"])
+    await model_batch(w, "B3", "b3", {"m/cheap": [(60, 0.04, 4)] * 5}, minutes=120)
+    out = await advice.batch_advice(w.db, w.ws.id, profile="disclosure", fiscal_year=2025)
+    assert any(n.startswith("m/cheap: its most recent batch scored 60 over 5 rows") for n in out["notes"])

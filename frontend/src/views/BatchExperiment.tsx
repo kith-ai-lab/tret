@@ -142,9 +142,19 @@ export function BatchExperiment() {
   }
   const promoted = exp.promoted
   const routerPick = previewMutation.data?.results?.[0] ?? null
+  const weighted = arms.some((a) => a.share !== null && a.share !== undefined)
 
   const rows: { name: string; cell: (a: ExperimentArmResult) => React.ReactNode }[] = [
     { name: 'Sets', cell: (a) => armSets(a) },
+    ...(weighted
+      ? [
+          {
+            name: 'Share',
+            cell: (a: ExperimentArmResult) =>
+              a.share === null || a.share === undefined ? '—' : `${Math.round(a.share * 1000) / 10}%`,
+          },
+        ]
+      : []),
     {
       name: 'Batch',
       cell: (a) =>

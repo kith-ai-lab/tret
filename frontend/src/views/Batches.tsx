@@ -15,7 +15,7 @@ import {
   type CreateExperimentBody,
   type DisclosureTargetOutcome,
 } from '../api/client'
-import { AdvicePanel, CostCapField, RowMemoryField, parseCostCap } from '../components/batches/AdvicePanel'
+import { AdvicePanel, CostCapField, RowMemoryField, parseCostCap, useBatchAdvice } from '../components/batches/AdvicePanel'
 import { ObjectiveSelect, useExperimentForm } from '../components/batches/ExperimentSection'
 import { DisclosurePanels } from '../components/batches/DisclosurePanels'
 import { EvaluationDrawer } from '../components/batches/EvaluationDrawer'
@@ -335,7 +335,18 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
 
   const effectiveTarget = targetSlug || targets[0]?.slug || ''
   const csvRowCount = Math.max(0, csv.split('\n').filter((l) => l.trim() !== '').length - 1)
-  const experiment = useExperimentForm(open, profile === 'prompt' ? prompt.rowCount : csvRowCount)
+  // Same key as the disclosure AdvicePanel's request, so this reads its cache.
+  const disclosureAdvice = useBatchAdvice(
+    open && profile === 'disclosure',
+    profile === 'disclosure' ? { profile: 'disclosure', fiscal_year: fiscalYear } : null,
+  )
+  const experimentHarnessId =
+    profile === 'prompt' ? (prompt.body?.harness_id ?? null) : (disclosureAdvice.query.data?.harness_id ?? null)
+  const experiment = useExperimentForm(
+    open,
+    profile === 'prompt' ? prompt.rowCount : csvRowCount,
+    experimentHarnessId,
+  )
 
   const experimentMutation = useMutation({
     mutationFn: (body: CreateExperimentBody) => api.createExperiment(body),
@@ -1175,7 +1186,10 @@ function TargetsTable({
                       </td>
                       {evalCells(t)}
                       <td className="num">{formatCost(t.cost_usd)}</td>
-                      <td>{t.model_used ?? '—'}</td>
+                      <td>
+                        {t.model_used ?? '—'}
+                        {t.explored && <ExplorationChip />}
+                      </td>
                       {runCell(t)}
                       <td className="error-text" style={{ maxWidth: 220 }}>
                         {t.error ?? ''}
@@ -1237,7 +1251,10 @@ function TargetsTable({
                     </td>
                     {evalCells(t)}
                     <td className="num">{formatCost(t.cost_usd)}</td>
-                    <td>{t.model_used ?? '—'}</td>
+                    <td>
+                      {t.model_used ?? '—'}
+                      {t.explored && <ExplorationChip />}
+                    </td>
                     {runCell(t)}
                     <td className="error-text" style={{ maxWidth: 220 }}>
                       {t.error ?? ''}
@@ -1478,5 +1495,17 @@ function RecordsPreview({
         </div>
       ) : null}
     </Modal>
+  )
+}
+
+function ExplorationChip() {
+  return (
+    <span
+      className="chip chip-check"
+      style={{ marginLeft: 6 }}
+      title="An exploration run: the router tried a model with little record on this agent."
+    >
+      exploration
+    </span>
   )
 }

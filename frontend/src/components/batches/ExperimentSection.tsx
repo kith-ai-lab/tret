@@ -38,9 +38,10 @@ interface ArmDraft {
   model: string
   objective: string
   maxIterations: string
+  weight: string
 }
 
-const BLANK_ARM: ArmDraft = { label: '', model: '', objective: '', maxIterations: '' }
+const BLANK_ARM: ArmDraft = { label: '', model: '', objective: '', maxIterations: '', weight: '' }
 const ARM_KEYS = ['A', 'B', 'C']
 
 const MODE_TEXT: Record<ExperimentMode, string> = {
@@ -57,8 +58,17 @@ function splitCounts(rows: number, arms: number): string {
   return `${counts.slice(0, -1).join(', ')} and ${counts[counts.length - 1]} rows per arm`
 }
 
-function armIn(a: ArmDraft): ExperimentArmIn {
+/** Resulting percentages of the filled shares, e.g. "A 80% · B 10% · C 10%"; null when none or unusable. */
+function sharesText(arms: ArmDraft[]): string | null {
+  const ws = arms.map((a) => Number(a.weight))
+  if (arms.some((a) => a.weight.trim() === '') || ws.some((w) => !Number.isFinite(w) || w <= 0)) return null
+  const total = ws.reduce((x, y) => x + y, 0)
+  return ws.map((w, i) => `${ARM_KEYS[i]} ${Math.round((w / total) * 1000) / 10}%`).join(' · ')
+}
+
+function armIn(a: ArmDraft, withWeight: boolean): ExperimentArmIn {
   const out: ExperimentArmIn = {}
+  if (withWeight && a.weight.trim()) out.weight = Number(a.weight)
   if (a.label.trim()) out.label = a.label.trim()
   if (a.model.trim()) out.model_override = a.model.trim()
   if (a.objective) out.objective = a.objective
@@ -73,11 +83,14 @@ function armSignature(a: ArmDraft): string {
 /** State + fields of the "Run as an experiment" section of the New batch
  *  modal. `rowCount` is how many rows the batch will have (for the estimate);
  *  `valid` is false while the section is on and the arms would be refused. */
-export function useExperimentForm(open: boolean, rowCount: number) {
+export function useExperimentForm(open: boolean, rowCount: number, harnessId: string | null = null) {
   const [enabled, setEnabled] = useState(false)
   const [mode, setMode] = useState<ExperimentMode>('replicate')
   const [arms, setArms] = useState<ArmDraft[]>([{ ...BLANK_ARM }, { ...BLANK_ARM }])
   const [sampleN, setSampleN] = useState('')
+  // Per arm: the router's suggestion note or error, set only when the person asks.
+  const [hints, setHints] = useState<Record<number, string>>({})
+  const [asking, setAsking] = useState<number | null>(null)
   const modelsQuery = useQuery({
     queryKey: ['models'],
     queryFn: api.listModels,
@@ -88,6 +101,31 @@ export function useExperimentForm(open: boolean, rowCount: number) {
 
   const setArm = (i: number, patch: Partial<ArmDraft>) =>
     setArms((prev) => prev.map((a, j) => (j === i ? { ...a, ...patch } : a)))
+
+  const askRouter = async (i: number) => {
+    if (!harnessId) return
+    setAsking(i)
+    try {
+      const r = await api.previewRouting({ harness_id: harnessId })
+      const d = r.results?.[0]?.decision
+      const candidate = d?.scored?.exploration?.candidate ?? d?.shadow?.exploration?.candidate ?? null
+      if (!d?.scored && !d?.shadow) {
+        setHints((h) => ({
+          ...h,
+          [i]: 'The scored ranking is not on for this agent, so the router has no candidate to suggest.',
+        }))
+      } else if (candidate) {
+        setArm(i, { model: candidate })
+        setHints((h) => ({ ...h, [i]: "the router's next untried model for this agent" }))
+      } else {
+        setHints((h) => ({ ...h, [i]: 'The router has no untried model to suggest for this agent.' }))
+      }
+    } catch {
+      setHints((h) => ({ ...h, [i]: 'The router could not be asked just now.' }))
+    } finally {
+      setAsking(null)
+    }
+  }
 
   const sampleValue = sampleN.trim() === '' ? null : Number(sampleN)
   const problems: string[] = []
@@ -106,6 +144,14 @@ export function useExperimentForm(open: boolean, rowCount: number) {
     const sigs = arms.map(armSignature)
     if (new Set(sigs).size !== sigs.length && arms.every((a) => armSignature(a) !== '||'))
       problems.push('Arms must differ from each other.')
+    if (mode === 'split') {
+      const filled = arms.filter((a) => a.weight.trim() !== '')
+      if (filled.length > 0 && filled.length < arms.length)
+        problems.push('Give every arm a share or none.')
+      if (filled.some((a) => !(Number(a.weight) > 0)))
+        problems.push('Each share must be a number greater than 0.')
+      if (filled.some((a) => Number(a.weight) > 1000)) problems.push('Each share must be at most 1000.')
+    }
     if (mode === 'split' && sampleValue !== null)
       problems.push('A sample size is only for replicate mode.')
     if (mode === 'split' && rowCount > 0 && rowCount < arms.length)
@@ -127,7 +173,7 @@ export function useExperimentForm(open: boolean, rowCount: number) {
   const buildBody = (batch: CreateBatchBody): CreateExperimentBody => ({
     name: batch.name,
     mode,
-    arms: arms.map(armIn),
+    arms: arms.map((a) => armIn(a, mode === 'split')),
     ...(mode === 'replicate' && sampleValue !== null ? { sample_n: sampleValue } : {}),
     batch,
   })
@@ -186,8 +232,25 @@ export function useExperimentForm(open: boolean, rowCount: number) {
                   type="text"
                   list="experiment-models"
                   value={a.model}
-                  onChange={(e) => setArm(i, { model: e.target.value })}
+                  onChange={(e) => {
+                    setArm(i, { model: e.target.value })
+                    setHints((h) => {
+                      const { [i]: _drop, ...rest } = h
+                      return rest
+                    })
+                  }}
                 />
+                {harnessId && (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={asking !== null}
+                    onClick={() => void askRouter(i)}
+                  >
+                    {asking === i ? 'Asking the router…' : "Use the router's next candidate"}
+                  </button>
+                )}
+                {hints[i] && <span className="fine-print">{hints[i]}</span>}
               </div>
               <div className="field">
                 <label className="mono-label">Objective</label>
@@ -204,6 +267,20 @@ export function useExperimentForm(open: boolean, rowCount: number) {
                   onChange={(e) => setArm(i, { maxIterations: e.target.value })}
                 />
               </div>
+              {mode === 'split' && (
+                <div className="field">
+                  <label className="mono-label">Share</label>
+                  <input
+                    type="number"
+                    min={0}
+                    step="any"
+                    style={{ width: 90 }}
+                    placeholder="equal"
+                    value={a.weight}
+                    onChange={(e) => setArm(i, { weight: e.target.value })}
+                  />
+                </div>
+              )}
               {arms.length > 2 && (
                 <button
                   type="button"
@@ -223,6 +300,13 @@ export function useExperimentForm(open: boolean, rowCount: number) {
             >
               Add arm C
             </button>
+          )}
+          {mode === 'split' && (
+            <div className="fine-print" style={{ marginTop: 6 }}>
+              {sharesText(arms) && <div>{sharesText(arms)}</div>}
+              A small share makes that arm a challenger. The page recommends nothing for an arm with fewer than
+              five scored rows.
+            </div>
           )}
           {mode === 'replicate' && (
             <div className="field" style={{ marginTop: 10 }}>

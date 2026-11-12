@@ -342,6 +342,12 @@ def written_files_latest(t: BatchTarget) -> list[dict]:
     return list(latest.values())
 
 
+def _run_explored(run: Run | None) -> bool:
+    routing = run.routing if run is not None else None
+    exploration = routing.get("exploration") if isinstance(routing, dict) else None
+    return isinstance(exploration, dict) and exploration.get("explored") is True
+
+
 def target_out(
     t: BatchTarget, run: Run | None, findings: list[Finding], profile: BatchProfile | None = None
 ) -> dict:
@@ -369,6 +375,7 @@ def target_out(
         "cost_usd": round(target_cost(t, run), 6),
         "model_used": run.model_used if run else None,
         "iterations": run.iterations if run else None,
+        "explored": _run_explored(run),
         "started_at": _iso(t.started_at),
         "finished_at": _iso(t.finished_at),
     }

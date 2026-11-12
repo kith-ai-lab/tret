@@ -161,6 +161,10 @@ review is on, else the run's most recent finding of any type, else `null`. Targe
 status for a prompt batch is one of `pending`, `held`, `running`, `review`,
 `completed`, `rejected`, `failed`.
 
+Every target in the API also has `explored`: true when its current run was an
+exploration run, that is, the router tried a model it had little evidence on instead of
+its usual pick (`run.routing.exploration.explored`).
+
 ## The gate, pause and retry
 
 These work for every profile. With `first_batch_size` N, only the first N rows run;
@@ -634,7 +638,12 @@ left out of the model table. Per model: delivered, yield, mean quality with a 90
 bootstrap interval (three or more scores), mean residual, cost and Wh per acceptable
 result, p95 iterations and cost over acceptable runs, infrastructure failures and a Pareto
 mark (not beaten on both quality and cost per acceptable result, among models with three
-or more scored rows). The page is `/batches/family?key=...`; it is computed on demand and
+or more scored rows). Each model row also has `latest_batch`: the model's rows in the most
+recent comparable batch that contains it, on their own (batch id, name, date, scored rows,
+mean quality and its 90% interval), or null when that batch has no scored row for the
+model. The pooled figures do not change; `latest_batch` is there because a model whose
+harness was fixed between two batches scores differently in the newer one, and the pooled
+mean hides that. The page is `/batches/family?key=...`; it is computed on demand and
 never polled.
 
 The chat harness gains `batch_compare` (batch_a, batch_b): the compare summary, the
@@ -674,6 +683,11 @@ iteration or cost values, and the concurrency suggestion if there is one; it is 
 when there is nothing to say, and `notes` say why. An unknown or archived `harness_id` on a
 prompt request is a 422, as at batch creation. Notes
 also flag a single earlier batch, thin models and batches left out as not comparable.
+When a model appears in two or more batches and its most recent batch, with at least 5
+scored rows for that model, scored outside its pooled 90% interval, a note gives both figures and says the recommendation uses the
+pooled one. The recommendation rule is unchanged. The response also carries `harness_id`,
+the harness the family's batches run on (null when there is none), and each model in
+`evidence.models` carries `latest_batch` as described under Families.
 
 ### Cost cap per target
 
@@ -733,6 +747,13 @@ the experiment and an **admin** (not an approver) promotes an arm.
   the same rows in every arm). The comparison is paired. `split` creates one batch and gives
   each row to one arm, round-robin within market and category in register order starting
   with A. The comparison is unpaired.
+- **Weights.** The arms of a split experiment can each carry a `weight` (a number above 0, on
+  every arm or none; a replicate refuses them), so a challenger can take a small share of the rows.
+  Rows are dealt in the same order as before, each to the arm furthest below its share of the rows
+  dealt so far, so a small arm is spread across the register rather than bunched at the end, and
+  equal weights give the plain round-robin. Creation is refused if an arm would get no row. A small
+  arm needs at least five scored rows before the page recommends anything, and a split comparison is
+  between different rows, so a small arm has a wide interval.
 - **Create and start.** `POST /api/batches/experiments` (approver) with `{name, mode, arms,
   sample_n, batch}` where `batch` is a normal create body; creation is all-or-nothing.
   `POST /api/batches/experiments/{id}/start` starts every arm. `start_batch` accepts

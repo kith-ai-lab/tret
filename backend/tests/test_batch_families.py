@@ -171,3 +171,27 @@ async def test_a_dead_current_pass_is_not_part_of_the_comparable_set(w, api):
     assert row["comparable"] is False and row["judge_model"] is None
     listed = (await families.list_families(w.db, w.ws.id))[0]
     assert listed["batches"] == 2 and listed["evaluated_batches"] == 1
+
+
+async def test_latest_batch_is_the_models_most_recent_comparable_batch(w):
+    await model_batch(w, "Old", "old", {"m/a": [(80, 0.1, 3), (82, 0.1, 3), (81, 0.1, 3)]}, minutes=0)
+    await model_batch(
+        w, "New", "new",
+        {"m/a": [(90, 0.1, 3), (91, 0.1, 3), (92, 0.1, 3), (90, 0.1, 3)], "m/only": [(70, 0.1, 3)]},
+        minutes=60,
+    )
+    models = {m["model"]: m for m in (await families.family_models(w.db, w.ws.id, "disclosure:fy2025"))["models"]}
+    latest = models["m/a"]["latest_batch"]
+    assert latest["name"] == "New" and latest["scored"] == 4 and latest["quality_mean"] == 90.8
+    assert latest["created_at"] and latest["batch_id"]
+    assert models["m/a"]["batches"] == 2 and models["m/a"]["quality_mean"] < latest["quality_mean"]
+    only = models["m/only"]
+    assert only["latest_batch"]["scored"] == only["scored"] == 1
+    assert only["latest_batch"]["quality_mean"] == only["quality_mean"]
+
+
+async def test_latest_batch_is_null_when_its_rows_are_unscored(w):
+    await model_batch(w, "Old", "old", {"m/a": [(80, 0.1, 3), (82, 0.1, 3)]}, minutes=0)
+    await model_batch(w, "New", "new", {"m/a": [(None, 0.1, 3, "failed")]}, minutes=60)
+    models = {m["model"]: m for m in (await families.family_models(w.db, w.ws.id, "disclosure:fy2025"))["models"]}
+    assert models["m/a"]["latest_batch"] is None

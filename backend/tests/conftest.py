@@ -21,6 +21,17 @@ LIVE_ENV_FLAG = "TRET_LIVE_EVALS"
 os.environ.setdefault("TRET_OPENROUTER_CATALOG", "false")
 
 
+@pytest.fixture(autouse=True)
+def _restore_batch_app():
+    """The app lifespan binds `batches.core._app` and leaves it draining at shutdown;
+    restore it so a test that enters the lifespan cannot make later tests see draining."""
+    from tret.batches import core
+
+    saved = core._app
+    yield
+    core._app = saved
+
+
 def pytest_collection_modifyitems(config, items) -> None:
     if os.environ.get(LIVE_ENV_FLAG) == "1":
         return

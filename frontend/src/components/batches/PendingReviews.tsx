@@ -38,6 +38,10 @@ export function PendingReviews({
     () => new Map(targets.map((t) => [t.id, t.label || t.company || t.slug])),
     [targets],
   )
+  const exploredIds = useMemo(() => new Set(targets.filter((t) => t.explored).map((t) => t.id)), [targets])
+  const isExploration = (m: BatchPendingReview) =>
+    m.schema_slug === 'package_map' && exploredIds.has(m.target_id)
+  const explorationPending = reviews.filter(isExploration).length
   const packageMaps = reviews.length > 0 && reviews.every((m) => m.schema_slug === 'package_map')
 
   const hasPackageMap = reviews.some((m) => m.schema_slug === 'package_map')
@@ -73,6 +77,10 @@ export function PendingReviews({
       return next
     })
   const chosen = ids.filter((i) => selected.has(i))
+  const explorationChosen = chosen.some((id) => {
+    const m = reviews.find((r) => r.id === id)
+    return m ? isExploration(m) : false
+  })
   const failures = results.filter((r): r is Extract<BatchDecideResult, { ok: false }> => !r.ok)
 
   return (
@@ -80,6 +88,17 @@ export function PendingReviews({
       <div className="mono-label" style={{ marginBottom: 6 }}>
         {packageMaps ? 'Package maps' : 'Findings'} awaiting review ({reviews.length})
       </div>
+      {explorationPending > 0 && (
+        <div className="callout callout-warn" style={{ marginBottom: 8 }}>
+          <div className="mono-label">Exploration runs</div>
+          <div>
+            {explorationPending === 1 ? '1 of these comes' : `${explorationPending} of these come`} from an
+            exploration run. A success on such a run counts toward the model&rsquo;s record only after one of its
+            findings is approved in review. A packaging-only approval, or the judge&rsquo;s score, does not count
+            it.
+          </div>
+        </div>
+      )}
       <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
         <label className="check-row">
           <input
@@ -137,6 +156,9 @@ export function PendingReviews({
               }}
           />
           <span>Approve for packaging only (does not count as a review)</span>
+          {packagingOnly && explorationChosen && (
+            <span className="fine-print"> Selected exploration runs will not count for their model.</span>
+          )}
         </label>
       )}
       {packagingError && (
@@ -211,7 +233,18 @@ export function PendingReviews({
               return (
                 <tr key={m.id}>
                   {checkbox}
-                  <td>{labelById.get(m.target_id) ?? '—'}</td>
+                  <td>
+                    {labelById.get(m.target_id) ?? '—'}
+                    {isExploration(m) && (
+                      <span
+                        className="chip chip-check"
+                        style={{ marginLeft: 6 }}
+                        title="An exploration run: the router tried a model with little record on this agent."
+                      >
+                        exploration
+                      </span>
+                    )}
+                  </td>
                   <td>{p.stem}</td>
                   <td>
                     {map.role} / {map.scope}

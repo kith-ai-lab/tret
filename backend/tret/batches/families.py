@@ -159,11 +159,25 @@ def models_from(datas: list[scoring.BatchData]) -> dict:
     models = []
     for model, items in per_model.items():
         ds = [d for _, d in items]
+        newest = max((data for data, _ in items), key=lambda data: scoring.core._aware(data.batch.created_at))
+        latest = group_stats([d for data, d in items if data is newest])
         models.append(
             {
                 "model": model,
                 "batches": len({data.batch.id for data, _ in items}),
                 **group_stats(ds),
+                "latest_batch": (
+                    {
+                        "batch_id": str(newest.batch.id),
+                        "name": newest.batch.name,
+                        "created_at": newest.batch.created_at.isoformat() if newest.batch.created_at else None,
+                        "scored": latest["scored"],
+                        "quality_mean": latest["quality_mean"],
+                        "quality_interval90": latest["quality_interval90"],
+                    }
+                    if latest["scored"]
+                    else None
+                ),
             }
         )
     frontier = [

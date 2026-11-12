@@ -161,6 +161,11 @@ function ModelTable({ advice }: { advice: BatchAdvice }) {
                     ({m.quality_interval90[0].toFixed(1)} to {m.quality_interval90[1].toFixed(1)})
                   </span>
                 ) : null}
+                {m.batches > 1 && m.latest_batch && m.latest_batch.quality_mean !== null && (
+                  <div className="fine-print">
+                    latest batch {fmtScore(m.latest_batch.quality_mean)} (n={m.latest_batch.scored})
+                  </div>
+                )}
               </td>
               <td className="num">{fmtScore(m.mean_residual)}</td>
               <td className="num">{dash(m.cost_per_acceptable_usd, (n) => formatCost(n))}</td>

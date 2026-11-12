@@ -390,3 +390,30 @@ def test_allowlist_warnings_are_capped():
         mp.undo()
         get_settings.cache_clear()
     assert len(out) == 21 and out[-1] == "... and 5 more"
+
+
+@pytest.mark.parametrize(
+    ("routing", "expected"),
+    [
+        ({"exploration": {"explored": True}}, True),
+        (None, False),
+        ({}, False),
+        ({"exploration": None}, False),
+        ({"exploration": {"explored": False}}, False),
+        ("not a dict", False),
+        ({"exploration": "not a dict"}, False),
+    ],
+)
+def test_target_out_marks_exploration_runs(routing, expected):
+    from datetime import datetime, timezone
+
+    from tret.db.models import BatchTarget
+
+    now = datetime.now(timezone.utc)
+    t = BatchTarget(
+        id=uuid.uuid4(), collection_id=uuid.uuid4(), position=0, slug="s", label="S", status="completed",
+        task_input={}, history=[], written_files=[], finding_ids=[], attempts=1, started_at=now, finished_at=now,
+    )
+    run = Run(id=uuid.uuid4(), routing=routing, cost_usd=0, iterations=1, model_used="m/x")
+    assert core.target_out(t, run, [], profile=SimpleNamespace(target_extra=lambda *a: {}))["explored"] is expected
+    assert core.target_out(t, None, [], profile=SimpleNamespace(target_extra=lambda *a: {}))["explored"] is False

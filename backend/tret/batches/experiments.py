@@ -16,6 +16,7 @@ import random
 import statistics
 import uuid
 from dataclasses import dataclass, field
+from fractions import Fraction
 from types import SimpleNamespace
 from typing import Any
 
@@ -32,7 +33,8 @@ from tret.router_llm.router import _max_cost_tier
 
 ARM_KEYS = ("A", "B", "C")
 MODES = ("replicate", "split")
-ARM_FIELDS = ("label", "model_override", "objective", "max_iterations")
+ARM_FIELDS = ("label", "model_override", "objective", "max_iterations", "weight")
+MAX_WEIGHT = 1000
 MIN_SAMPLE = 2
 UNPAIRED_NOTE = "different rows"
 
@@ -61,8 +63,9 @@ def _label(arm: dict) -> str:
     return ", ".join(parts)
 
 
-def clean_arms(raw: Any) -> list[dict]:
-    """Validate the arm list: 2-3 arms, each setting at least one known field, all different."""
+def clean_arms(raw: Any, mode: str | None = None) -> list[dict]:
+    """Validate the arm list: 2-3 arms, each setting at least one known field, all different.
+    A weight (split experiments only) is on every arm or on none."""
     if not isinstance(raw, list) or not 2 <= len(raw) <= len(ARM_KEYS):
         raise HTTPException(422, f"An experiment needs 2 or {len(ARM_KEYS)} arms")
     catalog = get_catalog()
@@ -91,12 +94,18 @@ def clean_arms(raw: Any) -> list[dict]:
             raise HTTPException(
                 422, f"Arm {key} sets nothing: give it a model_override, an objective or max_iterations"
             )
+        weight = item.get("weight")
+        if weight is not None and (
+            isinstance(weight, bool) or not isinstance(weight, (int, float)) or not 0 < weight <= MAX_WEIGHT
+        ):
+            raise HTTPException(422, f"Arm {key}: weight must be a number above 0 and at most {MAX_WEIGHT}")
         arm = {
             "key": key,
             "label": (str(item.get("label") or "").strip()[:80]) or "",
             "model_override": model or None,
             "objective": objective,
             "max_iterations": iterations,
+            "weight": float(weight) if weight is not None else None,
         }
         arm["label"] = arm["label"] or _label(arm)
         arms.append(arm)
@@ -104,8 +113,20 @@ def clean_arms(raw: Any) -> list[dict]:
     for arm in arms:
         sig = (arm["model_override"], arm["objective"], arm["max_iterations"])
         if sig in seen:
+            if arm["weight"] is not None:
+                raise HTTPException(
+                    422,
+                    f"Arms {seen[sig]} and {arm['key']} run the same settings; a weight changes only the share of rows",
+                )
             raise HTTPException(422, f"Arms {seen[sig]} and {arm['key']} are identical")
         seen[sig] = arm["key"]
+    weighted = [a["key"] for a in arms if a["weight"] is not None]
+    if weighted and mode == "replicate":
+        raise HTTPException(
+            422, "weights are only for split experiments: a replicate runs every row in every arm"
+        )
+    if weighted and len(weighted) != len(arms):
+        raise HTTPException(422, "give every arm a weight or none")
     return arms
 
 
@@ -163,11 +184,13 @@ def sample_rows(rows: list[dict], n: int, profile: str) -> list[dict]:
     return [{**r, "position": i} for i, r in enumerate(chosen, start=1)]
 
 
-def assign_arms(rows: list[dict], keys: list[str], profile: str) -> list[dict]:
+def assign_arms(rows: list[dict], keys: list[str], profile: str, weights: list[float] | None = None) -> list[dict]:
     """Deal the arm keys over the rows in position order, within each stratum in turn
     (disclosure: market and category) and carrying the rotation across strata, so each
     stratum is spread over the arms and the arm counts differ by at most one overall.
-    Starts with A; deterministic."""
+    Starts with A; deterministic. With `weights` (one per key) the same walk deals by smooth
+    weighted round-robin: each row goes to the arm furthest below its share of the rows
+    dealt so far (ties to the earlier arm), and every arm must end up with a row."""
     if len(rows) < len(keys):
         raise HTTPException(
             422, f"A split experiment needs at least one row per arm: {len(rows)} row(s) for {len(keys)} arms"
@@ -177,6 +200,25 @@ def assign_arms(rows: list[dict], keys: list[str], profile: str) -> list[dict]:
         strata.setdefault(_stratum(r, profile), []).append(r)
     arm_of: dict[int, str] = {}
     offset = 0
+    if weights is not None:
+        exact = [Fraction(str(w)) for w in weights]
+        total = sum(exact)
+        shares = [w / total for w in exact]
+        counts = [0] * len(keys)
+        for group in strata.values():
+            for r in group:
+                best = max(range(len(keys)), key=lambda i: (shares[i] * (offset + 1) - counts[i], -i))
+                counts[best] += 1
+                arm_of[r["position"]] = keys[best]
+                offset += 1
+        for i, key in enumerate(keys):
+            if counts[i] == 0:
+                raise HTTPException(
+                    422,
+                    f"Arm {key} would get no rows: {len(rows)} rows at a share of {float(shares[i]) * 100:.1f}%; "
+                    "give it a larger share or add rows",
+                )
+        return [{**r, "arm": arm_of[r["position"]]} for r in sorted(rows, key=lambda r: r["position"])]
     for group in strata.values():
         for r in group:
             arm_of[r["position"]] = keys[offset % len(keys)]
@@ -201,7 +243,7 @@ async def create_experiment(db: AsyncSession, workspace: Any, user: Any, spec: E
         raise HTTPException(422, "name is required")
     if spec.mode not in MODES:
         raise HTTPException(422, f"mode must be one of {', '.join(MODES)}")
-    arms = clean_arms(spec.arms)
+    arms = clean_arms(spec.arms, spec.mode)
     base = spec.batch
     profile = getattr(base, "profile", None) or "disclosure"
     sample_n = spec.sample_n
@@ -240,6 +282,7 @@ async def create_experiment(db: AsyncSession, workspace: Any, user: Any, spec: E
                 arm["batch_id"] = str(batch.id)
         else:
             keys = [a["key"] for a in arms]
+            weights = [a["weight"] for a in arms] if arms[0]["weight"] is not None else None
             batch, _ = await core.create_batch(
                 db,
                 workspace_id=workspace_id,
@@ -247,7 +290,7 @@ async def create_experiment(db: AsyncSession, workspace: Any, user: Any, spec: E
                 body=base,
                 profile_slug=profile,
                 settings_extra={"experiment": {"id": str(experiment_id), "arms": copy.deepcopy(arms)}},
-                row_filter=lambda rows: assign_arms(rows, keys, profile),
+                row_filter=lambda rows: assign_arms(rows, keys, profile, weights),
                 commit=False,
             )
             for arm in arms:
@@ -602,12 +645,15 @@ async def experiment_result(db: AsyncSession, e: BatchExperiment) -> dict:
         d is not None and d.current is not None and d.current.status in ("pending", "running")
         for d in [*datas.values(), split_data]
     )
+    weight_total = sum(a.get("weight") or 0 for a in e.arms)
     for a in e.arms:
         k = a["key"]
         ds = per_arm_data.get(k, [])
         stats = families.group_stats(ds, intervals=bootstrap)
         b = batches.get(k)
         plan = promotion_plan(e, a, harness, last_row)
+        weight = a.get("weight")
+        share = round(weight / weight_total, 4) if weight is not None and weight_total and e.mode == "split" else None
         arms_out.append(
             {
                 "key": k,
@@ -615,6 +661,8 @@ async def experiment_result(db: AsyncSession, e: BatchExperiment) -> dict:
                 "model_override": a.get("model_override"),
                 "objective": a.get("objective"),
                 "max_iterations": a.get("max_iterations"),
+                "weight": weight,
+                "share": share,
                 "batch_id": a.get("batch_id"),
                 "batch_status": b.status if b is not None else None,
                 "targets": stats["targets"],
