@@ -18,7 +18,7 @@
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@vitest/runner": "^4.1.11",
     "@vitest/snapshot": "^4.1.11",
-    "vitest": "^4.1.11",
+    "vitest": "^4.1.12",
     "wrangler": "^4.142.0"
   },
   "allowScripts": {
