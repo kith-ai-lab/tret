@@ -16,6 +16,9 @@ evaluation pass exists (`tret/batches/evaluation.py`), its scores.
 - `delivered_elsewhere`: for a disclosure batch's rows, the acceptable deliveries
   of the same company in other batches of the family (the cross-check that tests a
   gap's reason; the judge decides, nothing is overridden in code).
+- `primaries_elsewhere`: for a disclosure batch's delivered rows, the main documents
+  that other batches of the family packaged for the same company and this run did
+  not (the mirror image of the gap cross-check; the judge decides).
 - `recompute_relative`: rank, percentile and expected-vs-actual (residual) for
   the scored rows of a pass.
 """
@@ -26,11 +29,14 @@ import random
 import re
 import statistics
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
+from sqlalchemy.orm import load_only
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.batches import core
@@ -59,6 +65,15 @@ DISQUALIFYING_FLAGS = frozenset(
     }
 )
 CROSS_CHECK_MAX = 3
+# Package-map roles that are the issuer's main disclosure document (the rest are
+# companions: an index, a scorecard, a data appendix, a glossary).
+MAIN_DOCUMENT_ROLES = frozenset({"primary_disclosure", "embedded_statement_and_assurance"})
+# A main-role source of another run below this share of the largest main-role source
+# this run packaged is not a missing main document (an index labelled primary).
+MAIN_DOCUMENT_MIN_RATIO = 0.25
+# ... and only when it is also this short: an 80-page report is still disputed by a
+# 400-page filing's run.
+MAIN_DOCUMENT_SMALL_PAGES = 20
 BOOTSTRAP_RESAMPLES = 2000
 # Statuses of an evaluation pass that do not count as "the current pass".
 DEAD_PASS_STATUSES = ("cancelled", "failed")
@@ -406,6 +421,138 @@ def gap_rechecked(row: TargetEvaluation | None, evidence: list[dict]) -> bool:
     return bool(evidence) and {e["target_id"] for e in evidence} == gap_checked_ids(row)
 
 
+def primary_checked_groups(row: TargetEvaluation | None) -> list[set[str]]:
+    """The documents a delivered row's last judging was shown as main documents other
+    runs packaged and this run did not: one set of keys (every `sha256:` / `url:` key
+    of the document) per shown document. A plain string entry is a one-key document."""
+    rel = row.relative if row is not None and isinstance(row.relative, dict) else {}
+    check = rel.get("primary_check")
+    shown = check.get("checked_against") if isinstance(check, dict) else None
+    out: list[set[str]] = []
+    for entry in shown if isinstance(shown, list) else []:
+        keys = entry if isinstance(entry, list) else [entry]
+        out.append({str(k) for k in keys})
+    return out
+
+
+def same_documents(current: list[set[str]], recorded: list[set[str]]) -> bool:
+    """True when every current document shares a key with a recorded one and every
+    recorded document shares a key with a current one (both empty: True). A document
+    that gains a hash or a URL stays the same document; a new or vanished one does not."""
+    return all(any(c & r for r in recorded) for c in current) and all(
+        any(c & r for c in current) for r in recorded
+    )
+
+
+def primary_rechecked(row: TargetEvaluation | None, evidence: list[dict]) -> bool:
+    """True when `evidence` is not empty and the row was judged with exactly those
+    documents in view. The identity is the DOCUMENT (sha256 or URL), not the run: another
+    run delivering the same document must not re-open a row."""
+    return bool(evidence) and same_documents(
+        [set(e.get("keys") or [e["key"]]) for e in evidence], primary_checked_groups(row)
+    )
+
+
+def _page_count(value: Any) -> int | None:
+    """A page count as an int (a JSON number may arrive as 400, 400.0 or "400.0")."""
+    try:
+        return int(float(value)) if value not in (None, "") else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def package_sources(findings: Iterable[Any]) -> list[dict]:
+    """The sources of the run's approved, packaged `package_map` findings: role, URL,
+    sha256 and page count of each (what `delivered_elsewhere` reads for its URLs)."""
+    from tret.batches.profiles.disclosure import _package_of, _relevant_maps
+
+    out: list[dict] = []
+    for f in _relevant_maps(findings):
+        package = _package_of(f)
+        if f.status != "approved" or not package or package.get("status") != "packaged":
+            continue
+        payload = f.payload or {}
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        map_ = payload.get("map") if isinstance(payload.get("map"), dict) else {}
+        out.append(
+            {
+                "role": map_.get("role"),
+                "url": source.get("url"),
+                "sha256": source.get("sha256"),
+                "page_count": _page_count(source.get("page_count")),
+            }
+        )
+    return out
+
+
+def _normal_url(url: Any) -> str | None:
+    """A URL for comparing documents: `<host><path>[?query]` with the scheme, a leading
+    `www.`, a default port (80, 443), the fragment and one trailing slash of the path
+    dropped and the host lower-cased; the query is kept."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+    try:
+        parts = urlsplit(url.strip())
+        host, port = (parts.hostname or "").lower(), parts.port
+    except ValueError:
+        return None
+    if not host:
+        return None
+    host = host[4:] if host.startswith("www.") else host
+    if port not in (None, 80, 443):
+        host = f"{host}:{port}"
+    path = parts.path[:-1] if parts.path.endswith("/") else parts.path
+    return f"{host}{path}" + (f"?{parts.query}" if parts.query else "")
+
+
+def source_keys(sources: Iterable[dict]) -> set[str]:
+    """`sha256:<sha>` for each hash and `url:<normalised url>` for each URL."""
+    keys: set[str] = set()
+    for src in sources:
+        sha = src.get("sha256") if isinstance(src, dict) else None
+        if isinstance(sha, str) and sha.strip():
+            keys.add(f"sha256:{sha.strip().lower()}")
+        url = _normal_url(src.get("url") if isinstance(src, dict) else None)
+        if url:
+            keys.add(f"url:{url}")
+    return keys
+
+
+def missing_main_documents(own_sources: list[dict], other_sources: list[dict]) -> list[dict]:
+    """The main-document sources in `other_sources` that match none of `own_sources`
+    (any role) by sha256 or by normalised URL. Not missing: a source whose page count
+    is below `MAIN_DOCUMENT_MIN_RATIO` of the largest main-role source of `own_sources`
+    AND below `MAIN_DOCUMENT_SMALL_PAGES` (a 100-page report is not disputed by someone's
+    11-page index labelled primary; a 400-page filing is still disputed by an 80-page
+    report);
+    with an unknown page count on either side, or no main-role source of its own, there
+    is no such guard."""
+    own = source_keys(own_sources)
+    own_pages = [
+        s["page_count"]
+        for s in own_sources
+        if s.get("role") in MAIN_DOCUMENT_ROLES and isinstance(s.get("page_count"), (int, float))
+    ]
+    floor = MAIN_DOCUMENT_MIN_RATIO * max(own_pages) if own_pages else None
+    out = []
+    for s in other_sources:
+        if s.get("role") not in MAIN_DOCUMENT_ROLES:
+            continue
+        keys = source_keys([s])
+        if not keys or not own.isdisjoint(keys):
+            continue
+        pages = s.get("page_count")
+        if (
+            floor is not None
+            and isinstance(pages, (int, float))
+            and pages < floor
+            and pages < MAIN_DOCUMENT_SMALL_PAGES
+        ):
+            continue
+        out.append(s)
+    return out
+
+
 async def scorecard_from(db: AsyncSession, data: BatchData) -> dict:
     from tret.batches import evaluation as evaluation_service
 
@@ -430,11 +577,22 @@ async def scorecard_from(db: AsyncSession, data: BatchData) -> dict:
     quality = quality_summary(data)
     if quality is not None and (batch.profile or "disclosure") == "disclosure":
         gaps = [d for d in data.targets if d.cls == "gap"]
-        elsewhere = await delivered_elsewhere(db, batch, {d.row for d in gaps}, with_sources=False)
+        qualifying = await _qualifying_elsewhere(
+            db, batch, {d.row for d in data.targets if d.cls in ("gap", "success")}
+        )
+        elsewhere = await delivered_elsewhere(
+            db, batch, {d.row for d in gaps}, with_sources=False, qualifying=qualifying
+        )
         disputed = [d for d in gaps if elsewhere.get(d.row)]
         quality["gaps_disputed"] = len(disputed)
         quality["gaps_rechecked"] = sum(
             1 for d in disputed if gap_rechecked(d.evaluation, elsewhere[d.row])
+        )
+        primaries = await primaries_elsewhere(db, batch, [d.target for d in data.targets], qualifying=qualifying)
+        disputed_main = [d for d in data.targets if d.cls == "success" and primaries.get(d.row)]
+        quality["primaries_disputed"] = len(disputed_main)
+        quality["primaries_rechecked"] = sum(
+            1 for d in disputed_main if primary_rechecked(d.evaluation, primaries[d.row])
         )
     return {
         "batch_id": str(batch.id),
@@ -581,6 +739,20 @@ async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
             disputed = "a"
         elif db_.cls == "gap" and _qualifying_delivery(da):
             disputed = "b"
+        disputed_primary = None
+        if card_a["family_key"] == card_b["family_key"] and da.cls == db_.cls == "success":
+            a_missing = _qualifying_delivery(db_) and missing_main_documents(
+                package_sources(da.findings), package_sources(db_.findings)
+            )
+            b_missing = _qualifying_delivery(da) and missing_main_documents(
+                package_sources(db_.findings), package_sources(da.findings)
+            )
+            if a_missing and b_missing:
+                disputed_primary = "both"
+            elif a_missing:
+                disputed_primary = "a"
+            elif b_missing:
+                disputed_primary = "b"
         rows.append(
             {
                 "row_key": key,
@@ -591,6 +763,7 @@ async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
                 and sa["quality"] is not None
                 and sb["quality"] is not None,
                 "disputed_gap": disputed,
+                "disputed_primary": disputed_primary,
                 "delta": {
                     "quality": _delta(sa["quality"], sb["quality"], 2),
                     "cost_usd": _delta(sa["cost_usd"], sb["cost_usd"]),
@@ -649,6 +822,8 @@ async def compare_batches(db: AsyncSession, a: Batch, b: Batch) -> dict:
             "delivered": delivered,
             "disputed_gaps_a": sum(1 for r in rows if r["disputed_gap"] == "a"),
             "disputed_gaps_b": sum(1 for r in rows if r["disputed_gap"] == "b"),
+            "disputed_primaries_a": sum(1 for r in rows if r["disputed_primary"] in ("a", "both")),
+            "disputed_primaries_b": sum(1 for r in rows if r["disputed_primary"] in ("b", "both")),
             "cost_a": round(sum(r["a"]["cost_usd"] for r in rows), 6),
             "cost_b": round(sum(r["b"]["cost_usd"] for r in rows), 6),
             "energy_a": _sum_known([r["a"]["energy_wh"] for r in rows]),
@@ -694,45 +869,28 @@ async def _history(db: AsyncSession, ev: BatchEvaluation, keys: set[str]) -> dic
     return out
 
 
-async def delivered_elsewhere(
-    db: AsyncSession, batch: Batch, row_keys: set[str], *, with_sources: bool = True
-) -> dict[str, list[dict]]:
-    """Acceptable deliveries of the same companies in OTHER batches of this batch's
-    family (same workspace), by row key: scored rows of the other batch's current
-    pass whose target succeeded, is not stale, reached that pass's
-    `acceptable_quality` and carries no disqualifying flag. At most three per row key,
-    best quality first; each names its batch, target, quality, finish date, the run's
-    outcome status and reporting period and up to three source URLs of its packaged page maps. Never
-    carries a model name. Empty for a batch that is not a disclosure batch.
-
-    `with_sources=False` skips loading the page maps (`source_urls` is then empty):
-    the batch detail, scorecard and keep rule need only which targets qualify, and
-    the batch page polls them; only the judge's evidence pack shows the URLs."""
+async def _qualifying_elsewhere(
+    db: AsyncSession, batch: Batch, row_keys: set[str]
+) -> list[tuple[TargetEvaluation, BatchTarget]]:
+    """The scored rows of OTHER batches of this batch's family that count as an
+    acceptable delivery of one of `row_keys` (see `delivered_elsewhere`), with their
+    targets. Empty for a batch that is not a disclosure batch. Three queries: the
+    passes of the other batches, the scored rows of their current passes (only the
+    columns read here) and the targets. Callers that need several row-key sets call it
+    once and pass the result on (`qualifying=`)."""
     if (batch.profile or "disclosure") != "disclosure" or not row_keys:
-        return {}
-    candidates = list(
-        (
-            await db.execute(
-                select(TargetEvaluation).where(
-                    TargetEvaluation.workspace_id == batch.workspace_id,
-                    TargetEvaluation.family_key == family_key(batch),
-                    TargetEvaluation.status == "scored",
-                    TargetEvaluation.collection_id != batch.id,
-                    TargetEvaluation.row_key.in_(sorted(row_keys)),
-                )
-            )
-        ).scalars()
-    )
-    if not candidates:
-        return {}
-    cids = sorted({r.collection_id for r in candidates}, key=str)
-    # One query for every pass of the candidate batches; the current one is picked
-    # here by `current_pass`'s rule (latest not cancelled or failed, else latest).
+        return []
+    # The current pass of each batch is picked here by `current_pass`'s rule (latest not
+    # cancelled or failed, else latest).
     passes = list(
         (
             await db.execute(
                 select(BatchEvaluation)
-                .where(BatchEvaluation.collection_id.in_(cids))
+                .where(
+                    BatchEvaluation.workspace_id == batch.workspace_id,
+                    BatchEvaluation.family_key == family_key(batch),
+                    BatchEvaluation.collection_id != batch.id,
+                )
                 .order_by(BatchEvaluation.created_at.desc())
                 .execution_options(populate_existing=True)
             )
@@ -744,18 +902,42 @@ async def delivered_elsewhere(
             current.setdefault(p.collection_id, p)
     for p in passes:
         current.setdefault(p.collection_id, p)
+    by_pass = {p.id: p for p in current.values()}
+    if not by_pass:
+        return []
     candidates = [
         r
-        for r in candidates
-        if r.collection_id in current
-        and current[r.collection_id].id == r.evaluation_id
-        and r.quality is not None
+        for r in (
+            await db.execute(
+                select(TargetEvaluation)
+                .options(
+                    load_only(
+                        TargetEvaluation.id,
+                        TargetEvaluation.evaluation_id,
+                        TargetEvaluation.collection_id,
+                        TargetEvaluation.target_id,
+                        TargetEvaluation.row_key,
+                        TargetEvaluation.attempt,
+                        TargetEvaluation.evaluated_run_id,
+                        TargetEvaluation.status,
+                        TargetEvaluation.quality,
+                        TargetEvaluation.flags,
+                    )
+                )
+                .where(
+                    TargetEvaluation.evaluation_id.in_(sorted(by_pass, key=str)),
+                    TargetEvaluation.status == "scored",
+                    TargetEvaluation.row_key.in_(sorted(row_keys)),
+                )
+            )
+        ).scalars()
+        if r.quality is not None
         and DISQUALIFYING_FLAGS.isdisjoint(r.flags or [])
         and float(r.quality)
-        >= float((current[r.collection_id].rubric or {}).get("acceptable_quality", DEFAULT_ACCEPTABLE_QUALITY))
+        >= float((by_pass[r.evaluation_id].rubric or {}).get("acceptable_quality", DEFAULT_ACCEPTABLE_QUALITY))
     ]
     if not candidates:
-        return {}
+        return []
     targets_by_id = {
         t.id: t
         for t in (
@@ -766,7 +948,7 @@ async def delivered_elsewhere(
             )
         ).scalars()
     }
-    qualifying = [
+    return [
         (r, t)
         for r in candidates
         if (t := targets_by_id.get(r.target_id)) is not None
@@ -774,6 +956,35 @@ async def delivered_elsewhere(
         and not is_stale(r, t)
         and r.evaluated_run_id == t.run_id
     ]
+
+
+async def delivered_elsewhere(
+    db: AsyncSession,
+    batch: Batch,
+    row_keys: set[str],
+    *,
+    with_sources: bool = True,
+    qualifying: list[tuple[TargetEvaluation, BatchTarget]] | None = None,
+) -> dict[str, list[dict]]:
+    """Acceptable deliveries of the same companies in OTHER batches of this batch's
+    family (same workspace), by row key: scored rows of the other batch's current
+    pass whose target succeeded, is not stale, reached that pass's
+    `acceptable_quality` and carries no disqualifying flag. At most three per row key,
+    best quality first; each names its batch, target, quality, finish date, the run's
+    outcome status and reporting period and up to three source URLs of its packaged page maps. Never
+    carries a model name. Empty for a batch that is not a disclosure batch.
+
+    `with_sources=False` skips loading the page maps (`source_urls` is then empty):
+    the batch detail, scorecard and keep rule need only which targets qualify, and
+    the batch page polls them; only the judge's evidence pack shows the URLs.
+
+    `qualifying`: a pre-computed `_qualifying_elsewhere` list (for these keys or a
+    superset); it is filtered by row key here."""
+    if (batch.profile or "disclosure") != "disclosure" or not row_keys:
+        return {}
+    if qualifying is None:
+        qualifying = await _qualifying_elsewhere(db, batch, row_keys)
+    qualifying = [(r, t) for r, t in qualifying if r.row_key in row_keys]
     if not qualifying:
         return {}
     batches: dict[uuid.UUID, Batch] = {}
@@ -824,6 +1035,127 @@ async def delivered_elsewhere(
     return out
 
 
+def _package_sources_statement(run_ids: list[uuid.UUID]) -> Select:
+    """The one query behind `_package_sources_by_run`: JSON paths only, no payloads."""
+    return (
+        select(
+            Finding.run_id,
+            Finding.payload["map"]["role"].as_string(),
+            Finding.payload["source"]["url"].as_string(),
+            Finding.payload["source"]["sha256"].as_string(),
+            Finding.payload["source"]["page_count"].as_string(),
+        )
+        .where(
+            Finding.run_id.in_(run_ids),
+            Finding.schema_slug == "package_map",
+            Finding.status == "approved",
+            Finding.payload["package"]["status"].as_string() == "packaged",
+        )
+        .order_by(Finding.created_at, Finding.id)
+    )
+
+
+async def _package_sources_by_run(
+    db: AsyncSession, run_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, list[dict]]:
+    """`package_sources` for many runs in ONE query that reads only the few JSON
+    paths it needs (a package map's payload can be large)."""
+    ids = sorted({r for r in run_ids if r is not None}, key=str)
+    if not ids:
+        return {}
+    rows = await db.execute(_package_sources_statement(ids))
+    out: dict[uuid.UUID, list[dict]] = {}
+    for run_id, role, url, sha, pages in rows:
+        # Postgres may render a JSON number as text such as "100.0".
+        page_count = _page_count(pages)
+        out.setdefault(run_id, []).append(
+            {"role": role, "url": url, "sha256": sha, "page_count": page_count}
+        )
+    return out
+
+
+async def primaries_elsewhere(
+    db: AsyncSession,
+    batch: Batch,
+    targets: list[BatchTarget],
+    *,
+    qualifying: list[tuple[TargetEvaluation, BatchTarget]] | None = None,
+) -> dict[str, list[dict]]:
+    """For each delivered (success-class) target of this batch, by row key: the main
+    documents (`MAIN_DOCUMENT_ROLES`) that acceptable deliveries of the same company in
+    other batches of the family packaged and this target did not. Grouped by document
+    (same sha256 or same normalised URL); each item has `key` (display only), `keys` (every
+    `sha256:` / `url:` key of the document: its identity), `url`, `page_count`, `runs`
+    (distinct other targets that packaged it), `best_quality` and `target_ids`. Most runs
+    first, at most `CROSS_CHECK_MAX`. Row keys with nothing disputed are absent. Never
+    carries a batch or model name. A fixed number of queries. `qualifying`: a
+    pre-computed `_qualifying_elsewhere` list (filtered by row key here)."""
+    if (batch.profile or "disclosure") != "disclosure":
+        return {}
+    mine = [t for t in targets if target_class(t) == "success"]
+    if not mine:
+        return {}
+    keys = {row_key(batch, t) for t in mine}
+    if qualifying is None:
+        qualifying = await _qualifying_elsewhere(db, batch, keys)
+    qualifying = [(r, t) for r, t in qualifying if r.row_key in keys]
+    if not qualifying:
+        return {}
+    run_ids = {t.run_id for t in mine if t.run_id} | {t.run_id for _, t in qualifying if t.run_id}
+    sources = await _package_sources_by_run(db, run_ids)
+    own_by_key: dict[str, list[dict]] = {}
+    for t in mine:
+        own_by_key.setdefault(row_key(batch, t), []).extend(sources.get(t.run_id, []))
+    groups_by_key: dict[str, list[dict]] = {}
+    for r, t in sorted(qualifying, key=lambda rt: str(rt[1].id)):
+        missing = missing_main_documents(own_by_key.get(r.row_key, []), sources.get(t.run_id, []))
+        groups = groups_by_key.setdefault(r.row_key, [])
+        for src in missing:
+            skeys = source_keys([src])
+            hit = [g for g in groups if g["keys"] & skeys]
+            if hit:
+                group = hit[0]
+                for other in hit[1:]:  # the source bridges two groups: one document
+                    group["keys"] |= other["keys"]
+                    group["sources"] += other["sources"]
+                    group["targets"] |= other["targets"]
+                    group["best"] = max(group["best"], other["best"])
+                    groups.remove(other)
+            else:
+                group = {"keys": set(), "sources": [], "targets": set(), "best": 0.0}
+                groups.append(group)
+            group["keys"] |= skeys
+            group["sources"].append(src)
+            group["targets"].add(str(t.id))
+            group["best"] = max(group["best"], float(r.quality))
+    out: dict[str, list[dict]] = {}
+    for rk, groups in groups_by_key.items():
+        items = []
+        for g in groups:
+            ordered = sorted(g["keys"])
+            # Order-independent identity: the smallest hash, else the smallest URL.
+            key = next((k for k in ordered if k.startswith("sha256:")), ordered[0])
+            urls = [s["url"] for s in g["sources"] if isinstance(s.get("url"), str) and s["url"]]
+            pages = [s["page_count"] for s in g["sources"] if s.get("page_count") is not None]
+            items.append(
+                {
+                    "key": key,
+                    "keys": ordered,
+                    # Order-independent: the shortest (then smallest) URL, the largest page count.
+                    "url": min(urls, key=lambda u: (len(u), u)) if urls else None,
+                    "page_count": max(pages) if pages else None,
+                    "runs": len(g["targets"]),
+                    "best_quality": g["best"],
+                    "target_ids": sorted(g["targets"]),
+                }
+            )
+        # Not by quality: a re-score elsewhere must not rotate which documents are shown.
+        items.sort(key=lambda e: (-e["runs"], e["key"]))
+        if items:
+            out[rk] = items[:CROSS_CHECK_MAX]
+    return out
+
+
 async def recompute_relative(db: AsyncSession, ev: BatchEvaluation) -> None:
     """Rank, percentile and expected-vs-actual for every scored row of the pass.
 
@@ -860,6 +1192,7 @@ async def recompute_relative(db: AsyncSession, ev: BatchEvaluation) -> None:
             expected = mean - offset
             basis = "batch mean, difficulty-adjusted"
         gap_check = (r.relative or {}).get("gap_check") if isinstance(r.relative, dict) else None
+        primary_check = (r.relative or {}).get("primary_check") if isinstance(r.relative, dict) else None
         r.relative = {
             "rank": rank,
             "of": n,
@@ -870,6 +1203,7 @@ async def recompute_relative(db: AsyncSession, ev: BatchEvaluation) -> None:
             "outliers": outliers_by_target.get(str(r.target_id), []),
             # Written by the evidence pack of a gap row, not a score: kept as it was.
             **({"gap_check": gap_check} if gap_check is not None else {}),
+            **({"primary_check": primary_check} if primary_check is not None else {}),
         }
     await db.commit()
 

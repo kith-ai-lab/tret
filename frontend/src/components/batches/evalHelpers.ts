@@ -144,10 +144,17 @@ export function keyFromLabel(label: string, taken: Set<string> = new Set()): str
 export const DISPUTED_GAP_TITLE =
   "A gap is disputed when the other batch delivered that company's disclosure, judged acceptable."
 
+export const DISPUTED_PRIMARY_TITLE =
+  'Another batch packaged a main document for this company that this run did not capture. Re-evaluate with Only unscored to have the judge check it.'
+
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`
 }
 
 export function deliveredElsewhereTitle(n: number, rechecked: boolean | null | undefined): string {
   return `${plural(n, 'other batch', 'other batches')} of this target list delivered this company's disclosure, judged acceptable. Re-checked by the judge: ${rechecked ? 'yes' : 'no'}.`
+}
+
+export function otherPrimaryTitle(n: number, rechecked: boolean | null | undefined): string {
+  return `${plural(n, 'main document')} packaged by other batches of this target list that this run did not capture. Re-checked by the judge: ${rechecked ? 'yes' : 'no'}.`
 }

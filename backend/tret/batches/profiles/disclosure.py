@@ -1066,6 +1066,19 @@ CROSS_CHECK_TEXT = (
     "score well; judge whether the doctrine required this run to try that route."
 )
 
+PRIMARY_CHECK_TEXT = (
+    "Other runs of the same target list packaged, as this company's main FY{fy} disclosure, a "
+    "document that is not among this run's packages, and were judged acceptable (listed below). "
+    "Use this to test whether this run captured the issuer's primary disclosure, not to assume it "
+    "missed it. You cannot open those files: judge from each URL, the page count and this run's "
+    "own page maps. If this run packaged only companion documents (an index, scorecard, data "
+    "appendix, glossary or summary) while the report itself was available, score right_document "
+    "at most 2 and flag missed_primary, whatever the register notes say. If this run holds the "
+    "same disclosure in another form (the annual report that embeds the statement, another "
+    "edition or URL of the same report), or the listed document is another year or a thematic "
+    "report, this run is not at fault."
+)
+
 
 async def _document_text(db: AsyncSession, document_id: Any) -> tuple[Document | None, str | None]:
     try:
@@ -1105,12 +1118,16 @@ async def build_evidence(
     rubric: dict | None = None,
     *,
     cross_check: list[dict] | None = None,
+    primary_check: list[dict] | None = None,
 ) -> tuple[str, list[uuid.UUID]]:
     """The blind evidence pack for one disclosure target (see
     `tret/batches/evidence.py`) and the documents to attach to the evaluator run:
     each map's source document and its retained-text package document. For a gap
     target, `cross_check` (`scoring.delivered_elsewhere`) adds what other runs of the
-    same target list delivered, so the judge can test the gap's reason."""
+    same target list delivered, so the judge can test the gap's reason. For a delivered
+    target, `primary_check` (`scoring.primaries_elsewhere`) adds the main documents other
+    runs packaged that this run did not, so the judge can test whether it captured the
+    primary disclosure."""
     from tret.batches import evidence, scoring
     from tret.batches.rubrics import default_rubric, rubric_text
 
@@ -1126,7 +1143,7 @@ async def build_evidence(
             f"- Expected form: {target.expected_form}",
             f"- Fiscal year wanted: FY{fy}",
             f"- Known URLs: {urls}",
-            f"- Notes: {target.notes or 'none'}",
+            f"- Register notes (may be out of date; the documents decide): {target.notes or 'none'}",
             "",
             f"The run was held to this doctrine:\n{doctrine_text(fy)}",
         ]
@@ -1212,6 +1229,18 @@ async def build_evidence(
                 f"status: {status}; period: {period}; source: {urls or 'not recorded'}"
             )
         cross_section = [("Cross-check: other runs of this target list", "\n".join(lines))]
+
+    if row_class == "success" and primary_check:
+        lines = [PRIMARY_CHECK_TEXT.format(fy=fy)]
+        for item in primary_check:
+            url = evidence.clip(evidence.scrub(item["url"], run), 200) if item.get("url") else "not recorded"
+            pages = item.get("page_count")
+            lines.append(
+                f"- packaged as the main document by {item['runs']} other run(s): {url} "
+                f"({pages if pages is not None else 'not recorded'} pages), "
+                f"best quality {float(item['best_quality']):.0f} of 100"
+            )
+        cross_section = [("Cross-check: main documents other runs delivered", "\n".join(lines))]
 
     sections = [
         ("Rubric", rubric_text(rubric, row_class)),
@@ -1368,8 +1397,11 @@ class DisclosureProfile:
         *,
         rubric: dict | None = None,
         cross_check: list[dict] | None = None,
+        primary_check: list[dict] | None = None,
     ) -> tuple[str, list[uuid.UUID]]:
-        return await build_evidence(db, batch, target, run, findings, rubric, cross_check=cross_check)
+        return await build_evidence(
+            db, batch, target, run, findings, rubric, cross_check=cross_check, primary_check=primary_check
+        )
 
     def settings_keys(self) -> tuple[str, ...]:
         return (

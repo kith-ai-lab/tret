@@ -466,6 +466,35 @@ tools `read_document`, `search_documents`, `submit_evaluation`, `submit_batch_re
   only while the deliveries elsewhere are exactly the ones its judging saw; a new one, or
   a shown one that stopped qualifying, makes it pending again (unselected rows of a
   targeted re-judge are kept as they were).
+- **Cross-check of a delivered row (main documents).** The mirror image: a run that
+  packaged only companion documents (a frameworks index, a scorecard, a glossary) can be
+  scored like a run that packaged the 100-page report, when a register note says no main
+  PDF exists. So for a delivered target of a disclosure batch the pack gains "Cross-check:
+  main documents other runs delivered": up to three documents (role `primary_disclosure`
+  or `embedded_statement_and_assurance`) that acceptable deliveries of the same company in
+  other batches of the family packaged and this run did not (matched by sha256 or by
+  normalised URL, any role of this run's own packages counts; the scheme, a leading
+  `www.`, default ports, the fragment and a trailing slash do not make a different URL).
+  A main-role source under 25% of the pages of this run's largest main-role source and
+  under 20 pages is not counted (an 11-page index labelled primary does not dispute a
+  100-page report, but an 80-page report still disputes a 400-page filing; unknown page
+  counts are not guarded). Each is shown with the URL, page count,
+  how many other runs packaged it and the best quality, never batch names or models. The
+  judge cannot open them: it tests whether this run captured the primary disclosure (at
+  most 2 on right_document with `missed_primary` when only companions were packaged
+  although the report was available; no fault when this run holds the same disclosure in
+  another form, another year or a thematic report). The pack's task block now calls the
+  register notes "may be out of date; the documents decide". Code never changes a score.
+  The row records the document keys it was shown (`relative.primary_check`, kept when
+  ranks are recomputed, one list of document keys per shown document); "Only unscored"
+  re-judges a scored delivered row when a new document appears or a shown one stops
+  qualifying, not when another run delivers a document already shown (a document is the
+  same while its sha256 or normalised URL overlaps, so a re-fetched copy with new bytes
+  or a URL-only document that gains a hash is not new). The scorecard's `quality` gains
+  `primaries_disputed` / `primaries_rechecked` (counts of delivered rows, not documents), each target's `evaluation` gains
+  `primary_elsewhere` / `primary_rechecked`, and the comparison's rows carry
+  `disputed_primary` (`a`, `b` or `both`, same family only) with
+  `summary.disputed_primaries_a` / `_b`.
 - **Relative scores.** Each scored row gets a rank, a percentile and an expected score:
   the same row's history in other batches of the family (shrunk toward the batch mean),
   else the batch mean moved 5 points per difficulty step. `residual` = quality - expected.

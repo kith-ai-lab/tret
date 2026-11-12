@@ -344,12 +344,17 @@ def target_evaluation_out(row: TargetEvaluation, target: BatchTarget | None) -> 
 
 
 def target_brief(
-    row: TargetEvaluation, target: BatchTarget, elsewhere: list[dict] | None = None
+    row: TargetEvaluation,
+    target: BatchTarget,
+    elsewhere: list[dict] | None = None,
+    primaries: list[dict] | None = None,
 ) -> dict:
     """`elsewhere`: the current `scoring.delivered_elsewhere` evidence for this
-    target's row key (only read for a gap-class target)."""
+    target's row key (only read for a gap-class target). `primaries`: the current
+    `scoring.primaries_elsewhere` items for it (only read for a success-class one)."""
     rel = row.relative if isinstance(row.relative, dict) else {}
     evidence = elsewhere if (elsewhere and scoring.target_class(target) == "gap") else []
+    main_docs = primaries if (primaries and scoring.target_class(target) == "success") else []
     return {
         "status": row.status,
         "quality": _f(row.quality),
@@ -362,6 +367,8 @@ def target_brief(
         "stale": scoring.is_stale(row, target),
         "delivered_elsewhere": len(evidence),
         "gap_rechecked": scoring.gap_rechecked(row, evidence) if evidence else None,
+        "primary_elsewhere": len(main_docs),
+        "primary_rechecked": scoring.primary_rechecked(row, main_docs) if main_docs else None,
     }
 
 
@@ -373,10 +380,21 @@ async def target_briefs(db: AsyncSession, batch: Batch, targets: list[BatchTarge
     by_id = {t.id: t for t in targets}
     rows = [r for r in await scoring.pass_rows(db, current.id) if r.target_id in by_id]
     elsewhere: dict[str, list[dict]] = {}
+    primaries: dict[str, list[dict]] = {}
     if (batch.profile or "disclosure") == "disclosure":
         gap_keys = {r.row_key for r in rows if scoring.target_class(by_id[r.target_id]) == "gap"}
-        elsewhere = await scoring.delivered_elsewhere(db, batch, gap_keys, with_sources=False)
-    return {str(r.target_id): target_brief(r, by_id[r.target_id], elsewhere.get(r.row_key)) for r in rows}
+        success_keys = {r.row_key for r in rows if scoring.target_class(by_id[r.target_id]) == "success"}
+        qualifying = await scoring._qualifying_elsewhere(db, batch, gap_keys | success_keys)
+        elsewhere = await scoring.delivered_elsewhere(
+            db, batch, gap_keys, with_sources=False, qualifying=qualifying
+        )
+        primaries = await scoring.primaries_elsewhere(
+            db, batch, [by_id[r.target_id] for r in rows], qualifying=qualifying
+        )
+    return {
+        str(r.target_id): target_brief(r, by_id[r.target_id], elsewhere.get(r.row_key), primaries.get(r.row_key))
+        for r in rows
+    }
 
 
 async def evaluation_overview(db: AsyncSession, batch_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
@@ -521,8 +539,11 @@ async def start_evaluation(
     only while the acceptable deliveries of the same company in other batches of the
     family (the cross-check) are exactly the ones its judging was shown
     (`relative.gap_check`, missing = none): a new delivery elsewhere, or a shown one
-    that no longer qualifies, makes it pending again. With `target_ids` the unselected
-    rows are kept as they were."""
+    that no longer qualifies, makes it pending again. A scored delivered row is kept only
+    while the main documents other runs packaged and it did not (`primaries_elsewhere`)
+    are the documents its judging was shown (`relative.primary_check`; the same document
+    when its keys overlap, so a document that gains a hash or URL stays the same one).
+    With `target_ids` the unselected rows are kept as they were."""
     from tret.services.workspace import ensure_evaluator_harness
 
     # Serialise starters on the batch row (a double click, or the auto pass racing a
@@ -590,9 +611,15 @@ async def start_evaluation(
     )
     can_evaluate = getattr(profile, "evaluation_evidence", None) is not None
     elsewhere: dict[str, list[dict]] = {}
+    primaries: dict[str, list[dict]] = {}
     if (batch.profile or "disclosure") == "disclosure":
         gap_keys = {scoring.row_key(batch, t) for t in targets if scoring.target_class(t) == "gap"}
-        elsewhere = await scoring.delivered_elsewhere(db, batch, gap_keys, with_sources=False)
+        success_keys = {scoring.row_key(batch, t) for t in targets if scoring.target_class(t) == "success"}
+        qualifying = await scoring._qualifying_elsewhere(db, batch, gap_keys | success_keys)
+        elsewhere = await scoring.delivered_elsewhere(
+            db, batch, gap_keys, with_sources=False, qualifying=qualifying
+        )
+        primaries = await scoring.primaries_elsewhere(db, batch, targets, qualifying=qualifying)
     rows: list[TargetEvaluation] = []
     for t in targets:
         cls = scoring.target_class(t)
@@ -610,9 +637,17 @@ async def start_evaluation(
             and prior.attempt == (t.attempts or 0)
             and prior.evaluated_run_id == t.run_id
             and (
-                cls != "gap"
-                or selected is not None
-                or {e["target_id"] for e in elsewhere.get(row.row_key, [])} == scoring.gap_checked_ids(prior)
+                selected is not None
+                or (
+                    {e["target_id"] for e in elsewhere.get(row.row_key, [])} == scoring.gap_checked_ids(prior)
+                    if cls == "gap"
+                    else scoring.same_documents(
+                        [set(e["keys"]) for e in primaries.get(row.row_key, [])],
+                        scoring.primary_checked_groups(prior),
+                    )
+                    if cls == "success"
+                    else True
+                )
             )
         ):
             for field in ("scores", "quality", "difficulty", "flags", "confidence", "rationale", "review", "evaluator_run_id", "finished_at"):
@@ -620,6 +655,8 @@ async def start_evaluation(
             row.status = "scored"
             if cls == "gap" and isinstance(prior.relative, dict) and prior.relative.get("gap_check") is not None:
                 row.relative = {"gap_check": prior.relative["gap_check"]}
+            if cls == "success" and isinstance(prior.relative, dict) and prior.relative.get("primary_check") is not None:
+                row.relative = {"primary_check": prior.relative["primary_check"]}
         elif selected is not None and t.id not in selected:
             row.status, row.skip_reason = "skipped", "not selected for this pass"
         rows.append(row)
@@ -810,8 +847,17 @@ async def _create_evaluator_run(
     elif isinstance(row.relative, dict) and "gap_check" in row.relative:
         # A stale check from an earlier gap attempt must not linger on a non-gap row.
         row.relative = {k: v for k, v in row.relative.items() if k != "gap_check"}
+    main_docs: list[dict] | None = None
+    if (batch.profile or "disclosure") == "disclosure" and scoring.target_class(t) == "success":
+        main_docs = (await scoring.primaries_elsewhere(db, batch, [t])).get(row.row_key, [])
+        row.relative = {
+            **(row.relative or {}),
+            "primary_check": {"checked_against": sorted(e["keys"] for e in main_docs), "checked_at": _now().isoformat()},
+        }
+    elif isinstance(row.relative, dict) and "primary_check" in row.relative:
+        row.relative = {k: v for k, v in row.relative.items() if k != "primary_check"}
     text, document_ids = await profile.evaluation_evidence(
-        db, batch, t, target_run, findings, rubric=ev.rubric, cross_check=cross
+        db, batch, t, target_run, findings, rubric=ev.rubric, cross_check=cross, primary_check=main_docs
     )
     run = Run(
         id=uuid.uuid4(),

@@ -22,6 +22,24 @@ one that needs action on an existing install.
   `gap_rechecked`, and "Only unscored" re-judges a scored gap when a new delivery elsewhere
   appears or a shown one stops qualifying. No rubric change.
 
+- **A delivered row is cross-checked against the main documents other runs packaged.** A
+  run that packaged only companion PDFs (an index, a scorecard, a glossary) was scored 93
+  like runs that packaged the real report, because a register note said no main PDF
+  existed. When the judge scores a delivered target of a disclosure batch, its evidence
+  pack now lists main documents (`primary_disclosure`, `embedded_statement_and_assurance`)
+  that acceptable deliveries in other batches of the family packaged and this run did not
+  (by sha256 or normalised URL; no batch or model names) and tells the judge to cap
+  right_document at 2 with `missed_primary` when only companions were packaged; the
+  register notes are labelled as possibly out of date. A main-role source under 25% of
+  the pages of this run's largest main-role source and under 20 pages is not counted. The judge still
+  decides. The scorecard adds `quality.primaries_disputed` / `primaries_rechecked`
+  (delivered rows, not documents), target briefs
+  `primary_elsewhere` / `primary_rechecked`, the comparison `disputed_primary` per row and
+  `disputed_primaries_a` / `_b`, and "Only unscored" re-judges a scored delivery when
+  a new document appears or a shown one stops qualifying (not when another run delivers a
+  document already shown; a document is the same while its hash or normalised URL
+  overlaps). No rubric change.
+
 - **Routing prefers open-weight models and sees the live OpenRouter catalog.** Every
   model carries `open_weights` (from OpenRouter's `hugging_face_id`, or `models.yaml`;
   local models are open) and a harness policy can say `open_weights: prefer | require |
