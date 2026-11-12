@@ -72,8 +72,11 @@ def test_acceptable_batch_needs_a_success_target_and_a_delivered_run():
     assert acceptable(_row(is_batch=True, target_class="success", ok=False)) is False
     for cls in ("gap", "rejected", "failed"):
         assert acceptable(_row(is_batch=True, target_class=cls)) is False
-    # A batch row's own findings_rejected does not matter: the target decides.
-    assert acceptable(_row(is_batch=True, target_class="success", findings_rejected=3)) is True
+    # The target decides, except that a rejection with no approval fails the row.
+    assert acceptable(_row(is_batch=True, target_class="success", findings_rejected=3)) is False
+    assert acceptable(
+        _row(is_batch=True, target_class="success", findings_rejected=3, findings_approved=1)
+    ) is True
 
 
 def test_left_out_rows_are_counted_neither_way():
@@ -111,7 +114,7 @@ def test_below_min_runs_the_prior_alone_decides():
     zero = _by(_go(base, [a, b], pooled))["test/b"]
     four = _by(_go(base + _runs("test/b", 4, 0), [a, b], pooled))["test/b"]
     for key in zero:
-        if key in ("runs", "effective_n", "sat_out"):
+        if key in ("runs", "effective_n", "trusted_n", "sat_out"):
             continue
         assert zero[key] == four[key], key
     assert zero["basis"] == "pooled" and zero["runs"] == 0 and four["runs"] == 4
@@ -485,7 +488,7 @@ def test_a_few_runs_of_a_model_without_a_record_change_only_its_own_row():
         block = json.loads(json.dumps(block))
         for e in block["models"]:
             if e["model"] == "test/b":
-                for k in ("runs", "effective_n", "sat_out"):
+                for k in ("runs", "effective_n", "trusted_n", "sat_out"):
                     e.pop(k)
         return block
 
@@ -531,29 +534,10 @@ def test_the_floor_comparison_is_strict(monkeypatch):
     assert by["test/a"]["excluded"] is None and by["test/b"]["excluded"] is None
 
 
-# ── exploration_live ─────────────────────────────────────────────────────────
+# ── applied ──────────────────────────────────────────────────────────────────
 def _fresh_case():
     rows = _runs("test/tried", 10, 10)
     return rows, [_m("tried"), _m("fresh")], {"test/tried": _prior("test/tried", 0.9)}
-
-
-def test_exploration_not_live_picks_the_ranked_pick_even_when_the_draw_fires():
-    rows, models, pooled = _fresh_case()
-    block = _go(rows, models, pooled, draw=0.05, exploration_live=False)
-    ex = block["exploration"]
-    assert ex["fired"] is True and ex["applied"] is False and ex["candidate"] == "test/fresh"
-    assert block["pick"] == block["ranked_pick"] == "test/tried"
-    assert "would have been tried but the exploration share is not live for this agent yet" in block["reason"]
-    assert "test/fresh" in block["reason"]
-
-
-def test_exploration_not_live_keeps_the_existing_wording_when_the_draw_did_not_fire():
-    rows, models, pooled = _fresh_case()
-    live = _go(rows, models, pooled, draw=0.99)
-    held = _go(rows, models, pooled, draw=0.99, exploration_live=False)
-    assert held["reason"] == live["reason"]
-    off = _go(rows, models, pooled, exploration_share=0.0, draw=None, exploration_live=False)
-    assert "Exploration is off" in off["reason"] and off["exploration"]["applied"] is False
 
 
 def test_exploration_applied_is_true_in_the_default_mode_when_fired():
@@ -568,3 +552,223 @@ def test_the_block_lists_the_main_ranking_in_rank_order():
     a, b = _m("a", price="5"), _m("b", price="1")
     block = _go(_runs("test/a", 10, 10, cost=0.05) + _runs("test/b", 10, 10, cost=0.01), [a, b])
     assert block["ranking"] == ["test/b", "test/a"] and block["ranked_pick"] == "test/b"
+
+
+# ── exploration runs: counted, but a record needs reviewed evidence ──────────
+def _xb(model, n, **kw):
+    """Explored, delivered batch rows (target class success) with one finding each."""
+    base = dict(explored=True, is_batch=True, target_class="success", findings_created=1)
+    base.update(kw)
+    return [_row(model, **base) for _ in range(n)]
+
+
+def _tried_and_fresh():
+    """A tried model with a record and an untried, cheaper one."""
+    return _runs("test/tried", 12, 12, cost=0.05), [_m("tried", "2"), _m("fresh", "1")]
+
+
+def test_acceptable_batch_row_with_a_rejection_and_no_approval_fails():
+    ok = dict(is_batch=True, target_class="success")
+    assert acceptable(_row(findings_rejected=1, **ok)) is False
+    assert acceptable(_row(findings_rejected=1, findings_approved=1, **ok)) is True
+    assert acceptable(_row(findings_rejected=1, is_batch=True, target_class=None)) is None
+    assert acceptable(_row(findings_rejected=1, is_batch=True, target_class="infra")) is None
+
+
+def test_awaiting_review_and_pending_trial_rules():
+    assert scoring.awaiting_review(_row(explored=True, findings_created=1)) is True
+    assert scoring.awaiting_review(_row(explored=True, findings_created=1, findings_approved=1)) is False
+    assert scoring.awaiting_review(_row(explored=True)) is False  # no findings: nothing to review
+    assert scoring.awaiting_review(_row(findings_created=1)) is False  # not explored
+    assert scoring.awaiting_review(_row(explored=True, findings_created=1, ok=False)) is False
+    assert scoring.pending_trial(_row(explored=True, is_batch=True, target_class="unsettled")) is True
+    for cls in ("infra", "timeout", "success", None):
+        assert scoring.pending_trial(_row(explored=True, is_batch=True, target_class=cls)) is False
+    assert scoring.pending_trial(_row(is_batch=True, target_class=None)) is False
+    assert scoring.pending_trial(_row(explored=True)) is False
+
+
+def test_five_unreviewed_explored_successes_give_no_record_and_end_exploration():
+    rows, models = _tried_and_fresh()
+    four = _go(rows + _xb("test/fresh", 4), models)
+    five = _go(rows + _xb("test/fresh", 5), models)
+    assert four["exploration"]["candidate"] == "test/fresh" and four["exploration"]["eligible"] == 1
+    e = _by(five)["test/fresh"]
+    assert e["awaiting_review"] == 5 and e["runs"] == 5 and e["basis"] != "agent" and e["trusted_n"] == 0
+    assert five["agent"]["awaiting_review"] == 5
+    assert five["ranked_pick"] == "test/tried" and "test/fresh" not in five["ranking"]
+    assert five["exploration"]["candidate"] is None and five["exploration"]["eligible"] == 0
+    assert models_with_record(rows + _xb("test/fresh", 5), "balanced", NOW) == {"test/tried"}
+
+
+def test_the_same_five_with_a_review_approval_have_a_record_and_a_place_in_the_ranking():
+    rows, models = _tried_and_fresh()
+    block = _go(rows + _xb("test/fresh", 5, findings_approved=1, cost=0.001), models)
+    e = _by(block)["test/fresh"]
+    assert e["basis"] == "agent" and e["awaiting_review"] == 0 and e["trusted_n"] == 5.0
+    assert block["ranking"] == ["test/fresh", "test/tried"] and block["ranked_pick"] == "test/fresh"
+
+
+def test_five_explored_rejected_batch_runs_are_five_failures():
+    rows, models = _tried_and_fresh()
+    block = _go(rows + _xb("test/fresh", 5, findings_rejected=1, cost=0.001), models)
+    e = _by(block)["test/fresh"]
+    assert e["runs"] == 5 and e["awaiting_review"] == 0 and e["sat_out"] is True
+    assert e["acceptable_rate"] < 0.3
+    assert block["ranked_pick"] == "test/tried" and "test/fresh" not in block["ranking"]
+    assert block["exploration"]["candidate"] is None
+
+
+def test_an_explored_success_with_no_findings_counts_at_once():
+    rows, models = _tried_and_fresh()
+    block = _go(rows + [_row("test/fresh", explored=True) for _ in range(5)], models)
+    e = _by(block)["test/fresh"]
+    assert e["basis"] == "agent" and e["awaiting_review"] == 0 and e["runs"] == 5
+
+
+def test_unreviewed_explored_rows_count_in_the_rate_of_a_model_with_a_record():
+    # 6 normal successes, 3 unreviewed explored successes, 2 explored failures: 9 of 11.
+    rows = _runs("test/m", 6, 6) + _xb("test/m", 3, is_batch=False, target_class=None)
+    rows += [_row("test/m", explored=True, ok=False) for _ in range(2)]
+    e = _by(_go(rows, [_m("m")]))["test/m"]
+    assert e["basis"] == "agent" and e["runs"] == 11 and e["awaiting_review"] == 3
+    p0 = 9 / 11  # the agent average, from this one model's counted rows
+    alpha, beta = 0.5 + p0 * 1.0 + 9, 0.5 + (1 - p0) * 1.0 + 2
+    assert e["acceptable_rate"] == round(alpha / (alpha + beta), 4)
+
+
+def _aw(model, n, **kw):
+    """Awaiting-review rows: explored, non-batch, delivered, one unreviewed finding each."""
+    base = dict(explored=True, findings_created=1)
+    base.update(kw)
+    return [_row(model, **base) for _ in range(n)]
+
+
+def test_awaiting_successes_raise_the_shown_rate_but_never_the_standing():
+    pair = [_m("m", "1"), _m("o", "1")]
+    other = _runs("test/o", 12, 12)
+    trusted = _runs("test/m", 5, 4)
+    without = _go(other + trusted, pair)
+    with_aw = _go(other + trusted + _aw("test/m", 5), pair)
+    a, b = _by(without)["test/m"], _by(with_aw)["test/m"]
+    for k in ("cautious_rate", "score", "excluded"):
+        assert a[k] == b[k], k
+    assert b["acceptable_rate"] > a["acceptable_rate"] and b["runs"] == 10
+    assert without["ranked_pick"] == with_aw["ranked_pick"]
+    assert a["excluded"] == "below_reliability_floor"
+
+
+@pytest.mark.parametrize("trusted_ok", [3, 0])
+def test_unreviewed_successes_cannot_promote_a_model_over_a_better_one(trusted_ok):
+    pair = [_m("m", "1"), _m("o", "5")]
+    other = _runs("test/o", 12, 12, cost=0.20)
+    trusted = _runs("test/m", 5, trusted_ok, cost=0.001)
+    base = _go(other + trusted, pair)
+    assert base["ranked_pick"] == "test/o"
+    many = _go(other + trusted + _aw("test/m", 40, cost=0.001), pair)
+    assert many["ranked_pick"] == "test/o"
+    assert _by(many)["test/m"]["excluded"] == "below_reliability_floor"
+
+
+def test_pending_trials_count_toward_the_cap_but_not_the_rates():
+    cls = "unsettled"
+    rows, models = _tried_and_fresh()
+    base = _go(rows, models)
+    block = _go(rows + _xb("test/fresh", 5, target_class=cls), models)
+    e = _by(block)["test/fresh"]
+    assert e["pending"] == 5 and block["agent"]["pending"] == 5 and e["runs"] == 0
+    assert e["basis"] != "agent" and block["exploration"]["candidate"] is None
+    assert e["acceptable_rate"] == _by(base)["test/fresh"]["acceptable_rate"]
+    assert block["agent"]["runs"] == base["agent"]["runs"]
+    four = _go(rows + _xb("test/fresh", 4, target_class=cls), models)
+    assert four["exploration"]["candidate"] == "test/fresh"
+
+
+@pytest.mark.parametrize("cls", ["infra", "timeout", None])
+def test_infra_timeout_and_no_current_target_are_not_trials(cls):
+    rows, models = _tried_and_fresh()
+    block = _go(rows + _xb("test/fresh", 5, target_class=cls), models)
+    assert _by(block)["test/fresh"]["pending"] == 0
+    assert block["exploration"]["candidate"] == "test/fresh"
+
+
+def test_awaiting_rows_count_undecayed_for_the_cap_but_trusted_rows_decay():
+    rows, models = _tried_and_fresh()
+    ages = [0.5, 1.0, 1.5, 2.0, 2.5]
+    aged = [r for a in ages for r in _xb("test/fresh", 1, age=a)]
+    assert _go(rows + aged, models)["exploration"]["candidate"] is None
+    trusted = [_row("test/fresh", age=a) for a in ages]
+    block = _go(rows + trusted, models)
+    e = _by(block)["test/fresh"]
+    assert e["basis"] != "agent" and 4.5 < e["trusted_n"] < 5.0
+    assert block["exploration"]["candidate"] == "test/fresh"
+
+
+def test_awaiting_rows_under_the_other_objective_still_stop_exploration():
+    rows, models = _tried_and_fresh()
+    block = _go(rows + _xb("test/fresh", 5, objective="eco"), models)
+    assert _by(block)["test/fresh"]["awaiting_review"] == 5
+    assert block["exploration"]["candidate"] is None
+
+
+def test_explored_rows_of_a_model_without_a_record_stay_out_of_calibration_and_typical_tokens():
+    rows, models = _tried_and_fresh()
+    base = _go(rows, models)
+    # Six trusted rows would give a record; unreviewed, they must not reach the agent numbers.
+    noisy_rows = _aw("test/fresh", 6, cost=100.0, inp=900_000, out=900_000, is_batch=True, target_class="success")
+    noisy = _go(rows + noisy_rows, models)
+    assert _by(noisy)["test/fresh"]["basis"] != "agent"
+    for k in ("typical_input_tokens", "typical_output_tokens", "list_price_calibration", "acceptable_rate"):
+        assert noisy["agent"][k] == base["agent"][k]
+
+
+def test_sat_out_follows_the_last_two_counted_rows():
+    rows, models = _tried_and_fresh()
+
+    def fail(age):
+        return _row("test/fresh", explored=True, ok=False, age=age)
+
+    def await_(age):
+        return _xb("test/fresh", 1, age=age)[0]
+
+    broken = _go(rows + [fail(3.0), await_(2.0), fail(1.0)], models)
+    assert _by(broken)["test/fresh"]["sat_out"] is False
+    assert broken["exploration"]["candidate"] == "test/fresh"
+    after = _go(rows + [await_(3.0), fail(2.0), fail(1.0)], models)
+    assert _by(after)["test/fresh"]["sat_out"] is True and after["exploration"]["candidate"] is None
+
+
+def test_rows_that_are_not_explored_behave_as_before():
+    rows, models = _tried_and_fresh()
+
+    def five(explored):
+        return [_row("test/fresh", explored=explored, findings_created=1) for _ in range(5)]
+
+    plain = _go(rows + five(False), models)
+    flagged = _go(rows + five(True), models)
+    assert _by(plain)["test/fresh"]["basis"] == "agent" and _by(plain)["test/fresh"]["awaiting_review"] == 0
+    assert _by(flagged)["test/fresh"]["basis"] != "agent" and _by(flagged)["test/fresh"]["awaiting_review"] == 5
+
+
+def test_explore_ok_restricts_the_candidate_and_none_does_not():
+    rows = _runs("test/tried", 12, 12)
+    models = [_m("tried", "2"), _m("f1"), _m("f2", "3")]
+    free = _go(rows, models)
+    assert free["exploration"]["candidate"] == "test/f1" and free["exploration"]["eligible"] == 2
+    only = _go(rows, models, explore_ok={"test/f2"})
+    assert only["exploration"]["candidate"] == "test/f2" and only["exploration"]["eligible"] == 1
+    none = _go(rows, models, explore_ok=set())
+    assert none["exploration"]["candidate"] is None and none["exploration"]["eligible"] == 0
+    assert "No untried model was eligible for exploration." in none["reason"]
+
+
+def test_five_unreviewed_exploration_batch_rows_never_promote_a_cheap_model():
+    base = _runs("test/tried", 12, 12, cost=0.20)
+    models = [_m("tried", "2"), _m("cheap", "1")]
+    before = _go(base + _xb("test/cheap", 5, cost=0.001), models)
+    assert before["ranked_pick"] == "test/tried" and before["pick"] == "test/tried"
+    # the reviewer's probe: rejected findings, no approval, are failures and promote nothing
+    probe = _go(base + _xb("test/cheap", 5, cost=0.001, findings_rejected=1), models)
+    assert probe["ranked_pick"] == "test/tried"
+    after = _go(base + _xb("test/cheap", 5, cost=0.001, findings_approved=1), models)
+    assert after["ranked_pick"] == "test/cheap"

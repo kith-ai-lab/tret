@@ -318,6 +318,11 @@ class OutcomePriors:
                     RunOutcome.input_tokens,
                     RunOutcome.output_tokens,
                     RunOutcome.findings_rejected,
+                    RunOutcome.findings_approved,
+                    RunOutcome.findings_created,
+                    # As text and read in Python, so a stray non-boolean value
+                    # cannot fail the query on Postgres.
+                    RunOutcome.components["explored"].as_string().label("explored"),
                     RunOutcome.task_family,
                     Run.task_input["_collection_id"].as_string().label("batch_stamp"),
                     BatchTarget.id.label("target_id"),
@@ -366,6 +371,9 @@ class OutcomePriors:
                         input_tokens=int(r.input_tokens or 0),
                         output_tokens=int(r.output_tokens or 0),
                         findings_rejected=int(r.findings_rejected or 0),
+                        findings_approved=int(r.findings_approved or 0),
+                        findings_created=int(r.findings_created or 0),
+                        explored=str(r.explored).lower() in ("true", "1"),
                         # The engine's batch stamp on the run, so a row written before
                         # `task_family` existed is still recognised as a batch row.
                         is_batch=(

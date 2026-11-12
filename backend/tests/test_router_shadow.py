@@ -300,14 +300,14 @@ OTHER = uuid.uuid4()
 T = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
 
 
-def _outcome(model, *, harness=HARNESS, run_id=None, outcome_class="delivered", family=None, age_days=1.0, rejected=0):
+def _outcome(model, *, harness=HARNESS, run_id=None, outcome_class="delivered", family=None, age_days=1.0, rejected=0, approved=0, created=0, components=None):
     return RunOutcome(
         run_id=run_id or uuid.uuid4(), segment_index=0, harness_id=harness, task_type="freeform",
         task_shape="freeform", objective=OBJ, max_cost_tier="premium", size_band="s", model_id=model,
         provider="openrouter", outcome_class=outcome_class, quality_score=Decimal("0.8"),
-        score_version="outcome-v1", components={}, iterations=3, cost_usd=Decimal("0.05"),
+        score_version="outcome-v1", components=components or {}, iterations=3, cost_usd=Decimal("0.05"),
         input_tokens=1000, output_tokens=500, duration_ms=1, findings_rejected=rejected,
-        task_family=family, observed_at=T - timedelta(days=age_days),
+        findings_approved=approved, findings_created=created, task_family=family, observed_at=T - timedelta(days=age_days),
     )
 
 
@@ -362,6 +362,30 @@ def test_for_agent_reads_one_agents_rows_with_their_target_class(client, world):
     # invalidate() clears the cache: the next call is a fresh list
     p.invalidate()
     assert p._agent_cache == {}
+
+
+def test_for_agent_reads_the_explored_mark_and_the_review_approvals(client, world):
+    async def go(db):
+        from sqlalchemy import text
+
+        await db.execute(text("PRAGMA foreign_keys=OFF"))  # synthetic rows have no run behind them
+        db.add_all([
+            _outcome("m/yes", components={"explored": True}, approved=2, created=3),
+            # a JSON string "true" reads as explored: the writer only ever stores a boolean
+            _outcome("m/str", components={"explored": "true"}),
+            _outcome("m/empty", components={}),
+            _outcome("m/no", components={"explored": False}),
+            _outcome("m/null", components={"explored": None}),
+        ])
+        await db.commit()
+        return await OutcomePriors(world.factory, now=lambda: T).for_agent(HARNESS)
+
+    rows = {r.model_id: r for r in run_db(client, world, go)}
+    assert (rows["m/yes"].explored, rows["m/yes"].findings_approved) == (True, 2)
+    assert rows["m/yes"].findings_created == 3 and rows["m/empty"].findings_created == 0
+    assert rows["m/str"].explored is True
+    for m in ("m/empty", "m/no", "m/null"):
+        assert (rows[m].explored, rows[m].findings_approved) == (False, 0)
 
 
 def test_for_agent_failure_is_logged_not_raised_and_not_cached(client, world, monkeypatch):

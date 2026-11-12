@@ -630,11 +630,15 @@ class RoutingDecision:
     #    "eligible": n, "reason": "untried model within exploration tier"}
     #     the roll fired: `chosen_model` is `candidate` and no router call was
     #     made for this decision at all (see `reasoning`, which says so).
-    #   {"explored": False, "candidate": None, "probability": 0.0,
-    #    "eligible": None, "reason": "scored ranking: ..."}
-    #     the scored path made the decision (`scored`); `probability` is 0.0
-    #     because today's exploration is not consulted there (the scored block's
-    #     own `exploration.share` is the share that applies once it goes live).
+    #   {"explored": False, "candidate": None, "probability": p,
+    #    "eligible": n, "reason": "scored ranking: ..."}
+    #     the scored path made the decision (`scored`) and its roll did not
+    #     explore: `p` is the policy's share (0 when exploration is off) and `n`
+    #     the number of models eligible for exploration (0 when none was).
+    #   {"explored": True, "candidate": id, "probability": p,
+    #    "eligible": n, "reason": "scored ranking: exploration share"}
+    #     the scored path's roll fired: `chosen_model` is `candidate`, no router
+    #     call was made, and `scored.exploration.applied` is true.
     exploration: dict | None = None
     # The open-weights mode applied to this decision ("prefer" | "require" |
     # "any": the policy's own value, else `TRET_ROUTER_OPEN_WEIGHTS`). Null on
@@ -1188,7 +1192,6 @@ class ModelRouter:
         pooled,
         min_context_window: int | None,
         live_choice: str | None,
-        exploration_live: bool,
     ) -> tuple[dict, dict[str, ModelInfo]]:
         """The scored block for one decision, and the pool it ranked, by id.
 
@@ -1235,11 +1238,21 @@ class ModelRouter:
         if extras and get_settings().router_cooldown_minutes > 0:
             cooling = {e["model"] for e in await self._cooldown_for([m.id for m in extras])}
             extras = [m for m in extras if m.id not in cooling]
-        share = 0.0 if not adaptive.exploration else scoring.EXPLORATION_SHARE
+        share = adaptive.exploration
+        # Same ceiling rules as `_untried_exploration_candidates`: the policy floor
+        # lifts the exploration ceiling when it is higher.
+        explore_ceiling = adaptive.exploration_max_cost_tier
+        if min_tier is not None and TIER_ORDER[min_tier] > TIER_ORDER.get(explore_ceiling, 2):
+            explore_ceiling = min_tier
         # No draw when exploration is off, so a preview (exploration forced to
         # 0) is deterministic and never advances the shadow generator.
         draw = self._shadow_rng.random() if share > 0 else None
         models = [*pool, *extras]
+        explore_ok = {
+            m.id
+            for m in models
+            if within_cost_tier(m, explore_ceiling) and not _is_specialist_variant(m)
+        }
         block = scoring.decide(
             rows=rows,
             pooled=pooled,
@@ -1250,7 +1263,7 @@ class ModelRouter:
             draw=draw,
             live_choice=live_choice,
             now=now,
-            exploration_live=exploration_live,
+            explore_ok=explore_ok,
         )
         block["harness_id"] = str(harness_id)
         return block, {m.id: m for m in models}
@@ -1277,7 +1290,6 @@ class ModelRouter:
                 pooled=pooled,
                 min_context_window=kwargs.get("min_context_window"),
                 live_choice=decision.chosen_model,
-                exploration_live=True,
             )
             return block
         except Exception:  # noqa: BLE001 - the shadow must never break routing
@@ -1799,12 +1811,21 @@ class ModelRouter:
             pooled=priors,
             min_context_window=min_context_window,
             live_choice=None,
-            # The draw is recorded; acting on it comes in a later step.
-            exploration_live=False,
         )
-        pick = block.get("ranked_pick")
-        if block.get("status") != "scored" or pick not in pool:
+        if block.get("status") != "scored":
             return None
+        ranked = block.get("ranked_pick")
+        pick = block.get("pick")
+        if pick not in pool:
+            return None
+        ex = block.get("exploration") or {}
+        explored = bool(ex.get("fired") and ex.get("applied") and pick == ex.get("candidate"))
+        if not explored:
+            pick = ranked
+            if pick not in pool:
+                return None
+        share = ex.get("share", 0.0)
+        eligible = ex.get("eligible", 0)
         # The same guard every automatic path has: no decision leaves the router
         # above the ceiling. Raising here is caught by the caller, which falls
         # through to today's path.
@@ -1816,6 +1837,28 @@ class ModelRouter:
         for mid in [*block.get("ranking", []), *pool]:
             if mid in pool and mid not in ids:
                 ids.append(mid)
+        if explored:
+            exploration = {
+                "explored": True,
+                "candidate": pick,
+                "probability": share,
+                "eligible": eligible,
+                "reason": "scored ranking: exploration share",
+            }
+        else:
+            if not share:
+                why = "exploration is off"
+            elif ex.get("candidate") is None:
+                why = "no untried model was eligible"
+            else:
+                why = "exploration roll did not fire"
+            exploration = {
+                "explored": False,
+                "candidate": None,
+                "probability": share,
+                "eligible": eligible,
+                "reason": f"scored ranking: {why}",
+            }
         return RoutingDecision(
             router_model=None,
             routing_prompt_version=ROUTING_PROMPT_VERSION,
@@ -1830,13 +1873,7 @@ class ModelRouter:
             context_fit=context_fit,
             fallback_used=False,
             effort=default_effort(objective, task_shape, pool[pick].cost_tier),
-            exploration={
-                "explored": False,
-                "candidate": None,
-                "probability": 0.0,
-                "eligible": None,
-                "reason": "scored ranking: the exploration share is not live for this agent yet",
-            },
+            exploration=exploration,
             open_weights=open_weights,
             scored=block,
         )

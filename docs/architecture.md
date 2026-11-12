@@ -396,8 +396,9 @@ An agent is a harness. Its record is its own `run_outcomes` rows from the last 1
 result counts as acceptable when the run delivered and no finding was rejected. A batch run
 is recognised by the batch stamp on the run (or a current target pointing at it), so runs
 recorded before batch families existed are handled the same way; its result is acceptable
-when the target is a success by the batch scorecard's rule, and it is left out when the
-target is infrastructure, timeout or unsettled, or when no current target points at it. A
+when the target is a success by the batch scorecard's rule and the run has no review
+rejection without a review approval (such a run counts as a failure), and it is left out when
+the target is infrastructure, timeout or unsettled, or when no current target points at it. A
 model needs about five decayed runs on the agent before its own results count; below that its
 estimate is the pooled prior alone, or the agent's average rate when the model has no pooled record. The score is the expected cost (USD) or energy (Wh)
 per acceptable result, using a cautious acceptable rate (mean minus 1.28 standard
@@ -405,8 +406,8 @@ deviations), so a thin record cannot win on luck. A recorded cost of zero counts
 model whose cautious rate is under 80% of the best tried model's is kept out of the main
 ranking. A model with no record on the agent enters the main ranking only when its cautious
 rate is at least the best tried model's, and otherwise is reached only through the
-exploration share of 10%, decided by a separate random draw (no draw is made when
-exploration is off). List-price estimates are scaled by how much the agent's tried models cost
+exploration share (the policy's `adaptive.exploration`), decided by a separate random draw
+(no draw is made when exploration is 0). List-price estimates are scaled by how much the agent's tried models cost
 against their own list-price estimates, because token counts leave out cache reads. With
 `TRET_ROUTER_AGENT_SCORING=shadow` each routing decision stores what the ranking would have
 picked, with the numbers, in `runs.routing.shadow`, and the model that runs is unchanged.
@@ -420,9 +421,21 @@ stored as `runs.routing.scored`, and the decision's reasoning states the numbers
 agent has no record yet, the objective is not scored (`quality`, `token_conservation`),
 learning is off for the policy, or nothing fits the context window, today's router decides. In
 the first three cases the shadow block's status says why; the last shows in the decision's
-`context_fit`. Every other agent under `live` is as under `shadow`. The
-exploration share is recorded but not acted on yet. A model switch made mid-run by the
-supervisor still uses today's ordering.
+`context_fit`. Every other agent under `live` is as under `shadow`. A model switch made
+mid-run by the supervisor still uses today's ordering.
+
+For an agent routed by the scored ranking, a share of runs equal to `adaptive.exploration` (0
+turns it off) goes to the most promising model with fewer than about five recent trial runs on
+the agent, chosen on the optimistic estimate and within `adaptive.exploration_max_cost_tier`.
+The cap counts trials: runs awaiting review and runs whose target is not settled yet count as
+well as settled ones. The run is marked (`routing.exploration.explored`, and
+`routing.scored.exploration.applied`). A model whose last two runs failed sits out. An
+exploration run's failure counts at once. Its success shows in the model's displayed rate but,
+while it has findings and no review approval, it does not count toward the model's record or its
+cautious rate, so it cannot raise the model's place; a run with no findings has nothing to
+review and counts at once; the batch evaluator's score is not a review. Unlike today's exploration, the scored ranking's exploration
+applies on any task shape and under any scored objective. Runs still in flight are not seen, so
+several draws inside one batch can go to the same model before its first run finishes.
 
 ## Outbound network
 

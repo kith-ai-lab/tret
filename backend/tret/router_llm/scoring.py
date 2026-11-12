@@ -35,8 +35,6 @@ POOLED_PRIOR_MAX_RUNS = 3.0
 AGENT_AVERAGE_PRIOR_RUNS = 1.0
 # Half a run each way: keeps the estimate proper at 0% and 100%.
 BASE_PSEUDO = 0.5
-# Share of decisions that would try a model the agent has no record of.
-EXPLORATION_SHARE = 0.10
 # Under "prefer", an open-weight model may win within this fraction of the best score.
 OPEN_WEIGHTS_MARGIN = 0.15
 # A model whose cautious rate is under this share of the best one leaves the main ranking.
@@ -73,20 +71,56 @@ class AgentRow:
     findings_rejected: int
     is_batch: bool
     target_class: str | None
+    # The run's routing decision explored (`RunOutcome.components["explored"]`), and
+    # how many review decisions (not packaging approvals) its findings got.
+    explored: bool = False
+    findings_approved: int = 0
+    findings_created: int = 0
 
 
 def acceptable(row: AgentRow, excluded_classes: tuple[str, ...] = _EXCLUDED_CLASSES) -> bool | None:
     """True or False for a row that counts, None for one that is left out.
 
-    A batch row is judged by its target's class (the batch scorecard's rule), so a
+    A batch row is judged by its target's class (the batch scorecard's), and in
+    addition a review rejection with no review approval makes it a failure. So a
     target no current attempt points at, or one still unsettled or lost to
     infrastructure, says nothing about the model. Any other row is acceptable when
     it delivered and no finding was rejected."""
     if row.is_batch:
         if row.target_class is None or row.target_class in excluded_classes:
             return None
+        if row.findings_rejected > 0 and row.findings_approved == 0:
+            return False
         return row.target_class == "success" and row.outcome_class == "delivered"
     return row.outcome_class == "delivered" and row.findings_rejected == 0
+
+
+def awaiting_review(row: AgentRow) -> bool:
+    """An exploration run that looks like a success, has findings, and none of them
+    got a review approval yet.
+
+    It counts in the model's numbers, but cannot by itself give the model a record:
+    a success nobody has looked at is not yet evidence. A run that created no
+    findings has nothing to review and counts at once."""
+    return (
+        row.explored
+        and acceptable(row) is True
+        and row.findings_created > 0
+        and row.findings_approved == 0
+    )
+
+
+def pending_trial(row: AgentRow) -> bool:
+    """An exploration batch run whose target is still unsettled.
+
+    Left out of every rate like any such row, but it is a trial of the model. A run
+    with no current target (a replaced attempt, a deleted batch) is not one: it
+    would block exploration of the model for the whole window."""
+    return (
+        row.explored
+        and row.is_batch
+        and row.target_class == "unsettled"
+    )
 
 
 def _aware(ts: datetime | None) -> datetime | None:
@@ -118,15 +152,26 @@ def _row_key(row: AgentRow, now: datetime):
         row.findings_rejected,
         row.is_batch,
         row.target_class or "",
+        row.explored,
+        row.findings_approved,
+        row.findings_created,
     )
 
 
 class _Acc:
-    __slots__ = ("runs", "weight", "ok", "cost", "energy", "energy_w", "inp", "out", "recent")
+    __slots__ = (
+        "runs", "weight", "trusted", "trusted_ok", "awaiting", "pending", "ok", "cost", "energy", "energy_w", "inp", "out",
+        "recent",
+    )
 
     def __init__(self) -> None:
         self.runs = 0
         self.weight = 0.0
+        # Decayed weight of counted rows that are not awaiting review: what a record needs.
+        self.trusted = 0.0
+        self.trusted_ok = 0.0
+        self.awaiting = 0
+        self.pending = 0
         self.ok = 0.0
         self.cost = 0.0
         self.energy = 0.0
@@ -142,10 +187,19 @@ def _accumulate(rows: list[AgentRow], objective: str, now: datetime) -> tuple[di
     for row in sorted(rows, key=lambda r: _row_key(r, now)):
         ok = acceptable(row)
         if ok is None:
+            if pending_trial(row):
+                accs.setdefault(row.model_id, _Acc()).pending += 1
             continue
-        counted += 1
         w = _weight(row, objective, now)
         a = accs.setdefault(row.model_id, _Acc())
+        # Every settled row is counted, so a model's rate is not biased by leaving
+        # out the unreviewed ones; only a record needs trusted weight.
+        if awaiting_review(row):
+            a.awaiting += 1
+        else:
+            a.trusted += w
+            a.trusted_ok += w if ok else 0.0
+        counted += 1
         a.runs += 1
         a.weight += w
         a.ok += w if ok else 0.0
@@ -160,9 +214,9 @@ def _accumulate(rows: list[AgentRow], objective: str, now: datetime) -> tuple[di
 
 
 def models_with_record(rows: list[AgentRow], objective: str, now: datetime) -> set[str]:
-    """Models whose decayed weight on the agent reaches `MIN_AGENT_RUNS`."""
+    """Models whose decayed, not-awaiting-review weight on the agent reaches `MIN_AGENT_RUNS`."""
     accs, _ = _accumulate(rows, objective, now)
-    return {m for m, a in accs.items() if a.weight >= MIN_AGENT_RUNS}
+    return {m for m, a in accs.items() if a.trusted >= MIN_AGENT_RUNS}
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -248,14 +302,14 @@ def decide(
     draw: float | None,
     live_choice: str | None,
     now: datetime,
-    exploration_live: bool = True,
+    explore_ok: set[str] | None = None,
 ) -> dict:
     """What the scored ranking would pick for this agent, with every number."""
     if objective not in UNITS:
         return {"version": SCORING_VERSION, "status": "objective_not_scored", "objective": objective}
     unit = UNITS[objective]
     accs, counted = _accumulate(rows, objective, now)
-    with_record = {m for m, a in accs.items() if a.weight >= MIN_AGENT_RUNS}
+    with_record = {m for m, a in accs.items() if a.trusted >= MIN_AGENT_RUNS}
     if not any(m.id in with_record for m in models):
         return {
             "version": SCORING_VERSION,
@@ -271,6 +325,10 @@ def decide(
     typical_out = int(round(sum(accs[m].out for m in with_record) / tot_w)) if tot_w > 0 else 0
     rec_w = tot_w
     agent_rate = sum(accs[m].ok for m in with_record) / rec_w if rec_w > 0 else 0.0
+    # The same average over trusted rows: the prior of the cautious posterior, so
+    # awaiting-review successes cannot lift it through the agent average either.
+    trust_w = sum(accs[m].trusted for m in with_record)
+    agent_rate_t = sum(accs[m].trusted_ok for m in with_record) / trust_w if trust_w > 0 else 0.0
 
     calibration = _calibration(accs, with_record, models, objective)
 
@@ -280,21 +338,34 @@ def decide(
         has = m.id in with_record
         pr = pooled.get(m.id)
         if pr is not None:
-            p0, w0 = pr.delivered_rate, min(POOLED_PRIOR_MAX_RUNS, pr.effective_n)
+            p0 = p0_t = pr.delivered_rate
+            w0 = min(POOLED_PRIOR_MAX_RUNS, pr.effective_n)
             basis = "pooled"
         else:
-            p0, w0 = agent_rate, AGENT_AVERAGE_PRIOR_RUNS
+            p0, p0_t, w0 = agent_rate, agent_rate_t, AGENT_AVERAGE_PRIOR_RUNS
             basis = "agent_average"
         alpha = BASE_PSEUDO + p0 * w0
         beta = BASE_PSEUDO + (1.0 - p0) * w0
+        alpha_t = BASE_PSEUDO + p0_t * w0
+        beta_t = BASE_PSEUDO + (1.0 - p0_t) * w0
+        # Two posteriors. The shown mean and the optimistic rate use every counted row.
+        # The cautious rate, which the floor and the ranking use, uses trusted rows only:
+        # an awaiting-review row is a success by definition and must never raise a
+        # model's standing before a human has looked at it.
         if has and a is not None:
             alpha += a.ok
             beta += a.weight - a.ok
+            alpha_t += a.trusted_ok
+            beta_t += a.trusted - a.trusted_ok
             basis = "agent"
-        total = alpha + beta
-        mean = alpha / total
-        sd = math.sqrt(max(0.0, alpha * beta / (total * total * (total + 1.0))))
-        cautious = _clamp(mean - Z_CONSERVATIVE * sd, RATE_FLOOR, 1.0)
+
+        def _post(al: float, be: float) -> tuple[float, float]:
+            tot = al + be
+            return al / tot, math.sqrt(max(0.0, al * be / (tot * tot * (tot + 1.0))))
+
+        mean, sd = _post(alpha, beta)
+        mean_t, sd_t = _post(alpha_t, beta_t)
+        cautious = _clamp(mean_t - Z_CONSERVATIVE * sd_t, RATE_FLOOR, 1.0)
         optimistic = _clamp(mean + Z_CONSERVATIVE * sd, RATE_FLOOR, 1.0)
 
         resource: float | None
@@ -336,6 +407,10 @@ def decide(
             "open_weights": m.open_weights,
             "excluded": None,
             "sat_out": sat_out,
+            "trusted_n": round(a.trusted, 4) if a else 0.0,
+            "awaiting_review": a.awaiting if a else 0,
+            "pending": a.pending if a else 0,
+            "_trial": (a.trusted + a.awaiting + a.pending) if a else 0.0,
             "_open": m.open_weights,
             "_has": has,
             "_cautious": cautious,
@@ -386,7 +461,17 @@ def decide(
 
     eligible = sorted(
         # The ranked pick is never also the exploration candidate.
-        (e for e in scored if not e["_has"] and not e["sat_out"] and e["model"] != ranked_pick),
+        (
+            e
+            for e in scored
+            if not e["_has"]
+            and not e["sat_out"]
+            and e["model"] != ranked_pick
+            # The caller's cost-ceiling and specialist rules.
+            and (explore_ok is None or e["model"] in explore_ok)
+            # Enough trials already, whether or not they have been reviewed yet.
+            and e["_trial"] < MIN_AGENT_RUNS
+        ),
         key=lambda e: (e["_opt_score"], -e["_optimistic"], e["model"]),
     )
     cand, cand_applied = _prefer_open(eligible, "_opt_score", open_weights)
@@ -394,8 +479,7 @@ def decide(
     fired = bool(
         exploration_share > 0 and candidate is not None and draw is not None and draw < exploration_share
     )
-    # With exploration not live the draw is still recorded, but the pick is the ranking's.
-    pick = candidate if fired and exploration_live else ranked_pick
+    pick = candidate if fired else ranked_pick
 
     # Listing: the ranking in order, with room kept for the models the reader
     # needs to see whatever their rank.
@@ -432,8 +516,9 @@ def decide(
             "share": exploration_share,
             "draw": None if draw is None else round(draw, 6),
             "fired": fired,
-            "applied": fired and exploration_live,
+            "applied": fired,
             "candidate": candidate,
+            "eligible": len(eligible),
             "open_weights_applied": cand_applied,
         },
         "open_weights": {
@@ -450,6 +535,8 @@ def decide(
             # Every counted row for the agent, across all models, including models
             # below the record threshold or outside the pool.
             "runs": counted,
+            "awaiting_review": sum(a.awaiting for a in accs.values()),
+            "pending": sum(a.pending for a in accs.values()),
             "typical_input_tokens": typical_in,
             "typical_output_tokens": typical_out,
             "acceptable_rate": _rate(agent_rate),
@@ -458,15 +545,12 @@ def decide(
         "ranking": ranking_ids,
         "models": shown,
         "reason": _reason(
-            main, ranking, main_applied, candidate, fired, exploration_share, draw, unit,
-            exploration_live,
+            main, ranking, main_applied, candidate, fired, exploration_share, draw, unit
         ),
     }
 
 
-def _reason(
-    main, ranking, main_applied, candidate, fired, share, draw, unit, exploration_live=True
-) -> str:
+def _reason(main, ranking, main_applied, candidate, fired, share, draw, unit) -> str:
     if main is None:
         head = "No model had a usable estimate, so nothing was ranked."
     else:
@@ -482,11 +566,6 @@ def _reason(
         head += "."
     if candidate is None:
         tail = "No untried model was eligible for exploration."
-    elif fired and not exploration_live:
-        tail = (
-            f"The exploration draw {round(draw, 4)} was under {share}, so {candidate} would "
-            "have been tried but the exploration share is not live for this agent yet."
-        )
     elif fired:
         tail = f"The exploration draw {round(draw, 4)} was under {share}, so {candidate} was picked to try."
     elif share > 0 and draw is not None:

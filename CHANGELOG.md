@@ -10,6 +10,14 @@ one that needs action on an existing install.
 
 ### Added
 
+- Exploration share for agents on the scored ranking. A share of such an agent's runs equal to
+  its policy's `adaptive.exploration` (default 0.05; 0 turns it off) goes to the most promising
+  model it has not tried, within `adaptive.exploration_max_cost_tier`, and the run is marked in
+  `runs.routing.exploration`. An exploration failure counts at once. An exploration success
+  that has findings does not count toward the model's record or its cautious rate until one of
+  them is approved in review, so unreviewed trial runs cannot promote a model. A batch run with
+  a review rejection and no review approval now counts as a failure in the per-agent record.
+  No migration.
 - Scored ranking, live for agents that opt in. With `TRET_ROUTER_AGENT_SCORING=live`, an agent
   whose policy sets `adaptive.ranking: scored` is routed by the per-agent ranking: the ranked
   pick runs with no router call, and the decision stores its numbers in `runs.routing.scored`.
