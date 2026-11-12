@@ -78,6 +78,16 @@ one that needs action on an existing install.
   received. A flat, even-length list of integers, which some hosts produce by flattening
   the nested list, is read as consecutive pairs. The tool result says how it was read,
   and the draft still waits for a reviewer's approval.
+- **`propose_package_map` shows what the chosen pages hold.** A model that copies the
+  page numbers printed in a report's contents page into `keep_ranges` selects the wrong
+  pages, because those are printed numbers and the ranges are positions in the PDF. The
+  result now quotes the opening words of the first and last page of every range and,
+  where the page's own text carries one, its printed number. It recognises a constant
+  shift between printed and physical numbering and files laid out as two printed pages
+  per PDF page, and says so. A range that runs past the end of the file is told the
+  number is probably a printed one. The tool still never corrects pages itself: every
+  number it states is read from a page's text. The Disclosure Collector's procedure
+  carries the same warning.
 
 ### Fixed
 

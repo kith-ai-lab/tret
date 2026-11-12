@@ -78,6 +78,7 @@ from tret.router_llm.objectives import THRIFT_OBJECTIVES
 from tret.services import connections as connections_service
 from tret.services import lessons as lessons_service
 from tret.services import packaging as packaging_service
+from tret.services import page_check
 from tret.services import retrieval as retrieval_service
 from tret.services.emissions import energy_wh_field
 from tret.storage import document_local_path
@@ -1858,6 +1859,16 @@ def _read_head_sync(path: Path, n: int = 5) -> bytes:
         return fh.read(n)
 
 
+def _page_check_block(doc_id, text: str | None, keep_ranges, page_count: int) -> str:
+    """Newline + the page-check block, or "" (never raises: the proposal must succeed)."""
+    try:
+        block = page_check.describe_ranges(keep_ranges, page_check.split_pages(text), page_count)
+    except Exception:
+        log.warning("page check failed for document %s", doc_id, exc_info=True)
+        return ""
+    return f"\n{block}" if block else ""
+
+
 @builtin(
     "propose_package_map",
     "Propose which pages of a captured source PDF form a sustainability-disclosure package. This "
@@ -1865,7 +1876,10 @@ def _read_head_sync(path: Path, n: int = 5) -> bytes:
     "the map does Tret retain exactly those pages (plus a page map, link audit and page-referenced "
     "text) and register them as new documents. Ranges are PHYSICAL PDF page indices counted from 1 "
     "in the file itself, never the printed folio or page label; read the document first and map "
-    "printed numbers to physical pages yourself. A whole standalone report (scope=standalone) uses "
+    "printed numbers to physical pages yourself. The result quotes the opening words, and the "
+    "printed page number where it can be read, of the first and last page of every range: check "
+    "them and propose again if a range is not the section you meant. A whole standalone report "
+    "(scope=standalone) uses "
     "keep_ranges=null and is retained byte for byte. An embedded statement (scope=embedded) inside "
     "a larger annual report needs explicit keep_ranges, increasing and non-overlapping, and may "
     "not keep every page. Where the retained pages incorporate other sections by reference (for "
@@ -2089,7 +2103,21 @@ async def propose_package_map(
     try:
         pages = packaging_service.validate_map(mapping, info.page_count)
     except packaging_service.PackageMapError as e:
-        raise ToolError(f"Invalid package map: {e}") from e
+        hint = ""
+        if (
+            str(e).startswith("Out-of-bounds range")
+            and keep_pairs is not None
+            and any(b > info.page_count for _, b in keep_pairs)
+        ):
+            hint = (
+                " If that number came from a contents page or an index it is a printed page "
+                f"number, not a position in the file: this PDF has {info.page_count} physical "
+                "pages (a file laid out as two-page spreads has about half as many physical "
+                "pages as printed ones). Find the section with search_documents, whose hits "
+                "name physical pages, read it, and map the pages you read; do not substitute "
+                "a guessed range."
+            )
+        raise ToolError(f"Invalid package map: {e}{hint}") from e
     selected = set(pages)
     for i, rec in enumerate(incorporation_records):
         resolved = rec["resolved_range"]
@@ -2165,6 +2193,9 @@ async def propose_package_map(
     await _supersede_drafts(
         ctx, finding, [f for f in earlier if f.subject == finding.subject or f.id in revised_ids]
     )
+    page_block = await asyncio.to_thread(
+        _page_check_block, doc.id, doc.extracted_text, keep_pairs, info.page_count
+    )
     return (
         f"Proposed package map '{title}' for {doc.filename}: {len(pages)} of {info.page_count} "
         f"physical pages selected (role {role}, scope {scope}, {len(incorporation_records)} "
@@ -2178,6 +2209,7 @@ async def propose_package_map(
             if keep_flat is not None
             else ""
         )
+        + page_block
     )
 
 
