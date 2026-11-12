@@ -105,6 +105,45 @@ def _comparable_set(datas: list[scoring.BatchData]) -> tuple[tuple[str, str, str
     return best, sets[best]
 
 
+def group_stats(ds: list[scoring.TargetData], *, intervals: bool = True) -> dict:
+    """Aggregate of one group of targets (a model's, or an experiment arm's): yield, quality
+    with its 90% interval, cost and energy per acceptable result."""
+    classes = [d.cls for d in ds]
+    denominator = len(ds) - sum(1 for c in classes if c in scoring.EXCLUDED_FROM_YIELD)
+    acceptable_ds = [d for d in ds if d.acceptable and d.cls not in scoring.EXCLUDED_FROM_YIELD]
+    qualities = [d.quality for d in ds if d.quality is not None]
+    residuals = [
+        float(d.evaluation.relative["residual"])
+        for d in ds
+        if d.quality is not None
+        and d.evaluation is not None
+        and isinstance(d.evaluation.relative, dict)
+        and d.evaluation.relative.get("residual") is not None
+    ]
+    cost = sum(d.metrics["cost_usd"] for d in ds)
+    energy = scoring._sum_known([d.metrics["energy_wh"] for d in ds])
+    n_ok = len(acceptable_ds)
+    iterations = [d.metrics["iterations"] for d in ds if d.metrics["iterations"] is not None]
+    return {
+        "targets": len(ds),
+        "delivered": sum(1 for c in classes if c == "success"),
+        "scored": len(qualities),
+        "acceptable": n_ok,
+        "yield": scoring._ratio(n_ok, denominator),
+        "quality_mean": round(statistics.fmean(qualities), 1) if qualities else None,
+        "quality_interval90": scoring.bootstrap_interval(qualities) if intervals and len(qualities) >= INTERVAL_MIN else None,
+        "mean_residual": round(statistics.fmean(residuals), 1) if residuals else None,
+        "cost_usd": round(cost, 6),
+        "cost_per_acceptable_usd": round(cost / n_ok, 6) if n_ok else None,
+        "energy_per_acceptable_wh": round(energy / n_ok, 4) if n_ok and energy is not None else None,
+        "mean_iterations": round(statistics.fmean(iterations), 1) if iterations else None,
+        "p95_iterations": _p95([d.metrics["iterations"] for d in acceptable_ds if d.metrics["iterations"] is not None]),
+        "p95_cost_usd": _p95([d.metrics["cost_usd"] for d in acceptable_ds]),
+        "infra_failures": sum(1 for c in classes if c == "infra"),
+        "pareto": False,
+    }
+
+
 def models_from(datas: list[scoring.BatchData]) -> dict:
     """`{comparable, models, excluded_batches}` over already-collected batches."""
     best, included = _comparable_set(datas)
@@ -120,42 +159,11 @@ def models_from(datas: list[scoring.BatchData]) -> dict:
     models = []
     for model, items in per_model.items():
         ds = [d for _, d in items]
-        classes = [d.cls for d in ds]
-        denominator = len(ds) - sum(1 for c in classes if c in scoring.EXCLUDED_FROM_YIELD)
-        acceptable_ds = [d for d in ds if d.acceptable and d.cls not in scoring.EXCLUDED_FROM_YIELD]
-        qualities = [d.quality for d in ds if d.quality is not None]
-        residuals = [
-            float(d.evaluation.relative["residual"])
-            for d in ds
-            if d.quality is not None
-            and d.evaluation is not None
-            and isinstance(d.evaluation.relative, dict)
-            and d.evaluation.relative.get("residual") is not None
-        ]
-        cost = sum(d.metrics["cost_usd"] for d in ds)
-        energy = scoring._sum_known([d.metrics["energy_wh"] for d in ds])
-        n_ok = len(acceptable_ds)
-        iterations = [d.metrics["iterations"] for d in ds if d.metrics["iterations"] is not None]
         models.append(
             {
                 "model": model,
                 "batches": len({data.batch.id for data, _ in items}),
-                "targets": len(ds),
-                "delivered": sum(1 for c in classes if c == "success"),
-                "scored": len(qualities),
-                "acceptable": n_ok,
-                "yield": scoring._ratio(n_ok, denominator),
-                "quality_mean": round(statistics.fmean(qualities), 1) if qualities else None,
-                "quality_interval90": scoring.bootstrap_interval(qualities) if len(qualities) >= INTERVAL_MIN else None,
-                "mean_residual": round(statistics.fmean(residuals), 1) if residuals else None,
-                "cost_usd": round(cost, 6),
-                "cost_per_acceptable_usd": round(cost / n_ok, 6) if n_ok else None,
-                "energy_per_acceptable_wh": round(energy / n_ok, 4) if n_ok and energy is not None else None,
-                "mean_iterations": round(statistics.fmean(iterations), 1) if iterations else None,
-                "p95_iterations": _p95([d.metrics["iterations"] for d in acceptable_ds if d.metrics["iterations"] is not None]),
-                "p95_cost_usd": _p95([d.metrics["cost_usd"] for d in acceptable_ds]),
-                "infra_failures": sum(1 for c in classes if c == "infra"),
-                "pareto": False,
+                **group_stats(ds),
             }
         )
     frontier = [

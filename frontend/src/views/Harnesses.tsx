@@ -17,6 +17,7 @@ import {
   ESCALATION_MODES,
   type EscalationMode,
   type Harness,
+  type HarnessPolicyHistoryRow,
   type HarnessBody,
   type LoopConfig,
   type ModelPolicy,
@@ -27,6 +28,8 @@ import {
   type RoutingPreviewBody,
   type RoutingPreviewResult,
 } from '../api/client'
+import { useConfirm } from '../components/shared/ConfirmDialog'
+import { formatDateTime } from '../components/shared/format'
 import { Lessons } from '../components/shared/Lessons'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
@@ -166,6 +169,9 @@ function HarnessEditorLoader({
     queryKey: ['harness', harnessId],
     queryFn: () => api.getHarness(harnessId),
   })
+  // Bumped only when a Revert from this page succeeds, so the form resets then
+  // and never because a background refetch saw someone else's edit.
+  const [revision, setRevision] = useState(0)
   if (detailQuery.isLoading) return <div className="empty pulse">Loading harness…</div>
   if (detailQuery.isError)
     return <div className="error-text">{(detailQuery.error as Error).message}</div>
@@ -174,6 +180,7 @@ function HarnessEditorLoader({
   return (
     <>
       <HarnessEditor
+        key={`${detailQuery.data.id}:${revision}`}
         harness={detailQuery.data}
         assembledPrompt={detailQuery.data.assembled_system_prompt}
         canAuthor={canAuthor}
@@ -181,7 +188,156 @@ function HarnessEditorLoader({
       <div style={{ maxWidth: 680, marginTop: 24 }}>
         <Lessons scope={{ kind: 'harness', harnessId }} />
       </div>
+      <div style={{ maxWidth: 680, marginTop: 24 }}>
+        <PolicyHistory harnessId={harnessId} canRevert={canAuthor} current={detailQuery.data} onReverted={() => setRevision((n) => n + 1)} />
+      </div>
     </>
+  )
+}
+
+/** Keys whose value differs between two policy objects, as "key: before -> after". */
+function policyDiff(before: Record<string, unknown> | undefined, after: Record<string, unknown> | undefined): string[] {
+  const b = before ?? {}
+  const a = after ?? {}
+  const show = (v: unknown) => (v === undefined ? 'unset' : typeof v === 'string' ? v : JSON.stringify(v))
+  return Array.from(new Set([...Object.keys(b), ...Object.keys(a)]))
+    .filter((k) => JSON.stringify(b[k]) !== JSON.stringify(a[k]))
+    .map((k) => `${k}: ${show(b[k])} → ${show(a[k])}`)
+}
+
+const HISTORY_SOURCE: Record<string, string> = {
+  edit: 'edit',
+  experiment: 'experiment',
+  revert: 'revert',
+}
+
+/** Who changed this harness's model policy or loop config, when, and to what.
+ *  Outside the editor form. Hidden quietly on a server without the endpoint. */
+function PolicyHistory({
+  harnessId,
+  canRevert,
+  current,
+  onReverted,
+}: {
+  harnessId: string
+  canRevert: boolean
+  onReverted?: () => void
+  current?: { model_policy: unknown; loop_config: unknown }
+}) {
+  const queryClient = useQueryClient()
+  const askConfirm = useConfirm()
+  const query = useQuery({
+    queryKey: ['harness-policy-history', harnessId],
+    queryFn: () => api.listHarnessPolicyHistory(harnessId),
+    retry: false,
+  })
+  const revertMutation = useMutation({
+    mutationFn: (historyId: string) => api.revertHarnessPolicy(harnessId, historyId),
+    onSuccess: async () => {
+      void queryClient.invalidateQueries({ queryKey: ['harness-policy-history', harnessId] })
+      void queryClient.invalidateQueries({ queryKey: ['harnesses'] })
+      // Remount the editor only once the refetched harness is in the cache.
+      await queryClient.refetchQueries({ queryKey: ['harness', harnessId] })
+      onReverted?.()
+    },
+  })
+  if (query.error instanceof ApiError && (query.error.status === 404 || query.error.status === 405)) return null
+  const rows: HarnessPolicyHistoryRow[] = query.data ?? []
+
+  const changes = (r: HarnessPolicyHistoryRow) => [
+    ...policyDiff(r.previous_model_policy, r.new_model_policy).map((l) => `policy ${l}`),
+    ...policyDiff(r.previous_loop_config, r.new_loop_config).map((l) => `loop ${l}`),
+  ]
+
+  // Reverting restores the entry's PREVIOUS values over the harness's CURRENT ones.
+  const revertLines = (r: HarnessPolicyHistoryRow) => [
+    ...policyDiff(current?.model_policy as Record<string, unknown>, r.previous_model_policy).map((l) => `policy ${l}`),
+    ...policyDiff(current?.loop_config as Record<string, unknown>, r.previous_loop_config).map((l) => `loop ${l}`),
+  ]
+
+  const revert = async (r: HarnessPolicyHistoryRow) => {
+    const lines = revertLines(r)
+    const ok = await askConfirm({
+      title: 'Revert policy change',
+      message: `This restores the settings from before this change: ${lines.join('; ') || 'no setting changes'}.`,
+      confirmLabel: 'Revert',
+      destructive: true,
+    })
+    if (ok) revertMutation.mutate(r.id)
+  }
+
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 6 }}>
+        Policy history
+      </div>
+      <div className="view-sub" style={{ marginTop: -4, marginBottom: 10 }}>
+        Every change to this harness's model policy or loop settings: who made it and what it replaced.
+      </div>
+      {revertMutation.error && (
+        <div className="error-text" style={{ marginBottom: 8 }}>
+          {revertMutation.error instanceof ApiError && revertMutation.error.status === 403
+            ? 'Reverting requires the admin role.'
+            : (revertMutation.error as Error).message}
+        </div>
+      )}
+      {query.isLoading ? (
+        <div className="empty pulse">Loading history…</div>
+      ) : query.error ? (
+        <div className="error-text">{(query.error as Error).message}</div>
+      ) : rows.length === 0 ? (
+        <div className="empty">No policy changes recorded yet.</div>
+      ) : (
+        <table className="mono-table">
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>Who</th>
+              <th>Source</th>
+              <th>What changed</th>
+              {canRevert && <th />}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td>{formatDateTime(r.changed_at)}</td>
+                <td>{r.changed_by_name ?? '—'}</td>
+                <td>{HISTORY_SOURCE[r.source] ?? r.source}</td>
+                <td>
+                  {changes(r).length === 0 ? (
+                    <span className="fine-print">no setting differences</span>
+                  ) : (
+                    changes(r).map((l) => (
+                      <div key={l} className="mono-body" style={{ overflowWrap: 'anywhere' }}>
+                        {l}
+                      </div>
+                    ))
+                  )}
+                  {r.note && <div className="fine-print">{r.note}</div>}
+                </td>
+                {canRevert && (
+                  <td>
+                    <button
+                      className="btn btn-sm"
+                      disabled={revertMutation.isPending || (!!current && revertLines(r).length === 0)}
+                      title={
+                        current && revertLines(r).length === 0
+                          ? 'The harness already has these settings.'
+                          : undefined
+                      }
+                      onClick={() => void revert(r)}
+                    >
+                      Revert
+                    </button>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
   )
 }
 
@@ -222,6 +378,7 @@ function HarnessEditor({
     onSuccess: (saved) => {
       queryClient.invalidateQueries({ queryKey: ['harnesses'] })
       queryClient.invalidateQueries({ queryKey: ['harness', saved.id] })
+      queryClient.invalidateQueries({ queryKey: ['harness-policy-history', saved.id] })
       onSaved?.(saved)
     },
   })

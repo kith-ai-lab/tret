@@ -45,7 +45,7 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
@@ -351,6 +351,7 @@ def target_out(
         "position": t.position,
         "slug": t.slug,
         "label": t.label,
+        "arm": t.arm,
         "task_input": dict(t.task_input or {}),
         **profile.target_extra(t, run, findings),
         "status": t.status,
@@ -403,12 +404,13 @@ def collection_out(
         "harness_id": str(c.harness_id) if c.harness_id else None,
         "parent_run_id": str(c.parent_run_id) if c.parent_run_id else None,
         "status": c.status,
+        "experiment": batch_settings.get("experiment"),
         # `evaluation` is echoed only for a batch that has it, so the settings of
         # every other batch read exactly as they did before evaluation existed.
         "settings": {
             k: batch_settings.get(k)
             for k in profile.settings_keys()
-            if k != "evaluation" or "evaluation" in batch_settings
+            if k not in ("evaluation", "experiment") or k in batch_settings
         },
         "created_by": str(c.created_by) if c.created_by else None,
         "created_at": _iso(c.created_at),
@@ -663,6 +665,12 @@ async def _launch(collection_id: uuid.UUID) -> int:
             model_override = (c.settings or {}).get("model_override")
             max_iterations = (c.settings or {}).get("max_iterations")
             max_cost_usd = (c.settings or {}).get("max_cost_usd")
+            objective = (c.settings or {}).get("objective")
+            arm_settings = {
+                a.get("key"): a
+                for a in ((c.settings or {}).get("experiment") or {}).get("arms") or []
+                if isinstance(a, dict)
+            }
             previous = await load_runs(db, pending)
             memory: dict[uuid.UUID, str] = {}
             if (c.settings or {}).get("row_memory"):
@@ -696,10 +704,18 @@ async def _launch(collection_id: uuid.UUID) -> int:
                     COLLECTION_ID_KEY: str(c.id),
                     COLLECTION_TARGET_KEY: str(t.id),
                 }
-                if model_override:
-                    task_input["_model_override"] = model_override
-                if max_iterations:
-                    task_input["_max_iterations"] = int(max_iterations)
+                t_model, t_objective, t_iterations = model_override, objective, max_iterations
+                arm = arm_settings.get(t.arm) if t.arm else None
+                if arm is not None:  # a split experiment's arm replaces the batch-level values
+                    t_model = arm.get("model_override") or t_model
+                    t_objective = arm.get("objective") or t_objective
+                    t_iterations = arm.get("max_iterations") or t_iterations
+                if t_model:
+                    task_input["_model_override"] = t_model
+                if t_objective:
+                    task_input["_objective"] = t_objective
+                if t_iterations:
+                    task_input["_max_iterations"] = int(t_iterations)
                 if max_cost_usd:
                     task_input[COST_CAP_KEY] = float(max_cost_usd)
                 if t.id in memory:
@@ -980,6 +996,18 @@ def _allowlist_warnings(rows: list[dict]) -> list[str]:
     return out
 
 
+def clean_objective(value: Any) -> str | None:
+    """A batch's `objective` setting: one of the router's objectives, or None."""
+    from tret.router_llm.objectives import OBJECTIVES
+
+    text = (value or "").strip() if isinstance(value, str) else None
+    if not text:
+        return None
+    if text not in OBJECTIVES:
+        raise HTTPException(422, f"objective must be one of {', '.join(OBJECTIVES)}")
+    return text
+
+
 async def create_batch(
     db: AsyncSession,
     *,
@@ -987,7 +1015,14 @@ async def create_batch(
     user_id: uuid.UUID | None,
     body: Any,
     profile_slug: str,
+    settings_extra: dict | None = None,
+    row_filter: Callable[[list[dict]], list[dict]] | None = None,
+    commit: bool = True,
 ) -> tuple[Batch, list[BatchTarget]]:
+    """Create a draft batch. The keyword extras are for `tret/batches/experiments.py`:
+    `settings_extra` is merged into the batch settings, `row_filter` may keep, renumber
+    or tag (`row["arm"]`) the parsed rows, `commit=False` leaves the transaction open
+    (flushed) so a group of batches can be created all-or-nothing."""
     try:
         profile = get_profile(profile_slug)
     except KeyError as e:
@@ -1000,6 +1035,8 @@ async def create_batch(
         rows, warnings = await profile.parse_targets(body)
     except RegisterError as e:
         raise HTTPException(422, str(e)) from e
+    if row_filter is not None:
+        rows = row_filter(rows)
     warnings = [*warnings, *_allowlist_warnings(rows)]
     existing = (
         await db.execute(
@@ -1014,6 +1051,8 @@ async def create_batch(
     evaluation_settings = evaluation.build_settings(profile.slug, getattr(body, "evaluation", None))
     if evaluation_settings is not None:
         settings = {**settings, "evaluation": evaluation_settings}
+    if settings_extra:
+        settings = {**settings, **settings_extra}
     project = (
         await db.execute(
             select(Project).where(Project.workspace_id == workspace_id).order_by(Project.created_at)
@@ -1057,6 +1096,7 @@ async def create_batch(
             fiscal_year=row.get("fiscal_year"),
             known_urls=row.get("known_urls") or [],
             notes=row.get("notes"),
+            arm=row.get("arm"),
             status="held" if gate > 0 and row["position"] > gate else "pending",
             finding_ids=[],
             attempts=0,
@@ -1066,7 +1106,10 @@ async def create_batch(
     await db.flush()  # the batch row first: targets reference it
     for t in targets:
         db.add(t)
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     return batch, targets
 
 

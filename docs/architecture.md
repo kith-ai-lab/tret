@@ -649,6 +649,22 @@ in every run of that harness, pack or no pack, except evaluator runs. The
 evaluator can propose, never approve, retire or edit, and nothing here changes
 scores.
 
+## Harness policy history
+
+A harness's `model_policy` and `loop_config` are changed on purpose and rarely, so
+every change is recorded (`harness_policy_history`, `services/harness_policy.py`):
+who made it, when, the previous and the new value, and its source (`edit` for the
+harness PUT, `experiment` for a promoted batch-experiment winner, `revert`). A PUT
+that leaves both fields as they were records nothing. Any workspace member can read
+the list (`GET /api/harnesses/{id}/policy-history`, newest first); a workspace
+admin can restore a row's previous values
+(`POST /api/harnesses/{id}/policy-history/{history_id}/revert`). The restored
+policy goes through the same validator as an edit, so a revert that names a model
+no longer in the catalog is refused with a 422 and changes nothing. A revert is
+itself a row, so it can be reverted in turn. The seeded harnesses' boot upgrade
+only replaces a policy that still equals an earlier seed value, so it never
+overwrites a policy changed through any of these paths.
+
 ## Schema and migrations
 
 **Alembic owns the schema.** `db/models.py` declares it, `alembic/versions/` is

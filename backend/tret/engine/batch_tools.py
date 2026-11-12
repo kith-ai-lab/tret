@@ -274,6 +274,38 @@ async def _advice_for(ctx: RunContext, profile: str, body: Any) -> dict | None:
             "max_iterations": {"type": "integer", "minimum": 1, "maximum": 50},
             "max_cost_usd": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000},
             "row_memory": {"type": "boolean", "default": False},
+            "objective": {
+                "type": "string",
+                "enum": ["quality", "balanced", "token_conservation", "eco"],
+                "description": "Routing objective for every run of the batch (default: the harness's own).",
+            },
+            "experiment": {
+                "type": "object",
+                "description": "Run the batch as an experiment that compares 2-3 arms. mode 'replicate' "
+                "creates one batch per arm over the same rows; 'split' runs each row once, alternating arms. "
+                "Each arm sets at least one of model_override, objective, max_iterations (and may have a label). "
+                "sample_n (replicate only) keeps that many rows, spread across the register. All arm batches "
+                "start now; a person decides whether to make an arm the harness default from the experiment page.",
+                "required": ["mode", "arms"],
+                "properties": {
+                    "mode": {"type": "string", "enum": ["replicate", "split"]},
+                    "arms": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 3,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "model_override": {"type": "string"},
+                                "objective": {"type": "string", "enum": ["quality", "balanced", "token_conservation", "eco"]},
+                                "max_iterations": {"type": "integer", "minimum": 1, "maximum": 50},
+                            },
+                        },
+                    },
+                    "sample_n": {"type": "integer", "minimum": 2},
+                },
+            },
             "evaluate": {
                 "type": "boolean",
                 "default": False,
@@ -306,9 +338,15 @@ async def start_batch(
     evaluate: bool = False,
     max_cost_usd: float | None = None,
     row_memory: bool = False,
+    objective: str | None = None,
+    experiment: dict | None = None,
 ) -> str:
     if ctx.workspace_id is None:
         raise ToolError("Batches are not available in this run.")
+    if experiment is not None and (
+        not isinstance(experiment, dict) or set(experiment) - {"mode", "arms", "sample_n"}
+    ):
+        raise ToolError("experiment: give mode, arms and optionally sample_n.")
     if profile not in ("prompt", "disclosure"):
         raise ToolError(f"profile: '{profile}' is not a batch profile; use 'prompt' or 'disclosure'.")
     given = {
@@ -387,6 +425,7 @@ async def start_batch(
                 max_iterations=max_iterations,
                 max_cost_usd=max_cost_usd,
                 row_memory=row_memory,
+                objective=objective,
                 parent_run_id=ctx.run_id,
                 evaluation=evaluation_in,
             )
@@ -419,6 +458,7 @@ async def start_batch(
                 max_iterations=max_iterations,
                 max_cost_usd=max_cost_usd,
                 row_memory=row_memory,
+                objective=objective,
                 parent_run_id=ctx.run_id,
                 evaluation=evaluation_in,
                 **extra,
@@ -436,6 +476,8 @@ async def start_batch(
                 "This workspace has no Disclosure Collector harness; enable research egress "
                 "or seed it from Settings."
             )
+    if experiment is not None:
+        return await _start_experiment(ctx, run, name, body, experiment)
     advice = await _advice_for(ctx, profile, body)
     try:
         batch, targets = await core.create_batch(
@@ -476,6 +518,42 @@ async def start_batch(
         out["warnings"] = list(batch.warnings)[:5]
         out["warnings_count"] = len(batch.warnings)
     return json.dumps(out)
+
+
+async def _start_experiment(ctx: RunContext, run: Run, name: str, body: Any, experiment: dict) -> str:
+    """`start_batch` with `experiment`: create the experiment from the same arguments and
+    start every arm batch."""
+    from tret.batches import experiments
+
+    try:
+        spec = experiments.ExperimentSpec(
+            name=name,
+            mode=str(experiment.get("mode") or ""),
+            arms=experiment.get("arms") or [],
+            batch=body,
+            sample_n=experiment.get("sample_n"),
+        )
+        e = await experiments.create_experiment(ctx.db, ctx.workspace_id, run.created_by, spec)
+    except HTTPException as exc:
+        raise ToolError(_http_text(exc)) from None
+    try:
+        await experiments.start_experiment(ctx.db, e)
+    except HTTPException as exc:
+        raise ToolError(
+            f"Experiment '{e.name}' was created ({e.id}) but could not be fully started: {_http_text(exc)}. "
+            "Start the rest from its page when that is resolved."
+        ) from None
+    await ctx.db.refresh(e)
+    return json.dumps(
+        {
+            "experiment_id": str(e.id),
+            "name": e.name,
+            "mode": e.mode,
+            "arms": [{"key": a["key"], "label": a.get("label"), "batch_id": a.get("batch_id")} for a in e.arms],
+            "sample_n": e.sample_n,
+            "page": f"/batches/experiments/{e.id}",
+        }
+    )
 
 
 @builtin(

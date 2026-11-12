@@ -18,6 +18,7 @@ on this.
 """
 from __future__ import annotations
 
+import copy
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -39,6 +40,7 @@ from tret.packs.links import (
     set_harness_packs,
     task_slug_collision,
 )
+from tret.services import harness_policy as policy_history
 from tret.services import lessons as lessons_service
 
 router = APIRouter(prefix="/api/harnesses", tags=["harnesses"])
@@ -277,7 +279,7 @@ async def update_harness(
     ctx: WorkspaceContext = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    h = await db.get(Harness, harness_id)
+    h = await db.get(Harness, harness_id, with_for_update=True)
     if h is None or h.workspace_id != ctx.id:
         raise HTTPException(404, "Harness not found")
     if h.task_profile == "chat" and body.task_profile != "chat":
@@ -298,9 +300,57 @@ async def update_harness(
     _validate_policy(body.model_policy)
     _validate_tool_names(body.tool_names)
     pack_ids = await _resolve_pack_ids(db, ctx, body)
+    previous_policy = copy.deepcopy(h.model_policy)
+    previous_loop = copy.deepcopy(h.loop_config)
     for field, value in body.model_dump(exclude={"pack_id", "pack_ids"}).items():
         setattr(h, field, value)
+    if policy_history.policy_changed(previous_policy, previous_loop, h):
+        await policy_history.record_policy_change(
+            db,
+            h,
+            previous_model_policy=previous_policy,
+            previous_loop_config=previous_loop,
+            user_id=user.id,
+            source="edit",
+        )
     await set_harness_packs(db, h, pack_ids)
+    await db.commit()
+    packs = await packs_for_harness(db, h)
+    return _out(h, packs)
+
+
+@router.get("/{harness_id}/policy-history")
+async def get_policy_history(
+    harness_id: uuid.UUID,
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    h = await db.get(Harness, harness_id)
+    if h is None or h.workspace_id != ctx.id:
+        raise HTTPException(404, "Harness not found")
+    return {"history": await policy_history.list_policy_history(db, h)}
+
+
+@router.post("/{harness_id}/policy-history/{history_id}/revert")
+async def revert_policy(
+    harness_id: uuid.UUID,
+    history_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    h = await db.get(Harness, harness_id, with_for_update=True)
+    if h is None or h.workspace_id != ctx.id:
+        raise HTTPException(404, "Harness not found")
+    try:
+        await policy_history.revert_policy_change(db, h, history_id, user)
+    except LookupError:
+        raise HTTPException(404, "Policy history entry not found") from None
+    except policy_history.PolicyUnchanged as exc:
+        raise HTTPException(409, str(exc)) from None
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(422, str(exc)) from None
     await db.commit()
     packs = await packs_for_harness(db, h)
     return _out(h, packs)

@@ -835,3 +835,23 @@ def test_row_memory_on_the_prompt_profile_and_exact_message_when_off(client, wor
         base, _, block = m.partition("\n\n")
         assert base in ("Assess Acme in DE.", "Assess Globex in FR.")
         assert block.startswith("EARLIER ATTEMPTS AT THIS TARGET") and "delivered" in block
+
+
+# ── start_batch with an experiment ────────────────────────────────────────────
+def test_start_batch_with_an_experiment_creates_and_starts_every_arm(client, world, engine):
+    arms = [{"model_override": "anthropic/claude-sonnet-5"}, {"objective": "eco"}]
+    out, _ = start(client, world, experiment={"mode": "replicate", "arms": arms}, objective="balanced")
+    assert out["page"] == f"/batches/experiments/{out['experiment_id']}"
+    assert [a["key"] for a in out["arms"]] == ["A", "B"] and "batch_id" not in out
+    for a in out["arms"]:
+        d = client.get(f"/api/batches/{a['batch_id']}").json()
+        assert d["status"] in ("running", "completed") and d["experiment"]["id"] == out["experiment_id"]
+
+
+def test_start_batch_experiment_errors_are_tool_errors_and_plain_batches_are_unchanged(client, world, engine):
+    with pytest.raises(ToolError, match="arms"):
+        start(client, world, experiment={"mode": "split", "arms": [{"objective": "eco"}]})
+    assert client.get("/api/batches/experiments").json() == {"experiments": []}
+    out, _ = start(client, world, objective="eco")
+    assert "experiment_id" not in out and out["page"].startswith("/batches/")
+    assert client.get(f"/api/batches/{out['batch_id']}").json()["settings"]["objective"] == "eco"
