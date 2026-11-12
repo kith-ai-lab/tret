@@ -891,3 +891,103 @@ def test_router_gate_failure_is_null(client, world, engine, monkeypatch):
     monkeypatch.setattr(experiments, "safe_family_gate", boom)
     res = make(client, world, TWO).json()
     assert res["experiment"]["router_gate"] is None
+
+
+# ---- weighted arms ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("arms", "mode", "fragment"),
+    [
+        ([{"model_override": CHEAP, "weight": 3}, {"model_override": OTHER}], "split", "every arm a weight or none"),
+        ([{"model_override": CHEAP, "weight": 0}, {"model_override": OTHER, "weight": 1}], "split", "Arm A: weight"),
+        ([{"model_override": CHEAP, "weight": 1}, {"model_override": OTHER, "weight": -2}], "split", "Arm B: weight"),
+        ([{"model_override": CHEAP, "weight": 1}, {"model_override": OTHER, "weight": 1001}], "split", "Arm B: weight"),
+        ([{"model_override": CHEAP, "weight": 1}, {"model_override": OTHER, "weight": 1}], "replicate", "only for split"),
+    ],
+)
+def test_weight_validation_is_a_422(client, world, engine, arms, mode, fragment):
+    r = make(client, world, arms, mode=mode)
+    assert r.status_code == 422 and fragment in r.text
+    assert client.get("/api/batches/experiments").json() == {"experiments": []}
+
+
+def test_a_non_number_weight_is_refused():
+    with pytest.raises(Exception, match="Arm B: weight"):
+        experiments.clean_arms([{"model_override": CHEAP}, {"model_override": OTHER, "weight": "heavy"}], "split")
+    with pytest.raises(Exception, match="Arm A: weight"):
+        experiments.clean_arms([{"model_override": CHEAP, "weight": True}, {"model_override": OTHER, "weight": 1}], "split")
+
+
+def test_equal_weights_reproduce_the_unweighted_assignment():
+    for sizes, keys in (([4, 3, 3, 5], ["A", "B", "C"]), ([7, 6, 5], ["A", "B"]), ([1] * 9, ["A", "B", "C"])):
+        rows = _strata_rows(sizes)
+        plain = experiments.assign_arms(rows, keys, "disclosure")
+        assert experiments.assign_arms(rows, keys, "disclosure", [2.5] * len(keys)) == plain
+
+
+def test_nine_to_one_over_48_rows_is_spread_across_strata():
+    rows = _strata_rows([12, 12, 12, 12])
+    out = experiments.assign_arms(rows, ["A", "B"], "disclosure", [9, 1])
+    assert _counts(out) == {"A": 43, "B": 5}
+    positions = [r["position"] for r in out if r["arm"] == "B"]
+    assert positions[0] <= 10 and positions[-1] >= 39  # not bunched at the end
+    assert {r["market"] for r in out if r["arm"] == "B"} == {"m0", "m1", "m2", "m3"}
+    assert experiments.assign_arms(rows, ["A", "B"], "disclosure", [9, 1]) == out  # deterministic
+
+
+def test_three_arms_eight_one_one_over_48_rows():
+    out = experiments.assign_arms(_strata_rows([16, 16, 16]), ["A", "B", "C"], "disclosure", [8, 1, 1])
+    assert _counts(out) == {"A": 38, "B": 5, "C": 5}
+
+
+def test_an_arm_that_would_get_no_rows_is_a_422():
+    with pytest.raises(Exception, match=r"Arm B would get no rows: 5 rows at a share of 0\.1%"):
+        experiments.assign_arms(_strata_rows([5]), ["A", "B"], "disclosure", [1000, 1])
+
+
+def test_a_weighted_split_stores_weights_and_reports_shares(client, world, engine):
+    arms = [{"model_override": CHEAP, "weight": 2}, {"model_override": OTHER, "weight": 1}]
+    r = make(client, world, arms, mode="split")
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert [a["weight"] for a in out["arms"]] == [2.0, 1.0]
+    d = client.get(f"/api/batches/{out['arms'][0]['batch_id']}").json()
+    assert [t["arm"] for t in d["targets"]] == ["A", "B", "A", "A", "B", "A"]
+    assert [a["weight"] for a in d["experiment"]["arms"]] == [2.0, 1.0]
+    res = client.get(f"/api/batches/experiments/{out['experiment']['id']}").json()
+    assert [(a["weight"], a["share"], a["targets"]) for a in res["arms"]] == [(2.0, 0.6667, 4), (1.0, 0.3333, 2)]
+
+
+def test_an_unweighted_split_reports_null_weight_and_share(client, world, engine):
+    out = make(client, world, TWO, mode="split").json()
+    res = client.get(f"/api/batches/experiments/{out['experiment']['id']}").json()
+    assert [(a["weight"], a["share"]) for a in res["arms"]] == [(None, None), (None, None)]
+
+
+def test_equal_proportions_deal_the_same_whether_whole_or_decimal():
+    def deal(rows, keys, weights):
+        try:
+            return [r["arm"] for r in experiments.assign_arms(rows, keys, "disclosure", weights)]
+        except Exception as e:  # noqa: BLE001
+            return str(e.detail)
+
+    for sizes in ([5], [10], [12, 8], [3, 3, 4], [20, 7, 1]):
+        rows = _strata_rows(sizes)
+        assert deal(rows, ["A", "B"], [9, 1]) == deal(rows, ["A", "B"], [0.9, 0.1])
+        assert deal(rows, ["A", "B"], [7, 3]) == deal(rows, ["A", "B"], [0.7, 0.3])
+        assert deal(rows, ["A", "B", "C"], [1, 1, 1]) == deal(rows, ["A", "B", "C"], [0.5, 0.5, 0.5])
+
+
+@pytest.mark.parametrize("bad", [True, "0.5"])
+def test_a_bool_or_string_weight_is_a_422_through_the_api(client, world, engine, bad):
+    arms = [{"model_override": CHEAP, "weight": bad}, {"model_override": OTHER, "weight": 1}]
+    r = make(client, world, arms, mode="split")
+    assert r.status_code == 422 and "weight must be a number" in r.text
+
+
+def test_arms_that_differ_only_in_weight_get_a_specific_422(client, world, engine):
+    arms = [{"model_override": CHEAP, "weight": 3}, {"model_override": CHEAP, "weight": 1}]
+    r = make(client, world, arms, mode="split")
+    assert r.status_code == 422 and "run the same settings" in r.text
+    assert "are identical" in make(client, world, [{"model_override": CHEAP}, {"model_override": CHEAP}]).text

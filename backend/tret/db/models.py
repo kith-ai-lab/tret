@@ -31,7 +31,15 @@ from sqlalchemy import (
 )
 from sqlalchemy import TIMESTAMP
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+@compiles(UUID, "sqlite")
+def _compile_uuid_sqlite(type_, compiler, **kw):  # DDL only; PostgreSQL output is unchanged
+    # A column declared UUID gets NUMERIC affinity on SQLite, so a uuid4 whose hex is all
+    # decimal digits is stored as a number and read back as a float. CHAR gets TEXT affinity.
+    return "CHAR(32)"
 
 
 def utcnow() -> datetime:

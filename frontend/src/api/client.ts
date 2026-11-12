@@ -258,6 +258,10 @@ export interface RoutingDecision {
     eligible: number | null
     reason: string
   } | null
+  /** Optional: the router's scored and shadow views, read only for the model it
+   *  would try next (`exploration.candidate`). Absent on older servers. */
+  scored?: { exploration?: { candidate?: string | null } | null } | null
+  shadow?: { exploration?: { candidate?: string | null } | null } | null
 }
 
 /** `POST /api/routing/preview` request (backend: `api/routing.py`). Either
@@ -3306,6 +3310,8 @@ export interface BatchTarget {
   evaluation?: BatchTargetEvaluationBrief | null
   /** Experiment arm key ("A".."C") this target runs under (split mode); absent otherwise. */
   arm?: string | null
+  /** True when the current run was an exploration run. Absent on older servers. */
+  explored?: boolean
   // Disclosure-only keys (absent on prompt targets).
   company?: string
   market?: 'US' | 'UK' | 'EU' | (string & {})
@@ -3398,6 +3404,8 @@ export interface ExperimentArmIn {
   objective?: string | null
   /** 1–50. */
   max_iterations?: number | null
+  /** Split only, greater than 0: every arm has one or none does. */
+  weight?: number | null
 }
 
 export interface CreateExperimentBody {
@@ -3442,6 +3450,9 @@ export interface ExperimentArmResult {
   model_override: string | null
   objective: string | null
   max_iterations: number | null
+  /** Split weight and its share (0 to 1) of the rows; null when unweighted. Absent on older servers. */
+  weight?: number | null
+  share?: number | null
   batch_id: string | null
   batch_status: string | null
   targets: number
@@ -3953,6 +3964,15 @@ export interface FamilyModel {
   p95_cost_usd: number | null
   infra_failures: number
   pareto: boolean
+  /** The model's rows in the most recent comparable batch containing it. Absent on older servers. */
+  latest_batch?: {
+    batch_id: string
+    name: string
+    created_at: string | null
+    scored: number
+    quality_mean: number | null
+    quality_interval90: [number, number] | null
+  } | null
 }
 
 /** POST /batches/advice: what earlier batches of the same kind suggest. Read-only. */
@@ -3975,6 +3995,8 @@ export interface BatchAdviceRecommendation {
 }
 
 export interface BatchAdvice {
+  /** The harness the family's batches run on. Absent on older servers. */
+  harness_id?: string | null
   family_key: string
   family_label: string
   objective: string

@@ -19,7 +19,7 @@ from urllib.parse import quote
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -336,6 +336,14 @@ class ExperimentArmBody(BaseModel):
     model_override: str | None = Field(default=None, max_length=200)
     objective: str | None = Field(default=None, max_length=40)
     max_iterations: int | None = None
+    weight: float | None = None
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _weight_is_a_number(cls, v):
+        if isinstance(v, (bool, str)):
+            raise ValueError("weight must be a number")
+        return v
 
 
 class CreateExperimentBody(BaseModel):

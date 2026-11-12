@@ -255,6 +255,7 @@ export function BatchFamily() {
                         <th className="num">Delivered</th>
                         <th className="num">Yield</th>
                         <th className="num">Quality (90% interval)</th>
+                        <th className="num">Latest batch</th>
                         <th className="num">Residual</th>
                         <th className="num">$ / acceptable</th>
                         <th className="num">Wh / acceptable</th>
@@ -281,6 +282,11 @@ export function BatchFamily() {
                             ) : m.scored > 0 ? (
                               <span className="fine-print"> (n={m.scored})</span>
                             ) : null}
+                          </td>
+                          <td className="num" title={m.batches > 1 ? m.latest_batch?.name : undefined}>
+                            {m.batches > 1 && m.latest_batch && m.latest_batch.quality_mean !== null
+                              ? `${fmtScore(m.latest_batch.quality_mean)} (n=${m.latest_batch.scored})`
+                              : '—'}
                           </td>
                           <td className="num">{fmtScore(m.mean_residual)}</td>
                           <td className="num">{dash(m.cost_per_acceptable_usd, (n) => formatCost(n))}</td>

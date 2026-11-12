@@ -160,6 +160,23 @@ async def batch_advice(
             f"{len(thin)} model(s) have fewer than {MIN_ADVICE_ROWS} scored rows and are never recommended."
         )
 
+    for m in models:
+        latest = m.get("latest_batch")
+        interval = m.get("quality_interval90")
+        if (
+            m["batches"] >= 2
+            and latest is not None
+            and latest["quality_mean"] is not None
+            and latest["scored"] >= MIN_ADVICE_ROWS
+            and interval is not None
+            and not (interval[0] <= latest["quality_mean"] <= interval[1])
+        ):
+            notes.append(
+                f"{m['model']}: its most recent batch scored {latest['quality_mean']:g} over "
+                f"{latest['scored']} rows, against {m['quality_mean']:g} pooled over {m['batches']} batches. "
+                "The recommendation uses the pooled figure."
+            )
+
     pick, reason = _recommend_model(models, objective)
     concurrency, concurrency_reason = await _concurrency_advice(db, batches)
     if pick is None:
@@ -210,6 +227,7 @@ async def batch_advice(
         "family_key": key,
         "family_label": label,
         "objective": objective,
+        "harness_id": str(harness.id) if harness is not None else None,
         "evidence": {"batches": len(batches), "comparable": agg["comparable"], "models": models},
         "recommendation": recommendation,
         "notes": notes,

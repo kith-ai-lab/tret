@@ -10,6 +10,18 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Weighted arms for split experiments.** Each arm of a split experiment can carry a
+  `weight`; rows are dealt in proportion (smooth weighted round-robin within market and
+  category, deterministic), so one arm can be a small challenger share. Every arm or none
+  must have a weight, and every arm must get at least one row. The result reports each
+  arm's `weight` and `share`, the experiment form has a Share field per arm and a button
+  that fills an arm's model with the router's next untried candidate, and `start_batch`
+  accepts weights. Replicate experiments are unchanged.
+- **Exploration runs are marked on batch pages.** A target's JSON carries `explored`, the
+  targets table shows an "exploration" chip, and the pending-reviews panel says that a
+  success on such a run counts toward the model's record only after a review approval,
+  not after a packaging-only approval or a judge score.
+
 - Exploration share for agents on the scored ranking. A share of such an agent's runs equal to
   its policy's `adaptive.exploration` (default 0.05; 0 turns it off) goes to the most promising
   model it has not tried, within `adaptive.exploration_max_cost_tier`, and the run is marked in
@@ -86,6 +98,11 @@ one that needs action on an existing install.
   to mention `submit_pairwise` and an edited one is left alone.
 
 ### Changed
+
+- **Each model's most recent batch is shown beside its pooled figure.** Family models and
+  the advice evidence carry `latest_batch`, and the advice adds a note when a model's most
+  recent batch lies outside its pooled interval. The recommendation rule is unchanged. The
+  advice response also returns the family's `harness_id`.
 
 - **Approvals now carry a purpose, and only a review counts as quality evidence.** An
   approval is `review` (the default) or `packaging`; a page map approved only so it can be
@@ -181,6 +198,12 @@ one that needs action on an existing install.
   carries the same warning.
 
 ### Fixed
+
+- **Two causes of flaky tests.** The PostgreSQL `UUID` column type now compiles to
+  `CHAR(32)` on SQLite (tests only): the type name `UUID` got NUMERIC affinity there, so a
+  uuid4 made only of digits came back as a float. And `tests/conftest.py` restores the
+  batch module's bound app after every test, so a lifespan test no longer leaves later
+  tests with a draining app that refuses to launch targets.
 
 - **A search-backend outage no longer counts against the model.** `web_search` now reads
   SearXNG's `unresponsive_engines`: when a query returns nothing and two or more engines did

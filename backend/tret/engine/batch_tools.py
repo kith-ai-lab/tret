@@ -285,7 +285,8 @@ async def _advice_for(ctx: RunContext, profile: str, body: Any) -> dict | None:
                 "creates one batch per arm over the same rows; 'split' runs each row once, alternating arms. "
                 "Each arm sets at least one of model_override, objective, max_iterations (and may have a label). "
                 "sample_n (replicate only) keeps that many rows, spread across the register. All arm batches "
-                "start now; a person decides whether to make an arm the harness default from the experiment page.",
+                "start now; a person decides whether to make an arm the harness default from the experiment page. "
+                "Arms may carry a weight (split only; every arm or none): a small weight makes that arm a challenger share.",
                 "required": ["mode", "arms"],
                 "properties": {
                     "mode": {"type": "string", "enum": ["replicate", "split"]},
@@ -300,6 +301,7 @@ async def _advice_for(ctx: RunContext, profile: str, body: Any) -> dict | None:
                                 "model_override": {"type": "string"},
                                 "objective": {"type": "string", "enum": ["quality", "balanced", "token_conservation", "eco"]},
                                 "max_iterations": {"type": "integer", "minimum": 1, "maximum": 50},
+                                "weight": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000},
                             },
                         },
                     },

@@ -3717,6 +3717,8 @@ export interface components {
             model_override?: string | null;
             /** Objective */
             objective?: string | null;
+            /** Weight */
+            weight?: number | null;
         };
         /** FinalizeBody */
         FinalizeBody: {
