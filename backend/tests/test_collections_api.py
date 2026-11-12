@@ -282,6 +282,7 @@ def test_create_returns_the_collection_with_targets_and_warnings(client, world):
     assert d["settings"] == {
         "target_slug": "test-output", "write_root": "runs", "concurrency": 2, "first_batch_size": 2,
         "fiscal_year": 2025, "auto_write": True, "model_override": None, "max_iterations": None,
+        "max_cost_usd": None, "row_memory": False,
     }
     assert [t["slug"] for t in d["targets"]] == ["allianz", "shell", "apple", "siemens", "hsbc-holdings"]
     assert [t["status"] for t in d["targets"]] == ["pending", "pending", "held", "held", "held"]
@@ -1139,6 +1140,93 @@ def test_max_iterations_out_of_range_is_a_422(client, world):
     assert create(client, max_iterations=51).status_code == 422
 
 
+def test_max_cost_usd_is_stored_echoed_and_stamped_only_when_set(client, world):
+    from tret.engine.delegation import COST_CAP_KEY
+
+    async def caps(db):
+        return {r.task_input.get(COST_CAP_KEY) for r in (await db.execute(select(Run))).scalars()}
+
+    r = create(client, max_cost_usd=0.25)
+    assert r.status_code == 200, r.text
+    cid = r.json()["id"]
+    assert client.get(f"/api/collections/{cid}").json()["settings"]["max_cost_usd"] == 0.25
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+    assert run_db(client, world, caps) == {0.25}
+
+
+def test_max_cost_usd_is_absent_from_the_task_input_when_unset(client, world):
+    from tret.engine.delegation import COST_CAP_KEY
+
+    cid = create(client).json()["id"]
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+
+    async def keys(db):
+        return {k for r in (await db.execute(select(Run))).scalars() for k in r.task_input}
+
+    ks = run_db(client, world, keys)
+    assert COST_CAP_KEY not in ks and "_row_memory" not in ks
+
+
+def test_max_cost_usd_bounds(client, world):
+    assert create(client, max_cost_usd=0).status_code == 422
+    assert create(client, max_cost_usd=-1).status_code == 422
+    assert create(client, max_cost_usd=1000.01).status_code == 422
+    assert create(client, max_cost_usd=1000, run_slug="2026-11-05-batch2").status_code == 200
+
+
+def test_row_memory_adds_a_block_to_a_later_batch_of_the_family_only_when_on(client, world):
+    world.engine.behaviour.update({"allianz": "gap", "shell": "gap", "apple": "gap", "siemens": "gap",
+                                   "hsbc-holdings": "gap"})
+    first = create(client).json()["id"]
+    client.post(f"/api/collections/{first}/start")
+    settle(client)
+
+    async def messages(db):
+        return {
+            str(r.task_input.get("_collection_target_id")): (r.task_input.get("message"), r.task_input.get("_row_memory"))
+            for r in (await db.execute(select(Run))).scalars()
+        }
+
+    base = run_db(client, world, messages)
+    off = create(client, run_slug="2026-11-05-off").json()["id"]
+    client.post(f"/api/collections/{off}/start")
+    settle(client)
+    after_off = run_db(client, world, messages)
+    new_off = {k: v for k, v in after_off.items() if k not in base}
+    assert new_off and all(v[1] is None and "EARLIER ATTEMPTS" not in v[0] for v in new_off.values())
+    on = create(client, run_slug="2026-11-05-on", row_memory=True).json()
+    assert on["settings"]["row_memory"] is True
+    client.post(f"/api/collections/{on['id']}/start")
+    settle(client)
+    after_on = run_db(client, world, messages)
+    new_on = {k: v for k, v in after_on.items() if k not in after_off}
+    assert new_on and all(v[1] is True and "EARLIER ATTEMPTS AT THIS TARGET" in v[0] for v in new_on.values())
+    assert all('reported a gap: "not published"' in v[0] for v in new_on.values())
+    # the block is appended after the ordinary task message, never inside it
+    assert all(v[0].index("EARLIER ATTEMPTS") > 100 for v in new_on.values())
+
+
+def test_a_memory_failure_does_not_block_the_launch(client, world, monkeypatch):
+    from tret.batches import memory
+
+    async def boom(*a, **k):
+        raise RuntimeError("memory exploded")
+
+    monkeypatch.setattr(memory, "earlier_attempts", boom)
+    cid = create(client, row_memory=True).json()["id"]
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+    d = detail(client, cid)
+    assert d["status"] != "paused" and d["counts"]["total"] == 5
+
+    async def flags(db):
+        return {r.task_input.get("_row_memory") for r in (await db.execute(select(Run))).scalars()}
+
+    assert run_db(client, world, flags) == {None}
+
+
 def test_a_provider_error_body_is_sanitised_on_the_target(client, world):
     world.engine.behaviour.update({"allianz": "fail_leaky", "shell": "gap", "apple": "gap",
                                    "siemens": "gap", "hsbc-holdings": "gap"})
@@ -1324,3 +1412,58 @@ def test_a_non_ascii_filename_gets_an_ascii_fallback_and_rfc5987_name(client, wo
     cd = r.headers["content-disposition"]
     assert 'filename="z?rich.md"' in cd
     assert "filename*=UTF-8''z%C3%BCrich.md" in cd
+
+
+def test_row_memory_is_asked_only_for_the_targets_being_launched(client, world, monkeypatch):
+    from tret.batches import memory
+
+    asked = []
+    real = memory.earlier_attempts
+
+    async def spy(db, batch, targets):
+        asked.append(len(targets))
+        return await real(db, batch, targets)
+
+    monkeypatch.setattr(memory, "earlier_attempts", spy)
+    cid = create(client, row_memory=True, concurrency=1).json()["id"]
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+    assert asked and asked[0] <= 3 < 5  # one slot plus at most two spares, not all five pending targets
+
+
+def test_a_failing_sql_statement_in_memory_does_not_abort_the_launch(client, world, monkeypatch):
+    from sqlalchemy import text
+
+    from tret.batches import memory
+
+    async def bad(db, batch, targets):
+        await db.execute(text("select * from no_such_table_at_all"))
+
+    monkeypatch.setattr(memory, "earlier_attempts", bad)
+    cid = create(client, row_memory=True).json()["id"]
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+    d = detail(client, cid)
+    assert d["status"] != "paused" and all(t["status"] != "pending" for t in d["targets"])
+
+
+def test_the_launched_message_is_byte_identical_to_the_profile_message_when_row_memory_is_off(client, world):
+    world.engine.behaviour.update({"allianz": "gap", "shell": "gap", "apple": "gap", "siemens": "gap", "hsbc-holdings": "gap"})
+    first = create(client).json()["id"]
+    client.post(f"/api/collections/{first}/start")
+    settle(client)
+    off = create(client, run_slug="2026-11-05-off2").json()["id"]
+    client.post(f"/api/collections/{off}/start")
+    settle(client)
+
+    async def compare(db):
+        from tret.db.models import Batch, BatchTarget
+
+        batch = await db.get(Batch, uuid.UUID(off))
+        profile = service.profile_for(batch)
+        targets = (await db.execute(select(BatchTarget).where(BatchTarget.collection_id == batch.id))).scalars().all()
+        runs = {str(r.task_input.get("_collection_target_id")): r for r in (await db.execute(select(Run))).scalars()}
+        return [(runs[str(t.id)].task_input["message"], profile.task_input(batch, t, len(targets))["message"]) for t in targets]
+
+    pairs = run_db(client, world, compare)
+    assert pairs and all(a == b for a, b in pairs)

@@ -98,7 +98,7 @@ def start(client, world, **over):
 # ── start_batch ──────────────────────────────────────────────────────────────
 def test_start_batch_creates_and_starts_a_prompt_batch_for_the_calling_run(client, world, engine):
     out, parent_id = start(client, world)
-    assert set(out) == {"batch_id", "name", "profile", "targets", "status", "estimated_cost_usd", "page"}
+    assert set(out) == {"batch_id", "name", "profile", "targets", "status", "estimated_cost_usd", "page", "advice"}
     assert out["profile"] == "prompt"
     assert out["targets"] == 2 and out["status"] == "running" and out["name"] == "Supplier screen"
     assert out["page"] == f"/batches/{out['batch_id']}" and out["estimated_cost_usd"] is None
@@ -112,6 +112,53 @@ def test_start_batch_creates_and_starts_a_prompt_batch_for_the_calling_run(clien
     # scheduling, not behaviour.
     assert sorted(engine.messages) == ["Assess Acme in DE.", "Assess Globex in FR."]
     assert d["created_by"] == str(world.user.id)
+
+
+def test_start_batch_advice_is_null_without_evidence_and_never_fails_the_tool(client, world, engine, monkeypatch):
+    out, _ = start(client, world)
+    assert out["advice"] is None
+    settle(client)
+    from tret.batches import advice
+
+    async def boom(*a, **k):
+        raise RuntimeError("advice exploded")
+
+    monkeypatch.setattr(advice, "batch_advice", boom)
+    out, _ = start(client, world, name="Second")
+    assert out["advice"] is None and out["status"] == "running"
+
+
+def test_start_batch_returns_advice_computed_before_the_batch_is_counted(client, world, engine, monkeypatch):
+    from tret.batches import advice
+
+    seen = []
+
+    async def fake(db, workspace_id, **kw):
+        from tret.db.models import Batch
+
+        seen.append((kw["profile"], kw["template"], len((await db.execute(select(Batch))).scalars().all())))
+        return {
+            "recommendation": {
+                "model": "m/x", "reason": "because", "max_iterations": 13, "cost_cap_usd": 0.06,
+                "concurrency": 2, "max_iterations_basis": "b", "cost_cap_basis": "c", "concurrency_reason": "r",
+            }
+        }
+
+    monkeypatch.setattr(advice, "batch_advice", fake)
+    out, _ = start(client, world)
+    assert out["advice"] == {
+        "recommended_model": "m/x", "max_iterations": 13, "cost_cap_usd": 0.06, "concurrency": 2, "reason": "because",
+    }
+    assert seen == [("prompt", TEMPLATE, 0)]  # before this batch exists
+
+
+def test_start_batch_passes_max_cost_usd_and_row_memory_through(client, world, engine):
+    out, _ = start(client, world, max_cost_usd=0.4, row_memory=True)
+    d = client.get(f"/api/batches/{out['batch_id']}").json()
+    assert d["settings"]["max_cost_usd"] == 0.4 and d["settings"]["row_memory"] is True
+    out, _ = start(client, world, name="Plain")
+    d = client.get(f"/api/batches/{out['batch_id']}").json()
+    assert d["settings"]["max_cost_usd"] is None and d["settings"]["row_memory"] is False
 
 
 def test_start_batch_estimates_from_the_harness_cap_and_passes_options(client, world, engine):
@@ -758,3 +805,33 @@ async def test_batch_compare_without_comparable_quality_gives_no_quality_and_ord
     assert [r["label"] for r in out["rows"]] == ["Amy", "Zed"]
     assert all(r["delta_quality"] is None and r["a"]["quality"] is None and r["b"]["quality"] is None for r in out["rows"])
     assert "label" in get_builtin_tools()["batch_compare"].description
+
+
+def test_start_batch_advice_failure_in_the_database_leaves_the_tool_working(client, world, engine, monkeypatch):
+    from sqlalchemy import text
+
+    from tret.batches import advice
+
+    async def bad(db, workspace_id, **kw):
+        await db.execute(text("select * from no_such_table_at_all"))
+
+    monkeypatch.setattr(advice, "batch_advice", bad)
+    out, _ = start(client, world)
+    assert out["advice"] is None and out["status"] == "running"
+
+
+def test_row_memory_on_the_prompt_profile_and_exact_message_when_off(client, world, engine):
+    first, _ = start(client, world)
+    settle(client)
+    engine.messages.clear()
+    off, _ = start(client, world, name="Off")
+    settle(client)
+    assert sorted(engine.messages) == ["Assess Acme in DE.", "Assess Globex in FR."]  # byte for byte
+    engine.messages.clear()
+    on, _ = start(client, world, name="On", row_memory=True)
+    settle(client)
+    assert len(engine.messages) == 2
+    for m in engine.messages:
+        base, _, block = m.partition("\n\n")
+        assert base in ("Assess Acme in DE.", "Assess Globex in FR.")
+        assert block.startswith("EARLIER ATTEMPTS AT THIS TARGET") and "delivered" in block

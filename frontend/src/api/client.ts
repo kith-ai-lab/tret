@@ -3090,6 +3090,10 @@ export interface DisclosureBatchSettings {
   auto_write: boolean
   model_override: string | null
   max_iterations?: number | null
+  /** Per-target cost cap in USD (narrows the harness cap). */
+  max_cost_usd?: number | null
+  /** Earlier-attempts block appended to each target's task message. */
+  row_memory?: boolean
   evaluation?: BatchEvaluationSettings | null
 }
 
@@ -3107,6 +3111,8 @@ export interface PromptBatchSettings {
   write_root: string | null
   model_override: string | null
   max_iterations?: number | null
+  max_cost_usd?: number | null
+  row_memory?: boolean
   columns: string[]
   evaluation?: BatchEvaluationSettings | null
 }
@@ -3307,6 +3313,10 @@ export interface CreateDisclosureBatchBody {
   model_override: string | null
   /** Optional iteration cap (1–50) for every target run, in place of the harness value. */
   max_iterations?: number | null
+  /** Optional per-target cost cap in USD (> 0, <= 1000). */
+  max_cost_usd?: number | null
+  /** Append notes from earlier attempts at the same target to its task message. */
+  row_memory?: boolean
   evaluation?: BatchEvaluationBody | null
 }
 
@@ -3330,6 +3340,8 @@ export interface CreatePromptBatchBody {
   write_root?: string | null
   model_override?: string | null
   max_iterations?: number | null
+  max_cost_usd?: number | null
+  row_memory?: boolean
   evaluation?: BatchEvaluationBody | null
 }
 
@@ -3725,6 +3737,38 @@ export interface FamilyModel {
   pareto: boolean
 }
 
+/** POST /batches/advice: what earlier batches of the same kind suggest. Read-only. */
+export interface BatchAdviceBody {
+  profile: 'disclosure' | 'prompt'
+  fiscal_year?: number
+  harness_id?: string
+  template?: string
+}
+
+export interface BatchAdviceRecommendation {
+  model: string | null
+  reason: string
+  max_iterations: number | null
+  max_iterations_basis: string | null
+  cost_cap_usd: number | null
+  cost_cap_basis: string | null
+  concurrency: number | null
+  concurrency_reason: string | null
+}
+
+export interface BatchAdvice {
+  family_key: string
+  family_label: string
+  objective: string
+  evidence: {
+    batches: number
+    comparable: FamilyComparableSet | null
+    models: FamilyModel[]
+  }
+  recommendation: BatchAdviceRecommendation | null
+  notes: string[]
+}
+
 export interface FamilyBatchRow {
   batch_id: string
   name: string
@@ -3940,6 +3984,8 @@ export const api = {
     ),
   getBatchFamily: (key: string) =>
     request<FamilyLeaderboard>(`/batches/family?key=${encodeURIComponent(key)}`),
+  getBatchAdvice: (body: BatchAdviceBody) =>
+    request<BatchAdvice>('/batches/advice', { method: 'POST', body }),
   getBatchEvaluation: (id: string) => request<BatchEvaluationDetail>(`/batches/${id}/evaluation`),
   startBatchEvaluation: (id: string, body: StartBatchEvaluationBody) =>
     request<BatchEvaluationPass>(`/batches/${id}/evaluate`, { method: 'POST', body }),

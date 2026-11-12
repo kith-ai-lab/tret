@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.api.auth import current_user
 from tret.api.findings import _finding_out
 from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_approver
-from tret.batches import evaluation, families, pairwise, scoring
+from tret.batches import advice, evaluation, families, pairwise, scoring
 from tret.batches.core import written_files_latest
 from tret.batches.rubrics import default_rubric
 from tret.batches.profiles.prompt import CreatePromptBatchBody
@@ -313,6 +313,37 @@ async def get_batch_family(
     if not await families.family_batches(db, ctx.id, key):
         raise HTTPException(404, "No batch of that family in this workspace")
     return await families.family_leaderboard(db, ctx.id, key)
+
+
+class AdviceBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile: Literal["disclosure", "prompt"]
+    fiscal_year: int | None = Field(default=None, ge=2000, le=2100)
+    harness_id: uuid.UUID | None = None
+    template: str | None = Field(default=None, max_length=50_000)
+
+
+@router.post("/batches/advice")
+async def batch_advice(
+    body: AdviceBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """What earlier batches of the family a new batch would join suggest for it.
+    Read-only; nothing is applied. See docs/batch-runs.md."""
+    if body.profile == "prompt" and (body.harness_id is None or not (body.template or "").strip()):
+        raise HTTPException(422, "A prompt batch's advice needs harness_id and template")
+    fiscal_year = body.fiscal_year if body.fiscal_year is not None else (2025 if body.profile == "disclosure" else None)
+    return await advice.batch_advice(
+        db,
+        ctx.id,
+        profile=body.profile,
+        fiscal_year=fiscal_year,
+        harness_id=body.harness_id,
+        template=body.template,
+    )
 
 
 @_both("get", "/rubrics/default")

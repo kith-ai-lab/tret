@@ -152,6 +152,10 @@ class CreateCollectionBody(BaseModel):
     auto_write: bool = True
     model_override: str | None = Field(default=None, max_length=200)
     max_iterations: int | None = Field(default=None, ge=1, le=50)
+    # Per-target cost cap in USD; only ever narrows the harness's own cap.
+    max_cost_usd: float | None = Field(default=None, gt=0, le=1000)
+    # Opt-in: add a short block of earlier attempts at the same row to each task.
+    row_memory: bool = False
     # Optional batch evaluation (tret/batches/evaluation.py); absent = off.
     evaluation: EvaluationIn | None = None
 
@@ -1369,6 +1373,8 @@ class DisclosureProfile:
             "auto_write": body.auto_write,
             "model_override": (body.model_override or "").strip() or None,
             "max_iterations": body.max_iterations,
+            "max_cost_usd": body.max_cost_usd,
+            "row_memory": bool(body.row_memory),
         }
 
     async def harness_for(self, db: AsyncSession, batch: Batch) -> Harness | None:
@@ -1466,6 +1472,8 @@ class DisclosureProfile:
             "auto_write",
             "model_override",
             "max_iterations",
+            "max_cost_usd",
+            "row_memory",
             "evaluation",
         )
 

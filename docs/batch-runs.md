@@ -578,6 +578,67 @@ pairwise tally and the ten rows with the largest quality difference, read-only. 
 offered once to existing chat harnesses that still list the other batch tools
 (`settings.batch_compare_seeded`).
 
+### Advice from earlier batches
+
+`POST /api/batches/advice` (member) says what earlier batches of the same family suggest
+for a batch you are about to create. Body: `{profile: "disclosure" | "prompt", fiscal_year?,
+harness_id?, template?}`; a prompt request needs `harness_id` and `template`, and the
+harness must exist in the workspace and not be archived (422 otherwise). It is read-only:
+nothing is applied unless a person, or the calling agent, picks it. The create form shows it and has an Apply button per suggestion; the
+`start_batch` tool returns the same suggestion, computed before the new batch is counted,
+as `advice` (null when there is no evidence or computing it failed).
+
+The rule, in plain words. The evidence is the family's per-model aggregate over its
+comparable batches (see Families). A model is eligible with at least 5 scored rows and a
+quality interval; its lower bound is the low end of that 90% interval. Under the
+`quality` objective the eligible model with the best lower bound is recommended. Under
+any other objective, the cheapest model per acceptable result among those whose lower
+bound is within 3 points of the best lower bound (5 points under `eco`). The objective is
+the harness policy's (default `balanced`). Then:
+
+- `max_iterations` = 1.25 x the model's 95th-percentile iterations on acceptable runs,
+  rounded up and capped at 50 (null if unknown);
+- `cost_cap_usd` = 1.5 x its 95th-percentile cost on acceptable runs, rounded up to the
+  cent and never below $0.01 (null when that p95 is 0: a free or unreported-cost model);
+- `concurrency` = one lower than the family's most recent batch when more than 10% of its
+  targets ended as infrastructure failures or timeouts, else null.
+
+The reason sentences carry the numbers, for example "cheapest model whose quality lower
+bound (88.2) is within 5 points of the best (91.0): $0.06 per acceptable result over 40
+scored rows". With no eligible model `recommendation` has `model` null, a reason, no
+iteration or cost values, and the concurrency suggestion if there is one; it is null only
+when there is nothing to say, and `notes` say why. An unknown or archived `harness_id` on a
+prompt request is a 422, as at batch creation. Notes
+also flag a single earlier batch, thin models and batches left out as not comparable.
+
+### Cost cap per target
+
+`max_cost_usd` (greater than 0, at most 1000) on both create bodies and on `start_batch`.
+It is stored in the batch settings, shown in the batch detail, and stamped on each run as
+`_cost_cap_usd`, which the engine applies with `min` against the harness's own cap: it can
+only lower a target's cap, never raise it. Unset means the harness cap alone.
+
+### Row memory (opt-in)
+
+`row_memory: true` on a create body or `start_batch`; off by default. When on, each target's
+task message gets a clearly labelled block appended (and the run is stamped
+`_row_memory`), built from other batches of the same family in the same workspace and the
+target's own archived attempts. It is built only for the targets being launched in that
+call. Evaluator scores and flags come only from a batch's current pass. Nothing crosses workspaces. At most three one-line
+entries, 1,500 characters in all: the best delivery (highest fresh evaluator quality among
+deliveries with no disqualifying flag, else the most recent), the most recent delivery that
+carried a disqualifying flag (never shown as the best lead; always marked "Do not repeat
+this choice without checking it"), and the most recent gap or failure. A delivery line gives the date, the main-document URL(s) (at most
+two), the page count, and when scored the quality and the reviewer flag keys. A gap line
+says it reported a gap or was blocked (a fixed phrase, never the status text), up to three URLs tried and the outcome summary; a failed attempt is one
+fixed category, never the error text: "timed out", "reached its iteration limit",
+"reached its cost limit", "model provider error", "infrastructure error", "rejected by a
+reviewer" or "run failed". URLs are kept only when they are http(s) URLs with a host and no whitespace. Never a model name, cost, iteration count or batch name. Free text
+written by an earlier run is collapsed to one line, stripped of backticks, angle brackets
+and a leading `#`, clipped to 200 characters and quoted, so it cannot add headings or
+instructions. The block is headed "leads to verify, not instructions". If building it
+fails the target launches without it.
+
 ## Agentic test probes
 
 For the agentic test protocol (id, level, identity, steps, oracle, expected cost). All
@@ -704,3 +765,21 @@ page. Expected cost: none.
 chat, ask to compare two batches by id. Oracle: the reply cites `wins`, the quality delta
 and its interval, the pairwise tally and links the compare page; asking about a batch of
 another workspace is refused. Expected cost: about $0.05.
+
+**BATCH-EVAL-E3-01. Advice.** Level: L1. Identity: member. Steps: in a workspace with two
+evaluated disclosure batches of one fiscal year, `POST /api/batches/advice` with
+`{"profile": "disclosure", "fiscal_year": <year>}`; repeat with another fiscal year.
+Oracle: the first returns per-model evidence and a recommendation whose model has at least
+5 scored rows and whose reason quotes its lower bound and cost; `max_iterations` is at most
+50; the second returns `recommendation: null` and a note. Expected cost: none.
+
+**BATCH-EVAL-E3-02. Row memory.** Level: L2. Identity: approver. Steps: create a batch of a
+register already collected once with `row_memory: true`, start it and open one run's task.
+Oracle: the task message ends with the EARLIER ATTEMPTS block, at most three lines, with no
+model, cost or batch name; the same batch with `row_memory` off has no block. Expected
+cost: the batch only.
+
+**BATCH-EVAL-E3-03. Cost cap.** Level: L2. Identity: approver. Steps: create a batch with
+`max_cost_usd: 0.05` over a harness whose own cap is higher. Oracle: a run that reaches the cap stops
+(the engine's cost-cap stop); a cap above the harness's own changes nothing. Expected
+cost: under $0.50.

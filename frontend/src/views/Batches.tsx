@@ -14,6 +14,7 @@ import {
   type CreateDisclosureBatchBody,
   type DisclosureTargetOutcome,
 } from '../api/client'
+import { AdvicePanel, CostCapField, RowMemoryField, parseCostCap } from '../components/batches/AdvicePanel'
 import { DisclosurePanels } from '../components/batches/DisclosurePanels'
 import { EvaluationDrawer } from '../components/batches/EvaluationDrawer'
 import { useEvaluationForm } from '../components/batches/EvaluationSection'
@@ -255,6 +256,8 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
   const [autoWrite, setAutoWrite] = useState(true)
   const [model, setModel] = useState('')
   const [maxIterations, setMaxIterations] = useState('')
+  const [costCap, setCostCap] = useState('')
+  const [rowMemory, setRowMemory] = useState(false)
   const [csv, setCsv] = useState(`${CSV_HEADER}\n`)
   const [created, setCreated] = useState<Batch | null>(null)
   const [fileError, setFileError] = useState<string | null>(null)
@@ -291,6 +294,8 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
       auto_write: autoWrite,
       model_override: model.trim() || null,
       max_iterations: maxIterations.trim() ? Number(maxIterations) : null,
+      ...(parseCostCap(costCap) != null ? { max_cost_usd: parseCostCap(costCap) as number } : {}),
+      ...(rowMemory ? { row_memory: true } : {}),
       ...(disclosureEval.value ? { evaluation: disclosureEval.value } : {}),
     }
     createMutation.mutate(body)
@@ -314,6 +319,7 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
       : name.trim() !== '' &&
         runSlug.trim() !== '' &&
         effectiveTarget !== '' &&
+        parseCostCap(costCap) !== undefined &&
         disclosureEval.valid)
   const createError = createMutation.error
 
@@ -458,6 +464,13 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
             )}
           </div>
 
+          <AdvicePanel
+            enabled={open && profile === 'disclosure'}
+            body={{ profile: 'disclosure', fiscal_year: fiscalYear }}
+            values={{ model, maxIterations, costCap, concurrency }}
+            setters={{ setModel, setMaxIterations, setCostCap, setConcurrency }}
+          />
+
           <div className="row" style={{ gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
             <div className="field">
               <label className="mono-label">Write root</label>
@@ -507,12 +520,14 @@ function CreateBatchModal({ open, onClose }: { open: boolean; onClose: () => voi
                 }}
               />
             </div>
+            <CostCapField value={costCap} onChange={setCostCap} />
           </div>
 
           <div className="field">
             <label className="mono-label">Model override (optional)</label>
             <input type="text" value={model} onChange={(e) => setModel(e.target.value)} />
           </div>
+          <RowMemoryField checked={rowMemory} onChange={setRowMemory} />
           <label className="check-row" style={{ marginBottom: 14 }}>
             <input
               type="checkbox"
@@ -569,6 +584,8 @@ function settingsLine(c: Batch): string {
     )
     if (s.model_override) parts.push(`model ${s.model_override}`)
     if (s.max_iterations) parts.push(`max iterations ${s.max_iterations}`)
+    if (s.max_cost_usd) parts.push(`cost cap $${s.max_cost_usd.toFixed(2)} per target`)
+    if (s.row_memory) parts.push('row memory on')
   } else {
     parts.push(`target ${s.target_slug}`)
     parts.push(`${s.write_root}/`)
@@ -578,6 +595,8 @@ function settingsLine(c: Batch): string {
     parts.push(`auto-write ${s.auto_write ? 'on' : 'off'}`)
     if (s.model_override) parts.push(`model ${s.model_override}`)
     if (s.max_iterations) parts.push(`max iterations ${s.max_iterations}`)
+    if (s.max_cost_usd) parts.push(`cost cap $${s.max_cost_usd} per target`)
+    if (s.row_memory) parts.push('row memory on')
   }
   parts.push(`cost ${formatCost(c.cost_usd)}`)
   return parts.join(' · ')

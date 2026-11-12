@@ -1,6 +1,61 @@
 {
   "components": {
     "schemas": {
+      "AdviceBody": {
+        "additionalProperties": false,
+        "properties": {
+          "fiscal_year": {
+            "anyOf": [
+              {
+                "maximum": 2100.0,
+                "minimum": 2000.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fiscal Year"
+          },
+          "harness_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harness Id"
+          },
+          "profile": {
+            "enum": [
+              "disclosure",
+              "prompt"
+            ],
+            "title": "Profile",
+            "type": "string"
+          },
+          "template": {
+            "anyOf": [
+              {
+                "maxLength": 50000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template"
+          }
+        },
+        "required": [
+          "profile"
+        ],
+        "title": "AdviceBody",
+        "type": "object"
+      },
       "ApprovalBody": {
         "additionalProperties": false,
         "properties": {
@@ -154,6 +209,19 @@
             "title": "Fiscal Year",
             "type": "integer"
           },
+          "max_cost_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 1000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Cost Usd"
+          },
           "max_iterations": {
             "anyOf": [
               {
@@ -217,6 +285,11 @@
               }
             ],
             "title": "Register Csv"
+          },
+          "row_memory": {
+            "default": false,
+            "title": "Row Memory",
+            "type": "boolean"
           },
           "run_slug": {
             "title": "Run Slug",
@@ -341,6 +414,19 @@
             ],
             "title": "Label Column"
           },
+          "max_cost_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 1000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Cost Usd"
+          },
           "max_iterations": {
             "anyOf": [
               {
@@ -389,6 +475,11 @@
               }
             ],
             "title": "Review Schema"
+          },
+          "row_memory": {
+            "default": false,
+            "title": "Row Memory",
+            "type": "boolean"
           },
           "rows": {
             "anyOf": [
@@ -3051,6 +3142,46 @@
           }
         },
         "summary": "Create Batch",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/advice": {
+      "post": {
+        "description": "What earlier batches of the family a new batch would join suggest for it.\nRead-only; nothing is applied. See docs/batch-runs.md.",
+        "operationId": "batch_advice_api_batches_advice_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdviceBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Batch Advice",
         "tags": [
           "batches"
         ]

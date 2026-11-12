@@ -63,6 +63,7 @@ from tret.db.models import (
     Run,
 )
 from tret.engine.collection_tools import COLLECTION_ID_KEY, COLLECTION_TARGET_KEY
+from tret.engine.delegation import COST_CAP_KEY
 from tret.net import policy as egress_policy
 from tret.packs.links import packs_for_harness, resolve_pack_for_task
 from tret.services import connections as connections_service
@@ -661,7 +662,21 @@ async def _launch(collection_id: uuid.UUID) -> int:
             pack = resolve_pack_for_task(await packs_for_harness(db, harness), "freeform")
             model_override = (c.settings or {}).get("model_override")
             max_iterations = (c.settings or {}).get("max_iterations")
+            max_cost_usd = (c.settings or {}).get("max_cost_usd")
             previous = await load_runs(db, pending)
+            memory: dict[uuid.UUID, str] = {}
+            if (c.settings or {}).get("row_memory"):
+                try:
+                    from tret.batches import memory as row_memory
+
+                    # Only the targets this call can launch (the free slots plus a couple
+                    # in case a task fails to build), in a SAVEPOINT so a failed query
+                    # cannot abort the launch's transaction.
+                    async with db.begin_nested():
+                        memory = await row_memory.earlier_attempts(db, c, pending[: slots + 2])
+                except Exception:  # noqa: BLE001 - memory is a courtesy; never block a launch
+                    log.warning("batch %s: row memory could not be built; launching without it", c.id, exc_info=True)
+                    memory = {}
             launched: list[tuple[uuid.UUID, uuid.UUID]] = []
             for t in pending:
                 if len(launched) >= slots:
@@ -685,6 +700,11 @@ async def _launch(collection_id: uuid.UUID) -> int:
                     task_input["_model_override"] = model_override
                 if max_iterations:
                     task_input["_max_iterations"] = int(max_iterations)
+                if max_cost_usd:
+                    task_input[COST_CAP_KEY] = float(max_cost_usd)
+                if t.id in memory:
+                    task_input["message"] = f"{task_input.get('message') or ''}\n\n{memory[t.id]}"
+                    task_input["_row_memory"] = True
                 run = Run(
                     id=uuid.uuid4(),
                     project_id=c.project_id,
