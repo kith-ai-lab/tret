@@ -10,6 +10,15 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Batch-review lessons with a harness scope.** A batch review's lessons are proposed
+  (never approved) as harness-scoped lessons for the batch's harness; once a person approves
+  them they are added to every later run of that harness, with or without a pack, except
+  evaluator runs. New `GET /api/harnesses/{id}/lessons` and review/retire endpoints; lesson
+  rows gain `harness_id`, `scope` and `proposed_by_evaluation_id`; the evaluation detail gains
+  `lesson_proposals` (one entry per review lesson, with its outcome and the lesson's current status)
+  and `lessons_harness_id`. Proposals go to the harness the batch ran on, retired and rejected
+  lessons are not re-proposed, and invisible characters are stripped from lesson text. Migration
+  `d9e4b7a1c2f8`.
 - **Advice at batch creation, a per-target cost cap and opt-in row memory.**
   `POST /api/batches/advice` recommends a model, iteration limit, cost cap and concurrency
   from the family's earlier evaluated batches (a model needs 5 scored rows; read-only), and

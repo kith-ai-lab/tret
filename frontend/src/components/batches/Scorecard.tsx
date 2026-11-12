@@ -2,7 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { api, type BatchScorecard } from '../../api/client'
+import { api, type ApiError, type BatchLessonProposal, type BatchScorecard, lessonsApi } from '../../api/client'
+import { ROLE_RANK } from '../shared/Lessons'
 import { useConfirm } from '../shared/ConfirmDialog'
 import { formatCost } from '../shared/format'
 import { Modal } from '../shared/Modal'
@@ -218,7 +219,12 @@ export function Scorecard({
       </div>
       {actionError && <div className="error-text">{actionError}</div>}
 
-      {!compact && ev?.summary && <BatchReview summary={ev.summary} />}
+      {!compact && ev?.summary && <BatchReview
+          batchId={batchId}
+          summary={ev.summary}
+          proposals={ev.lesson_proposals}
+          harnessId={ev.lessons_harness_id ?? null}
+        />}
 
       {!compact && (sc.outliers ?? []).length > 0 && (
         <details style={{ marginTop: 8 }}>
@@ -251,10 +257,32 @@ export function Scorecard({
 }
 
 function BatchReview({
+  batchId,
   summary,
+  proposals,
+  harnessId,
 }: {
+  batchId: string
   summary: { narrative: string; consistency_notes?: string[]; lessons?: string[] }
+  proposals?: BatchLessonProposal[]
+  harnessId: string | null
 }) {
+  const queryClient = useQueryClient()
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const canReview = (ROLE_RANK[meQuery.data?.role ?? 'analyst'] ?? 0) >= ROLE_RANK.approver
+  const reviewMutation = useMutation({
+    mutationFn: ({ hid, id, approve }: { hid: string; id: string; approve: boolean }) =>
+      lessonsApi.reviewHarnessLesson(hid, id, approve),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['batch-scorecard', batchId] })
+      void queryClient.invalidateQueries({ queryKey: ['batch-evaluation', batchId] })
+      void queryClient.invalidateQueries({ queryKey: ['harness-lessons'] })
+    },
+  })
+  const reviewError = reviewMutation.error as ApiError | null
+  // Absent (older server) or empty-despite-lessons: the plain list.
+  const showProposals = !!proposals && proposals.length > 0
+
   return (
     <details style={{ marginTop: 8 }}>
       <summary className="fine-print">Batch review</summary>
@@ -272,15 +300,72 @@ function BatchReview({
             </ul>
           </div>
         )}
-        {(summary.lessons ?? []).length > 0 && (
+        {showProposals ? (
           <div>
             <div className="mono-label">Lessons for future runs</div>
-            <ul style={{ margin: 0, paddingLeft: 18 }} className="mono-body">
-              {summary.lessons!.map((n, i) => (
-                <li key={i}>{n}</li>
-              ))}
-            </ul>
+            <div className="stack" style={{ gap: 6, marginTop: 4 }}>
+              {proposals!.map((p, i) => {
+                const notProposed = p.status === null || p.lesson_id === null
+                const hid = p.harness_id ?? harnessId
+                const decidable = p.status === 'proposed' && canReview && !!p.lesson_id && !!hid
+                return (
+                  <div key={p.lesson_id ?? `i${i}`} className="row" style={{ alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+                    <span className="mono-body" style={{ flex: 1, minWidth: 200 }}>
+                      {p.text}
+                    </span>
+                    <span className="chip" title={notProposed ? (p.reason ?? undefined) : undefined}>
+                      {notProposed
+                        ? 'not proposed'
+                        : `${p.outcome === 'duplicate' ? 'already recorded: ' : ''}${p.status}`}
+                    </span>
+                    {p.status === 'approved' && p.in_effect === false && (
+                      <span className="fine-print">not in effect: over the lessons cap</span>
+                    )}
+                    {notProposed && p.reason && <span className="fine-print">{p.reason}</span>}
+                    {decidable && (
+                      <span className="row" style={{ gap: 6 }}>
+                        <button
+                          className="btn btn-sm btn-approve"
+                          disabled={reviewMutation.isPending}
+                          onClick={() => reviewMutation.mutate({ hid: hid!, id: p.lesson_id!, approve: true })}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          className="btn btn-sm btn-reject"
+                          disabled={reviewMutation.isPending}
+                          onClick={() => reviewMutation.mutate({ hid: hid!, id: p.lesson_id!, approve: false })}
+                        >
+                          Reject
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+            {reviewError && (
+              <div className="error-text" style={{ marginTop: 6 }}>
+                {reviewError.status === 403 ? 'Requires approver role or higher.' : reviewError.message}
+              </div>
+            )}
+            <div className="fine-print" style={{ marginTop: 6 }}>
+              An approved lesson is added to the instructions of future runs of this harness, up to
+              the lessons cap, and only a person can approve it.{' '}
+              {harnessId && <Link to="/harnesses">Open harnesses</Link>}
+            </div>
           </div>
+        ) : (
+          (summary.lessons ?? []).length > 0 && (
+            <div>
+              <div className="mono-label">Lessons for future runs</div>
+              <ul style={{ margin: 0, paddingLeft: 18 }} className="mono-body">
+                {summary.lessons!.map((n, i) => (
+                  <li key={i}>{n}</li>
+                ))}
+              </ul>
+            </div>
+          )
         )}
       </div>
     </details>

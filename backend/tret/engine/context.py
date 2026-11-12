@@ -196,6 +196,19 @@ def pack_lessons_block(lessons: list[str]) -> ContextBlock:
     return block_for("pack_lessons", f"{len(lessons)} lessons", rendered, sha256=rendered_sha)
 
 
+HARNESS_LESSONS_HEADING = (
+    "## Lessons recorded for this harness (approved by a reviewer; follow them "
+    "unless the task says otherwise)"
+)
+
+
+def harness_lessons_block(lessons: list[str]) -> ContextBlock:
+    numbered = "\n".join(f"{i}. {text}" for i, text in enumerate(lessons, start=1))
+    rendered = f"{HARNESS_LESSONS_HEADING}\n\n{numbered}"
+    rendered_sha = hashlib.sha256(rendered.encode()).hexdigest()
+    return block_for("harness_lessons", f"{len(lessons)} lessons", rendered, sha256=rendered_sha)
+
+
 # ── composition accounting ────────────────────────────────────────────────────
 @dataclass
 class ContextBlock:
@@ -464,6 +477,7 @@ def assemble_context(
     web_tools_enabled: bool = False,
     lessons: list[str] | None = None,
     objective: str | None = None,
+    harness_lessons: list[str] | None = None,
 ) -> AssembledContext:
     """Build the system prompt and its per-component token accounting.
 
@@ -489,6 +503,8 @@ def assemble_context(
 
     if lessons:
         blocks.append(pack_lessons_block(lessons))
+    if harness_lessons:
+        blocks.append(harness_lessons_block(harness_lessons))
 
     if task:
         instructions = (
@@ -540,6 +556,7 @@ def assemble_system_prompt(
     web_tools_enabled: bool = False,
     lessons: list[str] | None = None,
     objective: str | None = None,
+    harness_lessons: list[str] | None = None,
 ) -> str:
     """The system prompt alone (harness preview endpoint, and back-compat).
 
@@ -559,6 +576,7 @@ def assemble_system_prompt(
         web_tools_enabled=web_tools_enabled,
         lessons=lessons,
         objective=objective,
+        harness_lessons=harness_lessons,
     ).system
 
 

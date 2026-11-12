@@ -1317,3 +1317,37 @@ async def test_max_output_tokens_at_ceiling_is_200(client, seed):
         },
     )
     assert response.status_code == 200, response.text
+
+
+# ── harness lessons ────────────────────────────────────────────────────────
+async def test_preview_counts_approved_harness_lessons_like_the_run_does(client, seed, session_factory):
+    """The preview reports no prompt text, only the input estimate, so the
+    harness-lessons block shows up as extra estimated input tokens, and not at
+    all for a harness that opted out (`loop_config.lessons: false`)."""
+    from tret.db.models import PackLesson
+
+    team, admin, pack, harness = await _basic_setup(seed, session_factory)
+    off = make_harness(team, loop_config={"max_iterations": 24, "max_output_tokens": 8192, "lessons": False})
+    await seed(off)
+    async with session_factory() as db:
+        await set_harness_packs(db, await db.get(Harness, off.id), [pack.id])
+        await db.commit()
+    await login(client, admin.email)
+
+    async def input_tokens(h):
+        r = await client.post(
+            "/api/routing/preview", json={"harness_id": str(h.id), "task_type": "divergence_assessment"}
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["results"][0]["estimate"]["input_tokens"]
+
+    before, before_off = await input_tokens(harness), await input_tokens(off)
+    async with session_factory() as db:
+        for h in (harness, off):
+            db.add(PackLesson(
+                workspace_id=team.id, harness_id=h.id, ordinal=1, status="approved",
+                text="x" * 400, rationale="r",
+            ))
+        await db.commit()
+    assert await input_tokens(harness) - before >= 100  # ~400 chars / 4 plus the heading
+    assert await input_tokens(off) == before_off

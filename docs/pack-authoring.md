@@ -347,6 +347,11 @@ it — this withholds both tools and the context block for runs on that
 harness, with no effect on prompt behavior otherwise (an empty lessons list
 already renders nothing).
 
+Lessons can also be scoped to a harness rather than a pack: batch-review
+lessons approved for a harness reach every run of it, including harnesses with
+no pack. They share the `loop_config.lessons: false` opt-out but have their own
+cap, counted separately from the pack's.
+
 ## Connected sources (live SharePoint/OneDrive)
 
 A workspace can link a Microsoft 365 account under Settings > Connections

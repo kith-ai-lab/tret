@@ -31,15 +31,20 @@ not a semantic near-duplicate detector.
 """
 from __future__ import annotations
 
+import logging
 import re
+import unicodedata
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tret.db.models import PackLesson
+from tret.db.models import BatchEvaluation, PackLesson
+
+logger = logging.getLogger(__name__)
 
 # `text` is capped here (not just documented on the column) so the whole
 # approved list stays small enough to sit in the doctrine block's stable
@@ -61,6 +66,32 @@ MAX_APPROVED_CHARS = 4000
 
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# Batch-review lessons (E5): the evaluator may PROPOSE up to this many per
+# batch; only a person ever approves one.
+MAX_PENDING_PER_BATCH = 5
+
+
+@dataclass(frozen=True)
+class LessonScope:
+    """What a lesson is about: exactly one of a pack slug or a harness id
+    (mirrors the `ck_pack_lessons_one_scope` CHECK constraint)."""
+
+    pack_slug: str | None = None
+    harness_id: uuid.UUID | None = None
+
+    def __post_init__(self) -> None:
+        if (self.pack_slug is None) == (self.harness_id is None):
+            raise ValueError("a lesson scope needs exactly one of pack_slug / harness_id")
+
+    def clause(self):
+        """SQL condition selecting this scope's rows."""
+        if self.pack_slug is not None:
+            return PackLesson.pack_slug == self.pack_slug
+        return PackLesson.harness_id == self.harness_id
+
+    def columns(self) -> dict:
+        return {"pack_slug": self.pack_slug, "harness_id": self.harness_id}
+
 # Model-authored text is never trusted to be plain language on its own say-so.
 # Rejecting these keeps a lesson from being (or looking like) prompt structure
 # instead of the one or two sentences of advice it is meant to be: a
@@ -72,6 +103,68 @@ _WHITESPACE_RE = re.compile(r"\s+")
 _FORBIDDEN_SUBSTRINGS = ("<doctrine", "</doctrine", "```")
 
 
+_JOINERS = ("\u200c", "\u200d")
+
+
+def _is_variation_selector(ch: str) -> bool:
+    return "\ufe00" <= ch <= "\ufe0f"
+
+
+def _always_stripped(ch: str) -> bool:
+    """Format (Cf: zero-width, bidi), control (Cc), private-use (Co) characters,
+    the tag block U+E0000-E007F and the supplementary variation selectors
+    U+E0100-E01EF (both used to smuggle text invisibly)."""
+    return (
+        unicodedata.category(ch) in ("Cf", "Cc", "Co")
+        or 0xE0000 <= ord(ch) <= 0xE007F
+        or 0xE0100 <= ord(ch) <= 0xE01EF
+    )
+
+
+def _joins(ch: str | None) -> bool:
+    return ch is not None and (unicodedata.category(ch).startswith("L") or unicodedata.category(ch) == "So")
+
+
+def _neighbour(text: str, i: int, step: int) -> str | None:
+    """The nearest character from `i` in direction `step`, skipping variation
+    selectors (a kept U+FE0F is transparent to the joiner rule)."""
+    i += step
+    while 0 <= i < len(text) and _is_variation_selector(text[i]):
+        i += step
+    return text[i] if 0 <= i < len(text) else None
+
+
+def strip_invisible(text: str) -> str:
+    """Drop characters a reviewer cannot see but a model reads. Whitespace,
+    including newlines and tabs, is kept for the caller to collapse.
+
+    Always dropped: Cf, Cc and Co characters, the tag block U+E0000-E007F, the
+    variation selectors U+E0100-E01EF and U+FE00-FE0D. Kept only in context:
+    U+FE0E / U+FE0F directly after a symbol (category So) character, and
+    U+200C / U+200D between two letters or symbols (Persian and Indic joiners,
+    emoji sequences; a selector in between is looked through)."""
+    out: list[str] = []
+    for i, ch in enumerate(text):
+        prev = text[i - 1] if i > 0 else None
+        if ch.isspace():
+            out.append(ch)
+        elif ch in _JOINERS:
+            if _joins(_neighbour(text, i, -1)) and _joins(_neighbour(text, i, 1)):
+                out.append(ch)
+        elif _is_variation_selector(ch):
+            if ch in ("\ufe0e", "\ufe0f") and prev is not None and unicodedata.category(prev) == "So":
+                out.append(ch)
+        elif not _always_stripped(ch):
+            out.append(ch)
+    return "".join(out)
+
+
+def single_line(text: str) -> str:
+    """The stored form of a lesson's text (whitespace collapsed, invisible
+    characters stripped)."""
+    return _singleline(text)
+
+
 def _singleline(text: str) -> str:
     """Collapse all whitespace (including newlines) to single spaces and
     strip. This is the form a lesson's `text` is stored in — the reviewer
@@ -79,7 +172,7 @@ def _singleline(text: str) -> str:
     multi-line structure (a heading, a fenced block) inside what is meant to
     read as one flat sentence or two.
     """
-    return _WHITESPACE_RE.sub(" ", text).strip()
+    return _WHITESPACE_RE.sub(" ", strip_invisible(text)).strip()
 
 
 def _normalize(text: str) -> str:
@@ -147,19 +240,16 @@ def _cap_effective(rows: list[PackLesson]) -> set[uuid.UUID]:
     return ids
 
 
-async def approved_lesson_rows(
-    db: AsyncSession, workspace_id: uuid.UUID, pack_slug: str
+async def _approved_rows_in_scope(
+    db: AsyncSession, workspace_id: uuid.UUID, scope: LessonScope
 ) -> list[PackLesson]:
-    """The `approved` rows themselves, ordinal order, uncapped — for a caller
-    (the API layer, computing `in_effect` per row) that needs the rows, not
-    just `approved_lessons`'s already-capped text list."""
     return (
         (
             await db.execute(
                 select(PackLesson)
                 .where(
                     PackLesson.workspace_id == workspace_id,
-                    PackLesson.pack_slug == pack_slug,
+                    scope.clause(),
                     PackLesson.status == "approved",
                 )
                 .order_by(PackLesson.ordinal)
@@ -168,6 +258,15 @@ async def approved_lesson_rows(
         .scalars()
         .all()
     )
+
+
+async def approved_lesson_rows(
+    db: AsyncSession, workspace_id: uuid.UUID, pack_slug: str
+) -> list[PackLesson]:
+    """The `approved` rows themselves, ordinal order, uncapped — for a caller
+    (the API layer, computing `in_effect` per row) that needs the rows, not
+    just `approved_lessons`'s already-capped text list."""
+    return await _approved_rows_in_scope(db, workspace_id, LessonScope(pack_slug=pack_slug))
 
 
 def effective_lesson_ids(rows: list[PackLesson]) -> set[uuid.UUID]:
@@ -192,6 +291,22 @@ async def approved_lessons(
     same pack in this workspace (see `db/models.py::PackLesson`).
     """
     rows = await approved_lesson_rows(db, workspace_id, pack_slug)
+    ids = _cap_effective(rows)
+    return [row.text for row in rows if row.id in ids]
+
+
+async def approved_harness_lesson_rows(
+    db: AsyncSession, workspace_id: uuid.UUID, harness_id: uuid.UUID
+) -> list[PackLesson]:
+    return await _approved_rows_in_scope(db, workspace_id, LessonScope(harness_id=harness_id))
+
+
+async def approved_harness_lessons(
+    db: AsyncSession, workspace_id: uuid.UUID, harness_id: uuid.UUID
+) -> list[str]:
+    """This harness's approved lessons, oldest first, under the same cap as
+    `approved_lessons` but counted separately from any pack's."""
+    rows = await approved_harness_lesson_rows(db, workspace_id, harness_id)
     ids = _cap_effective(rows)
     return [row.text for row in rows if row.id in ids]
 
@@ -221,11 +336,11 @@ async def own_pending_proposals(
     )
 
 
-async def _next_ordinal(db: AsyncSession, workspace_id: uuid.UUID, pack_slug: str) -> int:
+async def _next_ordinal(db: AsyncSession, workspace_id: uuid.UUID, scope: LessonScope) -> int:
     current = (
         await db.execute(
             select(func.max(PackLesson.ordinal)).where(
-                PackLesson.workspace_id == workspace_id, PackLesson.pack_slug == pack_slug
+                PackLesson.workspace_id == workspace_id, scope.clause()
             )
         )
     ).scalar()
@@ -267,7 +382,22 @@ async def propose_lesson(
     that — the retry recomputes a fresh ordinal rather than surfacing a
     500 for what is, from the caller's side, an ordinary race.
     """
+    return await _propose_in_scope(
+        db,
+        workspace_id,
+        LessonScope(pack_slug=pack_slug),
+        text=text,
+        rationale=rationale,
+        run_id=run_id,
+        pack_id=pack_id,
+        dedup_statuses=("approved", "proposed"),
+    )
+
+
+def _clean_text(text: str) -> str:
     text = _singleline(text)
+    if not text:
+        raise LessonRejected("text is empty once invisible characters are removed.")
     lower = text.lower()
     if any(needle in lower for needle in _FORBIDDEN_SUBSTRINGS):
         raise LessonRejected(
@@ -277,15 +407,31 @@ async def propose_lesson(
         raise LessonRejected("text must not start with '#' (looks like a Markdown heading).")
     if len(text) > MAX_LESSON_CHARS:
         raise LessonTextTooLong(len(text))
+    return text
 
+
+async def _propose_in_scope(
+    db: AsyncSession,
+    workspace_id: uuid.UUID,
+    scope: LessonScope,
+    *,
+    text: str,
+    rationale: str,
+    run_id: uuid.UUID | None = None,
+    pack_id: uuid.UUID | None = None,
+    evaluation_id: uuid.UUID | None = None,
+    dedup_statuses: tuple[str, ...],
+) -> PackLesson:
+    text = _clean_text(text)
+    rationale = strip_invisible(rationale)
     normalized = _normalize(text)
     existing_rows = (
         (
             await db.execute(
                 select(PackLesson).where(
                     PackLesson.workspace_id == workspace_id,
-                    PackLesson.pack_slug == pack_slug,
-                    PackLesson.status.in_(("approved", "proposed")),
+                    scope.clause(),
+                    PackLesson.status.in_(dedup_statuses),
                 )
             )
         )
@@ -300,20 +446,19 @@ async def propose_lesson(
     for _attempt in range(2):
         try:
             # `add` happens *inside* the SAVEPOINT along with the flush that
-            # can fail: undoing only what happened inside `begin_nested`
-            # requires the failed insert to have been registered inside it
-            # too, or the pending object survives the rollback and collides
-            # again on the retry's flush.
+            # can fail, so the retry's flush does not collide with the pending
+            # object from the failed attempt.
             async with db.begin_nested():
                 lesson = PackLesson(
                     workspace_id=workspace_id,
-                    pack_slug=pack_slug,
+                    **scope.columns(),
                     pack_id=pack_id,
-                    ordinal=await _next_ordinal(db, workspace_id, pack_slug),
+                    ordinal=await _next_ordinal(db, workspace_id, scope),
                     status="proposed",
                     text=text,
                     rationale=rationale,
                     proposed_by_run_id=run_id,
+                    proposed_by_evaluation_id=evaluation_id,
                 )
                 db.add(lesson)
                 await db.flush()
@@ -323,6 +468,104 @@ async def propose_lesson(
         return lesson
     assert last_error is not None
     raise last_error
+
+
+async def propose_harness_lesson(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    harness_id: uuid.UUID,
+    text: str,
+    rationale: str,
+    evaluation_id: uuid.UUID | None,
+) -> PackLesson:
+    """Record a `proposed` harness-scoped lesson (from a batch review). Same
+    sanitisation and ordinal handling as `propose_lesson`; dedup also covers
+    `rejected` and `retired` rows, so a lesson a person turned down does not
+    come back verbatim.
+    Flushed, not committed."""
+    return await _propose_in_scope(
+        db,
+        workspace_id,
+        LessonScope(harness_id=harness_id),
+        text=text,
+        rationale=rationale,
+        evaluation_id=evaluation_id,
+        dedup_statuses=("approved", "proposed", "rejected", "retired"),
+    )
+
+
+async def clear_pending_review_proposals(db: AsyncSession, ev: BatchEvaluation) -> None:
+    """Delete this batch's still-`proposed` harness lessons from any of its
+    passes, whatever harness they were for. Flushed, not committed."""
+    pass_ids = select(BatchEvaluation.id).where(BatchEvaluation.collection_id == ev.collection_id)
+    await db.execute(
+        delete(PackLesson).where(
+            PackLesson.workspace_id == ev.workspace_id,
+            PackLesson.harness_id.is_not(None),
+            PackLesson.status == "proposed",
+            PackLesson.proposed_by_evaluation_id.in_(pass_ids),
+        )
+    )
+    await db.flush()
+
+
+async def sync_review_proposals(
+    db: AsyncSession,
+    ev: BatchEvaluation,
+    harness_id: uuid.UUID,
+    lessons: list[str],
+    batch_name: str,
+) -> list[dict]:
+    """Turn a batch review's lessons into harness-scoped proposals.
+
+    Deletes this batch's still-`proposed` harness lessons from earlier passes
+    (any pass of the batch, whatever harness they were for; approved, rejected
+    and retired rows are never touched), then proposes each lesson. One result
+    per input lesson, in order: `{text, lesson_id, outcome, reason}` with
+    outcome `proposed | duplicate | rejected_text | dropped`. For `duplicate`,
+    `lesson_id` is the EXISTING lesson it duplicates. Only the first
+    `MAX_PENDING_PER_BATCH` are proposed; the rest are `dropped`. Never raises
+    into the caller; a failure is logged and reported per item. Flushed, not
+    committed."""
+    results: list[dict] = []
+    try:
+        await clear_pending_review_proposals(db, ev)
+    except Exception:
+        logger.exception("clearing earlier batch-review proposals failed")
+    rationale = f"Proposed by the batch review of '{batch_name}'."
+    for index, text in enumerate(lessons):
+        entry: dict = {"text": text, "lesson_id": None, "outcome": "proposed", "reason": None}
+        if index >= MAX_PENDING_PER_BATCH:
+            entry.update(
+                outcome="dropped",
+                reason=f"only the first {MAX_PENDING_PER_BATCH} lessons are proposed per batch",
+            )
+            results.append(entry)
+            continue
+        try:
+            lesson = await propose_harness_lesson(
+                db,
+                workspace_id=ev.workspace_id,
+                harness_id=harness_id,
+                text=text,
+                rationale=rationale,
+                evaluation_id=ev.id,
+            )
+            entry["lesson_id"] = str(lesson.id)
+        except DuplicateLesson as e:
+            entry.update(
+                outcome="duplicate",
+                lesson_id=str(e.existing.id),
+                reason=f"duplicates a {e.existing.status} lesson",
+            )
+        except (LessonRejected, LessonTextTooLong) as e:
+            entry.update(outcome="rejected_text", reason=str(e))
+        except Exception as e:
+            logger.exception("proposing a batch-review lesson failed")
+            entry.update(outcome="rejected_text", reason=f"error: {type(e).__name__}")
+        results.append(entry)
+    return results
 
 
 async def review_lesson(

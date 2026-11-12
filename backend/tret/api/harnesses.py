@@ -208,6 +208,12 @@ async def get_harness(
             if pack is not None and lessons_service.lessons_enabled(h.loop_config)
             else None
         ),
+        harness_lessons=(
+            await lessons_service.approved_harness_lessons(db, ctx.id, h.id)
+            if lessons_service.lessons_enabled(h.loop_config)
+            else None
+        )
+        or None,
     )
     # Union of every linked pack's task types, in link order, each entry
     # tagged with the pack it came from — a two-pack harness can run task

@@ -26,7 +26,9 @@ from tret.config import get_settings
 from tret.db.models import (
     Batch,
     BatchEvaluation,
+    BatchTarget,
     Harness,
+    PackLesson,
     Run,
     RunOutcome,
     TargetEvaluation,
@@ -396,6 +398,304 @@ def test_a_failing_review_keeps_the_scores(client, world, eng):
     detail = ev_detail(client, b["id"])
     assert detail["evaluation"]["counts"]["scored"] == 3 and detail["evaluation"]["status"] == "completed"
     assert "did not submit a batch review" in detail["evaluation"]["error"]
+
+
+def _harness_lessons(client, world):
+    from tret.db.models import PackLesson
+
+    async def go(db):
+        return list((await db.execute(select(PackLesson).where(PackLesson.harness_id.is_not(None)))).scalars())
+
+    return run_db(client, world, go)
+
+
+def test_a_batch_review_proposes_lessons_for_the_harness_the_batch_ran_on(client, world, eng):
+    b = make(client, world)
+    run_batch(client, b["id"])
+    detail = ev_detail(client, b["id"])["evaluation"]
+    assert detail["summary"]["lessons"] == ["Keep it up"]
+    rows = _harness_lessons(client, world)
+    assert [(r.text, r.status, r.harness_id, r.pack_slug) for r in rows] == [
+        ("Keep it up", "proposed", world.harness.id, None)
+    ]
+    assert detail["lessons_harness_id"] == str(world.harness.id)
+    assert detail["lesson_proposals"] == [
+        {
+            "text": "Keep it up", "lesson_id": str(rows[0].id), "outcome": "proposed", "reason": None,
+            "status": "proposed", "in_effect": False, "harness_id": str(world.harness.id),
+        }
+    ]
+    assert rows[0].reviewed_by_user_id is None  # proposed only: a person approves
+
+
+def test_the_proposals_follow_the_lessons_current_status(client, world, eng):
+    b = make(client, world)
+    run_batch(client, b["id"])
+    row = _harness_lessons(client, world)[0]
+
+    async def set_status(db, status):
+        r = await db.get(PackLesson, row.id)
+        r.status = status
+        await db.commit()
+
+    run_db(client, world, lambda db: set_status(db, "approved"))
+    p = ev_detail(client, b["id"])["evaluation"]["lesson_proposals"][0]
+    assert (p["status"], p["in_effect"], p["outcome"]) == ("approved", True, "proposed")
+    run_db(client, world, lambda db: set_status(db, "retired"))
+    p = ev_detail(client, b["id"])["evaluation"]["lesson_proposals"][0]
+    assert (p["status"], p["in_effect"]) == ("retired", False)
+
+    async def delete(db):
+        await db.delete(await db.get(PackLesson, row.id))
+        await db.commit()
+
+    run_db(client, world, delete)
+    p = ev_detail(client, b["id"])["evaluation"]["lesson_proposals"][0]
+    assert (p["status"], p["in_effect"], p["harness_id"]) == (None, None, None)
+
+
+def test_an_all_duplicate_review_still_lists_every_lesson(client, world, eng):
+    async def seed(db):
+        from tret.services.lessons import propose_harness_lesson, review_lesson
+
+        row = await propose_harness_lesson(
+            db, workspace_id=world.ws.id, harness_id=world.harness.id, text="Keep it up",
+            rationale="r", evaluation_id=None,
+        )
+        await db.commit()
+        await review_lesson(db, row.id, approve=True, user_id=world.user.id)
+        return row.id
+
+    existing = run_db(client, world, seed)
+    b = make(client, world)
+    run_batch(client, b["id"])
+    p = ev_detail(client, b["id"])["evaluation"]["lesson_proposals"]
+    assert len(p) == 1 and p[0]["outcome"] == "duplicate" and p[0]["lesson_id"] == str(existing)
+    assert p[0]["status"] == "approved" and p[0]["in_effect"] is True
+
+
+def test_an_unresolved_harness_is_reported_per_lesson(client, world, eng, monkeypatch):
+    from tret.engine import evaluation_tools
+
+    async def none(*a, **k):
+        return None
+
+    monkeypatch.setattr(evaluation_tools, "_review_harness_id", none)
+    b = make(client, world)
+    run_batch(client, b["id"])
+    detail = ev_detail(client, b["id"])["evaluation"]
+    assert detail["lessons_harness_id"] is None
+    assert detail["lesson_proposals"] == [
+        {
+            "text": "Keep it up", "lesson_id": None, "outcome": "unresolved",
+            "reason": "no harness could be resolved for this batch", "status": None,
+            "in_effect": None, "harness_id": None,
+        }
+    ]
+    assert _harness_lessons(client, world) == []
+
+
+def test_a_batch_pinned_to_a_harness_archived_later_still_proposes_for_it(client, world, eng):
+    b = make(client, world)
+
+    archived = []
+
+    async def archive(db):
+        h = await db.get(Harness, world.harness.id)
+        h.is_archived = True
+        await db.commit()
+        archived.append(True)
+
+    # Archived while the batch is mid-flight: the targets still ran on it.
+    orig = eng._judge
+
+    async def judge(run_id, ti):
+        if ti.get("_batch_review"):
+            await _async_db(client, world, archive)
+        return await orig(run_id, ti)
+
+    eng._judge = judge
+    run_batch(client, b["id"])
+    rows = _harness_lessons(client, world)
+    assert archived and [r.harness_id for r in rows] == [world.harness.id]
+
+
+async def _async_db(client, world, fn):
+    async with world.factory() as db:
+        return await fn(db)
+
+
+def test_a_review_that_fails_its_guards_proposes_nothing(client, world, eng):
+    eng.judge_mode = "review_fails"
+    b = make(client, world)
+    run_batch(client, b["id"])
+    assert _harness_lessons(client, world) == []
+    detail = ev_detail(client, b["id"])["evaluation"]
+    assert "lesson_proposals" not in detail and "lessons_harness_id" not in detail
+
+
+def test_a_failing_proposal_step_does_not_lose_the_review(client, world, eng, monkeypatch):
+    from tret.services import lessons as lessons_service
+
+    async def boom(*a, **k):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(lessons_service, "sync_review_proposals", boom)
+    b = make(client, world)
+    run_batch(client, b["id"])
+    detail = ev_detail(client, b["id"])["evaluation"]
+    assert detail["status"] == "completed" and detail["summary"]["lessons"] == ["Keep it up"]
+    assert "proposals" not in detail["summary"] and "lesson_proposals" not in detail
+    assert _harness_lessons(client, world) == []
+
+
+def test_a_failing_harness_lookup_does_not_lose_the_review(client, world, eng, monkeypatch):
+    from tret.engine import evaluation_tools
+
+    async def boom(*a, **k):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(evaluation_tools, "_review_harness_id", boom)
+    b = make(client, world)
+    run_batch(client, b["id"])
+    detail = ev_detail(client, b["id"])["evaluation"]
+    assert detail["status"] == "completed" and detail["summary"]["narrative"] == "Scores are consistent."
+    assert _harness_lessons(client, world) == []
+
+
+def test_pending_proposals_of_an_earlier_pass_on_another_harness_are_replaced(client, world, eng):
+    from tret.services.lessons import propose_harness_lesson
+
+    b = make(client, world)
+    run_batch(client, b["id"])
+    first = _harness_lessons(client, world)[0]
+
+    async def other_harness(db):
+        h = Harness(
+            workspace_id=world.ws.id, name="Old", task_profile="chat", model_policy={}, tool_names=[],
+            loop_config={},
+        )
+        db.add(h)
+        await db.flush()
+        ev = (
+            await db.execute(select(BatchEvaluation).where(BatchEvaluation.collection_id == uuid.UUID(b["id"])))
+        ).scalars().first()
+        row = await propose_harness_lesson(
+            db, workspace_id=world.ws.id, harness_id=h.id, text="Stale elsewhere.", rationale="r",
+            evaluation_id=ev.id,
+        )
+        await db.commit()
+        return row.id
+
+    stale_id = run_db(client, world, other_harness)
+    # Re-run the proposal step for the same batch directly.
+    from tret.engine import evaluation_tools
+
+    async def rerun(db):
+        ev = (
+            await db.execute(
+                select(BatchEvaluation).where(BatchEvaluation.collection_id == uuid.UUID(b["id"]))
+                .order_by(BatchEvaluation.created_at.desc())
+            )
+        ).scalars().first()
+        await evaluation_tools._propose_review_lessons(ev.id, None)
+
+    run_db(client, world, rerun)
+    rows = {r.text: r for r in _harness_lessons(client, world)}
+    assert "Stale elsewhere." not in rows
+    assert rows["Keep it up"].id != first.id and rows["Keep it up"].status == "proposed"
+    assert stale_id not in {r.id for r in rows.values()}
+
+
+def _rerun_hook(client, world, bid):
+    from tret.engine import evaluation_tools
+
+    async def go(db):
+        ev = (
+            await db.execute(
+                select(BatchEvaluation).where(BatchEvaluation.collection_id == uuid.UUID(bid))
+                .order_by(BatchEvaluation.created_at.desc())
+            )
+        ).scalars().first()
+        await evaluation_tools._propose_review_lessons(ev.id, None)
+
+    run_db(client, world, go)
+
+
+def test_lesson_proposals_show_the_stored_text(client, world, eng):
+    b = make(client, world)
+    run_batch(client, b["id"])
+
+    async def messy(db):
+        ev, _ = None, None
+        ev = (await db.execute(select(BatchEvaluation).where(BatchEvaluation.collection_id == uuid.UUID(b["id"])))).scalars().first()
+        ev.summary = {**ev.summary, "lessons": ["  Keep\n  it\u200b   up  ", "\u200b"]}
+        await db.commit()
+
+    run_db(client, world, messy)
+    _rerun_hook(client, world, b["id"])
+    p = ev_detail(client, b["id"])["evaluation"]["lesson_proposals"]
+    stored = {r.text for r in _harness_lessons(client, world)}
+    assert p[0]["text"] == "Keep it up" and p[0]["text"] in stored
+    assert p[1]["outcome"] == "rejected_text" and p[1]["text"] == ""
+
+
+def test_the_returned_summary_has_only_the_review_keys(client, world, eng):
+    b = make(client, world)
+    run_batch(client, b["id"])
+    ev = ev_detail(client, b["id"])["evaluation"]
+    assert set(ev["summary"]) == {"narrative", "consistency_notes", "lessons"}
+    assert ev["lesson_proposals"] and ev["lessons_harness_id"] == str(world.harness.id)
+
+    async def stored(db):
+        row = (await db.execute(select(BatchEvaluation).where(BatchEvaluation.collection_id == uuid.UUID(b["id"])))).scalars().first()
+        return set(row.summary)
+
+    assert "proposals" in run_db(client, world, stored)  # the stored JSON is untouched
+
+
+def test_a_tie_between_harnesses_resolves_deterministically(client, world, eng):
+    from tret.engine import evaluation_tools
+
+    b = make(client, world)
+    run_batch(client, b["id"])
+
+    async def go(db):
+        extra = [
+            Harness(workspace_id=world.ws.id, name=f"X{i}", task_profile="chat", model_policy={}, tool_names=[], loop_config={})
+            for i in range(2)
+        ]
+        db.add_all(extra)
+        await db.flush()
+        targets = (await db.execute(select(BatchTarget).where(BatchTarget.collection_id == uuid.UUID(b["id"])))).scalars().all()
+        for t, h in zip(targets[:2], extra):
+            (await db.get(Run, t.run_id)).harness_id = h.id
+        await db.commit()
+        ev = (await db.execute(select(BatchEvaluation).where(BatchEvaluation.collection_id == uuid.UUID(b["id"])))).scalars().first()
+        batch = await db.get(Batch, uuid.UUID(b["id"]))
+        first = await evaluation_tools._review_harness_id(db, ev, batch, None)
+        second = await evaluation_tools._review_harness_id(db, ev, batch, None)
+        return first, second, {world.harness.id, *(h.id for h in extra)}
+
+    first, second, ids = run_db(client, world, go)
+    assert first == second == min(ids)
+
+
+def test_an_unresolved_review_still_clears_earlier_pending_proposals(client, world, eng, monkeypatch):
+    from tret.engine import evaluation_tools
+
+    b = make(client, world)
+    run_batch(client, b["id"])
+    assert len(_harness_lessons(client, world)) == 1
+
+    async def none(*a, **k):
+        return None
+
+    monkeypatch.setattr(evaluation_tools, "_review_harness_id", none)
+    _rerun_hook(client, world, b["id"])
+    assert _harness_lessons(client, world) == []
+    p = ev_detail(client, b["id"])["evaluation"]["lesson_proposals"]
+    assert [e["outcome"] for e in p] == ["unresolved"]
 
 
 # ── retroactive, cancel, review ──────────────────────────────────────────────
