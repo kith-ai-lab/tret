@@ -25,6 +25,7 @@ from datetime import timezone
 import contextlib
 import logging
 import uuid
+from collections.abc import Iterable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,6 +50,27 @@ DEFAULT_MAX_ITERATIONS = 24
 MAX_ITERATIONS_CEILING = 50
 
 
+async def latest_approval_purposes(
+    db: AsyncSession, finding_ids: Iterable[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    """`{finding_id: purpose}` of each finding's most recent approval row (ordered
+    by `created_at`, then `id`). Findings with no approval row are absent, so a
+    caller treats a missing key as a legacy review. One query; none for no ids."""
+    ids = list(finding_ids)
+    if not ids:
+        return {}
+    purposes: dict[uuid.UUID, str] = {}
+    for fid, purpose in (
+        await db.execute(
+            select(Approval.finding_id, Approval.purpose)
+            .where(Approval.finding_id.in_(ids))
+            .order_by(Approval.created_at, Approval.id)
+        )
+    ).all():
+        purposes[fid] = purpose  # ascending, so the last write is the latest
+    return purposes
+
+
 async def _finding_counts(db: AsyncSession, run_id: uuid.UUID) -> dict[str, int]:
     """`{status: count}` over the run's findings, where "approved"/"rejected"
     count only human *reviews*. A finding approved with purpose "packaging" (a
@@ -60,16 +82,7 @@ async def _finding_counts(db: AsyncSession, run_id: uuid.UUID) -> dict[str, int]
         await db.execute(select(Finding.id, Finding.status).where(Finding.run_id == run_id))
     ).all()
     decided = [fid for fid, status in rows if status in ("approved", "rejected")]
-    purposes: dict[uuid.UUID, str] = {}
-    if decided:
-        for fid, purpose in (
-            await db.execute(
-                select(Approval.finding_id, Approval.purpose)
-                .where(Approval.finding_id.in_(decided))
-                .order_by(Approval.created_at, Approval.id)
-            )
-        ).all():
-            purposes[fid] = purpose  # ascending, so the last write is the latest
+    purposes = await latest_approval_purposes(db, decided)
     counts: dict[str, int] = {}
     for fid, status in rows:
         key = status

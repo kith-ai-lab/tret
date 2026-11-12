@@ -6,12 +6,13 @@ built from the evaluator tests' fixtures."""
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from tests.test_batch_evaluation import EVAL_ON, eng, make, run_batch  # noqa: F401 - fixtures
-from tests.test_collections_api import client, world  # noqa: F401 - fixtures
+from tests.test_collections_api import client, create, run_db, settle, world  # noqa: F401 - fixtures
 from tret.batches import scoring
 from tret.batches.rubrics import (
     RubricError,
@@ -203,3 +204,63 @@ def test_quality_is_not_comparable_without_matching_evaluations(client, world, e
     settle(client)
     c = client.get(f"/api/batches/compare?a={a['id']}&b={b['id']}").json()
     assert not c["quality_comparable"] and "different judge" in c["quality_note"]
+
+
+# ── packaging approvals are not reviews ──────────────────────────────────────
+def _decided_batch(client, world, decisions):
+    """A started disclosure batch whose map findings are then given `decisions`:
+    a list of (finding stem, status, [(purpose, minute)] approval rows), written
+    straight to the database. Returns the scorecard's `human` block."""
+    from sqlalchemy import select
+
+    from tret.db.models import Approval, Finding
+
+    world.engine.behaviour.update(
+        {"allianz": "two_maps", "apple": "gap", "siemens": "gap", "hsbc-holdings": "gap"}
+    )
+    cid = create(client).json()["id"]
+    assert client.post(f"/api/collections/{cid}/start").status_code == 200
+    settle(client)
+
+    async def go(db):
+        found = {f.subject["stem"]: f for f in (await db.execute(select(Finding))).scalars()}
+        t0 = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        for stem, status, approvals in decisions:
+            found[stem].status = status
+            for purpose, minute in approvals:
+                db.add(Approval(
+                    id=uuid.uuid4(), finding_id=found[stem].id, action="reject" if status == "rejected" else "approve",
+                    approver_id=world.user.id, purpose=purpose, created_at=t0 + timedelta(minutes=minute),
+                ))
+        await db.commit()
+
+    run_db(client, world, go)
+    return client.get(f"/api/batches/{cid}/scorecard").json()["human"]
+
+
+def test_scorecard_separates_packaging_approvals_from_reviews(client, world):
+    human = _decided_batch(client, world, [
+        ("allianz", "approved", [("review", 0)]),
+        ("allianz-assurance", "approved", [("packaging", 0)]),
+        ("shell", "rejected", [("review", 0)]),
+    ])
+    assert human == {"decided_reviews": 2, "packaging_approvals": 1, "rejections": 1}
+
+
+def test_a_decided_finding_with_no_approval_row_counts_as_a_review(client, world):
+    human = _decided_batch(client, world, [("allianz", "approved", []), ("shell", "rejected", [])])
+    assert human == {"decided_reviews": 2, "packaging_approvals": 0, "rejections": 1}
+
+
+def test_a_review_approval_later_re_marked_packaging_counts_as_packaging(client, world):
+    human = _decided_batch(client, world, [("allianz", "approved", [("review", 0), ("packaging", 5)])])
+    assert human == {"decided_reviews": 0, "packaging_approvals": 1, "rejections": 0}
+
+
+def test_without_packaging_approvals_the_human_counts_are_unchanged(client, world):
+    human = _decided_batch(client, world, [
+        ("allianz", "approved", [("review", 0)]),
+        ("allianz-assurance", "approved", [("review", 0)]),
+        ("shell", "rejected", [("review", 0)]),
+    ])
+    assert human == {"decided_reviews": 3, "packaging_approvals": 0, "rejections": 1}

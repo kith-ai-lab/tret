@@ -71,6 +71,8 @@ one that needs action on an existing install.
   Rejections are always reviews. Existing approvals default to `review`, so re-scoring changes
   existing scores only for runs whose approvals you re-mark with
   `tret approvals mark-packaging --batch <id> [--dry-run]`. Migration `a7c3e1d94b62`.
+- The batch scorecard's `human.decided_reviews` now counts reviews only; page maps approved
+  only so they could be packaged are counted separately as `human.packaging_approvals`.
 - Experiments never pin a model. Make default applies only an arm's objective and iteration
   limit; an arm's model stays with the router, its evaluated runs being evidence for the
   family gate, and a model-only arm is not promotable. Experiment results gain

@@ -130,7 +130,9 @@ without inflating that model's record; it is valid only with `approve` and only 
 `package_map` finding. `decide-batch` refuses the whole request when `packaging` is sent with
 `reject`, and refuses a finding that is not a page map on its own, leaving the rest of the
 request to proceed. A packaging
-approval otherwise behaves exactly like any approval. For a batch whose maps were already
+approval otherwise behaves exactly like any approval. The scorecard counts the two apart:
+`human.decided_reviews` counts reviews only and `human.packaging_approvals` counts the
+packaging-only approvals. For a batch whose maps were already
 approved as reviews, `tret approvals mark-packaging --batch <id> [--batch <id> ...]
 [--dry-run]` (run where the database is reachable) re-marks them as `packaging` and
 re-scores the affected runs, printing per model the before and after mean `quality_score` and
