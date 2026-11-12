@@ -6,6 +6,7 @@ import { api, type BatchComparison, type BatchComparisonRow } from '../api/clien
 import { Scorecard } from '../components/batches/Scorecard'
 import {
   DISPUTED_GAP_TITLE,
+  DISPUTED_PRIMARY_TITLE,
   dash,
   deltaClass,
   fmtMeanInterval,
@@ -17,7 +18,15 @@ import { formatCost } from '../components/shared/format'
 import { QueryError } from '../components/shared/MonoTable'
 import { StatusBadge } from '../components/shared/StatusBadge'
 
-function Side({ side, disputed }: { side: BatchComparisonRow['a']; disputed?: boolean }) {
+function Side({
+  side,
+  disputed,
+  disputedPrimary,
+}: {
+  side: BatchComparisonRow['a']
+  disputed?: boolean
+  disputedPrimary?: boolean
+}) {
   if (!side) return <td colSpan={4} className="fine-print">not in this batch</td>
   const pages =
     side.retained_pages != null
@@ -34,6 +43,11 @@ function Side({ side, disputed }: { side: BatchComparisonRow['a']; disputed?: bo
             gap disputed
           </span>
         )}
+        {disputedPrimary && (
+          <span className="chip" style={{ marginLeft: 4 }} title={DISPUTED_PRIMARY_TITLE}>
+            main document disputed
+          </span>
+        )}
       </td>
       <td className="num">{fmtScore(side.quality)}</td>
       <td className="num">{pages}</td>
@@ -45,6 +59,7 @@ function Side({ side, disputed }: { side: BatchComparisonRow['a']; disputed?: bo
 function SummaryStrip({ cmp }: { cmp: BatchComparison }) {
   const s = cmp.summary ?? ({} as BatchComparison['summary'])
   const disputed = (s.disputed_gaps_a ?? 0) + (s.disputed_gaps_b ?? 0)
+  const disputedMain = (s.disputed_primaries_a ?? 0) + (s.disputed_primaries_b ?? 0)
   const pairs = cmp.rows.filter((r) => r.delta?.quality != null).length
   return (
     <div className="panel" style={{ margin: '14px 0' }}>
@@ -102,6 +117,11 @@ function SummaryStrip({ cmp }: { cmp: BatchComparison }) {
       {disputed > 0 && (
         <div className="mono-body" style={{ marginTop: 6 }} title={DISPUTED_GAP_TITLE}>
           Disputed gaps: A {s.disputed_gaps_a ?? 0} · B {s.disputed_gaps_b ?? 0}
+        </div>
+      )}
+      {disputedMain > 0 && (
+        <div className="mono-body" style={{ marginTop: 6 }} title={DISPUTED_PRIMARY_TITLE}>
+          Rows with a disputed main document: A {s.disputed_primaries_a ?? 0} · B {s.disputed_primaries_b ?? 0}
         </div>
       )}
     </div>
@@ -198,8 +218,16 @@ export function BatchCompare() {
                       {r.label}
                       <div className="fine-print">{r.row_key}</div>
                     </td>
-                    <Side side={r.a} disputed={r.disputed_gap === 'a'} />
-                    <Side side={r.b} disputed={r.disputed_gap === 'b'} />
+                    <Side
+                      side={r.a}
+                      disputed={r.disputed_gap === 'a'}
+                      disputedPrimary={r.disputed_primary === 'a' || r.disputed_primary === 'both'}
+                    />
+                    <Side
+                      side={r.b}
+                      disputed={r.disputed_gap === 'b'}
+                      disputedPrimary={r.disputed_primary === 'b' || r.disputed_primary === 'both'}
+                    />
                     <td className={`num ${deltaClass(r.delta?.quality)}`}>
                       {fmtSigned(r.delta?.quality)}
                     </td>

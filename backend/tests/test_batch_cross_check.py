@@ -527,7 +527,8 @@ async def test_creating_the_evaluator_run_records_the_gap_check(world):
     check = gap_row.relative["gap_check"]
     assert check["checked_against"] == [str(o["heineken"][0].id)] and check["checked_at"]
     await evaluation._create_evaluator_run(w.db, ev, batch, profile, ok_t, ok_row, harness, None)
-    assert ok_row.relative == {"rank": 1}  # other targets are untouched
+    # Other targets keep their relative data; a delivered row also records its (empty) primary check.
+    assert ok_row.relative["rank"] == 1 and ok_row.relative["primary_check"]["checked_against"] == []
     assert "Cross-check" not in (await w.db.get(Run, ok_row.evaluator_run_id)).task_input["message"]
 
 
@@ -727,4 +728,5 @@ async def test_a_non_gap_row_loses_a_stale_gap_check(world):
     await evaluation._create_evaluator_run(
         w.db, ev, batch, profile_for(batch), t, row, SimpleNamespace(id=w.harness.id), None
     )
-    assert row.relative == {"rank": 1}
+    assert row.relative["rank"] == 1 and "gap_check" not in row.relative
+    assert row.relative["primary_check"]["checked_against"] == []

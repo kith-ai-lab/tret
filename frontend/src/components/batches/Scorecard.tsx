@@ -163,6 +163,15 @@ export function Scorecard({
         </div>
       )}
 
+      {(sc.quality?.primaries_disputed ?? 0) > 0 && (
+        <div className="fine-print" style={{ marginTop: 8 }}>
+          {plural(sc.quality!.primaries_disputed!, 'delivered row')} with a disputed main document ·{' '}
+          {sc.quality!.primaries_rechecked ?? 0} re-checked by the judge
+          {(sc.quality!.primaries_rechecked ?? 0) < sc.quality!.primaries_disputed! &&
+            ' · Re-evaluate with “Only unscored” to re-check them.'}
+        </div>
+      )}
+
       <div className="row" style={{ gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
         {(sc.models ?? []).map((m) => (
           <span key={m.model} className="chip" title={m.model}>

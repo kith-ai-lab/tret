@@ -3485,6 +3485,10 @@ export interface BatchTargetEvaluationBrief {
   delivered_elsewhere?: number
   /** true: judged with that evidence; false: new evidence since; null: n/a. */
   gap_rechecked?: boolean | null
+  /** Main documents other batches packaged for this delivered row that it did not; 0 otherwise. */
+  primary_elsewhere?: number
+  /** true: judged with those documents in view; false: new ones since; null: n/a. */
+  primary_rechecked?: boolean | null
 }
 
 export interface BatchEvaluationDetail {
@@ -3535,6 +3539,9 @@ export interface BatchScorecard {
     /** Gaps another batch of the same target list delivered acceptably. */
     gaps_disputed?: number
     gaps_rechecked?: number
+    /** Delivered rows whose main document another batch packaged and this run did not. */
+    primaries_disputed?: number
+    primaries_rechecked?: number
   } | null
   evaluation: BatchEvaluationPass | null
 }
@@ -3561,6 +3568,8 @@ export interface BatchComparisonRow {
   both_delivered?: boolean
   /** Side that declared a gap the other side delivered acceptably. */
   disputed_gap?: 'a' | 'b' | null
+  /** Side that missed a main document the other side packaged (both sides can). */
+  disputed_primary?: 'a' | 'b' | 'both' | null
   delta: {
     quality: number | null
     cost_usd: number | null
@@ -3604,6 +3613,8 @@ export interface BatchComparison {
     }
     disputed_gaps_a?: number
     disputed_gaps_b?: number
+    disputed_primaries_a?: number
+    disputed_primaries_b?: number
   }
 }
 

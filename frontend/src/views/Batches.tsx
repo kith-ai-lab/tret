@@ -19,6 +19,7 @@ import { EvaluationDrawer } from '../components/batches/EvaluationDrawer'
 import { useEvaluationForm } from '../components/batches/EvaluationSection'
 import {
   deliveredElsewhereTitle,
+  otherPrimaryTitle,
   flagLabel,
   fmtScore,
   fmtSigned,
@@ -859,6 +860,15 @@ function TargetsTable({
               delivered elsewhere
             </span>
           )}
+          {(e.primary_elsewhere ?? 0) > 0 && (
+            <span
+              className="chip"
+              style={{ marginLeft: 4 }}
+              title={otherPrimaryTitle(e.primary_elsewhere!, e.primary_rechecked)}
+            >
+              other main document
+            </span>
+          )}
         </td>
         <td className="num">{e.rank != null && e.of != null ? `${e.rank}/${e.of}` : '—'}</td>
         <td className={`num ${(e.residual ?? 0) < 0 ? 'delta-neg' : (e.residual ?? 0) > 0 ? 'delta-pos' : ''}`}>
@@ -1077,6 +1087,10 @@ function TargetsTable({
           targets.find((t) => t.id === drawerTarget)?.evaluation?.delivered_elsewhere ?? 0
         }
         gapRechecked={targets.find((t) => t.id === drawerTarget)?.evaluation?.gap_rechecked}
+        primaryElsewhere={
+          targets.find((t) => t.id === drawerTarget)?.evaluation?.primary_elsewhere ?? 0
+        }
+        primaryRechecked={targets.find((t) => t.id === drawerTarget)?.evaluation?.primary_rechecked}
       />
     </div>
   )

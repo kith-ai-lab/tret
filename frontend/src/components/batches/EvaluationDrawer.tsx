@@ -6,7 +6,14 @@ import { api, type SpotVerdict, type TargetEvaluation } from '../../api/client'
 import { formatCost, formatDateTime } from '../shared/format'
 import { Modal } from '../shared/Modal'
 import { StatusBadge } from '../shared/StatusBadge'
-import { deliveredElsewhereTitle, flagLabel, fmtScore, fmtSigned, outlierText } from './evalHelpers'
+import {
+  deliveredElsewhereTitle,
+  flagLabel,
+  fmtScore,
+  fmtSigned,
+  otherPrimaryTitle,
+  outlierText,
+} from './evalHelpers'
 import { errText } from './shared'
 
 function Dots({ score }: { score: number | null }) {
@@ -31,6 +38,8 @@ export function EvaluationDrawer({
   suggested = false,
   deliveredElsewhere = 0,
   gapRechecked,
+  primaryElsewhere = 0,
+  primaryRechecked,
 }: {
   batchId: string
   targetId: string | null
@@ -41,6 +50,9 @@ export function EvaluationDrawer({
   /** Other batches' acceptable deliveries of this gap (from the target brief). */
   deliveredElsewhere?: number
   gapRechecked?: boolean | null
+  /** Main documents other batches packaged for this delivered row (from the target brief). */
+  primaryElsewhere?: number
+  primaryRechecked?: boolean | null
 }) {
   const queryClient = useQueryClient()
   const query = useQuery({
@@ -182,6 +194,15 @@ export function EvaluationDrawer({
                 delivered elsewhere
               </span>{' '}
               {deliveredElsewhereTitle(deliveredElsewhere, gapRechecked)}
+            </div>
+          )}
+
+          {primaryElsewhere > 0 && (
+            <div className="fine-print">
+              <span className="chip" title={otherPrimaryTitle(primaryElsewhere, primaryRechecked)}>
+                other main document
+              </span>{' '}
+              {otherPrimaryTitle(primaryElsewhere, primaryRechecked)}
             </div>
           )}
 
