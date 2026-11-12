@@ -84,6 +84,24 @@ _DEDUPE_SUFFIX_RE = re.compile(r"\s#\d+$")
 # ══════════════════════════════════════════════════════════════════════════
 # keys
 # ══════════════════════════════════════════════════════════════════════════
+def family_key_for(
+    profile: str,
+    *,
+    fiscal_year: Any = None,
+    harness_id: Any = None,
+    template: str | None = None,
+    run_slug: str | None = None,
+) -> str:
+    """The family key from its parts (the same rule `family_key` applies to a stored
+    batch), so a batch that does not exist yet can ask which family it would join."""
+    if profile == "disclosure":
+        return f"disclosure:fy{fiscal_year}"
+    if profile == "prompt":
+        digest = hashlib.sha256(str(template or "").encode("utf-8")).hexdigest()[:12]
+        return f"prompt:{harness_id}:{digest}"
+    return f"{profile}:{run_slug}"
+
+
 def family_key(batch: Batch) -> str:
     """What makes two batches comparable: `disclosure:fy<year>` for the disclosure
     profile, `prompt:<harness id>:<sha256(template)[:12]>` for a prompt batch;
@@ -91,13 +109,13 @@ def family_key(batch: Batch) -> str:
     with another batch)."""
     settings = batch.settings or {}
     profile = batch.profile or "disclosure"
-    if profile == "disclosure":
-        return f"disclosure:fy{settings.get('fiscal_year')}"
-    if profile == "prompt":
-        template = str(settings.get("template") or "")
-        digest = hashlib.sha256(template.encode("utf-8")).hexdigest()[:12]
-        return f"prompt:{settings.get('harness_id') or batch.harness_id}:{digest}"
-    return f"{profile}:{batch.run_slug}"
+    return family_key_for(
+        profile,
+        fiscal_year=settings.get("fiscal_year"),
+        harness_id=settings.get("harness_id") or (batch.harness_id if profile == "prompt" else None),
+        template=str(settings.get("template") or ""),
+        run_slug=batch.run_slug,
+    )
 
 
 def family_label(batch: Batch) -> str:

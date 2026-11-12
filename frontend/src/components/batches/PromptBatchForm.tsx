@@ -10,6 +10,7 @@ import {
   templateProblems,
   type ParsedCsv,
 } from './csv'
+import { AdvicePanel, CostCapField, RowMemoryField, parseCostCap } from './AdvicePanel'
 import { useEvaluationForm } from './EvaluationSection'
 import { errText } from './shared'
 
@@ -53,6 +54,8 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
   const [writeRoot, setWriteRoot] = useState('runs')
   const [model, setModel] = useState('')
   const [maxIterations, setMaxIterations] = useState('')
+  const [costCap, setCostCap] = useState('')
+  const [rowMemory, setRowMemory] = useState(false)
   const evaluation = useEvaluationForm(open, 'prompt')
 
   const effectiveHarness = harnessId || harnesses[0]?.id || ''
@@ -80,6 +83,7 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
     )
   }
 
+  const costCapValue = parseCostCap(costCap)
   const reviewOk = !review || reviewSchema.trim() !== ''
   const valid =
     shared.name.trim() !== '' &&
@@ -93,6 +97,7 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
     rows.length <= MAX_ROWS &&
     missing.length === 0 &&
     reviewOk &&
+    costCapValue !== undefined &&
     evaluation.valid
 
   const body: CreatePromptBatchBody | null = valid
@@ -112,6 +117,8 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
         write_root: targetSlug ? writeRoot.trim() || 'runs' : null,
         model_override: model.trim() || null,
         max_iterations: maxIterations.trim() ? Number(maxIterations) : null,
+        ...(costCapValue != null ? { max_cost_usd: costCapValue } : {}),
+        ...(rowMemory ? { row_memory: true } : {}),
         ...(evaluation.value ? { evaluation: evaluation.value } : {}),
       }
     : null
@@ -150,6 +157,17 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
           style={{ fontFamily: 'var(--font-mono, monospace)' }}
         />
       </div>
+
+      <AdvicePanel
+        enabled={open}
+        body={
+          effectiveHarness && template.trim()
+            ? { profile: 'prompt', harness_id: effectiveHarness, template }
+            : null
+        }
+        values={{ model, maxIterations, costCap, concurrency }}
+        setters={{ setModel, setMaxIterations, setCostCap, setConcurrency }}
+      />
 
       <div className="field">
         <label className="mono-label">Rows (CSV with a header row)</label>
@@ -291,12 +309,15 @@ export function usePromptBatchForm(open: boolean, shared: Shared) {
             }}
           />
         </div>
+        <CostCapField value={costCap} onChange={setCostCap} />
       </div>
 
       <div className="field">
         <label className="mono-label">Model override (optional)</label>
         <input type="text" value={model} onChange={(e) => setModel(e.target.value)} />
       </div>
+
+      <RowMemoryField checked={rowMemory} onChange={setRowMemory} />
 
       <div className="row" style={{ gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
         <div className="field">

@@ -10,6 +10,16 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Advice at batch creation, a per-target cost cap and opt-in row memory.**
+  `POST /api/batches/advice` recommends a model, iteration limit, cost cap and concurrency
+  from the family's earlier evaluated batches (a model needs 5 scored rows; read-only), and
+  `start_batch` returns the same suggestion as `advice`. New batch settings: `max_cost_usd`
+  (per-target cap, stamped as `_cost_cap_usd`, only ever narrows the harness cap) and
+  `row_memory` (off by default; appends a short, labelled block of earlier attempts at the
+  same row to each task, from structured fields only: failures appear as one fixed
+  category, never error text, and only for the targets being launched). The suggested cost
+  cap is never below $0.01; advice can carry a concurrency suggestion with no recommended
+  model; advice for an unknown or archived harness is a 422. No migration.
 - **A blind pairwise judge, a family leaderboard and a `batch_compare` tool.** Two
   quality-comparable batches can be judged head to head on the rows the rubric cannot
   separate: `POST /api/batches/compare/pairwise` runs one judge twice per pair (outputs

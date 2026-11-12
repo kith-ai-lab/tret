@@ -22,6 +22,7 @@ by `tret.main`); `engine/harness.py` does not import it.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from datetime import date
@@ -38,6 +39,8 @@ from tret.batches.profiles.prompt import CreatePromptBatchBody, slugify
 from tret.db.models import Document, Harness, Project, Run, WorkspaceMember
 from tret.engine.collection_tools import COLLECTION_TARGET_KEY
 from tret.engine.tools import RunContext, ToolError, builtin
+
+log = logging.getLogger(__name__)
 
 BATCH_TOOLS = ("start_batch", "batch_status", "batch_results", "batch_compare")
 # `Workspace.settings` flag: the chat harness was offered the tools once (services/workspace.py).
@@ -142,6 +145,36 @@ def _estimate(harness: Harness | None, targets: int) -> float | None:
         return None
 
 
+async def _advice_for(ctx: RunContext, profile: str, body: Any) -> dict | None:
+    """The advice for the family this batch joins, computed BEFORE it is created so it
+    describes earlier batches only. Never fails the tool."""
+    try:
+        from tret.batches import advice
+
+        async with ctx.db.begin_nested():  # a SAVEPOINT: a failed query leaves the tool's transaction usable
+            result = await advice.batch_advice(
+                ctx.db,
+                ctx.workspace_id,
+                profile=profile,
+                fiscal_year=getattr(body, "fiscal_year", None),
+                harness_id=getattr(body, "harness_id", None),
+                template=getattr(body, "template", None),
+            )
+        rec = result.get("recommendation")
+        if not rec:
+            return None
+        return {
+            "recommended_model": rec["model"],
+            "max_iterations": rec["max_iterations"],
+            "cost_cap_usd": rec["cost_cap_usd"],
+            "concurrency": rec["concurrency"],
+            "reason": rec["reason"],
+        }
+    except Exception:  # noqa: BLE001 - advice is a courtesy, never a reason to fail
+        log.warning("batch advice failed", exc_info=True)
+        return None
+
+
 @builtin(
     "start_batch",
     "Start a durable batch: one run per row of a table, slot-limited, with retries, optional "
@@ -163,7 +196,10 @@ def _estimate(harness: Harness | None, targets: int) -> float | None:
     "default 'prompt' profile only. If run_slug is taken, pass another. The result has "
     "warnings (first 5) and warnings_count: stored warning lines, the last may be a summary line. "
     "Pass evaluate=true to have a judge model score every finished target against a rubric "
-    "(see batch_status for the scorecard).",
+    "(see batch_status for the scorecard). The result's `advice` (when there is evidence) is what "
+    "earlier batches of this kind suggest for the NEXT one (model, iteration limit, cost cap, "
+    "concurrency); this batch already started as asked. max_cost_usd caps each target's cost; "
+    "row_memory=true adds a short block of earlier attempts at the same row to each target's task.",
     {
         "type": "object",
         "required": ["name"],
@@ -236,6 +272,8 @@ def _estimate(harness: Harness | None, targets: int) -> float | None:
             "auto_write": {"type": "boolean", "description": "disclosure profile: default true."},
             "model_override": {"type": "string"},
             "max_iterations": {"type": "integer", "minimum": 1, "maximum": 50},
+            "max_cost_usd": {"type": "number", "exclusiveMinimum": 0, "maximum": 1000},
+            "row_memory": {"type": "boolean", "default": False},
             "evaluate": {
                 "type": "boolean",
                 "default": False,
@@ -266,6 +304,8 @@ async def start_batch(
     fiscal_year: int | None = None,
     auto_write: bool | None = None,
     evaluate: bool = False,
+    max_cost_usd: float | None = None,
+    row_memory: bool = False,
 ) -> str:
     if ctx.workspace_id is None:
         raise ToolError("Batches are not available in this run.")
@@ -345,6 +385,8 @@ async def start_batch(
                 first_batch_size=first_batch_size,
                 model_override=model_override,
                 max_iterations=max_iterations,
+                max_cost_usd=max_cost_usd,
+                row_memory=row_memory,
                 parent_run_id=ctx.run_id,
                 evaluation=evaluation_in,
             )
@@ -375,6 +417,8 @@ async def start_batch(
                 first_batch_size=first_batch_size,
                 model_override=model_override,
                 max_iterations=max_iterations,
+                max_cost_usd=max_cost_usd,
+                row_memory=row_memory,
                 parent_run_id=ctx.run_id,
                 evaluation=evaluation_in,
                 **extra,
@@ -392,6 +436,7 @@ async def start_batch(
                 "This workspace has no Disclosure Collector harness; enable research egress "
                 "or seed it from Settings."
             )
+    advice = await _advice_for(ctx, profile, body)
     try:
         batch, targets = await core.create_batch(
             ctx.db,
@@ -426,6 +471,7 @@ async def start_batch(
         "estimated_cost_usd": _estimate(harness, len(targets)),
         "page": f"/batches/{batch.id}",
     }
+    out["advice"] = advice
     if batch.warnings:
         out["warnings"] = list(batch.warnings)[:5]
         out["warnings_count"] = len(batch.warnings)

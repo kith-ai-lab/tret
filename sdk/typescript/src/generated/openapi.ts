@@ -521,6 +521,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/batches/advice": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Batch Advice
+         * @description What earlier batches of the family a new batch would join suggest for it.
+         *     Read-only; nothing is applied. See docs/batch-runs.md.
+         */
+        post: operations["batch_advice_api_batches_advice_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/batches/compare": {
         parameters: {
             query?: never;
@@ -3163,6 +3184,20 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AdviceBody */
+        AdviceBody: {
+            /** Fiscal Year */
+            fiscal_year?: number | null;
+            /** Harness Id */
+            harness_id?: string | null;
+            /**
+             * Profile
+             * @enum {string}
+             */
+            profile: "disclosure" | "prompt";
+            /** Template */
+            template?: string | null;
+        };
         /** ApprovalBody */
         ApprovalBody: {
             /**
@@ -3233,6 +3268,8 @@ export interface components {
              * @default 2025
              */
             fiscal_year: number;
+            /** Max Cost Usd */
+            max_cost_usd?: number | null;
             /** Max Iterations */
             max_iterations?: number | null;
             /** Model Override */
@@ -3249,6 +3286,11 @@ export interface components {
             register?: components["schemas"]["TargetIn"][] | null;
             /** Register Csv */
             register_csv?: string | null;
+            /**
+             * Row Memory
+             * @default false
+             */
+            row_memory: boolean;
             /** Run Slug */
             run_slug: string;
             /** Target Slug */
@@ -3301,6 +3343,8 @@ export interface components {
             harness_id: string;
             /** Label Column */
             label_column?: string | null;
+            /** Max Cost Usd */
+            max_cost_usd?: number | null;
             /** Max Iterations */
             max_iterations?: number | null;
             /** Model Override */
@@ -3315,6 +3359,11 @@ export interface components {
             profile: "prompt";
             /** Review Schema */
             review_schema?: string | null;
+            /**
+             * Row Memory
+             * @default false
+             */
+            row_memory: boolean;
             /** Rows */
             rows?: {
                 [key: string]: unknown;
@@ -4621,6 +4670,39 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["CreateCollectionBody"] | components["schemas"]["CreatePromptBatchBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    batch_advice_api_batches_advice_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdviceBody"];
             };
         };
         responses: {
