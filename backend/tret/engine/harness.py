@@ -1833,6 +1833,9 @@ class HarnessEngine:
         min_context_window = required_context_window(
             floor_input_tokens, max_output_tokens, adaptive.context_headroom
         )
+        from tret.services.outcomes import task_family_for_run
+
+        task_family = await task_family_for_run(db, run)
         try:
             decision = await self.router.route(
                 model_policy=model_policy,
@@ -1847,6 +1850,10 @@ class HarnessEngine:
                 emissions_managed_doc=emissions.managed_doc,
                 emissions_at=emissions.at,
                 min_context_window=min_context_window,
+                # Only batch target runs have a family (derived, never taken from
+                # task_input); leaving the keyword out otherwise keeps every other
+                # call exactly as it was.
+                **({"task_family": task_family} if task_family else {}),
             )
         except RoutingUnavailable as e:
             await self._fail_before_start(db, run, str(e), workspace_id=harness.workspace_id)

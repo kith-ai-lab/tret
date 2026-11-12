@@ -798,6 +798,13 @@ class RunOutcome(Base):
     __table_args__ = (
         Index("run_outcomes_routing_key", "task_shape", "objective", "model_id"),
         Index("run_outcomes_observed", "observed_at"),
+        Index(
+            "run_outcomes_family",
+            "task_family",
+            "model_id",
+            postgresql_where=text("task_family IS NOT NULL"),
+            sqlite_where=text("task_family IS NOT NULL"),
+        ),
     )
 
     run_id: Mapped[uuid.UUID] = mapped_column(
@@ -846,6 +853,15 @@ class RunOutcome(Base):
     score_version: Mapped[str] = mapped_column(Text, nullable=False)
     error_kind: Mapped[str | None] = mapped_column(Text)
     components: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # The batch family this run was evidence about, `<family_key>@<workspace_id>`
+    # (derived from the run's batch, never stamped: `services.outcomes.task_family_for_run`). The workspace
+    # id is part of the key so learning is per workspace. Null for every other run.
+    task_family: Mapped[str | None] = mapped_column(Text)
+    # `quality_score` blended with the batch evaluator's score of this run
+    # (router_llm/outcomes.evaluated_quality). Set only on the run's last segment,
+    # only when a current, non-disputed evaluation exists. `quality_score` itself
+    # never changes meaning.
+    evaluated_quality_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 4))
 
     # ── what it cost to get there ────────────────────────────────────────────
     # Kept separate from quality_score on purpose: what a route is worth is a

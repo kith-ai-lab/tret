@@ -139,7 +139,9 @@ async def test_the_leaderboard_payload_and_the_api_shapes(w, api):
     assert r.status_code == 200
     body = r.json()
     assert set(body) == {"family_key", "family_label", "profile", "comparable", "excluded_batches", "row_keys",
-                         "batches", "models"}
+                         "batches", "models", "router_gate"}
+    assert set(body["router_gate"]) == {"open", "spot_checks", "agreeing", "agreement", "needed_checks",
+                                        "needed_agreement", "mode", "rubric_version", "judge_model"}
     assert isinstance(body["models"], list) and body["excluded_batches"] == 1
     assert body["comparable"]["judge_model"] == JUDGE
     assert set(body["models"][0]) >= {"model", "batches", "targets", "delivered", "scored", "acceptable", "yield",

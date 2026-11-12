@@ -360,6 +360,34 @@ WARNING and publishes a `budget_alert` event on that run's own SSE stream;
 which thresholds have already fired for the current window is tracked in
 `Workspace.settings["budget_state"]` so each fires once per period.
 
+
+### Learning per batch family, behind a human-agreement gate
+
+A batch target run's family is `<family_key>@<workspace_id>`. It is DERIVED, never
+stamped: only the engine-set `_collection_id` names a batch, and the batch's workspace
+must equal the run's project workspace (`services.outcomes.task_family_for_run`), so
+one workspace cannot write into another's family. `run_outcomes` carries it as
+`task_family`, plus an `evaluated_quality_score` when the batch evaluator scored the run
+in the batch's current live pass (not stale): `0.5 evaluator + 0.3 human finding verdict
++ 0.2 automatic` renormalised over the terms present (the automatic term is judged
+against the iteration ceiling the engine enforced). A human "adjust" replaces the
+judge's number; "disagree" removes the term. `quality_score` is byte-identical to before.
+
+**Nothing changes for routing until the gate opens**, and the base priors never read the
+evaluated score. The gate opens only when at least 15 scored rows of the family's
+comparable set (current live passes, same rubric / version / judge) carry a human spot
+check and at least 80% agree; nothing a model does can open it. With the gate open the
+family only RE-RANKS models against each other (`family_adjusted`): models with at
+least 5 evaluated rows each, at least two of them, are shifted by
+`n/(n+8) * (their mean evaluated score - the eligible models' mean)`, bounded to +-0.25,
+added to their unchanged base mean and lower bound; evidence from any other judge or
+rubric is ignored; a family never creates a prior. A closed gate, no family, an
+unusable adjustment, any error, or `TRET_ROUTER_FAMILY_PRIORS=off` leaves every decision
+exactly as it was; an applied adjustment is recorded in `run.routing` (`task_family`,
+`family_priors`). Override and pinned routes, and supervisor mid-run switches, never use
+family evidence. Settings: `TRET_ROUTER_FAMILY_PRIORS` (`gated`|`off`),
+`TRET_ROUTER_FAMILY_GATE_MIN_CHECKS` (>= 1), `TRET_ROUTER_FAMILY_GATE_MIN_AGREEMENT` (0-1].
+
 ## Outbound network
 
 Everything that leaves the process goes through `tret/net/`, tagged with a

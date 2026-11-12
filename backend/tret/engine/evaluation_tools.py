@@ -45,6 +45,9 @@ ENGINE_STAMPED_KEYS = (
     PAIRWISE_ORDER_KEY,
     COLLECTION_ID_KEY,
     COLLECTION_TARGET_KEY,
+    # Never stamped any more (the family is derived from the batch, see
+    # `services.outcomes.task_family_for_run`); stripped so a caller cannot even try.
+    "_task_family",
 )
 EVALUATION_TOOLS = ("submit_evaluation", "submit_batch_review", "submit_pairwise")
 PAIRWISE_PREFERENCES = ("first", "second", "tie")
@@ -212,6 +215,12 @@ async def submit_evaluation(
     row.skip_reason = None
     row.finished_at = now
     await ctx.db.commit()
+    try:  # bookkeeping: the stored evaluation must stand whatever happens here
+        from tret.services.outcomes import rescore_evaluated_runs
+
+        await rescore_evaluated_runs(ctx.db, [row.evaluated_run_id])
+    except Exception:  # noqa: BLE001
+        logging.getLogger("tret.outcomes").exception("evaluation re-score hook failed")
     return f"Evaluation recorded: quality {quality:.1f} of 100."
 
 

@@ -13,7 +13,7 @@ exist.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Protocol
 
@@ -55,6 +55,13 @@ OFF_BAND_WEIGHT = 0.25
 MIN_EFFECTIVE_SAMPLES = 3.0
 # How hard shrinkage pulls toward the pooled mean, in units of effective samples.
 SHRINKAGE_STRENGTH = 4.0
+# Family evidence only RE-RANKS models against each other (`family_adjusted`).
+# A model needs this many (decayed) evaluated rows to take part, at least two
+# models must, and the shift is bounded.
+FAMILY_MIN_ROWS = 5.0
+FAMILY_MAX_SHIFT = 0.25
+# Pseudo-rows pulling a model's shift toward zero: 5 rows move a model less than 30.
+FAMILY_SHRINKAGE_STRENGTH = 8.0
 # Where a key with no pooled evidence at all shrinks to. Mid-scale on purpose:
 # it is an admission of ignorance, not an opinion.
 NEUTRAL_QUALITY = 0.5
@@ -164,8 +171,25 @@ class PriorsProvider(Protocol):
     """What the router and the engine need. Implemented by both classes below."""
 
     async def for_key(
-        self, *, task_shape: str, objective: str, size_band: str | None = None
+        self,
+        *,
+        task_shape: str,
+        objective: str,
+        size_band: str | None = None,
+        task_family: str | None = None,
     ) -> dict[str, ModelPrior]:
+        ...
+
+    async def for_key_family(
+        self,
+        *,
+        task_shape: str,
+        objective: str,
+        size_band: str | None = None,
+        task_family: str,
+    ) -> tuple[dict[str, ModelPrior], dict | None]:
+        """`for_key` refined by a batch family's own evidence behind its gate, plus a
+        status of what was ACTUALLY done (None when the feature is off)."""
         ...
 
     def invalidate(self) -> None:
@@ -190,9 +214,24 @@ class NoPriors:
     """
 
     async def for_key(
-        self, *, task_shape: str, objective: str, size_band: str | None = None
+        self,
+        *,
+        task_shape: str,
+        objective: str,
+        size_band: str | None = None,
+        task_family: str | None = None,
     ) -> dict[str, ModelPrior]:
         return {}
+
+    async def for_key_family(
+        self,
+        *,
+        task_shape: str,
+        objective: str,
+        size_band: str | None = None,
+        task_family: str,
+    ) -> tuple[dict[str, ModelPrior], dict | None]:
+        return {}, None
 
     def invalidate(self) -> None:
         """No cache, nothing to drop — but the engine calls this on every run."""
@@ -427,6 +466,69 @@ def summarize(
             endpoints=endpoints,
         )
     return out
+
+
+def family_adjusted(
+    base: dict[str, ModelPrior],
+    family_rows: list[RunOutcome],
+    *,
+    now: datetime | None = None,
+) -> tuple[dict[str, ModelPrior], dict]:
+    """Re-rank `base` by one batch family's evaluated rows. Pure.
+
+    The family never creates or demotes a prior on its own: it shifts the models it
+    can COMPARE (at least two, each with `FAMILY_MIN_ROWS` decayed evaluated rows)
+    relative to each other, on the single scale of `evaluated_quality_score`:
+
+        delta_M = n_M / (n_M + FAMILY_SHRINKAGE_STRENGTH) * (e_M - e_bar)
+
+    clamped to +-`FAMILY_MAX_SHIFT`, added to that model's UNCHANGED base mean and
+    lower bound. `e_bar` is the weighted mean over all eligible models' rows, so a
+    harsh judge that scores everyone low shifts nobody. A model without a base prior
+    or without enough rows is returned as the same object. Rows are expected to be
+    pre-filtered to the gate's judge and rubric; rows without an evaluated score are
+    ignored. Returns `(priors, {"adjusted": {model: delta}, "pooled_mean", "rows"})`.
+    """
+    now = now or _utcnow()
+    n: dict[str, float] = {}
+    total: dict[str, float] = {}
+    count: dict[str, int] = {}
+    for row in family_rows:
+        if row.outcome_class in NON_QUALITY_CLASSES:
+            continue
+        evaluated = getattr(row, "evaluated_quality_score", None)
+        if evaluated is None:
+            continue
+        weight = _row_weight(row, now, None)  # decay only: no off-band factor
+        if weight <= 0.0:
+            continue
+        count[row.model_id] = count.get(row.model_id, 0) + 1
+        n[row.model_id] = n.get(row.model_id, 0.0) + weight
+        total[row.model_id] = total.get(row.model_id, 0.0) + weight * float(evaluated)
+    # Eligible by ROW COUNT inside the window (decay only weights the means), and only
+    # models that already have a base prior can be ranked: an unrankable model must
+    # neither satisfy the two-model minimum nor move `e_bar` for the others.
+    eligible = [m for m, c in count.items() if c >= FAMILY_MIN_ROWS and m in base]
+    info: dict = {"adjusted": {}, "pooled_mean": None, "rows": round(sum(n.values()), 4)}
+    if len(eligible) < 2:
+        return dict(base), info
+    weight_all = sum(n[m] for m in eligible)
+    e_bar = sum(total[m] for m in eligible) / weight_all
+    info["pooled_mean"] = round(e_bar, 4)
+    out = dict(base)
+    for model_id in eligible:
+        prior = base[model_id]
+        delta = (n[model_id] / (n[model_id] + FAMILY_SHRINKAGE_STRENGTH)) * (
+            total[model_id] / n[model_id] - e_bar
+        )
+        delta = max(-FAMILY_MAX_SHIFT, min(FAMILY_MAX_SHIFT, delta))
+        out[model_id] = replace(
+            prior,
+            quality_mean=min(1.0, max(0.0, prior.quality_mean + delta)),
+            quality_ci_low=min(1.0, max(0.0, prior.quality_ci_low + delta)),
+        )
+        info["adjusted"][model_id] = round(delta, 4)
+    return out, info
 
 
 # ── endpoint-level demotion ───────────────────────────────────────────────────

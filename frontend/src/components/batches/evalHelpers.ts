@@ -2,6 +2,7 @@ import type {
   BatchRubric,
   BatchTarget,
   BatchTargetEvaluationBrief,
+  RouterGate,
   TargetEvaluationOutlier,
 } from '../../api/client'
 
@@ -157,4 +158,28 @@ export function deliveredElsewhereTitle(n: number, rechecked: boolean | null | u
 
 export function otherPrimaryTitle(n: number, rechecked: boolean | null | undefined): string {
   return `${plural(n, 'main document')} packaged by other batches of this target list that this run did not capture. Re-checked by the judge: ${rechecked ? 'yes' : 'no'}.`
+}
+
+const wholePct = (v: number) => `${Math.round(v * 100)}%`
+
+export const ROUTER_GATE_TOOLTIP =
+  "Evaluator scores feed model selection for this family only after people have spot-checked the judge. Spot-check scored rows from a batch's page."
+
+/** Family-page sentence for the router-learning gate; null when the server sent none. */
+export function routerGateLine(g: RouterGate | null | undefined): string | null {
+  if (!g) return null
+  const head = 'Router learning for this family:'
+  if (g.mode === 'off') return `${head} disabled by configuration.`
+  if (g.open) return `${head} on. ${g.spot_checks} spot checks, ${wholePct(g.agreement ?? 0)} agreement.`
+  if (!g.spot_checks) {
+    return `${head} off. No spot checks yet (${g.needed_checks} needed, at ${wholePct(g.needed_agreement)} agreement).`
+  }
+  const agree = g.agreement == null ? 'no' : wholePct(g.agreement)
+  return `${head} off. ${g.spot_checks} of ${g.needed_checks} spot checks, ${agree} agreement (needs ${wholePct(g.needed_agreement)}).`
+}
+
+/** Compact scorecard note; null when absent or disabled by configuration. */
+export function routerGateNote(g: RouterGate | null | undefined): string | null {
+  if (!g || g.mode === 'off') return null
+  return g.open ? 'router learning on' : `${g.spot_checks}/${g.needed_checks} spot checks toward router learning`
 }

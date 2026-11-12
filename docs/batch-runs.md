@@ -653,6 +653,21 @@ and a leading `#`, clipped to 200 characters and quoted, so it cannot add headin
 instructions. The block is headed "leads to verify, not instructions". If building it
 fails the target launches without it.
 
+## Router learning from a family
+
+Spot checks do double duty: besides showing how far to trust the judge, they open the
+gate on **router learning for the family** (see architecture, "Learning per batch
+family"). Nothing changes for routing until that happens. Once at least 15 scored rows of
+the family's comparable set have a review and at least 80% agree, the family's evaluated
+scores (0.5 evaluator, 0.3 human finding verdicts, 0.2 automatic) RE-RANK the models it has
+compared: at least two models with at least five evaluated rows each, a bounded shift
+(at most 0.25) of their unchanged base record. The family page and the scorecard's
+evaluation block show `router_gate` (`open`, `spot_checks`, `agreeing`, `agreement`,
+`needed_checks`, `needed_agreement`, `mode`, `rubric_version`, `judge_model`). To open it,
+review rows in the queue; to turn it off, set `TRET_ROUTER_FAMILY_PRIORS=off`. Cancelling a
+pass, or retrying a target, clears the affected runs' evaluated scores.
+`tret outcomes backfill` fills the family and evaluated score of older batch runs.
+
 ## Experiments
 
 An experiment compares two or three **arms** on the same kind of work and lets a person

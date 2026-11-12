@@ -285,6 +285,43 @@ def batch_rubric(batch: Batch) -> dict:
 # ══════════════════════════════════════════════════════════════════════════
 # serializers
 # ══════════════════════════════════════════════════════════════════════════
+_RESCORE_TASKS: set = set()
+
+
+def _rescore_old_after_commit(db: AsyncSession, old_run_id, new_run_id) -> None:
+    """A row is being re-armed onto a new run: once the surrounding transaction
+    commits, re-score the OLD run so its evaluated score (now stale) becomes NULL.
+    Runs in its own session on the same engine; never raises into the caller."""
+    if old_run_id is None or old_run_id == new_run_id:
+        return
+    try:
+        import asyncio
+        from types import SimpleNamespace
+
+        from sqlalchemy import event
+
+        bind = db.bind
+
+        def fire(_session) -> None:
+            # Runs inside the caller's commit, after the data is saved: it must not
+            # raise there. A re-score lost here (or cancelled at shutdown) is repaired
+            # by `tret outcomes backfill`.
+            try:
+                from tret.services.outcomes import rescore_evaluated_runs
+
+                task = asyncio.get_running_loop().create_task(
+                    rescore_evaluated_runs(SimpleNamespace(bind=bind), [old_run_id])
+                )
+                _RESCORE_TASKS.add(task)
+                task.add_done_callback(_RESCORE_TASKS.discard)
+            except Exception:  # noqa: BLE001
+                log.exception("could not start the re-arm re-score")
+
+        event.listen(db.sync_session, "after_commit", fire, once=True)
+    except Exception:  # noqa: BLE001
+        log.exception("could not schedule the re-arm re-score")
+
+
 def review_agrees(row: TargetEvaluation) -> bool | None:
     review = row.review
     if not isinstance(review, dict):
@@ -828,6 +865,7 @@ async def _pump_inner(evaluation_id: uuid.UUID, launches: list[tuple[uuid.UUID, 
                 if row.attempt != (t.attempts or 0) or row.evaluated_run_id != t.run_id:
                     # The target settled outside the settle hook (a crash, a task that
                     # could not be built) or was retried: arm the row for its current run.
+                    _rescore_old_after_commit(db, row.evaluated_run_id, t.run_id)
                     row.attempt, row.evaluated_run_id = t.attempts or 0, t.run_id
                 if scoring.target_class(t) in ("infra", "timeout"):
                     row.status, row.skip_reason, row.finished_at = "skipped", INFRA_SKIP, _now()
@@ -1097,6 +1135,7 @@ async def _after_evaluator_run(
                 # pump, which arms it for the target's current run once it settles.
                 row.status, row.evaluator_run_id = "pending", None
                 if target is not None:
+                    _rescore_old_after_commit(db, row.evaluated_run_id, target.run_id)
                     row.attempt, row.evaluated_run_id = target.attempts or 0, target.run_id
             elif (
                 first_try and ev.status == "running" and not core.draining()
@@ -1348,6 +1387,7 @@ async def on_target_settled(batch_id: uuid.UUID, target_id: uuid.UUID) -> None:
                     db.add(row)
                     reopen = not skipped
                 elif row.attempt != (t.attempts or 0) or row.evaluated_run_id != t.run_id:
+                    _rescore_old_after_commit(db, row.evaluated_run_id, t.run_id)
                     row.attempt = t.attempts or 0
                     row.evaluated_run_id = t.run_id
                     row.evaluator_run_id = None  # a judge still working on the old attempt is late
@@ -1397,6 +1437,13 @@ async def cancel_evaluation(db: AsyncSession, batch: Batch) -> BatchEvaluation:
         if ev.summary is None and ev.summary_run_id:
             live.append(ev.summary_run_id)  # a batch review in flight
         await db.commit()
+        scored_runs = [r.evaluated_run_id for r in await scoring.pass_rows(db, ev.id) if r.status == "scored"]
+    try:  # the cancelled pass no longer vouches for its runs: clear their evaluated scores
+        from tret.services.outcomes import rescore_evaluated_runs
+
+        await rescore_evaluated_runs(db, scored_runs)
+    except Exception:  # noqa: BLE001
+        log.exception("cancel re-score hook failed")
     engine = core._compat().get_harness_engine()
     for run_id in live:
         with contextlib.suppress(Exception):
@@ -1435,7 +1482,14 @@ async def review_target(
         "at": _now().isoformat(),
     }
     await db.commit()
-    return target_evaluation_out(row, target)
+    out = target_evaluation_out(row, target)  # before the hook: nothing can disturb the reply
+    try:  # bookkeeping: the stored review must stand whatever happens here
+        from tret.services.outcomes import rescore_evaluated_runs
+
+        await rescore_evaluated_runs(db, [row.evaluated_run_id])
+    except Exception:  # noqa: BLE001
+        log.exception("review re-score hook failed")
+    return out
 
 
 async def sweep_orphaned_evaluations(db: AsyncSession) -> int:

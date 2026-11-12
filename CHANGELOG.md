@@ -10,6 +10,15 @@ one that needs action on an existing install.
 
 ### Added
 
+- Router learning per batch family, behind a human-agreement gate: run outcomes gain
+  `task_family` (derived from the batch, per workspace; never stamped) and an
+  evaluator-blended `evaluated_quality_score`. Once 15 spot checks agree at 80% the family
+  only re-ranks the models it has compared (two or more with five evaluated rows each, shift
+  at most 0.25); until then, and with `TRET_ROUTER_FAMILY_PRIORS=off`, routing and
+  `quality_score` are unchanged. `router_gate` on the family page and the scorecard.
+  `TRET_ROUTER_FAMILY_PRIORS`, `TRET_ROUTER_FAMILY_GATE_MIN_CHECKS`,
+  `TRET_ROUTER_FAMILY_GATE_MIN_AGREEMENT`. Approvals now drop the priors cache.
+
 - **Batch experiments.** Compare two or three arms (a model, an objective, an iteration limit)
   as one batch per arm over the same rows or one batch split across arms, read the comparison
   with intervals, and let an admin make the winning arm the harness default. A batch also
