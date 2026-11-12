@@ -37,6 +37,7 @@ from tret.adaptive import adaptive_of
 from tret.api._policy import validate_policy
 from tret.api.auth import current_user
 from tret.api.workspace import ROLE_RANK, WorkspaceContext, current_workspace
+from tret.config import get_settings
 from tret.db.engine import get_db
 from tret.db.models import Harness, Pack, User
 from tret.engine.compaction import required_context_window
@@ -520,6 +521,11 @@ async def preview_routing(
                 est_input_tokens=est_input_tokens,
                 min_context_window=min_context_window,
                 **({"task_family": task_family} if task_family else {}),
+                **(
+                    {"harness_id": body.harness_id}
+                    if get_settings().router_agent_scoring != "off" and body.harness_id
+                    else {}
+                ),
             )
             model_info = engine.catalog.get(decision.chosen_model)
             # Two ends of a range, not a point estimate — the actual bill

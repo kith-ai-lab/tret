@@ -1854,6 +1854,12 @@ class HarnessEngine:
                 # task_input); leaving the keyword out otherwise keeps every other
                 # call exactly as it was.
                 **({"task_family": task_family} if task_family else {}),
+                # Shadow scoring needs the agent; with it off the call is unchanged.
+                **(
+                    {"harness_id": run.harness_id}
+                    if get_settings().router_agent_scoring != "off"
+                    else {}
+                ),
             )
         except RoutingUnavailable as e:
             await self._fail_before_start(db, run, str(e), workspace_id=harness.workspace_id)

@@ -42,12 +42,14 @@ from __future__ import annotations
 import logging
 import time
 import weakref
+from types import SimpleNamespace
 from datetime import timedelta, timezone
 
 from sqlalchemy import select
 
-from tret.db.models import RunOutcome
+from tret.db.models import BatchTarget, Run, RunOutcome
 from tret.router_llm.outcomes import NON_QUALITY_CLASSES
+from tret.router_llm.scoring import AgentRow
 from tret.router_llm.priors_base import (
     ENDPOINT_POOR_MARGIN,
     HALF_LIFE_DAYS,
@@ -201,11 +203,14 @@ class OutcomePriors:
         # review / evaluation hooks through `invalidate_all_priors()`.
         self._gates: dict[str, tuple[float, dict]] = {}
         self._family_cache: dict[tuple, tuple[float, tuple[dict[str, ModelPrior], dict | None]]] = {}
+        # harness id -> (monotonic stamp, rows): the per-agent record (`for_agent`).
+        self._agent_cache: dict[str, tuple[float, list]] = {}
         _INSTANCES.add(self)
 
     def invalidate(self) -> None:
         self._cache.clear()
         self._family_cache.clear()
+        self._agent_cache.clear()
 
     def invalidate_gates(self) -> None:
         self._gates.clear()
@@ -293,6 +298,99 @@ class OutcomePriors:
         priors = summarize(rows, size_band=size_band, now=self._now())
         self._cache[key] = (time.monotonic(), priors)
         return priors
+
+    async def _agent_rows(self, harness_id) -> list:
+        factory = self._session_factory
+        if factory is None:
+            from tret.db.engine import get_session_factory
+
+            factory = get_session_factory()
+        since = self._now() - timedelta(days=WINDOW_DAYS)
+        async with factory() as db:
+            q = (
+                select(
+                    RunOutcome.model_id,
+                    RunOutcome.objective,
+                    RunOutcome.observed_at,
+                    RunOutcome.outcome_class,
+                    RunOutcome.cost_usd,
+                    RunOutcome.energy_wh,
+                    RunOutcome.input_tokens,
+                    RunOutcome.output_tokens,
+                    RunOutcome.findings_rejected,
+                    RunOutcome.task_family,
+                    Run.task_input["_collection_id"].as_string().label("batch_stamp"),
+                    BatchTarget.id.label("target_id"),
+                    BatchTarget.status.label("target_status"),
+                    BatchTarget.error.label("target_error"),
+                    BatchTarget.outcome.label("target_outcome"),
+                )
+                .select_from(RunOutcome)
+                .outerjoin(Run, Run.id == RunOutcome.run_id)
+                .outerjoin(BatchTarget, BatchTarget.run_id == RunOutcome.run_id)
+                .where(
+                    RunOutcome.harness_id == harness_id,
+                    RunOutcome.observed_at >= since,
+                    RunOutcome.outcome_class.notin_(NON_QUALITY_CLASSES),
+                )
+                .order_by(RunOutcome.observed_at.desc())
+                .limit(ROW_SCAN_LIMIT)
+            )
+            return list((await db.execute(q)).all())
+
+    async def for_agent(self, harness_id) -> list[AgentRow] | None:
+        """One agent's (harness's) own outcome rows, each with its batch target's
+        class, for the scored ranking (`router_llm.scoring`). Cached per harness for
+        the TTL. `None` for no harness id or on any failure (logged, not cached):
+        like `for_key`, evidence is never a dependency of routing."""
+        if harness_id is None:
+            return None
+        key = str(harness_id)
+        hit = self._agent_cache.get(key)
+        if hit and (time.monotonic() - hit[0]) < self._ttl:
+            return hit[1]
+        try:
+            from tret.batches.scoring import target_class
+            raw = await self._agent_rows(harness_id)
+            out = []
+            for r in raw:
+                matched = r.target_id is not None
+                out.append(
+                    AgentRow(
+                        model_id=r.model_id,
+                        objective=r.objective,
+                        observed_at=r.observed_at,
+                        outcome_class=r.outcome_class,
+                        cost_usd=float(r.cost_usd or 0.0),
+                        energy_wh=float(r.energy_wh) if r.energy_wh is not None else None,
+                        input_tokens=int(r.input_tokens or 0),
+                        output_tokens=int(r.output_tokens or 0),
+                        findings_rejected=int(r.findings_rejected or 0),
+                        # The engine's batch stamp on the run, so a row written before
+                        # `task_family` existed is still recognised as a batch row.
+                        is_batch=(
+                            r.task_family is not None
+                            or matched
+                            or r.batch_stamp not in (None, "", "null")
+                        ),
+                        target_class=(
+                            target_class(
+                                SimpleNamespace(
+                                    status=r.target_status,
+                                    error=r.target_error,
+                                    outcome=r.target_outcome,
+                                )
+                            )
+                            if matched
+                            else None
+                        ),
+                    )
+                )
+        except Exception:  # noqa: BLE001
+            logging.getLogger("tret.priors").exception("failed to read the per-agent record")
+            return None
+        self._agent_cache[key] = (time.monotonic(), out)
+        return out
 
     async def for_key_family(
         self,

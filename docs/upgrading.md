@@ -30,6 +30,13 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## 2026-11-12 · per-agent routing record (shadow)
+
+New setting `TRET_ROUTER_AGENT_SCORING` (`off` or `shadow`, default `off`). With `shadow`, each
+routing decision also stores in `runs.routing.shadow` what a per-agent scored ranking would
+have picked and why. It never changes the model that runs. No migration; with the default
+nothing is recorded and routing is byte-identical to before.
+
 ## 2026-11-12 · router learning per batch family (gated)
 
 Migration `f2a9c6d4e817` adds `run_outcomes.task_family` and `evaluated_quality_score`
