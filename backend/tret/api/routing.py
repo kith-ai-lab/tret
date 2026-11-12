@@ -448,6 +448,12 @@ async def preview_routing(
             and lessons_service.lessons_enabled(harness.loop_config if harness else None)
             else None
         ),
+        harness_lessons=(
+            await lessons_service.approved_harness_lessons(db, ctx.id, harness.id)
+            if harness is not None and lessons_service.lessons_enabled(harness.loop_config)
+            else None
+        )
+        or None,
     )
     # Minimal by design: this is the system-prompt assembly alone (platform
     # preamble + doctrine + task instructions/output contract [+ web-evidence

@@ -27,6 +27,7 @@ import {
   type RoutingPreviewBody,
   type RoutingPreviewResult,
 } from '../api/client'
+import { Lessons } from '../components/shared/Lessons'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { RoutingBadge } from '../components/shared/RoutingBadge'
@@ -169,12 +170,18 @@ function HarnessEditorLoader({
   if (detailQuery.isError)
     return <div className="error-text">{(detailQuery.error as Error).message}</div>
   if (!detailQuery.data) return null
+  // Lessons sit outside the editor's <form>: their buttons must not submit it.
   return (
-    <HarnessEditor
-      harness={detailQuery.data}
-      assembledPrompt={detailQuery.data.assembled_system_prompt}
-      canAuthor={canAuthor}
-    />
+    <>
+      <HarnessEditor
+        harness={detailQuery.data}
+        assembledPrompt={detailQuery.data.assembled_system_prompt}
+        canAuthor={canAuthor}
+      />
+      <div style={{ maxWidth: 680, marginTop: 24 }}>
+        <Lessons scope={{ kind: 'harness', harnessId }} />
+      </div>
+    </>
   )
 }
 

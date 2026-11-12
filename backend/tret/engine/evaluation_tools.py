@@ -15,6 +15,7 @@ Batch Evaluator harness can name them. They are on no other seeded harness.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -25,9 +26,11 @@ from tret.batches.rubrics import (
     compute_quality,
     criterion_applies,
 )
-from tret.db.models import BatchEvaluation, BatchTarget, PairwiseJudgment, Run, TargetEvaluation
+from tret.db.models import Batch, BatchEvaluation, BatchTarget, PairwiseJudgment, Run, TargetEvaluation
 from tret.engine.collection_tools import COLLECTION_ID_KEY, COLLECTION_TARGET_KEY
 from tret.engine.tools import RunContext, ToolError, builtin
+
+logger = logging.getLogger(__name__)
 
 TARGET_EVALUATION_ID_KEY = "_target_evaluation_id"
 BATCH_REVIEW_KEY = "_batch_review"
@@ -276,7 +279,93 @@ async def submit_batch_review(
         "lessons": [x.strip() for x in lesson_list if x.strip()],
     }
     await ctx.db.commit()
+    await _propose_review_lessons(ev.id, run.harness_id if run is not None else None)
+    try:
+        await ctx.db.refresh(ev)
+    except Exception:
+        logger.exception("refreshing the evaluation pass failed")
     return "Batch review recorded."
+
+
+async def _review_harness_id(
+    db, ev: BatchEvaluation, batch: Batch, evaluator_harness_id: uuid.UUID | None
+) -> uuid.UUID | None:
+    """The harness the batch's targets actually ran on (most common
+    `Run.harness_id` among its current target runs, this workspace, never the
+    evaluator's); only when no target has run, the profile's default harness."""
+    from sqlalchemy import func, select
+
+    from tret.batches.profiles import profile_for
+    from tret.db.models import Harness
+
+    counts = (
+        await db.execute(
+            select(Run.harness_id, func.count())
+            .join(BatchTarget, BatchTarget.run_id == Run.id)
+            .where(BatchTarget.collection_id == batch.id)
+            .group_by(Run.harness_id)
+            .order_by(func.count().desc(), Run.harness_id)
+        )
+    ).all()
+    for harness_id, _n in counts:
+        if harness_id is None or harness_id == evaluator_harness_id:
+            continue
+        h = await db.get(Harness, harness_id)
+        if h is not None and h.workspace_id == ev.workspace_id:
+            return h.id
+    if counts:
+        return None
+    default = await profile_for(batch).harness_for(db, batch)
+    if default is None or default.id == evaluator_harness_id:
+        return None
+    return default.id
+
+
+async def _propose_review_lessons(
+    ev_id: uuid.UUID, evaluator_harness_id: uuid.UUID | None
+) -> None:
+    """Turn the review's lessons into pending, harness-scoped proposals for a
+    person to approve (`services/lessons.py::sync_review_proposals`), and store
+    one result per lesson on the pass (`summary["proposals"]`,
+    `summary["lessons_harness_id"]`). Runs in its OWN session, so a failure here
+    can never roll back or expire the engine's session; the review itself is
+    already committed and the judge is not told."""
+    from tret.batches import core
+    from tret.services import lessons as lessons_service
+
+    try:
+        async with core._session_factory()() as db:
+            ev = await db.get(BatchEvaluation, ev_id)
+            batch = await db.get(Batch, ev.collection_id) if ev is not None else None
+            if ev is None or batch is None:
+                return
+            texts = list((ev.summary or {}).get("lessons") or [])
+            harness_id = await _review_harness_id(db, ev, batch, evaluator_harness_id)
+            if harness_id is None:
+                # Still clear this batch's earlier pending proposals.
+                await lessons_service.clear_pending_review_proposals(db, ev)
+                proposals = [
+                    {
+                        "text": t,
+                        "lesson_id": None,
+                        "outcome": "unresolved",
+                        "reason": "no harness could be resolved for this batch",
+                    }
+                    for t in texts
+                ]
+            else:
+                proposals = await lessons_service.sync_review_proposals(
+                    db, ev, harness_id, texts, batch.name
+                )
+            # Reassigned (not mutated) so SQLAlchemy sees the JSONB change.
+            ev.summary = {
+                **(ev.summary or {}),
+                "proposals": proposals,
+                "lessons_harness_id": str(harness_id) if harness_id else None,
+            }
+            await db.commit()
+    except Exception:
+        logger.exception("proposing batch-review lessons failed")
 
 
 async def _pairwise_row(ctx: RunContext) -> tuple[PairwiseJudgment, str, dict]:

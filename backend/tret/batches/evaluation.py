@@ -59,7 +59,16 @@ from tret.batches.rubrics import (
     validate_custom_rubric,
 )
 from tret.config import get_settings
-from tret.db.models import Batch, BatchEvaluation, BatchTarget, Run, TargetEvaluation, User
+from tret.db.models import (
+    Batch,
+    BatchEvaluation,
+    BatchTarget,
+    PackLesson,
+    Run,
+    TargetEvaluation,
+    User,
+)
+from tret.services import lessons as lessons_service
 from tret.engine.evaluation_tools import (
     BATCH_REVIEW_KEY,
     EVALUATION_ID_KEY,
@@ -288,6 +297,45 @@ def review_agrees(row: TargetEvaluation) -> bool | None:
     return False
 
 
+async def _lesson_proposal_fields(db: AsyncSession, ev: BatchEvaluation) -> dict:
+    """`lesson_proposals` (one entry per review lesson, in order, with the lesson
+    row's CURRENT status) and `lessons_harness_id`, from what the review stored
+    on the pass. A pass without `summary["proposals"]` (an older one) gets
+    neither field."""
+    stored = (ev.summary or {}).get("proposals")
+    if not isinstance(stored, list):
+        return {}
+    ids = [uuid.UUID(p["lesson_id"]) for p in stored if p.get("lesson_id")]
+    rows: dict = {}
+    if ids:
+        found = (await db.execute(select(PackLesson).where(PackLesson.id.in_(ids)))).scalars().all()
+        approved = [r for r in found if r.status == "approved" and r.harness_id is not None]
+        in_effect: set = set()
+        for harness_id in {r.harness_id for r in approved}:
+            ordered = await lessons_service.approved_harness_lesson_rows(db, ev.workspace_id, harness_id)
+            in_effect |= lessons_service.effective_lesson_ids(ordered)
+        rows = {r.id: (r, r.id in in_effect) for r in found}
+    out = []
+    for p in stored:
+        row = rows.get(uuid.UUID(p["lesson_id"])) if p.get("lesson_id") else None
+        lesson, effective = row if row else (None, None)
+        out.append(
+            {
+                # The stored (cleaned) text when there is a row: exactly what is injected.
+                "text": lesson.text
+                if lesson is not None
+                else lessons_service.single_line(p.get("text") or ""),
+                "lesson_id": p.get("lesson_id"),
+                "outcome": p.get("outcome"),
+                "reason": p.get("reason"),
+                "status": lesson.status if lesson is not None else None,
+                "in_effect": (effective if lesson.status == "approved" else False) if lesson is not None else None,
+                "harness_id": str(lesson.harness_id) if lesson is not None and lesson.harness_id else None,
+            }
+        )
+    return {"lesson_proposals": out, "lessons_harness_id": (ev.summary or {}).get("lessons_harness_id")}
+
+
 async def pass_summary(
     db: AsyncSession, ev: BatchEvaluation, rows: list[TargetEvaluation] | None = None
 ) -> dict:
@@ -298,6 +346,7 @@ async def pass_summary(
     reviewed = [r for r in rows if r.status == "scored" and isinstance(r.review, dict)]
     agreeing = sum(1 for r in reviewed if review_agrees(r))
     to_judge = sum(1 for r in rows if r.status != "skipped")
+    lesson_fields = await _lesson_proposal_fields(db, ev)
     return {
         "id": str(ev.id),
         "status": ev.status,
@@ -310,10 +359,16 @@ async def pass_summary(
         "counts": counts,
         "spot_checks": len(reviewed),
         "agreement": round(agreeing / len(reviewed), 4) if reviewed else None,
-        "summary": ev.summary,
+        # Only the review's own keys; proposals are the top-level lesson_proposals.
+        "summary": (
+            {k: v for k, v in ev.summary.items() if k not in ("proposals", "lessons_harness_id")}
+            if isinstance(ev.summary, dict)
+            else ev.summary
+        ),
         "error": ev.error,
         "created_at": core._iso(ev.created_at),
         "finished_at": core._iso(ev.finished_at),
+        **lesson_fields,
     }
 
 

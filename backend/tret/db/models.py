@@ -17,6 +17,7 @@ from sqlalchemy import (
     ARRAY,
     BigInteger,
     Boolean,
+    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
@@ -695,13 +696,30 @@ class PackLesson(Base):
             "workspace_id", "pack_slug", "ordinal", name="uq_pack_lessons_workspace_slug_ordinal"
         ),
         Index("ix_pack_lessons_workspace_slug", "workspace_id", "pack_slug"),
+        # A lesson is scoped to a pack (slug) OR to a harness, never both/neither.
+        CheckConstraint(
+            "(pack_slug IS NOT NULL) <> (harness_id IS NOT NULL)", name="ck_pack_lessons_one_scope"
+        ),
+        UniqueConstraint(
+            "workspace_id", "harness_id", "ordinal", name="uq_pack_lessons_workspace_harness_ordinal"
+        ),
+        Index("ix_pack_lessons_workspace_harness", "workspace_id", "harness_id"),
+        Index("ix_pack_lessons_proposed_by_evaluation", "proposed_by_evaluation_id"),
     )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
-    pack_slug: Mapped[str] = mapped_column(Text, nullable=False)
+    # Exactly one of `pack_slug` / `harness_id` is set (ck_pack_lessons_one_scope).
+    pack_slug: Mapped[str | None] = mapped_column(Text)
+    # Harness-scoped lesson (batch-review lessons): read into every run of this harness.
+    harness_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("harnesses.id", ondelete="CASCADE")
+    )
+    proposed_by_evaluation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("batch_evaluations.id", ondelete="SET NULL")
+    )
     # Provenance only — see the class docstring. Never joined on to resolve
     # "this pack's lessons"; `pack_slug` is what every query keys on.
     pack_id: Mapped[uuid.UUID | None] = mapped_column(

@@ -29,7 +29,7 @@ from tret.api.workspace import (
     require_workspace_approver,
 )
 from tret.db.engine import get_db
-from tret.db.models import Pack, PackLesson, User
+from tret.db.models import Harness, Pack, PackLesson, User
 from tret.services import lessons as lessons_service
 
 router = APIRouter(prefix="/api", tags=["lessons"])
@@ -40,6 +40,11 @@ def _lesson_out(lesson: PackLesson, *, in_effect: bool) -> dict:
         "id": str(lesson.id),
         "pack_id": str(lesson.pack_id) if lesson.pack_id else None,
         "pack_slug": lesson.pack_slug,
+        "harness_id": str(lesson.harness_id) if lesson.harness_id else None,
+        "scope": "harness" if lesson.harness_id else "pack",
+        "proposed_by_evaluation_id": (
+            str(lesson.proposed_by_evaluation_id) if lesson.proposed_by_evaluation_id else None
+        ),
         "ordinal": lesson.ordinal,
         "status": lesson.status,
         "text": lesson.text,
@@ -149,4 +154,91 @@ async def retire_lesson(
     except lessons_service.LessonAlreadyDecided as e:
         raise HTTPException(409, f"Only an 'approved' lesson can be retired (this one is '{e.status}')") from e
     # Just retired: never in effect regardless of cap.
+    return _lesson_out(lesson, in_effect=False)
+
+
+# ── harness-scoped lessons (batch-review proposals) ───────────────────────────
+async def _harness_in_workspace(
+    db: AsyncSession, harness_id: uuid.UUID, workspace_id: uuid.UUID
+) -> Harness:
+    harness = await db.get(Harness, harness_id)
+    if harness is None or harness.workspace_id != workspace_id:
+        raise HTTPException(404, "Harness not found")
+    return harness
+
+
+async def _harness_lesson(
+    db: AsyncSession, harness: Harness, lesson_id: uuid.UUID, workspace_id: uuid.UUID
+) -> PackLesson:
+    lesson = await db.get(PackLesson, lesson_id)
+    if lesson is None or lesson.workspace_id != workspace_id or lesson.harness_id != harness.id:
+        raise HTTPException(404, "Lesson not found")
+    return lesson
+
+
+@router.get("/harnesses/{harness_id}/lessons")
+async def list_harness_lessons(
+    harness_id: uuid.UUID,
+    status: str | None = None,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """Every lesson scoped to this harness, any status, oldest first."""
+    harness = await _harness_in_workspace(db, harness_id, ctx.id)
+    q = (
+        select(PackLesson)
+        .where(PackLesson.workspace_id == ctx.id, PackLesson.harness_id == harness.id)
+        .order_by(PackLesson.ordinal)
+    )
+    if status:
+        q = q.where(PackLesson.status == status)
+    rows = (await db.execute(q)).scalars().all()
+    effective_ids = lessons_service.effective_lesson_ids([r for r in rows if r.status == "approved"])
+    return [
+        _lesson_out(r, in_effect=r.status == "approved" and r.id in effective_ids) for r in rows
+    ]
+
+
+@router.post("/harnesses/{harness_id}/lessons/{lesson_id}/review")
+async def review_harness_lesson(
+    harness_id: uuid.UUID,
+    lesson_id: uuid.UUID,
+    body: LessonReviewBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    harness = await _harness_in_workspace(db, harness_id, ctx.id)
+    await _harness_lesson(db, harness, lesson_id, ctx.id)
+    try:
+        lesson = await lessons_service.review_lesson(
+            db, lesson_id, approve=body.approve, user_id=user.id
+        )
+    except lessons_service.LessonNotFound as e:
+        raise HTTPException(404, "Lesson not found") from e
+    except lessons_service.LessonAlreadyDecided as e:
+        raise HTTPException(409, f"Lesson is already '{e.status}'") from e
+    in_effect = lesson.status == "approved" and lesson.id in lessons_service.effective_lesson_ids(
+        await lessons_service.approved_harness_lesson_rows(db, ctx.id, harness.id)
+    )
+    return _lesson_out(lesson, in_effect=in_effect)
+
+
+@router.post("/harnesses/{harness_id}/lessons/{lesson_id}/retire")
+async def retire_harness_lesson(
+    harness_id: uuid.UUID,
+    lesson_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    harness = await _harness_in_workspace(db, harness_id, ctx.id)
+    await _harness_lesson(db, harness, lesson_id, ctx.id)
+    try:
+        lesson = await lessons_service.retire_lesson(db, lesson_id, user_id=user.id)
+    except lessons_service.LessonNotFound as e:
+        raise HTTPException(404, "Lesson not found") from e
+    except lessons_service.LessonAlreadyDecided as e:
+        raise HTTPException(409, f"Only an 'approved' lesson can be retired (this one is '{e.status}')") from e
     return _lesson_out(lesson, in_effect=False)

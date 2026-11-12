@@ -6934,6 +6934,176 @@
         ]
       }
     },
+    "/api/harnesses/{harness_id}/lessons": {
+      "get": {
+        "description": "Every lesson scoped to this harness, any status, oldest first.",
+        "operationId": "list_harness_lessons_api_harnesses__harness_id__lessons_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "harness_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Harness Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Harness Lessons",
+        "tags": [
+          "lessons"
+        ]
+      }
+    },
+    "/api/harnesses/{harness_id}/lessons/{lesson_id}/retire": {
+      "post": {
+        "operationId": "retire_harness_lesson_api_harnesses__harness_id__lessons__lesson_id__retire_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "harness_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Harness Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "lesson_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Lesson Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retire Harness Lesson",
+        "tags": [
+          "lessons"
+        ]
+      }
+    },
+    "/api/harnesses/{harness_id}/lessons/{lesson_id}/review": {
+      "post": {
+        "operationId": "review_harness_lesson_api_harnesses__harness_id__lessons__lesson_id__review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "harness_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Harness Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "lesson_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Lesson Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LessonReviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Harness Lesson",
+        "tags": [
+          "lessons"
+        ]
+      }
+    },
     "/api/healthz": {
       "get": {
         "operationId": "healthz_api_healthz_get",

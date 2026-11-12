@@ -3426,9 +3426,26 @@ export interface BatchEvaluationPass {
   /** null when nothing was reviewed. */
   agreement: number | null
   summary: { narrative: string; consistency_notes: string[]; lessons: string[] } | null
+  /** Harness lessons this pass proposed (absent on an older server). */
+  lesson_proposals?: BatchLessonProposal[]
+  /** The harness those proposals belong to; null when none could be resolved. */
+  lessons_harness_id?: string | null
   error: string | null
   created_at: string
   finished_at: string | null
+}
+
+/** One entry per review lesson, in `summary.lessons` order, whether or not a
+ *  row was created. `status` is the CURRENT status of the lesson it points at
+ *  (for `duplicate`, the existing lesson); null when there is none. */
+export interface BatchLessonProposal {
+  text: string
+  lesson_id: string | null
+  outcome: 'proposed' | 'duplicate' | 'rejected_text' | 'dropped' | 'unresolved'
+  reason: string | null
+  status: 'proposed' | 'approved' | 'rejected' | 'retired' | null
+  in_effect: boolean | null
+  harness_id: string | null
 }
 
 export type SpotVerdict = 'agree' | 'disagree' | 'adjust'
@@ -4403,7 +4420,8 @@ export const budgetApi = {
 export interface PackLesson {
   id: string
   pack_id: string | null
-  pack_slug: string
+  /** null on a harness-scoped lesson. */
+  pack_slug: string | null
   ordinal: number
   status: 'proposed' | 'approved' | 'rejected' | 'retired'
   text: string
@@ -4413,6 +4431,11 @@ export interface PackLesson {
   reviewed_by_user_id: string | null
   created_at: string | null
   reviewed_at: string | null
+  /** Absent on an older server (every lesson is then pack-scoped). */
+  harness_id?: string | null
+  scope?: 'pack' | 'harness'
+  /** Set when a batch review (not a run) proposed it. */
+  proposed_by_evaluation_id?: string | null
 }
 
 export const lessonsApi = {
@@ -4431,6 +4454,18 @@ export const lessonsApi = {
   // `approved` rather than a delete.
   retireLesson: (packId: string, lessonId: string) =>
     request<PackLesson>(`/packs/${packId}/lessons/${lessonId}/retire`, { method: 'POST' }),
+  // Harness-scoped lessons (proposed by a batch review, approved by a person,
+  // then added to every future run of that harness). Same roles as the pack
+  // ones: review needs approver, retire needs admin.
+  listHarnessLessons: (harnessId: string, status?: PackLesson['status']) =>
+    request<PackLesson[]>(`/harnesses/${harnessId}/lessons${status ? `?status=${status}` : ''}`),
+  reviewHarnessLesson: (harnessId: string, lessonId: string, approve: boolean) =>
+    request<PackLesson>(`/harnesses/${harnessId}/lessons/${lessonId}/review`, {
+      method: 'POST',
+      body: { approve },
+    }),
+  retireHarnessLesson: (harnessId: string, lessonId: string) =>
+    request<PackLesson>(`/harnesses/${harnessId}/lessons/${lessonId}/retire`, { method: 'POST' }),
 }
 
 // ── Telemetry (Settings → Anonymous usage statistics) ───────────────────────

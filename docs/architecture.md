@@ -639,6 +639,16 @@ never sent to a run — `api/lessons.py`'s `in_effect` field on each row says
 whether it currently falls inside the cap, and the Packs view badges the ones
 that don't. A harness opts out entirely with `loop_config.lessons: false`.
 
+Lessons also have a second scope, the harness. A batch review (the evaluator's
+`submit_batch_review`) may list lessons for future runs; `sync_review_proposals`
+turns them into `proposed` rows scoped to the batch's harness (pinned, else the
+profile default), replacing that batch's earlier still-pending proposals. Only
+a person approves one (`/api/harnesses/{id}/lessons/.../review`); approved
+harness lessons render as a `harness_lessons` block right after the pack block
+in every run of that harness, pack or no pack, except evaluator runs. The
+evaluator can propose, never approve, retire or edit, and nothing here changes
+scores.
+
 ## Schema and migrations
 
 **Alembic owns the schema.** `db/models.py` declares it, `alembic/versions/` is

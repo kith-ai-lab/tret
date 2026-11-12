@@ -112,7 +112,8 @@ from tret.services.emissions_v3_wiring import (
 )
 from tret.services.energy_collector import collected_meter
 from tret.services.energy_meter import NvidiaSmiMeter, NvmlEnergyMeter, meter_for_settings
-from tret.services.lessons import approved_lessons, lessons_enabled
+from tret.batches.rubrics import is_evaluator_run
+from tret.services.lessons import approved_harness_lessons, approved_lessons, lessons_enabled
 from tret.services.outcomes import record_outcome
 from tret.services.transcript import (
     ENGINE_NUDGE_KEY,
@@ -1738,6 +1739,16 @@ class HarnessEngine:
         lessons_on = (
             lessons_enabled(loop_cfg) and workspace_id is not None and pack is not None
         )
+        # Harness-scoped lessons (batch-review lessons a person approved) are
+        # read into every run of the harness, pack or no pack; the lesson TOOLS
+        # stay pack-gated. Evaluator runs never get them.
+        harness_lessons = None
+        if (
+            lessons_enabled(loop_cfg)
+            and workspace_id is not None
+            and not is_evaluator_run(run.task_input)
+        ):
+            harness_lessons = await approved_harness_lessons(db, workspace_id, harness.id) or None
         if lessons_on:
             enabled_names += [n for n in sorted(LESSON_TOOL_NAMES) if n not in enabled_names]
         else:
@@ -1772,6 +1783,7 @@ class HarnessEngine:
                 await approved_lessons(db, workspace_id, pack.slug) if lessons_on else None
             ),
             objective=objective,
+            harness_lessons=harness_lessons,
         )
         system = assembled.system
         user_message = build_user_message(run, pack, documents)

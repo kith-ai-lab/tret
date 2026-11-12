@@ -512,6 +512,20 @@ tools `read_document`, `search_documents`, `submit_evaluation`, `submit_batch_re
   (evaluator runs at once, 1-4, default 2) and `TRET_BATCH_EVALUATOR_RUN_TIMEOUT_SECONDS`
   (default 300). `POST .../evaluation/cancel` stops a running pass.
 
+**Review lessons.** Each of the batch review's "Lessons for future runs" gets exactly one
+result, shown on the evaluation card: `proposed` (a pending lesson on the harness), `duplicate`
+(it matches an existing lesson, which the entry points at, whatever its status), `rejected_text`
+(not plain language, or empty once invisible characters are removed), `dropped` (only the first
+five are proposed per batch) or `unresolved` (no harness could be found). Proposals go to the
+harness the batch's targets actually ran on (the most common one), not the evaluator's. A later
+pass replaces the batch's still-pending proposals; approved, rejected and retired lessons are never
+re-proposed verbatim. Invisible characters (zero-width, bidi overrides, control, tag and variation-selector
+characters) are stripped from lesson text (a joiner is kept only between two letters or symbols,
+and a variation selector only right after an emoji or other symbol), so a reviewer sees exactly what would be injected. Nothing reaches a
+prompt until an approver approves a proposal, on the card or in the harness's Lessons section.
+Approved lessons are added to every future run of that harness (not to evaluator runs) and never
+change scores.
+
 ### The pairwise judge
 
 Rubric scores grade each target alone, so two batches that both score 80 on a row look
