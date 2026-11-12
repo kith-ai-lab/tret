@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.api.auth import current_user
 from tret.api.findings import _finding_out
 from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_approver
-from tret.batches import evaluation, scoring
+from tret.batches import evaluation, families, pairwise, scoring
 from tret.batches.core import written_files_latest
 from tret.batches.rubrics import default_rubric
 from tret.batches.profiles.prompt import CreatePromptBatchBody
@@ -227,6 +227,92 @@ async def compare_batches(
     batch_a = await service.get_collection(db, a, ctx.id)
     batch_b = await service.get_collection(db, b, ctx.id)
     return await scoring.compare_batches(db, batch_a, batch_b)
+
+
+class PairwiseStartBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    a: uuid.UUID
+    b: uuid.UUID
+    scope: Literal["near_ties", "both_delivered"] = "near_ties"
+    max_pairs: int = Field(default=20, ge=1, le=100)
+    budget_usd: float | None = Field(default=None, gt=0, le=100_000)
+
+
+class PairwiseCancelBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    a: uuid.UUID
+    b: uuid.UUID
+
+
+@_both("post", "/compare/pairwise")
+async def start_pairwise(
+    body: PairwiseStartBody,
+    request: Request,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    """Start the blind pairwise judge over the shared rows of two batches (see
+    `tret/batches/pairwise.py`); returns the pair's status."""
+    lifecycle.refuse_if_draining(request)
+    if body.a == body.b:
+        raise HTTPException(422, "Pick two different batches to compare")
+    batch_a = await service.get_collection(db, body.a, ctx.id)
+    batch_b = await service.get_collection(db, body.b, ctx.id)
+    return await pairwise.start_pairwise(
+        db, batch_a, batch_b, user_id=user.id, scope=body.scope,
+        max_pairs=body.max_pairs, budget_usd=body.budget_usd,
+    )
+
+
+@_both("get", "/compare/pairwise")
+async def get_pairwise(
+    a: uuid.UUID,
+    b: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    if a == b:
+        raise HTTPException(422, "Pick two different batches to compare")
+    batch_a = await service.get_collection(db, a, ctx.id)
+    batch_b = await service.get_collection(db, b, ctx.id)
+    return await pairwise.pairwise_status(db, batch_a, batch_b, with_rows=True)
+
+
+@_both("post", "/compare/pairwise/cancel")
+async def cancel_pairwise(
+    body: PairwiseCancelBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    batch_a = await service.get_collection(db, body.a, ctx.id)
+    batch_b = await service.get_collection(db, body.b, ctx.id)
+    return await pairwise.cancel_pairwise(db, batch_a, batch_b)
+
+
+@_both("get", "/families")
+async def list_batch_families(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    return {"families": await families.list_families(db, ctx.id)}
+
+
+@_both("get", "/family")
+async def get_batch_family(
+    key: str,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    if not await families.family_batches(db, ctx.id, key):
+        raise HTTPException(404, "No batch of that family in this workspace")
+    return await families.family_leaderboard(db, ctx.id, key)
 
 
 @_both("get", "/rubrics/default")

@@ -8,6 +8,25 @@ one that needs action on an existing install.
 
 ## [Unreleased]
 
+### Added
+
+- **A blind pairwise judge, a family leaderboard and a `batch_compare` tool.** Two
+  quality-comparable batches can be judged head to head on the rows the rubric cannot
+  separate: `POST /api/batches/compare/pairwise` runs one judge twice per pair (outputs
+  scrubbed of model, provider, cost and batch identity, order swapped) and records a
+  verdict (`a`, `b`, `tie`, `inconsistent`; clear or lean) beside the rubric scores, never
+  instead of them. `GET /api/batches/compare` adds `pairwise` per row and
+  `summary.pairwise`. New table `pairwise_judgments` (migration `c7d2e9a4b6f1`), new
+  evaluator tool `submit_pairwise`; pairwise runs write no `run_outcomes`.
+  `GET /api/batches/families` and `/family?key=` serve a per-family leaderboard with a
+  per-model aggregate (yield, quality with interval, cost and Wh per acceptable result,
+  p95, Pareto). The chat harness gains the read-only `batch_compare` tool, offered once
+  to existing chat harnesses that still have the other batch tools.
+  The pairwise task is cut at 12,000 characters (rubric 8,000); a second start for a pair
+  already in flight is a 409; a judgment whose rubric version is gone fails with "the rubric
+  changed; start the pairwise judge again"; an unedited Batch Evaluator doctrine is upgraded
+  to mention `submit_pairwise` and an edited one is left alone.
+
 ### Changed
 
 - **The batch comparison has a both-delivered view, and a gap is cross-checked against

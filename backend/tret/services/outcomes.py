@@ -28,7 +28,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tret.batches.rubrics import EVALUATION_ID_KEY
+from tret.batches.rubrics import is_evaluator_run
 from tret.db.models import Finding, Harness, Pack, Run, RunOutcome
 from tret.engine.context import task_config
 from tret.router_llm.objectives import DEFAULT_MAX_COST_TIER, DEFAULT_OBJECTIVE
@@ -127,7 +127,7 @@ async def build_outcomes(db: AsyncSession, run: Run) -> list[RunOutcome]:
     Not persisted here — `record_outcome` owns the write, and the backfill reuses
     this to build rows in bulk.
     """
-    if (run.task_input or {}).get(EVALUATION_ID_KEY):
+    if is_evaluator_run(run.task_input):
         # A batch evaluator run (judging another run, `batches/evaluation.py`): the
         # judge's performance at judging says nothing about how it does the task
         # the router is learning, and its rows would skew those priors.

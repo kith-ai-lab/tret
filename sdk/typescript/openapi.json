@@ -1112,6 +1112,77 @@
         "title": "MemberOut",
         "type": "object"
       },
+      "PairwiseCancelBody": {
+        "additionalProperties": false,
+        "properties": {
+          "a": {
+            "format": "uuid",
+            "title": "A",
+            "type": "string"
+          },
+          "b": {
+            "format": "uuid",
+            "title": "B",
+            "type": "string"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ],
+        "title": "PairwiseCancelBody",
+        "type": "object"
+      },
+      "PairwiseStartBody": {
+        "additionalProperties": false,
+        "properties": {
+          "a": {
+            "format": "uuid",
+            "title": "A",
+            "type": "string"
+          },
+          "b": {
+            "format": "uuid",
+            "title": "B",
+            "type": "string"
+          },
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "max_pairs": {
+            "default": 20,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Max Pairs",
+            "type": "integer"
+          },
+          "scope": {
+            "default": "near_ties",
+            "enum": [
+              "near_ties",
+              "both_delivered"
+            ],
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ],
+        "title": "PairwiseStartBody",
+        "type": "object"
+      },
       "PasswordChangeBody": {
         "properties": {
           "current_password": {
@@ -3036,6 +3107,193 @@
         ]
       }
     },
+    "/api/batches/compare/pairwise": {
+      "get": {
+        "operationId": "get_pairwise_api_batches_compare_pairwise_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "A",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "b",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "B",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Pairwise",
+        "tags": [
+          "batches"
+        ]
+      },
+      "post": {
+        "description": "Start the blind pairwise judge over the shared rows of two batches (see\n`tret/batches/pairwise.py`); returns the pair's status.",
+        "operationId": "start_pairwise_api_batches_compare_pairwise_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairwiseStartBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Pairwise",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/compare/pairwise/cancel": {
+      "post": {
+        "operationId": "cancel_pairwise_api_batches_compare_pairwise_cancel_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairwiseCancelBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Pairwise",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/families": {
+      "get": {
+        "operationId": "list_batch_families_api_batches_families_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Batch Families",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/batches/family": {
+      "get": {
+        "operationId": "get_batch_family_api_batches_family_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Batch Family",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
     "/api/batches/rubrics/default": {
       "get": {
         "operationId": "default_batch_rubric_api_batches_rubrics_default_get",
@@ -4113,6 +4371,198 @@
           }
         },
         "summary": "Compare Batches",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/compare/pairwise": {
+      "get": {
+        "deprecated": true,
+        "operationId": "get_pairwise_api_collections_compare_pairwise_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "a",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "A",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "b",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "B",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Pairwise",
+        "tags": [
+          "batches"
+        ]
+      },
+      "post": {
+        "deprecated": true,
+        "description": "Start the blind pairwise judge over the shared rows of two batches (see\n`tret/batches/pairwise.py`); returns the pair's status.",
+        "operationId": "start_pairwise_api_collections_compare_pairwise_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairwiseStartBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Pairwise",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/compare/pairwise/cancel": {
+      "post": {
+        "deprecated": true,
+        "operationId": "cancel_pairwise_api_collections_compare_pairwise_cancel_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairwiseCancelBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Pairwise",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/families": {
+      "get": {
+        "deprecated": true,
+        "operationId": "list_batch_families_api_collections_families_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Batch Families",
+        "tags": [
+          "batches"
+        ]
+      }
+    },
+    "/api/collections/family": {
+      "get": {
+        "deprecated": true,
+        "operationId": "get_batch_family_api_collections_family_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Batch Family",
         "tags": [
           "batches"
         ]

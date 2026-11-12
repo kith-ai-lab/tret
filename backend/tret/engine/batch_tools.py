@@ -39,9 +39,13 @@ from tret.db.models import Document, Harness, Project, Run, WorkspaceMember
 from tret.engine.collection_tools import COLLECTION_TARGET_KEY
 from tret.engine.tools import RunContext, ToolError, builtin
 
-BATCH_TOOLS = ("start_batch", "batch_status", "batch_results")
+BATCH_TOOLS = ("start_batch", "batch_status", "batch_results", "batch_compare")
 # `Workspace.settings` flag: the chat harness was offered the tools once (services/workspace.py).
 BATCH_TOOLS_SEEDED_KEY = "batch_tools_seeded"
+# Same, for `batch_compare` (added later): offered once to a chat harness that still has
+# the other batch tools, so an operator who removed them is not re-seeded.
+BATCH_COMPARE_SEEDED_KEY = "batch_compare_seeded"
+COMPARE_ROWS = 10
 ANSWER_MAX_CHARS = 2000
 RESULTS_MAX_LIMIT = 200
 MAX_CSV_BYTES = 2_000_000
@@ -525,4 +529,71 @@ async def batch_results(
     return json.dumps({"total": total, "offset": offset, "rows": rows})
 
 
-__all__ = ["BATCH_TOOLS", "batch_results", "batch_status", "start_batch"]
+def _compare_side(side: dict, comparable: bool = True) -> dict:
+    return {
+        "status": side["status"],
+        "quality": side["quality"] if comparable else None,
+        "flags": side["flags"] if comparable else [],
+    }
+
+
+@builtin(
+    "batch_compare",
+    "Compare two batches of the same family row by row: wins, ties and the mean quality "
+    "difference with its interval, cost, energy, acceptable counts, disputed gaps and main "
+    "documents, the pairwise judge's tally, and the ten rows with the biggest quality "
+    "difference. Quality figures (and the ordering by difference) are only given when both "
+    "batches were scored by the same judge against the same rubric (quality_comparable); "
+    "otherwise rows are listed by label with null quality. Read-only.",
+    {
+        "type": "object",
+        "required": ["batch_a", "batch_b"],
+        "properties": {"batch_a": {"type": "string"}, "batch_b": {"type": "string"}},
+    },
+)
+async def batch_compare(ctx: RunContext, batch_a: str, batch_b: str) -> str:
+    a = await _own_batch(ctx, batch_a)
+    b = await _own_batch(ctx, batch_b)
+    if a.id == b.id:
+        raise ToolError("Pick two different batches to compare.")
+    from tret.batches import scoring
+
+    cmp = await scoring.compare_batches(ctx.db, a, b)
+    comparable = cmp["quality_comparable"]
+    if comparable:
+        rows = sorted(
+            cmp["rows"],
+            key=lambda r: abs(r["delta"]["quality"]) if r["delta"]["quality"] is not None else -1.0,
+            reverse=True,
+        )[:COMPARE_ROWS]
+    else:  # scores from different judges or rubrics say nothing about each other
+        rows = sorted(cmp["rows"], key=lambda r: str(r["label"]))[:COMPARE_ROWS]
+    s = cmp["summary"]
+    return json.dumps(
+        {
+            "same_family": cmp["same_family"],
+            "quality_comparable": cmp["quality_comparable"],
+            "quality_note": cmp["quality_note"],
+            "shared": cmp["shared"],
+            "only_a": cmp["only_a"],
+            "only_b": cmp["only_b"],
+            "summary": {k: s[k] for k in (
+                "wins_a", "wins_b", "ties", "mean_quality_delta", "interval90", "delivered", "pairwise",
+                "disputed_gaps_a", "disputed_gaps_b", "disputed_primaries_a", "disputed_primaries_b",
+                "cost_a", "cost_b", "energy_a", "energy_b", "acceptable_a", "acceptable_b",
+            )},
+            "rows": [
+                {
+                    "label": r["label"],
+                    "a": _compare_side(r["a"], comparable),
+                    "b": _compare_side(r["b"], comparable),
+                    "delta_quality": r["delta"]["quality"] if comparable else None,
+                }
+                for r in rows
+            ],
+            "page": f"/batches/compare?a={a.id}&b={b.id}",
+        }
+    )
+
+
+__all__ = ["BATCH_TOOLS", "batch_compare", "batch_results", "batch_status", "start_batch"]

@@ -22,6 +22,9 @@ from pydantic import BaseModel, ConfigDict, Field
 # Stamped on every evaluator run's task input (`evaluation.py`); `services/outcomes.py`
 # reads it, so it lives in this dependency-free module.
 EVALUATION_ID_KEY = "_batch_evaluation_id"
+# Stamped on every blind pairwise judge run (`tret/batches/pairwise.py`).
+PAIRWISE_ID_KEY = "_pairwise_judgment_id"
+PAIRWISE_ORDER_KEY = "_pairwise_order"
 DISCLOSURE_RUBRIC_KEY = "disclosure-v1"
 PROMPT_RUBRIC_KEY = "prompt-default-v1"
 DEFAULT_ACCEPTABLE_QUALITY = 60
@@ -45,6 +48,14 @@ class EvaluationIn(BaseModel):
     judge_model: str | None = Field(default=None, max_length=200)
     budget_usd: float | None = Field(default=None, gt=0, le=100_000)
     rubric: dict[str, Any] | None = None
+
+
+def is_evaluator_run(task_input: dict | None) -> bool:
+    """True for a run of the Batch Evaluator harness started by the batch machinery:
+    a per-target judge, a batch review or a pairwise judge. None of them is a
+    performance sample for the router."""
+    ti = task_input or {}
+    return bool(ti.get(EVALUATION_ID_KEY) or ti.get(PAIRWISE_ID_KEY))
 
 
 def _criterion(key: str, label: str, weight: int, applies: str, five: str, one: str) -> dict:
@@ -303,6 +314,7 @@ __all__ = [
     "compute_quality",
     "criterion_applies",
     "default_rubric",
+    "is_evaluator_run",
     "rubric_text",
     "rubric_version",
     "validate_custom_rubric",

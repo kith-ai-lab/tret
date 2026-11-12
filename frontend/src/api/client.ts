@@ -3566,6 +3566,8 @@ export interface BatchComparisonRow {
   a: ComparisonSide | null
   b: ComparisonSide | null
   both_delivered?: boolean
+  /** Blind pairwise verdict for this row, when one was judged (E2). */
+  pairwise?: PairwiseRowMark | null
   /** Side that declared a gap the other side delivered acceptably. */
   disputed_gap?: 'a' | 'b' | null
   /** Side that missed a main document the other side packaged (both sides can). */
@@ -3615,7 +3617,158 @@ export interface BatchComparison {
     disputed_gaps_b?: number
     disputed_primaries_a?: number
     disputed_primaries_b?: number
+    /** Blind pairwise judge tally (E2); absent on an older server. */
+    pairwise?: PairwiseSummary | null
   }
+}
+
+export type PairwiseVerdict = 'a' | 'b' | 'tie' | 'inconsistent'
+export type PairwiseScope = 'near_ties' | 'both_delivered'
+
+export interface PairwiseSummary {
+  eligible_near_ties: number
+  judged: number
+  wins_a: number
+  wins_b: number
+  ties: number
+  inconsistent: number
+  running: boolean
+  cost_usd: number
+}
+
+export interface PairwiseRowMark {
+  status: string
+  verdict: PairwiseVerdict | null
+  strength: 'clear' | 'lean' | null
+  stale: boolean
+}
+
+export interface PairwiseCall {
+  order: 'a_first' | 'b_first'
+  preferred: 'first' | 'second' | 'tie'
+  criteria: Record<string, 'first' | 'second' | 'tie'>
+  confidence: 'low' | 'medium' | 'high' | null
+  rationale: string | null
+}
+
+export interface PairwiseRow {
+  row_key: string
+  label: string
+  status: 'pending' | 'running' | 'judged' | 'failed' | 'skipped'
+  verdict: PairwiseVerdict | null
+  strength: 'clear' | 'lean' | null
+  stale: boolean
+  calls: PairwiseCall[]
+  cost_usd: number
+  error: string | null
+  finished_at: string | null
+}
+
+export interface PairwiseStatus {
+  a: string
+  b: string
+  status: 'idle' | 'running'
+  scope_eligible: { near_ties: number; both_delivered: number }
+  judged: number
+  pending: number
+  running: number
+  failed: number
+  skipped: number
+  stale: number
+  verdicts: { a: number; b: number; tie: number; inconsistent: number }
+  cost_usd: number
+  budget_usd: number | null
+  rows?: PairwiseRow[]
+}
+
+export interface StartPairwiseBody {
+  a: string
+  b: string
+  scope?: PairwiseScope
+  max_pairs?: number
+  budget_usd?: number | null
+}
+
+export interface FamilyComparableSet {
+  rubric_key: string
+  rubric_version: string
+  judge_model: string
+}
+
+export interface BatchFamilySummary {
+  family_key: string
+  family_label: string
+  profile: string
+  batches: number
+  evaluated_batches: number
+  last_created_at: string | null
+}
+
+export interface FamilyModel {
+  model: string
+  batches: number
+  targets: number
+  delivered: number
+  scored: number
+  acceptable: number
+  yield: number | null
+  quality_mean: number | null
+  quality_interval90: [number, number] | null
+  mean_residual: number | null
+  cost_usd: number
+  cost_per_acceptable_usd: number | null
+  energy_per_acceptable_wh: number | null
+  mean_iterations: number | null
+  p95_iterations: number | null
+  p95_cost_usd: number | null
+  infra_failures: number
+  pareto: boolean
+}
+
+export interface FamilyBatchRow {
+  batch_id: string
+  name: string
+  status: string
+  created_at: string | null
+  started_at: string | null
+  targets: number
+  classes: Record<string, number>
+  acceptable: number
+  yield: number | null
+  written_share: number | null
+  quality_mean: number | null
+  quality_median: number | null
+  mean_residual: number | null
+  cost_usd: number
+  cost_per_acceptable_usd: number | null
+  energy_wh: number | null
+  energy_per_acceptable_wh: number | null
+  wall_seconds: number | null
+  models: { model: string; targets: number }[]
+  judge_model: string | null
+  rubric_version: string | null
+  comparable: boolean
+  spot_checks: number | null
+  agreement: number | null
+}
+
+export interface FamilyLeaderboard {
+  family_key: string
+  family_label: string
+  profile: string
+  comparable: FamilyComparableSet | null
+  row_keys: number
+  batches: FamilyBatchRow[]
+  /** Batches left out of the per-model table (rubric, judge or evaluation state differs). */
+  excluded_batches?: number
+  /** Flat list. A nested {comparable, models, excluded_batches} block is tolerated by the view. */
+  models: FamilyModel[] | FamilyModelsBlock
+}
+
+export interface FamilyModelsBlock {
+  comparable: FamilyComparableSet | null
+  models: FamilyModel[]
+  excluded_batches: number
 }
 
 export interface ReviewTargetEvaluationBody {
@@ -3773,6 +3926,20 @@ export const api = {
     request<BatchComparison>(
       `/batches/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`,
     ),
+  startPairwise: (body: StartPairwiseBody) =>
+    request<PairwiseStatus>('/batches/compare/pairwise', { method: 'POST', body }),
+  getPairwise: (a: string, b: string) =>
+    request<PairwiseStatus>(
+      `/batches/compare/pairwise?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`,
+    ),
+  cancelPairwise: (a: string, b: string) =>
+    request<PairwiseStatus>('/batches/compare/pairwise/cancel', { method: 'POST', body: { a, b } }),
+  listBatchFamilies: () =>
+    request<{ families: BatchFamilySummary[] } | BatchFamilySummary[]>('/batches/families').then(
+      (r) => (Array.isArray(r) ? r : r.families ?? []),
+    ),
+  getBatchFamily: (key: string) =>
+    request<FamilyLeaderboard>(`/batches/family?key=${encodeURIComponent(key)}`),
   getBatchEvaluation: (id: string) => request<BatchEvaluationDetail>(`/batches/${id}/evaluation`),
   startBatchEvaluation: (id: string, body: StartBatchEvaluationBody) =>
     request<BatchEvaluationPass>(`/batches/${id}/evaluate`, { method: 'POST', body }),

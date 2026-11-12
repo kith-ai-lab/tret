@@ -1,8 +1,15 @@
 import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { type CSSProperties, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 
-import { api, type BatchComparison, type BatchComparisonRow } from '../api/client'
+import {
+  api,
+  type BatchComparison,
+  type BatchComparisonRow,
+  type PairwiseRow,
+  type PairwiseStatus,
+} from '../api/client'
+import { PairwisePanel } from '../components/batches/PairwisePanel'
 import { Scorecard } from '../components/batches/Scorecard'
 import {
   DISPUTED_GAP_TITLE,
@@ -53,6 +60,59 @@ function Side({
       <td className="num">{pages}</td>
       <td className="num">{dash(side.cost_usd, (n) => formatCost(n))}</td>
     </>
+  )
+}
+
+const VERDICT_TEXT: Record<string, string> = { a: 'A', b: 'B', tie: 'tie', inconsistent: 'inconsistent' }
+
+/** Pairwise verdict chip: "lean" is lighter, stale is greyed. Rationales in the title and an expander. */
+function PairwiseCell({
+  mark,
+  detail,
+}: {
+  mark: BatchComparisonRow['pairwise']
+  detail?: PairwiseRow
+}) {
+  if (!mark) return <span className="fine-print">—</span>
+  if (!mark.verdict) {
+    return <span className="fine-print">{mark.status === 'judged' ? '—' : mark.status}</span>
+  }
+  const text = VERDICT_TEXT[mark.verdict] ?? mark.verdict
+  const rationales = (detail?.calls ?? [])
+    .map((c) => `${c.order === 'a_first' ? 'A shown first' : 'B shown first'}: ${c.rationale ?? 'no rationale'}`)
+    .join('\n\n')
+  const title =
+    [
+      mark.strength === 'lean' ? 'Lean: one order preferred it, the other called a tie.' : null,
+      mark.stale ? 'Stale: a target was retried since this was judged.' : null,
+      rationales || null,
+    ]
+      .filter(Boolean)
+      .join('\n') || undefined
+  const style: CSSProperties = {
+    opacity: mark.stale ? 0.5 : mark.strength === 'lean' ? 0.75 : 1,
+    fontStyle: mark.strength === 'lean' ? 'italic' : undefined,
+    textDecoration: mark.stale ? 'line-through' : undefined,
+  }
+  return (
+    <div>
+      <span className="chip" style={style} title={title}>
+        {text}
+        {mark.strength === 'lean' ? ' (lean)' : ''}
+        {mark.stale ? ' (stale)' : ''}
+      </span>
+      {detail && detail.calls.length > 0 && (
+        <details className="fine-print" style={{ marginTop: 2 }}>
+          <summary>why</summary>
+          {detail.calls.map((c) => (
+            <div key={c.order} style={{ maxWidth: 360, marginTop: 4 }}>
+              <strong>{c.order === 'a_first' ? 'A shown first' : 'B shown first'}</strong>
+              {c.confidence ? ` (${c.confidence} confidence)` : ''}: {c.rationale ?? 'no rationale'}
+            </div>
+          ))}
+        </details>
+      )}
+    </div>
   )
 }
 
@@ -143,6 +203,16 @@ export function BatchCompare() {
   const [onlyBoth, setOnlyBoth] = useState(false)
   // An older server sends no `both_delivered`: no filter then, or it would empty the table.
   const canFilterBoth = cmp?.summary.delivered != null
+  const hasPairwise = cmp?.summary?.pairwise != null || cmp?.rows.some((r) => r.pairwise != null)
+  // Rationales come from the status endpoint; the panel owns the polling, this only reads the cache.
+  const pairwiseDetail = useQuery<PairwiseStatus>({
+    queryKey: ['batch-pairwise', a, b],
+    queryFn: () => api.getPairwise(a as string, b as string),
+    enabled: !!a && !!b && !!cmp?.quality_comparable && hasPairwise,
+    retry: false,
+  })
+  const detailByRow = new Map((pairwiseDetail.data?.rows ?? []).map((r) => [r.row_key, r]))
+  const showPairwiseColumn = !!cmp?.quality_comparable && cmp.rows.some((r) => r.pairwise != null)
   const rows = cmp ? (onlyBoth && canFilterBoth ? cmp.rows.filter((r) => r.both_delivered) : cmp.rows) : []
 
   return (
@@ -177,6 +247,14 @@ export function BatchCompare() {
 
           <SummaryStrip cmp={cmp} />
 
+          {cmp.quality_comparable && cmp.summary?.pairwise != null && (
+            <PairwisePanel
+              a={a}
+              b={b}
+              summary={cmp.summary.pairwise}
+            />
+          )}
+
           {canFilterBoth && (
             <label className="check-row" style={{ marginBottom: 8 }}>
               <input
@@ -196,6 +274,7 @@ export function BatchCompare() {
                   <th colSpan={4}>A</th>
                   <th colSpan={4}>B</th>
                   <th colSpan={3}>Δ (B − A)</th>
+                  {showPairwiseColumn && <th rowSpan={2}>Pairwise</th>}
                 </tr>
                 <tr>
                   <th>Status</th>
@@ -235,6 +314,11 @@ export function BatchCompare() {
                       {dash(r.delta?.cost_usd, (n) => `${n < 0 ? '−' : '+'}$${Math.abs(n).toFixed(2)}`)}
                     </td>
                     <td className="num">{fmtSigned(r.delta?.retained_pages, 0)}</td>
+                    {showPairwiseColumn && (
+                      <td>
+                        <PairwiseCell mark={r.pairwise} detail={detailByRow.get(r.row_key)} />
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

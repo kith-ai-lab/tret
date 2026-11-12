@@ -1215,3 +1215,60 @@ class TargetEvaluation(Base):
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = created_at_col()
     finished_at: Mapped[datetime | None] = mapped_column()
+
+
+class PairwiseJudgment(Base):
+    """One blind head-to-head judgment of the same register row in two batches of a
+    family (`tret/batches/pairwise.py`). The pair is stored once: "low" is the
+    target with the smaller `str(id)`, "high" the other, whichever way the caller
+    compared them. `calls` holds one entry per judge call (presentation order,
+    preferred side, per-criterion preference, confidence, rationale); `verdict` is
+    derived from them (low | high | tie | inconsistent) and never rewrites a
+    rubric score. A judgment is stale when either target's attempt or run moved on."""
+
+    __tablename__ = "pairwise_judgments"
+    __table_args__ = (
+        UniqueConstraint("target_low_id", "target_high_id", "judge_model", "rubric_version"),
+        Index("ix_pairwise_judgments_batches", "workspace_id", "batch_low_id", "batch_high_id"),
+        # Deleting a target cascades through both ids; the unique constraint covers the low one.
+        Index("ix_pairwise_judgments_target_high", "target_high_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    family_key: Mapped[str] = mapped_column(Text, nullable=False)
+    rubric_key: Mapped[str] = mapped_column(Text, nullable=False)
+    rubric_version: Mapped[str] = mapped_column(Text, nullable=False)
+    judge_model: Mapped[str] = mapped_column(Text, nullable=False)
+    row_key: Mapped[str] = mapped_column(Text, nullable=False)
+    batch_low_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), nullable=False
+    )
+    batch_high_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), nullable=False
+    )
+    target_low_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collection_targets.id", ondelete="CASCADE"), nullable=False
+    )
+    target_high_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collection_targets.id", ondelete="CASCADE"), nullable=False
+    )
+    attempt_low: Mapped[int | None] = mapped_column(Integer)
+    attempt_high: Mapped[int | None] = mapped_column(Integer)
+    run_low_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    run_high_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    # pending | running | judged | failed | skipped
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    # low | high | tie | inconsistent
+    verdict: Mapped[str | None] = mapped_column(Text)
+    # clear | lean
+    strength: Mapped[str | None] = mapped_column(Text)
+    calls: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    error: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = created_at_col()
+    finished_at: Mapped[datetime | None] = mapped_column()
