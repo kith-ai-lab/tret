@@ -638,10 +638,11 @@ left out of the model table. Per model: delivered, yield, mean quality with a 90
 bootstrap interval (three or more scores), mean residual, cost and Wh per acceptable
 result, p95 iterations and cost over acceptable runs, infrastructure failures and a Pareto
 mark (not beaten on both quality and cost per acceptable result, among models with three
-or more scored rows). Each model row also has `latest_batch`: the model's rows in the most
-recent comparable batch that contains it, on their own (batch id, name, date, scored rows,
-mean quality and its 90% interval), or null when that batch has no scored row for the
-model. The pooled figures do not change; `latest_batch` is there because a model whose
+or more scored rows). Each model row also has `latest_batch`: the model's rows in its most
+recent comparable batch with at least five scored rows for that model, on their own (batch
+id, name, date, scored rows, mean quality and its 90% interval). When no batch reaches five
+scored rows it is the model's most recent scored batch, and it is null when no batch has a
+scored row for the model. The pooled figures do not change; `latest_batch` is there because a model whose
 harness was fixed between two batches scores differently in the newer one, and the pooled
 mean hides that. The page is `/batches/family?key=...`; it is computed on demand and
 never polled.
@@ -683,9 +684,10 @@ iteration or cost values, and the concurrency suggestion if there is one; it is 
 when there is nothing to say, and `notes` say why. An unknown or archived `harness_id` on a
 prompt request is a 422, as at batch creation. Notes
 also flag a single earlier batch, thin models and batches left out as not comparable.
-When a model appears in two or more batches and its most recent batch, with at least 5
-scored rows for that model, scored outside its pooled 90% interval, a note gives both figures and says the recommendation uses the
-pooled one. The recommendation rule is unchanged. The response also carries `harness_id`,
+When a model appears in two or more batches and its most recent batch with at least five
+scored rows for that model scored outside its pooled 90% interval, a note names that batch,
+gives both figures and says the recommendation uses the pooled one. A model whose batches
+all have fewer than five scored rows gets no such note. The recommendation rule is unchanged. The response also carries `harness_id`,
 the harness the family's batches run on (null when there is none), and each model in
 `evidence.models` carries `latest_batch` as described under Families.
 

@@ -21,6 +21,9 @@ from tret.db.models import Batch, BatchEvaluation
 
 PARETO_MIN_SCORED = 3
 INTERVAL_MIN = 3
+# A model's "latest batch" is its most recent batch with at least this many scored rows for it, so a tiny
+# check batch does not displace a large one. advice.MIN_ADVICE_ROWS is defined as this value.
+LATEST_BATCH_MIN_SCORED = 5
 
 
 async def _workspace_batches(db: AsyncSession, workspace_id: uuid.UUID, profile: str | None = None) -> list[Batch]:
@@ -144,6 +147,21 @@ def group_stats(ds: list[scoring.TargetData], *, intervals: bool = True) -> dict
     }
 
 
+def _latest_batch(items: list[tuple[scoring.BatchData, scoring.TargetData]]):
+    """The model's most recent batch with at least `LATEST_BATCH_MIN_SCORED` scored rows for it, else its most
+    recent batch with any scored row, else `(None, None)`."""
+    by_batch: dict[uuid.UUID, tuple[scoring.BatchData, list[scoring.TargetData]]] = {}
+    for data, d in items:
+        by_batch.setdefault(data.batch.id, (data, []))[1].append(d)
+    ordered = sorted(by_batch.values(), key=lambda e: scoring.core._aware(e[0].batch.created_at), reverse=True)
+    stats = [(data, group_stats(ds)) for data, ds in ordered]
+    for floor in (LATEST_BATCH_MIN_SCORED, 1):
+        for data, st in stats:
+            if st["scored"] >= floor:
+                return data, st
+    return None, None
+
+
 def models_from(datas: list[scoring.BatchData]) -> dict:
     """`{comparable, models, excluded_batches}` over already-collected batches."""
     best, included = _comparable_set(datas)
@@ -159,8 +177,7 @@ def models_from(datas: list[scoring.BatchData]) -> dict:
     models = []
     for model, items in per_model.items():
         ds = [d for _, d in items]
-        newest = max((data for data, _ in items), key=lambda data: scoring.core._aware(data.batch.created_at))
-        latest = group_stats([d for data, d in items if data is newest])
+        newest, latest = _latest_batch(items)
         models.append(
             {
                 "model": model,
@@ -175,7 +192,7 @@ def models_from(datas: list[scoring.BatchData]) -> dict:
                         "quality_mean": latest["quality_mean"],
                         "quality_interval90": latest["quality_interval90"],
                     }
-                    if latest["scored"]
+                    if newest is not None
                     else None
                 ),
             }

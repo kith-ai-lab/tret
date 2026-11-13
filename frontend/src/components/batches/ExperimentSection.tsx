@@ -209,87 +209,86 @@ export function useExperimentForm(open: boolean, rowCount: number, harnessId: st
             ))}
           </datalist>
           {arms.map((a, i) => (
-            <div
-              key={i}
-              className="row"
-              style={{ gap: 10, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 8 }}
-            >
-              <div className="mono-label" style={{ width: 44 }}>
+            <div key={i} style={{ marginBottom: 12 }}>
+              <div className="mono-label" style={{ marginBottom: 6 }}>
                 Arm {ARM_KEYS[i]}
               </div>
-              <div className="field">
-                <label className="mono-label">Label</label>
-                <input
-                  type="text"
-                  value={a.label}
-                  placeholder="auto"
-                  onChange={(e) => setArm(i, { label: e.target.value })}
-                />
-              </div>
-              <div className="field">
-                <label className="mono-label">Model override</label>
-                <input
-                  type="text"
-                  list="experiment-models"
-                  value={a.model}
-                  onChange={(e) => {
-                    setArm(i, { model: e.target.value })
-                    setHints((h) => {
-                      const { [i]: _drop, ...rest } = h
-                      return rest
-                    })
-                  }}
-                />
-                {harnessId && (
+              <div className="row" style={{ gap: 10, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                <div className="field">
+                  <label className="mono-label">Label</label>
+                  <input
+                    type="text"
+                    value={a.label}
+                    placeholder="auto"
+                    onChange={(e) => setArm(i, { label: e.target.value })}
+                  />
+                </div>
+                <div className="field">
+                  <label className="mono-label">Model override</label>
+                  <input
+                    type="text"
+                    list="experiment-models"
+                    value={a.model}
+                    onChange={(e) => {
+                      setArm(i, { model: e.target.value })
+                      setHints((h) => {
+                        const { [i]: _drop, ...rest } = h
+                        return rest
+                      })
+                    }}
+                  />
+                  {harnessId && (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={asking !== null}
+                      onClick={() => void askRouter(i)}
+                    >
+                      {asking === i ? 'Asking the router…' : "Use the router's next candidate"}
+                    </button>
+                  )}
+                  {hints[i] && <span className="fine-print">{hints[i]}</span>}
+                </div>
+                <div className="field">
+                  <label className="mono-label">Objective</label>
+                  <ObjectiveSelect value={a.objective} onChange={(v) => setArm(i, { objective: v })} />
+                </div>
+                <div className="field">
+                  <label className="mono-label">Max iterations</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    style={{ width: 90 }}
+                    value={a.maxIterations}
+                    onChange={(e) => setArm(i, { maxIterations: e.target.value })}
+                  />
+                </div>
+                {mode === 'split' && (
+                  <div className="field">
+                    <label className="mono-label">Share</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="any"
+                      style={{ width: 90 }}
+                      placeholder="equal"
+                      value={a.weight}
+                      onChange={(e) => setArm(i, { weight: e.target.value })}
+                    />
+                  </div>
+                )}
+                {arms.length > 2 && (
                   <button
                     type="button"
                     className="btn btn-sm"
-                    disabled={asking !== null}
-                    onClick={() => void askRouter(i)}
+                    style={{ alignSelf: 'flex-end' }}
+                    onClick={() => setArms((prev) => prev.filter((_, j) => j !== i))}
                   >
-                    {asking === i ? 'Asking the router…' : "Use the router's next candidate"}
+                    Remove
                   </button>
                 )}
-                {hints[i] && <span className="fine-print">{hints[i]}</span>}
               </div>
-              <div className="field">
-                <label className="mono-label">Objective</label>
-                <ObjectiveSelect value={a.objective} onChange={(v) => setArm(i, { objective: v })} />
-              </div>
-              <div className="field">
-                <label className="mono-label">Max iterations</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={50}
-                  style={{ width: 90 }}
-                  value={a.maxIterations}
-                  onChange={(e) => setArm(i, { maxIterations: e.target.value })}
-                />
-              </div>
-              {mode === 'split' && (
-                <div className="field">
-                  <label className="mono-label">Share</label>
-                  <input
-                    type="number"
-                    min={0}
-                    step="any"
-                    style={{ width: 90 }}
-                    placeholder="equal"
-                    value={a.weight}
-                    onChange={(e) => setArm(i, { weight: e.target.value })}
-                  />
-                </div>
-              )}
-              {arms.length > 2 && (
-                <button
-                  type="button"
-                  className="btn btn-sm"
-                  onClick={() => setArms((prev) => prev.filter((_, j) => j !== i))}
-                >
-                  Remove
-                </button>
-              )}
             </div>
           ))}
           {arms.length < 3 && (

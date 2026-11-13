@@ -190,8 +190,29 @@ async def test_latest_batch_is_the_models_most_recent_comparable_batch(w):
     assert only["latest_batch"]["quality_mean"] == only["quality_mean"]
 
 
-async def test_latest_batch_is_null_when_its_rows_are_unscored(w):
+async def test_latest_batch_falls_back_to_an_older_scored_batch_when_the_newest_is_unscored(w):
     await model_batch(w, "Old", "old", {"m/a": [(80, 0.1, 3), (82, 0.1, 3)]}, minutes=0)
     await model_batch(w, "New", "new", {"m/a": [(None, 0.1, 3, "failed")]}, minutes=60)
     models = {m["model"]: m for m in (await families.family_models(w.db, w.ws.id, "disclosure:fy2025"))["models"]}
+    assert models["m/a"]["latest_batch"]["name"] == "Old"
+
+
+async def test_latest_batch_is_null_when_no_batch_has_a_scored_row(w):
+    await model_batch(w, "Only", "only", {"m/a": [(None, 0.1, 3, "failed")]}, minutes=0)
+    models = {m["model"]: m for m in (await families.family_models(w.db, w.ws.id, "disclosure:fy2025"))["models"]}
     assert models["m/a"]["latest_batch"] is None
+
+
+async def test_latest_batch_prefers_a_batch_with_enough_scored_rows_over_a_newer_tiny_one(w):
+    await model_batch(w, "Big", "big", {"m/a": [(80, 0.1, 3)] * 6}, minutes=0)
+    await model_batch(w, "Tiny", "tiny", {"m/a": [(95, 0.1, 3)] * 2}, minutes=60)
+    models = {m["model"]: m for m in (await families.family_models(w.db, w.ws.id, "disclosure:fy2025"))["models"]}
+    latest = models["m/a"]["latest_batch"]
+    assert latest["name"] == "Big" and latest["scored"] == 6
+
+
+async def test_latest_batch_is_the_most_recent_when_every_batch_is_small(w):
+    await model_batch(w, "Old", "old", {"m/a": [(80, 0.1, 3)] * 3}, minutes=0)
+    await model_batch(w, "New", "new", {"m/a": [(90, 0.1, 3)] * 2}, minutes=60)
+    models = {m["model"]: m for m in (await families.family_models(w.db, w.ws.id, "disclosure:fy2025"))["models"]}
+    assert models["m/a"]["latest_batch"]["name"] == "New"

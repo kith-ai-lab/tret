@@ -15,7 +15,7 @@ from tret.batches import core, families, scoring
 from tret.db.models import Harness
 from tret.router_llm.objectives import objective_of
 
-MIN_ADVICE_ROWS = 5
+MIN_ADVICE_ROWS = families.LATEST_BATCH_MIN_SCORED
 ITERATION_HEADROOM = 1.25
 COST_HEADROOM = 1.5
 MAX_ITERATIONS_CEILING = 50
@@ -172,7 +172,8 @@ async def batch_advice(
             and not (interval[0] <= latest["quality_mean"] <= interval[1])
         ):
             notes.append(
-                f"{m['model']}: its most recent batch scored {latest['quality_mean']:g} over "
+                f"{m['model']}: its most recent batch with at least {MIN_ADVICE_ROWS} scored rows, "
+                f"\"{latest['name']}\", scored {latest['quality_mean']:g} over "
                 f"{latest['scored']} rows, against {m['quality_mean']:g} pooled over {m['batches']} batches. "
                 "The recommendation uses the pooled figure."
             )
