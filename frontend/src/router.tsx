@@ -5,6 +5,7 @@ import { Approvals } from './views/Approvals'
 import { BatchCompare } from './views/BatchCompare'
 import { BatchExperiment } from './views/BatchExperiment'
 import { BatchFamily } from './views/BatchFamily'
+import { SharedBatch } from './views/SharedBatch'
 import { Batches } from './views/Batches'
 import { Chat } from './views/Chat'
 import { ConnectionsView } from './views/Connections'
@@ -38,6 +39,7 @@ export function AppRoutes() {
       <Route path="/batches/compare" element={<BatchCompare />} />
       <Route path="/batches/family" element={<BatchFamily />} />
       <Route path="/batches/experiments/:id" element={<BatchExperiment />} />
+      <Route path="/batches/shared/:id" element={<SharedBatch />} />
       <Route path="/batches/:id" element={<Batches />} />
       <Route path="/collections" element={<CollectionRedirect />} />
       <Route path="/collections/:id" element={<CollectionRedirect />} />

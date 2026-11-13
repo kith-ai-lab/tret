@@ -10,6 +10,21 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Share a batch with another workspace, read-only.** An approver can share a batch with a
+  person by email (pending until they accept it from a workspace) or with a workspace they
+  belong to (approver role there); the recipient sees the rows, statuses, evaluation scores,
+  what was reported for each row and the written files, can view or download them, download
+  one zip of the whole batch (streamed) and copy the files into its own document library,
+  where they are marked Shared. It never sees transcripts, costs, models, settings,
+  review findings, the batch record files or SharePoint links (a row's own package record,
+  one of its written files, does say which pages were kept and why), and the shared batch stays out of its own batch list,
+  families and router evidence. Revoking takes effect at once. New table `batch_shares`
+  (migration `c8d2f5a1b9e3`); new routes under `/api/batches/{id}/shares`,
+  `/api/batch-shares` and `/api/shared-batches`; the owner can also download a batch as a
+  zip (`GET /api/batches/{id}/archive`). A stored document file is now deleted by the
+  import cleanup paths only when no other document row refers to it.
+- **PDF preview in the written-file viewer.** The content security policy now allows `blob:` in
+  `frame-src` (API and nginx), so the viewer's PDF iframe is no longer blocked and blank.
 - **Weighted arms for split experiments.** Each arm of a split experiment can carry a
   `weight`; rows are dealt in proportion (smooth weighted round-robin within market and
   category, deterministic), so one arm can be a small challenger share. Every arm or none

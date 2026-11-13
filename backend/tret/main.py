@@ -13,6 +13,7 @@ from tret import __version__
 from tret.api import (
     analytics,
     auth,
+    batch_shares as batch_shares_api,
     batches as batches_api,
     budgets as budgets_api,
     chat,
@@ -78,6 +79,9 @@ log = logging.getLogger("tret")
 # `https://content.googleapis.com` and `https://docs.google.com` (connect-src)
 # — those three origins are the minimal widening needed for it, added to
 # script-src/frame-src/connect-src only, nothing else loosened.
+# frame-src also allows `blob:`: the written-file viewer shows a PDF in an iframe
+# from a blob URL it builds itself out of bytes fetched from /api (always typed
+# application/pdf). 'self' does not cover blob URLs, so without it the preview is blank.
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
     "script-src 'self' 'sha256-t9DNwLQDLCEhXVRmNTkJe02dNWmqy1VO8ME4IVgsRDk=' https://apis.google.com; "
@@ -85,7 +89,7 @@ CONTENT_SECURITY_POLICY = (
     "img-src 'self' data: blob:; "
     "font-src 'self' data:; "
     "connect-src 'self' https://content.googleapis.com https://docs.google.com; "
-    "frame-src 'self' https://docs.google.com; "
+    "frame-src 'self' blob: https://docs.google.com; "
     "frame-ancestors 'none'; "
     "base-uri 'self'; "
     "form-action 'self'"
@@ -447,6 +451,8 @@ def create_app() -> FastAPI:
     # the approvals and packaging above. The one router serves /api/batches and
     # the deprecated /api/collections alias.
     app.include_router(batches_api.router)
+    # Sharing a batch read-only with another workspace (tret/api/batch_shares.py).
+    app.include_router(batch_shares_api.router)
     # Pack lessons (tret/api/lessons.py): list/review/retire, the same
     # blessing-gate shape as findings above, applied to a pack's own
     # per-workspace memory instead of a run's output.

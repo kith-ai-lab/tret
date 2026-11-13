@@ -387,8 +387,10 @@ class Document(Base):
     sha256: Mapped[str] = mapped_column(Text, nullable=False)
     # Where these bytes came from: 'upload' (a human put them here), 'web' (an
     # agent fetched them), 'connected' (read live from a workspace's connected
-    # SharePoint/OneDrive) or 'package' (a page subset written by the approval-time
-    # packager from another document). A column rather than a key in `meta` because it is a
+    # SharePoint/OneDrive), 'package' (a page subset written by the approval-time
+    # packager from another document), 'batch_record' (a batch run's record file) or
+    # 'shared' (a file copied out of a batch another workspace shared: third-party
+    # content reviewed elsewhere, see `meta.shared_from`). A column rather than a key in `meta` because it is a
     # trust tier, and a tier that only exists inside a JSON blob is a tier nobody
     # can filter on, index, or notice. Web documents are third-party text nobody
     # vetted: readable and quotable with attribution, never a source of numbers
@@ -1381,3 +1383,45 @@ class BatchExperiment(Base):
     promoted: Mapped[dict | None] = mapped_column(JSONB)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = created_at_col()
+
+
+class BatchShare(Base):
+    """A read-only share of one batch with another workspace (`tret/batches/sharing.py`).
+    `workspace_id` is the owner (always the batch's workspace). A share addressed to a
+    person starts `pending` with `recipient_email`; accepting it from a workspace binds
+    `recipient_workspace_id` and makes it `active`. A share to a workspace the sharer
+    belongs to is `active` at once. `declined` and `revoked` shares grant nothing."""
+
+    __tablename__ = "batch_shares"
+    __table_args__ = (
+        Index("ix_batch_shares_batch", "batch_id"),
+        Index("ix_batch_shares_recipient_workspace", "recipient_workspace_id", "status"),
+        Index("ix_batch_shares_recipient_email", "recipient_email", "status"),
+        # At most one active share of a batch per recipient workspace, whatever the race.
+        Index(
+            "uq_batch_shares_active",
+            "batch_id",
+            "recipient_workspace_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    recipient_email: Mapped[str | None] = mapped_column(Text)
+    recipient_workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE")
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False)  # pending | active | declined | revoked
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = created_at_col()
+    accepted_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    accepted_at: Mapped[datetime | None] = mapped_column()
+    revoked_at: Mapped[datetime | None] = mapped_column()

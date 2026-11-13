@@ -19,6 +19,12 @@ const MAX_ROWS = 500
 
 const BODY_HEIGHT = 'calc(100vh - 190px)'
 
+/** A file the viewer can show: an owner's written file, or a shared one (no SharePoint link). */
+export type ViewerFile = Omit<BatchWrittenFile, 'web_url'> & { web_url?: string | null }
+
+/** Builds the URL of a file's bytes. Defaults to the owner's batch target files route. */
+export type ViewerFileUrl = (filename: string, opts: { download: boolean }) => string
+
 type Obj = Record<string, unknown>
 
 function isObj(v: unknown): v is Obj {
@@ -43,14 +49,17 @@ export function WrittenFileViewer({
   index,
   onIndexChange,
   onClose,
+  fileUrl,
 }: {
   batchId: string
   targetId: string
-  files: BatchWrittenFile[]
+  files: ViewerFile[]
   /** Index into `files`; null = closed. */
   index: number | null
   onIndexChange: (index: number) => void
   onClose: () => void
+  /** Supplies the file URL for a shared batch; omitted for the owner's own batch. */
+  fileUrl?: ViewerFileUrl
 }) {
   const file = index !== null ? (files[index] ?? null) : null
   const open = file !== null && index !== null
@@ -74,7 +83,9 @@ export function WrittenFileViewer({
     return () => window.removeEventListener('keydown', onKey)
   }, [open, index, files.length, onIndexChange])
 
-  const downloadHref = file ? api.batchTargetFileUrl(batchId, targetId, file.filename, { download: true }) : ''
+  const urlFor: ViewerFileUrl = fileUrl ?? ((name, o) =>
+    api.batchTargetFileUrl(batchId, targetId, name, o.download ? { download: true } : undefined))
+  const downloadHref = file ? urlFor(file.filename, { download: true }) : ''
   const sharepoint = file ? safeHref(file.web_url) : null
 
   const prevDisabled = index === null || index <= 0
@@ -165,6 +176,8 @@ export function WrittenFileViewer({
           targetId={targetId}
           file={file}
           downloadHref={downloadHref}
+          viewUrl={urlFor(file.filename, { download: false })}
+          shared={fileUrl !== undefined}
         />
       )}
     </Modal>
@@ -176,15 +189,19 @@ function FileBody({
   targetId,
   file,
   downloadHref,
+  viewUrl,
+  shared,
 }: {
   batchId: string
   targetId: string
-  file: BatchWrittenFile
+  file: ViewerFile
   downloadHref: string
+  viewUrl: string
+  shared: boolean
 }) {
   const q = useQuery({
-    queryKey: ['batch-target-file', batchId, targetId, file.filename, file.sha256],
-    queryFn: ({ signal }) => api.fetchBatchTargetFile(batchId, targetId, file.filename, signal),
+    queryKey: [shared ? 'shared-batch-file' : 'batch-target-file', batchId, targetId, file.filename, file.sha256],
+    queryFn: ({ signal }) => api.fetchFileBlob(viewUrl, signal),
     retry: false,
     // Keyed by sha256, so the bytes cannot go stale.
     staleTime: Infinity,

@@ -30,6 +30,8 @@ import {
   suggestedSpotChecks,
 } from '../components/batches/evalHelpers'
 import { Scorecard } from '../components/batches/Scorecard'
+import { IncomingSharesNotice, SharedBatchesTable } from '../components/batches/SharedBatchesSection'
+import { ShareBatchDialog } from '../components/batches/ShareBatchDialog'
 import { PendingReviews } from '../components/batches/PendingReviews'
 import { WrittenFileViewer } from '../components/batches/WrittenFileViewer'
 import { usePromptBatchForm } from '../components/batches/PromptBatchForm'
@@ -155,6 +157,8 @@ function BatchList() {
           </button>
         </div>
       </div>
+
+      <IncomingSharesNotice />
 
       {showFamilies && (
         <div className="panel" style={{ margin: '14px 0' }}>
@@ -287,6 +291,8 @@ function BatchList() {
           </table>
         </div>
       )}
+
+      <SharedBatchesTable />
 
       <CreateBatchModal open={creating} onClose={() => setCreating(false)} />
     </div>
@@ -722,6 +728,7 @@ function BatchDetail({ id }: { id: string }) {
   const askConfirm = useConfirm()
   const queryClient = useQueryClient()
   const [previewing, setPreviewing] = useState(false)
+  const [sharing, setSharing] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [forceOffer, setForceOffer] = useState(false)
 
@@ -912,6 +919,14 @@ function BatchDetail({ id }: { id: string }) {
         <button className="btn" onClick={() => setPreviewing(true)}>
           Preview records
         </button>
+        {targets.some((t) => t.written_files.length > 0) && (
+          <a className="btn" href={api.batchArchiveUrl(id)} download>
+            Download all files (.zip)
+          </a>
+        )}
+        <button className="btn" aria-haspopup="dialog" onClick={() => setSharing(true)}>
+          Share
+        </button>
         {actionError && <span className="error-text">{actionError}</span>}
       </div>
 
@@ -948,6 +963,12 @@ function BatchDetail({ id }: { id: string }) {
 
       <TargetsTable batch={c} targets={targets} busy={busy} act={act} />
 
+      <ShareBatchDialog
+        batchId={id}
+        batchName={c.name}
+        open={sharing}
+        onClose={() => setSharing(false)}
+      />
       <RecordsPreview id={id} open={previewing} onClose={() => setPreviewing(false)} />
     </div>
   )

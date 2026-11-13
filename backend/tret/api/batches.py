@@ -15,10 +15,9 @@ role, like the approvals it drives.
 from __future__ import annotations
 
 import uuid
-from urllib.parse import quote
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,25 +32,16 @@ from tret.api.workspace import (
 )
 from tret.batches import advice, evaluation, experiments, families, pairwise, scoring
 from tret.batches.core import written_files_latest
+from tret.batches.files import FILE_TYPES as _FILE_TYPES  # noqa: F401 - kept importable here
+from tret.batches.files import INLINE_TEXT_MAX_BYTES, serve_file, serve_record
 from tret.batches.rubrics import default_rubric
 from tret.batches.profiles.prompt import CreatePromptBatchBody
 from tret.db.engine import get_db
 from tret.db.models import Batch, BatchTarget, Document, Harness, User
 from tret.services import collections as service
 from tret.services import lifecycle
-from tret.storage import document_bytes
 
 router = APIRouter(prefix="/api", tags=["batches"])
-
-# Text-like written files over this size are download-only (the web viewer renders them inline).
-INLINE_TEXT_MAX_BYTES = 5 * 1024 * 1024
-
-_FILE_TYPES = {
-    ".pdf": "application/pdf",
-    ".md": "text/markdown; charset=utf-8",
-    ".json": "application/json",
-    ".txt": "text/plain; charset=utf-8",
-}
 
 
 def _both(method: str, path: str):
@@ -673,15 +663,7 @@ async def download_record(
     doc = await db.get(Document, uuid.UUID(entry["document_id"])) if entry else None
     if doc is None or (doc.meta or {}).get("batch_id") != str(c.id):
         raise HTTPException(404, "This batch has no stored record file with that name")
-    try:
-        data = await document_bytes(doc)
-    except FileNotFoundError as e:
-        raise HTTPException(404, "The record file is no longer in storage") from e
-    return Response(
-        content=data,
-        media_type=doc.content_type,
-        headers={"Content-Disposition": f'attachment; filename="{doc.filename}"'},
-    )
+    return await serve_record(doc)
 
 
 @_both("get", "/{collection_id}/targets/{target_id}/files")
@@ -710,34 +692,6 @@ async def get_target_file(
     doc = await db.get(Document, doc_id)
     if doc is None or doc.project_id != c.project_id or not doc.storage_path:
         raise HTTPException(404, "This target has no written file at that path")
-    name = path.rsplit("/", 1)[-1].replace('"', "").replace("\r", "").replace("\n", "")
-    ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
-    media_type = _FILE_TYPES.get(ext, "application/octet-stream")
-    capped = not download and media_type != "application/pdf"
-    size = entry.get("byte_size")
-
-    def too_big(n: int) -> HTTPException:
-        return HTTPException(
-            413, f"{name} is {n / 1048576:.1f} MB, over the {INLINE_TEXT_MAX_BYTES // 1048576} MB inline view limit; download it instead."
-        )
-
-    if capped and isinstance(size, int) and size > INLINE_TEXT_MAX_BYTES:
-        raise too_big(size)
-    # No M365 fallback: written_files keep only web_url, not the drive/item id.
-    try:
-        data = await document_bytes(doc)
-    except FileNotFoundError as e:
-        raise HTTPException(404, "The file is no longer in storage") from e
-    if capped and len(data) > INLINE_TEXT_MAX_BYTES:
-        raise too_big(len(data))
-    disposition = "attachment" if download else "inline"
-    ascii_name = name.encode("ascii", "replace").decode("ascii")  # header values are latin-1
-    return Response(
-        content=data,
-        media_type=media_type,
-        headers={
-            "Content-Disposition": f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name, safe='')}",
-            "X-Content-Type-Options": "nosniff",
-            "Cache-Control": "private, no-store",
-        },
+    return await serve_file(
+        doc, path, entry.get("byte_size"), download=download, inline_max=INLINE_TEXT_MAX_BYTES
     )

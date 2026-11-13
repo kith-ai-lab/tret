@@ -62,6 +62,7 @@ from tret.db.models import ConnectionActivity, Document, WorkspaceConnection
 from tret.engine.extensions import get_extension_registry
 from tret.net import EgressDenied, build_client
 from tret.net.policy import MODE_OFF, VERIFY_NONE, VERIFY_PUBLIC, ClassPolicy, master_mode
+from tret.services.blobs import delete_blob_unless_referenced
 from tret.services.credentials import get_fernet
 from tret.services.documents import MAX_DOCUMENT_BYTES, ingest_document
 from tret.storage import document_key, get_store
@@ -1893,7 +1894,7 @@ async def materialize_connected_file(
         storage_path = await store.local_path(key)
     except BaseException:
         if created:
-            await store.delete(key)
+            await delete_blob_unless_referenced(db, store, key)
         raise
 
     try:
