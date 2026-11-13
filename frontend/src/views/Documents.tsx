@@ -30,6 +30,14 @@ function useCurrentProjectId(documents: TretDocument[], documentsLoaded: boolean
   return documents[0]?.project_id ?? fallbackQuery.data ?? null
 }
 
+
+/** Where a copied file came from: "workspace, batch" off `meta.shared_from`. */
+function sharedFromTitle(meta: unknown): string {
+  const from = (meta as { shared_from?: { workspace_name?: string; batch_name?: string } } | null)
+    ?.shared_from
+  return from ? `Shared from ${from.workspace_name ?? 'another workspace'}, batch ${from.batch_name ?? ''}` : 'Shared file'
+}
+
 export function Documents() {
   const queryClient = useQueryClient()
   const documentsQuery = useQuery({ queryKey: ['documents'], queryFn: api.listDocuments })
@@ -74,6 +82,10 @@ export function Documents() {
         d.source_kind === 'web' ? (
           <span title={String((d.meta as { url?: string }).url ?? '')}>
             {d.filename} <span style={{ opacity: 0.6 }}>· web</span>
+          </span>
+        ) : d.source_kind === 'shared' ? (
+          <span title={sharedFromTitle(d.meta)}>
+            {d.filename} <span style={{ opacity: 0.6 }}>· Shared</span>
           </span>
         ) : (
           d.filename

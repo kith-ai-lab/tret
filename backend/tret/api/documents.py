@@ -41,6 +41,7 @@ from tret.services.connections import (
     m365_item_metadata,
     record_connection_activity,
 )
+from tret.services.blobs import delete_blob_unless_referenced
 from tret.services.documents import MAX_DOCUMENT_BYTES, ingest_document
 from tret.storage import BlobStore, document_key, get_store
 
@@ -380,7 +381,7 @@ async def _import_one(
         storage_path = await store.local_path(key)
     except Exception as e:  # noqa: BLE001
         if created:
-            await store.delete(key)
+            await delete_blob_unless_referenced(db, store, key)
         raise RuntimeError(f"{name}: could not be stored: {e}") from e
 
     try:
@@ -407,7 +408,7 @@ async def _import_one(
         )
     except BaseException:
         if created:
-            await store.delete(key)
+            await delete_blob_unless_referenced(db, store, key)
         raise
     await record_connection_activity(
         db,
@@ -521,7 +522,7 @@ async def import_documents(
             # sha-named path already belonged to another Document row,
             # which must never be unlinked out from under it.
             if created_key is not None:
-                await store.delete(created_key)
+                await delete_blob_unless_referenced(db, store, created_key)
             errors.append({"id": item.id, "name": item.name, "detail": str(exc)})
             continue
         out = _doc_out(doc)

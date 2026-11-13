@@ -299,6 +299,10 @@ PACKAGE_SOURCE_KIND = "package"
 # A batch's run-level record file (manifest, results, summary) kept as a
 # Document: model output, not something a person uploaded.
 BATCH_RECORD_SOURCE_KIND = "batch_record"
+# A file a workspace copied out of a batch another workspace shared with it
+# (`tret.batches.sharing.copy_files`): collected by an agent and reviewed in the
+# OTHER workspace, so here it is third-party content, never a source of numbers.
+SHARED_SOURCE_KIND = "shared"
 
 
 # ── document tools ────────────────────────────────────────────────────────────
@@ -311,6 +315,8 @@ def _document_tier_label(source_kind: str | None) -> str:
         return " REVIEWED PACKAGE EXTRACT"
     if source_kind == BATCH_RECORD_SOURCE_KIND:
         return " BATCH RECORD"
+    if source_kind == SHARED_SOURCE_KIND:
+        return " SHARED FILE"
     return ""
 
 
@@ -356,6 +362,19 @@ def _document_banner(doc: Document) -> str:
             "kept and that their extracted text matches the source; it does not establish table "
             "accuracy or reading order. No number here may be cited — numeric values still come "
             "only from lookup_dataset or run_method.]\n\n"
+        )
+    if doc.source_kind == SHARED_SOURCE_KIND:
+        meta = doc.meta or {}
+        origin = meta.get("shared_from") if isinstance(meta.get("shared_from"), dict) else {}
+        # Both names are chosen by the other workspace: a double quote in one must not
+        # end the quoted field and let the rest read as part of this banner.
+        workspace_name = _frame_safe(origin.get("workspace_name")).replace('"', "'")
+        batch_name = _frame_safe(origin.get("batch_name")).replace('"', "'")
+        return (
+            f"[SHARED FILE from workspace \"{workspace_name}\", "
+            f"batch \"{batch_name}\": reviewed there, not in this "
+            "workspace. Third-party content; never a source of numbers. No number here may be "
+            "cited — numeric values still come only from lookup_dataset or run_method.]\n\n"
         )
     return ""
 

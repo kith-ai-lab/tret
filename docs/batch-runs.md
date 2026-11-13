@@ -189,6 +189,62 @@ of the target's `written_files[*].filename` exactly (anything else is a 404), te
 over 5 MB are refused for inline viewing (413) and `download=true` returns any file as an
 attachment. There is no SharePoint fallback: a file whose stored copy is gone is a 404.
 
+## Sharing a batch with another workspace
+
+A workspace can share a batch, read-only, with another workspace. The recipient sees the
+batch name, its rows and their statuses, the evaluation score of each row, what was
+reported for each row (a disclosure row's outcome summary and fields, a prompt row's
+answer) and the files written for each row, and can open or download them, download the
+whole batch as one zip, or copy the files into its own document library. It never sees run
+transcripts, costs, models, settings, findings, lessons, experiments, the batch record files
+(`results.jsonl`, `manifest.json`, `results_summary.md`) or the SharePoint links the files
+were uploaded to. (A packaged row's files include its package record, which says which
+pages were kept and why.) A shared batch does not appear in the recipient's own
+batch list, family leaderboard, advice or router evidence, and the ordinary
+`/api/batches/{id}` routes keep answering 404 to any workspace that does not own the batch.
+
+- **Share.** On the batch, an approver adds a recipient: either an email address (the share
+  is `pending` until that person accepts it from the workspace they want it in) or a
+  workspace they belong to (active at once). Sharing the same batch with the same recipient
+  twice returns the existing share; a batch cannot be shared with its own workspace. Any
+  batch status can be shared, and the recipient's view is live: it follows the batch as it
+  changes. `POST /api/batches/{id}/shares` with `{"email": ...}` or `{"workspace_id": ...}`,
+  `GET /api/batches/{id}/shares` to list them.
+- **Accept.** `GET /api/batch-shares/incoming` lists pending shares addressed to the signed-in
+  person's own email (the same verified-email rule invites use). An approver of the
+  workspace they are acting in accepts with `POST /api/batch-shares/{id}/accept`, or anyone
+  with that email declines with `POST /api/batch-shares/{id}/decline`. A wrong email, an
+  unknown share and a share that is no longer pending all answer 404.
+- **Revoke.** The owner revokes with `DELETE /api/batches/{id}/shares/{share_id}`; access
+  ends at once. The recipient can drop a shared batch from its list with
+  `DELETE /api/shared-batches/{id}`. Archiving the owner workspace also stops its shares
+  resolving. Files a recipient already copied stay with the recipient.
+- **View.** `GET /api/shared-batches` and `GET /api/shared-batches/{id}` (the detail adds the
+  rows). Every response is built from a fixed list of fields. A batch that is not shared
+  with the caller's workspace, or whose share is pending, declined or revoked, is the same
+  404 as a batch that does not exist.
+- **Files.** `GET /api/shared-batches/{id}/targets/{target_id}/files?path=` serves one row
+  file exactly like the owner route (same type allowlist, 5 MB inline cap for text,
+  `download=true`). There is no route for the batch's record files: they stay with the
+  owner. A batch whose rows have no uploaded files (no write target) offers each row's approved
+  package documents instead.
+- **Zip.** `GET /api/shared-batches/{id}/archive` (and `GET /api/batches/{id}/archive` for
+  the owner) streams a zip with `<row slug>/<file>` for every row file and a root
+  `manifest.json` (batch, file list with SHA-256 and sizes, and any file missing from
+  storage). The owner's zip also has `records/<name>` for the stored record files; the
+  recipient's never does. The zip is written file by file, so a large batch does not
+  have to fit in memory.
+- **Copy files.** An approver of the recipient workspace can copy a shared batch's files
+  into its document library with `POST /api/shared-batches/{id}/copy-files`
+  (`{"target_ids": [...]}`, or null for every row). Each file becomes a new document row in
+  that workspace's project pointing at the same stored bytes (nothing is duplicated), with
+  `meta.shared_from` naming the batch, the sharing workspace and the source row, and the
+  source's descriptive keys (title, url, role, stem, hashes). A copy has source kind
+  `shared`, shown as Shared in the Documents list: an agent reading it is told it is
+  third-party content reviewed in another workspace and never a source of numbers. Copying is
+  idempotent, and the copies stay readable if the owner's own document rows are later
+  removed: a stored file is only deleted when no document row refers to it any more.
+
 ## Records and where they go
 
 `POST /api/batches/{id}/finalize` (approver role) writes the batch's run-level

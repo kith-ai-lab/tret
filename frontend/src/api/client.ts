@@ -3393,6 +3393,99 @@ export interface CreatePromptBatchBody {
   evaluation?: BatchEvaluationBody | null
 }
 
+// ── Batch sharing (read-only share of a batch with another workspace) ───
+
+export type BatchShareStatus = 'pending' | 'active' | 'declined' | 'revoked'
+
+/** backend: ShareOut, as the owner workspace sees it. */
+export interface BatchShare {
+  id: string
+  batch_id: string
+  status: BatchShareStatus
+  recipient_email: string | null
+  recipient_workspace: { id: string; name: string } | null
+  created_by: { id: string; email: string; name?: string | null } | null
+  created_at: string
+  accepted_at: string | null
+  revoked_at: string | null
+}
+
+export type CreateBatchShareBody = { email: string } | { workspace_id: string }
+
+/** GET /batch-shares/incoming: a pending share addressed to the current user. */
+export interface IncomingBatchShare {
+  id: string
+  batch: { id: string; name: string; profile: BatchProfile; counts: { total: number } }
+  from_workspace: { name: string }
+  shared_by: { email: string; name?: string | null } | null
+  created_at: string
+}
+
+export interface SharedBatchFile {
+  filename: string
+  sha256: string
+  byte_size: number
+  uploaded_at: string
+  /** Never sent for a shared batch; present so the file viewer can take either shape. */
+  web_url?: null
+}
+
+/** A row of a shared batch (whitelisted: no cost, model, run or history). */
+export interface SharedBatchTarget {
+  id: string
+  position: number
+  slug: string
+  label: string
+  status: BatchTargetStatus
+  // Disclosure-only keys (absent or null on prompt rows).
+  company?: string | null
+  market?: string | null
+  domicile_country?: string | null
+  sector?: string | null
+  category?: string | null
+  expected_form?: string | null
+  fiscal_year?: number | null
+  task_input?: Record<string, unknown> | null
+  outcome?: BatchTargetOutcome | null
+  /** The contract names `score` and `status`; `quality` is accepted too, since the owner view calls it that. */
+  evaluation?: { score?: number | null; quality?: number | null; status?: string | null } | null
+  files: SharedBatchFile[]
+  started_at?: string | null
+  finished_at?: string | null
+}
+
+/** A batch shared with the current workspace (whitelisted). `targets` only on the detail route. */
+export interface SharedBatch {
+  id: string
+  name: string
+  run_slug: string
+  profile: BatchProfile
+  status: BatchStatus
+  created_at: string
+  started_at: string | null
+  finalized_at: string | null
+  counts: { total: number; by_status: Partial<Record<BatchTargetStatus, number>> }
+  quality_mean: number | null
+  evaluation_status: string | null
+  file_count: number
+  byte_size: number
+  share: {
+    id: string
+    from_workspace: { name: string }
+    shared_by: { email: string; name?: string | null } | null
+    shared_at: string
+    accepted_at: string
+  }
+  targets?: SharedBatchTarget[]
+}
+
+export interface CopyFilesResult {
+  copied: number
+  skipped: number
+  missing: number
+  documents: { id: string; filename: string; target_slug: string }[]
+}
+
 // ── Experiments (E4a): arms of one batch family, a person starts and promotes ──
 
 export type ExperimentMode = 'replicate' | 'split'
@@ -4294,8 +4387,10 @@ export const api = {
     tid: string,
     path: string,
     signal?: AbortSignal,
-  ): Promise<Blob> => {
-    const res = await fetch(api.batchTargetFileUrl(id, tid, path), {
+  ): Promise<Blob> => api.fetchFileBlob(api.batchTargetFileUrl(id, tid, path), signal),
+  /** Fetch any same-origin file URL as a Blob; throws `ApiError` on a non-2xx response. */
+  fetchFileBlob: async (url: string, signal?: AbortSignal): Promise<Blob> => {
+    const res = await fetch(url, {
       credentials: 'include',
       signal,
     })
@@ -4317,6 +4412,38 @@ export const api = {
     }
     return await res.blob()
   },
+
+  // batch sharing. Owner side: share/revoke are approver-only, the list is for
+  // any member. Recipient side: accept, remove and copy are approver-only.
+  createBatchShare: (id: string, body: CreateBatchShareBody) =>
+    request<BatchShare>(`/batches/${id}/shares`, { method: 'POST', body }),
+  listBatchShares: (id: string) =>
+    request<{ shares: BatchShare[] }>(`/batches/${id}/shares`).then((r) => r.shares ?? []),
+  revokeBatchShare: (id: string, shareId: string) =>
+    request<{ ok: boolean }>(`/batches/${id}/shares/${shareId}`, { method: 'DELETE' }),
+  /** The owner's own batch as one zip (every written file plus the records). */
+  batchArchiveUrl: (id: string) => `/api/batches/${id}/archive`,
+  listIncomingBatchShares: () =>
+    request<{ shares: IncomingBatchShare[] }>('/batch-shares/incoming').then((r) => r.shares ?? []),
+  acceptBatchShare: (shareId: string) =>
+    request<SharedBatch>(`/batch-shares/${shareId}/accept`, { method: 'POST' }),
+  declineBatchShare: (shareId: string) =>
+    request<{ ok: boolean }>(`/batch-shares/${shareId}/decline`, { method: 'POST' }),
+  listSharedBatches: () =>
+    request<{ batches: SharedBatch[] }>('/shared-batches').then((r) => r.batches ?? []),
+  getSharedBatch: (id: string) => request<SharedBatch>(`/shared-batches/${id}`),
+  removeSharedBatch: (id: string) =>
+    request<{ ok: boolean }>(`/shared-batches/${id}`, { method: 'DELETE' }),
+  sharedBatchFileUrl: (id: string, tid: string, path: string, opts?: { download?: boolean }) =>
+    `/api/shared-batches/${id}/targets/${tid}/files?path=${encodeURIComponent(path)}${
+      opts?.download ? '&download=true' : ''
+    }`,
+  sharedBatchArchiveUrl: (id: string) => `/api/shared-batches/${id}/archive`,
+  copySharedBatchFiles: (id: string, targetIds: string[] | null = null) =>
+    request<CopyFilesResult>(`/shared-batches/${id}/copy-files`, {
+      method: 'POST',
+      body: { target_ids: targetIds },
+    }),
   decideFindingsBatch: (
     ids: string[],
     action: 'approve' | 'reject',
