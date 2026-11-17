@@ -64,6 +64,7 @@ from tret.api.oidc_bearer import authenticate_bearer, bearer_auth_enabled
 from tret.config import Settings, get_settings
 from tret.db.engine import get_db
 from tret.db.models import User, Workspace, WorkspaceMember
+from tret.services.edition import resolve_edition
 from tret.services.identity import (
     account_email_is_verified,
     live_workspaces,
@@ -329,6 +330,9 @@ class AuthConfigOut(BaseModel):
     auth_mode: str
     oidc_configured: bool
     oidc_login_url: str | None = None
+    # The deployment default UI edition (a workspace may override it; see
+    # `UserOut.edition`).
+    edition: str = "standard"
 
 
 @router.get("/config", response_model=AuthConfigOut)
@@ -347,6 +351,7 @@ async def auth_config():
         auth_mode=settings.auth_mode,
         oidc_configured=configured,
         oidc_login_url="/api/auth/oidc/login" if configured else None,
+        edition=settings.edition,
     )
 
 
@@ -387,6 +392,9 @@ class UserOut(BaseModel):
     # `api/workspace.py::current_workspace` uses, so what this reports is what
     # workspace-scoped calls actually operate on.
     current_workspace_id: uuid.UUID | None = None
+    # UI edition for the current workspace: its own override, else the
+    # deployment default. Presentation only, not an access control.
+    edition: str = "standard"
 
 
 async def _resolve_workspaces(
@@ -442,6 +450,7 @@ async def _user_out(
     workspaces, role, current_workspace_id = await _resolve_workspaces(
         db, user, preferred_wid=preferred_wid
     )
+    current = await db.get(Workspace, current_workspace_id) if current_workspace_id else None
     return UserOut(
         id=user.id,
         email=user.email,
@@ -451,6 +460,7 @@ async def _user_out(
         active=not user.disabled,
         workspaces=workspaces,
         current_workspace_id=current_workspace_id,
+        edition=resolve_edition(current.settings if current else None, get_settings().edition),
     )
 
 

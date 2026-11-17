@@ -34,6 +34,9 @@ export interface User {
   // recently joined team, else the first) — the same one workspace-scoped
   // calls use — so a client never has to pick before anything works.
   current_workspace_id: string | null
+  // UI edition for the current workspace (workspace override, else the
+  // deployment default). Optional: absent from older servers.
+  edition?: 'standard' | 'cohort'
 }
 
 /** One pending invite addressed to the current user (backend:
@@ -52,6 +55,7 @@ export interface AuthConfig {
   auth_mode: 'password' | 'oidc' | 'both'
   oidc_configured: boolean
   oidc_login_url: string | null
+  edition?: 'standard' | 'cohort'
 }
 
 /** One member of the current workspace (backend: api/workspaces.py::MemberOut,
@@ -1178,8 +1182,10 @@ export interface Dataset {
 export type DatasetRow = Record<string, unknown>
 
 /** `packaging` = page map approved only so its pages can be packaged; not a
- *  quality review. Server default (and absent value) is `review`. */
-export type ApprovalPurpose = 'review' | 'packaging'
+ *  quality review. `auto` = approved automatically by the workspace's
+ *  auto-approve policy (never sent by a client); also not a review. Server
+ *  default (and absent value) is `review`. */
+export type ApprovalPurpose = 'review' | 'packaging' | 'auto'
 
 export interface ApprovalRecord {
   action: string // approve | reject
@@ -4919,4 +4925,29 @@ export const telemetryApi = {
   getTelemetryPreview: () => request<TelemetryPreview>('/admin/telemetry/preview'),
   setTelemetryEnabled: (enabled: boolean) =>
     request<TelemetryStatus>('/admin/telemetry', { method: 'PUT', body: { enabled } }),
+}
+
+// ── Automatic approvals ────────────────────────────────────────────────────
+// Which agent outputs this workspace approves at creation instead of queueing
+// them for a person (backend: api/auto_approve.py, services/auto_approve.py).
+// Any member can read it; only a workspace admin/owner can change it. A
+// package_map is never auto-approved and is not a category here.
+
+export type AutoApproveCategory = 'draft_section' | 'connected_write' | 'findings'
+
+export interface AutoApproveSettings {
+  /** The workspace's own list; null = no override (the deployment default applies). */
+  override: AutoApproveCategory[] | null
+  effective: AutoApproveCategory[]
+  default: AutoApproveCategory[]
+}
+
+export const autoApproveApi = {
+  get: () => request<AutoApproveSettings>('/workspace/settings/auto-approve'),
+  /** `null` clears the workspace override. */
+  set: (categories: AutoApproveCategory[] | null) =>
+    request<AutoApproveSettings>('/workspace/settings/auto-approve', {
+      method: 'PUT',
+      body: { categories },
+    }),
 }

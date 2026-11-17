@@ -122,6 +122,11 @@
             "title": "Auth Mode",
             "type": "string"
           },
+          "edition": {
+            "default": "standard",
+            "title": "Edition",
+            "type": "string"
+          },
           "oidc_configured": {
             "title": "Oidc Configured",
             "type": "boolean"
@@ -159,6 +164,35 @@
           }
         },
         "title": "AuthorizeBody",
+        "type": "object"
+      },
+      "AutoApproveBody": {
+        "additionalProperties": false,
+        "properties": {
+          "categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "draft_section",
+                    "connected_write",
+                    "findings"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Categories"
+          }
+        },
+        "required": [
+          "categories"
+        ],
+        "title": "AutoApproveBody",
         "type": "object"
       },
       "Body_install_archive_api_packs_install_archive_post": {
@@ -879,6 +913,31 @@
           "action"
         ],
         "title": "DecideBatchBody",
+        "type": "object"
+      },
+      "EditionBody": {
+        "additionalProperties": false,
+        "properties": {
+          "edition": {
+            "anyOf": [
+              {
+                "enum": [
+                  "standard",
+                  "cohort"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edition"
+          }
+        },
+        "required": [
+          "edition"
+        ],
+        "title": "EditionBody",
         "type": "object"
       },
       "EgressOverride": {
@@ -2161,6 +2220,11 @@
           },
           "display_name": {
             "title": "Display Name",
+            "type": "string"
+          },
+          "edition": {
+            "default": "standard",
+            "title": "Edition",
             "type": "string"
           },
           "email": {
@@ -9826,6 +9890,62 @@
         ]
       }
     },
+    "/api/workspace/settings/auto-approve": {
+      "get": {
+        "operationId": "get_auto_approve_api_workspace_settings_auto_approve_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Auto Approve",
+        "tags": [
+          "auto-approve"
+        ]
+      },
+      "put": {
+        "operationId": "put_auto_approve_api_workspace_settings_auto_approve_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AutoApproveBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Auto Approve",
+        "tags": [
+          "auto-approve"
+        ]
+      }
+    },
     "/api/workspace/settings/budget": {
       "delete": {
         "operationId": "delete_budget_settings_api_workspace_settings_budget_delete",
@@ -9897,6 +10017,45 @@
         "summary": "Put Budget Settings",
         "tags": [
           "budgets"
+        ]
+      }
+    },
+    "/api/workspace/settings/edition": {
+      "put": {
+        "operationId": "put_edition_api_workspace_settings_edition_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditionBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Edition",
+        "tags": [
+          "edition"
         ]
       }
     },

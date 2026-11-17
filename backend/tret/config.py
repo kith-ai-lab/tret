@@ -247,7 +247,7 @@ class Settings(BaseSettings):
     @field_validator("instance_lock", mode="before")
     @classmethod
     def _known_instance_lock_mode(cls, value):
-        candidate = str(value if value is not None else "").strip().lower()
+        candidate = str(value if value is not None else "").strip().lower() or "standard"
         if candidate not in ("warn", "strict", "off"):
             raise ValueError(f"instance_lock must be one of warn|strict|off, got {value!r}")
         return candidate
@@ -337,6 +337,20 @@ class Settings(BaseSettings):
     # flag and the router mount (main.py) are deliberately independent
     # switches, the same way `multi_tenant` and OIDC are.
     auth_mode: str = "password"  # password | oidc | both
+
+    # Which screens the web UI shows by default: "standard" (everything) or
+    # "cohort" (a lean set for a course). A workspace can override it
+    # (PUT /api/workspace/settings/edition). It only shapes the UI's
+    # navigation; it is not an access control and gates no API route.
+    edition: str = "standard"
+
+    # Categories of agent output approved automatically at creation, in every
+    # workspace that has not set its own list (TRET_AUTO_APPROVE_DEFAULT,
+    # comma-separated; a subset of `services/auto_approve.py::
+    # AUTO_APPROVE_CATEGORIES`). Empty (the default) keeps every draft waiting
+    # for a human. A workspace overrides it via PUT /api/workspace/settings/
+    # auto-approve. `list[str] | None` for the same reason as `extensions`.
+    auto_approve_default: list[str] | None = None
 
     # Generic OIDC login (tret/api/oidc.py) via authlib — deliberately never an
     # Auth0 SDK, so any spec-compliant issuer works (Auth0, Okta, Keycloak,
@@ -429,9 +443,38 @@ class Settings(BaseSettings):
     @field_validator("auth_mode", mode="before")
     @classmethod
     def _known_auth_mode(cls, value):
-        candidate = str(value if value is not None else "").strip().lower()
+        candidate = str(value if value is not None else "").strip().lower() or "standard"
         if candidate not in ("password", "oidc", "both"):
             raise ValueError(f"auth_mode must be one of password|oidc|both, got {value!r}")
+        return candidate
+
+    @field_validator("auto_approve_default", mode="before")
+    @classmethod
+    def _parse_auto_approve_default(cls, value):
+        """Comma-separated categories; None/blank mean none. An unknown name is
+        a boot-time error rather than a silently ignored typo, because a
+        misspelt category would leave drafts waiting that the operator meant
+        to have approved."""
+        from tret.services.auto_approve import AUTO_APPROVE_CATEGORIES
+
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [c.strip() for c in value.split(",") if c.strip()]
+        unknown = [c for c in value if c not in AUTO_APPROVE_CATEGORIES]
+        if unknown:
+            raise ValueError(
+                f"auto_approve_default has unknown categories {unknown!r}; "
+                f"allowed: {', '.join(AUTO_APPROVE_CATEGORIES)}"
+            )
+        return list(dict.fromkeys(value))
+
+    @field_validator("edition", mode="before")
+    @classmethod
+    def _known_edition(cls, value):
+        candidate = str(value if value is not None else "").strip().lower() or "standard"
+        if candidate not in ("standard", "cohort"):
+            raise ValueError(f"edition must be one of standard|cohort, got {value!r}")
         return candidate
 
     # This deployment's own public base URL — the one place it has to be
@@ -468,7 +511,7 @@ class Settings(BaseSettings):
     @field_validator("email_mode", mode="before")
     @classmethod
     def _known_email_mode(cls, value):
-        candidate = str(value if value is not None else "").strip().lower()
+        candidate = str(value if value is not None else "").strip().lower() or "standard"
         if candidate not in ("off", "resend", "smtp"):
             raise ValueError(f"email_mode must be one of off|resend|smtp, got {value!r}")
         return candidate
@@ -613,7 +656,7 @@ class Settings(BaseSettings):
     @field_validator("telemetry", mode="before")
     @classmethod
     def _known_telemetry_mode(cls, value):
-        candidate = str(value if value is not None else "").strip().lower()
+        candidate = str(value if value is not None else "").strip().lower() or "standard"
         if candidate not in ("admin", "off", "on"):
             raise ValueError(f"telemetry must be one of admin|off|on, got {value!r}")
         return candidate

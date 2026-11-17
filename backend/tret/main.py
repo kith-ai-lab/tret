@@ -13,6 +13,7 @@ from tret import __version__
 from tret.api import (
     analytics,
     auth,
+    auto_approve as auto_approve_api,
     batch_shares as batch_shares_api,
     batches as batches_api,
     budgets as budgets_api,
@@ -20,6 +21,7 @@ from tret.api import (
     connections as connections_api,
     docs,
     documents,
+    edition as edition_api,
     emissions_settings as emissions_settings_api,
     findings,
     harnesses,
@@ -468,6 +470,8 @@ def create_app() -> FastAPI:
     app.include_router(packs.router)
     app.include_router(settings_api.router)
     app.include_router(emissions_settings_api.router)
+    app.include_router(edition_api.router)
+    app.include_router(auto_approve_api.router)
     # Per-workspace period spend budget settings (tret/api/budgets.py) — same
     # "/api/workspace/settings/..." convention as emissions settings above.
     app.include_router(budgets_api.router)

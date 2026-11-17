@@ -1,4 +1,6 @@
-import { Navigate, Route, Routes, useParams } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom'
+
+import { isRouteHidden, useEdition } from './edition'
 
 import { Analytics } from './views/Analytics'
 import { Approvals } from './views/Approvals'
@@ -27,6 +29,10 @@ function CollectionRedirect() {
 }
 
 export function AppRoutes() {
+  const edition = useEdition()
+  const { pathname } = useLocation()
+  // A hidden route in this edition bounces home (standard hides nothing).
+  if (isRouteHidden(edition, pathname)) return <Navigate to="/" replace />
   return (
     <Routes>
       <Route path="/" element={<Chat />} />

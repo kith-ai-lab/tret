@@ -1074,7 +1074,10 @@ def test_auth_config_password_only(client, monkeypatch):
     get_settings.cache_clear()
     try:
         body = client.get("/api/auth/config").json()
-        assert body == {"auth_mode": "password", "oidc_configured": False, "oidc_login_url": None}
+        assert body == {
+            "auth_mode": "password", "oidc_configured": False, "oidc_login_url": None,
+            "edition": "standard",
+        }
     finally:
         get_settings.cache_clear()
 
@@ -1088,6 +1091,7 @@ def test_auth_config_oidc_configured(client, monkeypatch):
             "auth_mode": "oidc",
             "oidc_configured": True,
             "oidc_login_url": "/api/auth/oidc/login",
+            "edition": "standard",
         }
     finally:
         get_settings.cache_clear()

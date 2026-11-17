@@ -267,7 +267,9 @@ function FindingDetailPane({ findingId }: { findingId: string }) {
                       </span>
                     )}
                   </td>
-                  <td title={a.approver_id}>{a.approver_id.slice(0, 8)}</td>
+                  <td title={a.approver_id}>
+                    {a.purpose === 'auto' ? 'Approved automatically' : a.approver_id.slice(0, 8)}
+                  </td>
                   <td>{a.note ?? '—'}</td>
                 </tr>
               ))}

@@ -7,6 +7,7 @@ import { api, ApiError, type User } from './api/client'
 import { LIGHT_ONLY } from './brand'
 import { ErrorBoundary } from './components/shared/ErrorBoundary'
 import { FirstRunSetup } from './components/shared/FirstRunSetup'
+import { normalizeEdition, visibleNav } from './edition'
 import { AppRoutes } from './router'
 import { Login } from './views/Login'
 
@@ -38,20 +39,6 @@ function useTheme(): [Theme, () => void] {
 
 type NavCountKey = 'approvals' | 'deliverables'
 
-const NAV: { to: string; label: string; count?: NavCountKey }[] = [
-  { to: '/', label: 'Chat' },
-  { to: '/workbench', label: 'Workbench' },
-  { to: '/runs', label: 'Runs' },
-  { to: '/approvals', label: 'Approvals', count: 'approvals' },
-  { to: '/batches', label: 'Batches' },
-  { to: '/analytics', label: 'Analytics' },
-  { to: '/emissions', label: 'Emissions' },
-  { to: '/deliverables', label: 'Deliverables', count: 'deliverables' },
-  { to: '/documents', label: 'Documents' },
-  { to: '/packs', label: 'Packs' },
-  { to: '/harnesses', label: 'Harnesses' },
-  { to: '/settings', label: 'Settings' },
-]
 
 export default function App() {
   const queryClient = useQueryClient()
@@ -132,6 +119,7 @@ function Sidebar({
   onLogout: () => void
 }) {
   const counts = useNavCounts()
+  const edition = normalizeEdition(user.edition)
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">
@@ -139,13 +127,13 @@ function Sidebar({
       </div>
       {user.workspaces.length >= 1 && <WorkspaceSwitcher user={user} />}
       <nav>
-        {NAV.map((n) => (
+        {visibleNav(edition).map((n) => (
           <NavLink key={n.to} to={n.to} end={n.to === '/'}>
             <span>{n.label}</span>
             {n.count && <NavCount count={counts[n.count]} what={n.count} />}
           </NavLink>
         ))}
-        <MarketplaceReviewNavItem />
+        {edition !== 'cohort' && <MarketplaceReviewNavItem />}
       </nav>
       {!LIGHT_ONLY && (
         <button
