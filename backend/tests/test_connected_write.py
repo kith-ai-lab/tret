@@ -245,7 +245,12 @@ async def test_propose_with_deliverable_renders_at_approval_not_now(
     )
 
     finding = (await ctx.db.execute(select(Finding).where(Finding.schema_slug == "connected_write"))).scalars().one()
-    assert finding.payload["source"] == {"kind": "deliverable", "slug": "tcfd-report", "format": "html"}
+    assert finding.payload["source"] == {
+        "kind": "deliverable",
+        "slug": "tcfd-report",
+        "format": "html",
+        "theme": "plain",
+    }
     # The extension is forced to match the render format, even though the
     # model asked for "report.txt".
     assert finding.payload["filename"] == "report.txt".replace(".txt", ".html")

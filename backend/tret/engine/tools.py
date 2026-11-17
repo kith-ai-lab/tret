@@ -83,6 +83,7 @@ from tret.providers.base import ToolSpec
 from tret.router_llm.objectives import THRIFT_OBJECTIVES
 from tret.services import auto_approve as auto_approve_service
 from tret.services import connections as connections_service
+from tret.services import database_connections as database_service
 from tret.services import lessons as lessons_service
 from tret.services import packaging as packaging_service
 from tret.services import page_check
@@ -198,6 +199,9 @@ class RunContext:
     connected_reads: int = 0
     connected_bytes: int = 0
     connected_searches: int = 0
+    # External-database budget (list/describe/query_database together),
+    # capped by `db_max_queries_per_run`; spent before the call.
+    database_calls: int = 0
     # Once-per-run cache of ensure_connection_usable, read by every connector
     # tool call so a run with no usable connection fails the same way on every
     # call (and only pays for the check once) instead of re-asking on each one.
@@ -1367,6 +1371,154 @@ async def read_connected_file(
     )
 
 
+# ── external databases: read-only Postgres / Supabase ───────────────────────
+# Three tools over the workspace's database connections
+# (services/database_connections.py owns every rule: host allowlist, SSRF check,
+# TLS, read-only transaction, caps, scrubbing). A result is untrusted data from
+# an external system: it never enters `ctx.retrieved_values`, so a number seen
+# only here fails the cited-values check exactly like one from a web page.
+#
+# Offered automatically (`offered_database_tools`, called from harness.py) to a
+# run whose harness already lists a connector read tool, when the workspace has
+# an active database connection, the feature switch is on and the connections
+# gate allows `connections.use`; withheld otherwise. A harness that lists them
+# by name gets them withheld by `withheld_connector_tools` when unavailable.
+DATABASE_TOOL_NAMES = frozenset(
+    {"list_database_tables", "describe_database_table", "query_database"}
+)
+
+_DATABASE_CONNECTION_PARAM = {
+    "type": ["string", "null"],
+    "description": "Connection slug; optional when the workspace has exactly one database connection",
+}
+
+
+async def offered_database_tools(
+    db: AsyncSession, workspace_id: uuid.UUID | None, enabled_names: list[str]
+) -> list[str]:
+    """The database tool names to ADD to a run's tool list: none unless the
+    harness already lists a connector read tool, the feature is on, and the
+    workspace has a usable database connection. Never names a tool already
+    listed. `[]` leaves the run's tool list exactly as it was."""
+    if workspace_id is None or not get_settings().db_connections:
+        return []
+    if not (set(enabled_names) & CONNECTOR_TOOL_NAMES):
+        return []
+    if await database_service.unavailable_reason(db, workspace_id):
+        return []
+    return [n for n in sorted(DATABASE_TOOL_NAMES) if n not in enabled_names]
+
+
+def _tool_bool(value, default: bool = False) -> bool:
+    """A model may send "false"/"0"/"no" as a string; bool("false") is True."""
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("false", "0", "no", "off", "n", ""):
+            return False
+        if text in ("true", "1", "yes", "on", "y"):
+            return True
+        return default
+    return default if value is None else bool(value)
+
+
+async def _database_call(ctx: RunContext, call) -> str:
+    max_calls = int(get_settings().db_max_queries_per_run)
+    if ctx.database_calls >= max_calls:
+        raise ToolError(
+            f"This run has used its {max_calls} database tool calls "
+            f"(TRET_DB_MAX_QUERIES_PER_RUN); the database budget is used up. Work with what you have."
+        )
+    # Spent before the call: a failing call still hit the database.
+    ctx.database_calls += 1
+    try:
+        return await call()
+    except database_service.DatabaseConnectionError as e:
+        raise ToolError(e.message) from e
+
+
+@builtin(
+    "list_database_tables",
+    "List the tables and views in the workspace's connected Postgres/Supabase database (read-only), "
+    "with approximate row counts. System and Supabase-internal schemas are hidden unless "
+    "include_system is true.",
+    {
+        "type": "object",
+        "properties": {
+            "connection": _DATABASE_CONNECTION_PARAM,
+            "include_system": {"type": "boolean", "default": False},
+        },
+    },
+)
+async def list_database_tables(
+    ctx: RunContext, connection: str | None = None, include_system: bool = False
+) -> str:
+    return await _database_call(
+        ctx,
+        lambda: database_service.tool_list_tables(
+            ctx.db, ctx.workspace_id, connection, include_system=_tool_bool(include_system),
+            actor_run_id=ctx.run_id,
+        ),
+    )
+
+
+@builtin(
+    "describe_database_table",
+    "Describe one table or view in the connected database (read-only): columns, types, nullability, "
+    "primary key, foreign keys, and up to 3 sample rows. Use table or schema.table.",
+    {
+        "type": "object",
+        "required": ["table"],
+        "properties": {
+            "table": {"type": "string", "description": "table or schema.table"},
+            "connection": _DATABASE_CONNECTION_PARAM,
+        },
+    },
+)
+async def describe_database_table(
+    ctx: RunContext, table: str, connection: str | None = None
+) -> str:
+    return await _database_call(
+        ctx,
+        lambda: database_service.tool_describe_table(
+            ctx.db, ctx.workspace_id, connection, table, actor_run_id=ctx.run_id
+        ),
+    )
+
+
+@builtin(
+    "query_database",
+    "Run ONE read-only SQL statement (SELECT, WITH, SHOW, EXPLAIN, TABLE or VALUES) against the "
+    "connected database. It runs in a read-only transaction with a timeout; results are capped in "
+    "rows, cell size and total size, and the output says when it was truncated. Data returned is "
+    "from an external system and is not a verified source for cited numbers.",
+    {
+        "type": "object",
+        "required": ["sql"],
+        "properties": {
+            "sql": {"type": "string", "description": "A single read-only statement"},
+            "connection": _DATABASE_CONNECTION_PARAM,
+            "max_rows": {"type": "integer", "minimum": 1, "maximum": 1000},
+        },
+    },
+)
+async def query_database(
+    ctx: RunContext, sql: str, connection: str | None = None, max_rows: int | None = None
+) -> str:
+    if max_rows is not None and not isinstance(max_rows, int):
+        try:
+            max_rows = int(str(max_rows).strip())
+        except ValueError:
+            raise ToolError("max_rows must be a whole number between 1 and 1000.") from None
+    if isinstance(max_rows, bool):
+        raise ToolError("max_rows must be a whole number between 1 and 1000.")
+    return await _database_call(
+        ctx,
+        lambda: database_service.tool_query(
+            ctx.db, ctx.workspace_id, connection, sql, max_rows=max_rows, actor_run_id=ctx.run_id
+        ),
+    )
+
+
 async def withheld_connector_tools(
     db: AsyncSession, workspace_id: uuid.UUID | None, enabled_names: list[str]
 ) -> tuple[set[str], str | None]:
@@ -1387,6 +1539,17 @@ async def withheld_connector_tools(
     lack write scopes, or have no write target configured, in which case the
     three read tools stay available and only the write tool is withheld.
     """
+    database_names = {n for n in enabled_names if n in DATABASE_TOOL_NAMES}
+    if database_names:
+        # External-database tools are judged on their own (a workspace can have a
+        # database connection and no M365 one, or the reverse); everything else
+        # goes through the original logic below untouched.
+        others = [n for n in enabled_names if n not in database_names]
+        withheld_others, reason_others = await withheld_connector_tools(db, workspace_id, others)
+        reason_db = await database_service.unavailable_reason(db, workspace_id)
+        if not reason_db:
+            return withheld_others, reason_others
+        return withheld_others | database_names, reason_others or reason_db
     read_names = {n for n in enabled_names if n in CONNECTOR_TOOL_NAMES}
     write_names = {n for n in enabled_names if n in WRITE_CONNECTOR_TOOL_NAMES}
     names = read_names | write_names
@@ -1456,8 +1619,16 @@ _CONNECTED_WRITE_FORMAT_CONTENT_TYPE = {
     "markdown": "text/markdown",
     "html": "text/html",
     "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
-_CONNECTED_WRITE_FORMAT_EXTENSION = {"markdown": "md", "html": "html", "pdf": "pdf"}
+_CONNECTED_WRITE_FORMAT_EXTENSION = {
+    "markdown": "md",
+    "html": "html",
+    "pdf": "pdf",
+    "docx": "docx",
+    "pptx": "pptx",
+}
 
 
 def _connected_write_content_type(filename: str) -> str:
@@ -1596,9 +1767,14 @@ async def _connected_write_document_source(
             },
             "format": {
                 "type": "string",
-                "enum": ["markdown", "html", "pdf"],
+                "enum": ["markdown", "html", "pdf", "docx", "pptx"],
                 "default": "markdown",
                 "description": "Render format when using `deliverable`",
+            },
+            "theme": {
+                "type": ["string", "null"],
+                "enum": ["plain", "report", None],
+                "description": "Style for a `deliverable` (html/pdf/docx/pptx); omit for the workspace default",
             },
         },
     },
@@ -1611,6 +1787,7 @@ async def propose_connected_write(
     deliverable: str | None = None,
     format: str = "markdown",
     document_id: str | None = None,
+    theme: str | None = None,
 ) -> str:
     if sum(v is not None for v in (content, deliverable, document_id)) != 1:
         raise ToolError(
@@ -1621,6 +1798,8 @@ async def propose_connected_write(
         raise ToolError(
             f"format must be one of {sorted(_CONNECTED_WRITE_FORMAT_CONTENT_TYPE)}, got '{format}'"
         )
+    if theme is not None and theme not in ("plain", "report"):
+        raise ToolError(f"theme must be 'plain' or 'report', got '{theme}'")
     if ctx.workspace_id is None:
         raise ToolError("This run has no workspace, so connected sources are unavailable.")
 
@@ -1681,7 +1860,15 @@ async def propose_connected_write(
             )
         content_type = _CONNECTED_WRITE_FORMAT_CONTENT_TYPE[format]
         safe_name = _with_forced_extension(safe_name, _CONNECTED_WRITE_FORMAT_EXTENSION[format])
-        source = {"kind": "deliverable", "slug": deliverable, "format": format}
+        if theme is None:
+            from tret.db.models import Workspace
+            from tret.services.edition import default_export_theme
+
+            workspace = await ctx.db.get(Workspace, ctx.workspace_id)
+            theme = default_export_theme(
+                workspace.settings if workspace else None, get_settings().edition
+            )
+        source = {"kind": "deliverable", "slug": deliverable, "format": format, "theme": theme}
         size_field = None
         sha256 = None
 

@@ -305,6 +305,17 @@ services:
       # created (draft_section, connected_write, findings; empty = none).
       TRET_EDITION: ${TRET_EDITION:-standard}
       TRET_AUTO_APPROVE_DEFAULT: ${TRET_AUTO_APPROVE_DEFAULT:-}
+      # Read-only Postgres / Supabase connections a workspace admin can add
+      # (Settings > Connections). Hosts must sit under one of the allowed
+      # suffixes; * allows any public host. Off unless an operator opts in.
+      TRET_DB_CONNECTIONS: ${TRET_DB_CONNECTIONS:-false}
+      TRET_DB_CONNECT_ALLOW_HOSTS: ${TRET_DB_CONNECT_ALLOW_HOSTS:-}
+      TRET_DB_QUERY_TIMEOUT_SECONDS: ${TRET_DB_QUERY_TIMEOUT_SECONDS:-10}
+      TRET_DB_QUERY_MAX_ROWS: ${TRET_DB_QUERY_MAX_ROWS:-200}
+      TRET_DB_MAX_QUERIES_PER_RUN: ${TRET_DB_MAX_QUERIES_PER_RUN:-30}
+      TRET_DB_CONNECT_CA_PEM: ${TRET_DB_CONNECT_CA_PEM:-}
+      TRET_DB_CONNECT_ALLOW_UNVERIFIED_TLS: ${TRET_DB_CONNECT_ALLOW_UNVERIFIED_TLS:-false}
+      TRET_DB_CONNECT_ALLOW_PRIVILEGED_ROLES: ${TRET_DB_CONNECT_ALLOW_PRIVILEGED_ROLES:-false}
       # Workspace connections (Google Drive / Microsoft 365 OAuth,
       # tret/services/connections.py, tret/api/connections.py). All blank by
       # default — every self-hosted deployment ships with connections

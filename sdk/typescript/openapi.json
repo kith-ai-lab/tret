@@ -6486,6 +6486,122 @@
         ]
       }
     },
+    "/api/connections/database": {
+      "get": {
+        "operationId": "list_database_connections_api_connections_database_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Database Connections",
+        "tags": [
+          "database-connections"
+        ]
+      },
+      "post": {
+        "operationId": "add_database_connection_api_connections_database_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Add Database Connection",
+        "tags": [
+          "database-connections"
+        ]
+      }
+    },
+    "/api/connections/database/{slug}": {
+      "delete": {
+        "operationId": "remove_database_connection_api_connections_database__slug__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Database Connection",
+        "tags": [
+          "database-connections"
+        ]
+      }
+    },
+    "/api/connections/database/{slug}/test": {
+      "post": {
+        "operationId": "test_database_connection_api_connections_database__slug__test_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Test Database Connection",
+        "tags": [
+          "database-connections"
+        ]
+      }
+    },
     "/api/connections/m365/browse": {
       "get": {
         "description": "Server-side Graph browsing for the m365 import picker (Phase 1) — see\n`services/connections.py::browse_m365` for the scope/params contract.\nAny workspace member: browsing does not touch the stored token or the\nconnection row, only reads through it, so this needs no admin gate. It\ndoes, however, consult the plan gate — `require_connections_gate` with\n`USE_ACTION`, as the first statement in the body, before the m365\nconnection's token is touched at all — because browsing is exercising an\nexisting connection exactly as much as fetching a token or importing a\nfile is (see that helper's docstring for why \"use\" is asked separately\nfrom \"connect\").\n\nA `ConnectionAuthError` here means the same thing it means at `GET\n/{provider}/token` above: the m365 connection needs to be reconnected —\n409, same as that route, for the same \"actionable conflict\" reason.",
@@ -7032,6 +7148,38 @@
               "default": false,
               "title": "Include Draft",
               "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "theme",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Theme"
+            }
+          },
+          {
+            "in": "query",
+            "name": "accent",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Accent"
             }
           }
         ],

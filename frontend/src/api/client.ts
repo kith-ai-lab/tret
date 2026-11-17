@@ -1225,6 +1225,10 @@ export interface Finding {
   /** Ids of the older drafts this finding replaced. */
   supersedes?: string[]
   created_at: string | null
+  /** Purpose of the latest approval row on the list endpoint (`review`,
+   *  `packaging` or `auto`); null when the finding has none. Absent on the
+   *  detail endpoint, which carries the full `approvals` instead. */
+  approval_purpose?: string | null
 }
 
 export interface FindingDetail extends Finding {
@@ -1265,7 +1269,7 @@ export interface ConnectedWriteDocumentSource {
 
 export type ConnectedWriteSource =
   | { kind: 'inline'; content: string }
-  | { kind: 'deliverable'; slug: string; format: string }
+  | { kind: 'deliverable'; slug: string; format: string; theme?: string }
   | ConnectedWriteDocumentSource
 
 export interface ConnectedWritePayload {
@@ -2699,6 +2703,22 @@ export interface M365BrowseResult {
 export interface M365WriteTargetsResult {
   targets: WriteTarget[]
   write_enabled: boolean
+}
+
+/** One read-only Postgres/Supabase connection, as GET /api/connections/database
+ *  lists it. The connection string is never returned. */
+export interface DatabaseConnection {
+  slug: string
+  label: string
+  host: string | null
+  port: number | null
+  database: string | null
+  user: string | null
+  status: string
+  last_tested_at: string | null
+  last_error: string | null
+  warnings: string[]
+  tls?: string | null
 }
 
 /** One row of GET /api/connections/activity?limit=N (admin only) — an audit
@@ -4674,6 +4694,16 @@ export const api = {
       method: 'POST',
       body: scopeSet ? { scope_set: scopeSet } : undefined,
     }),
+  // read-only Postgres/Supabase connections (404 when the deployment has them off)
+  listDatabaseConnections: () => request<DatabaseConnection[]>('/connections/database'),
+  addDatabaseConnection: (body: { label: string; dsn: string }) =>
+    request<DatabaseConnection>('/connections/database', { method: 'POST', body }),
+  testDatabaseConnection: (slug: string) =>
+    request<DatabaseConnection>(`/connections/database/${encodeURIComponent(slug)}/test`, {
+      method: 'POST',
+    }),
+  removeDatabaseConnection: (slug: string) =>
+    request<{ ok: boolean }>(`/connections/database/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
   disconnectConnection: (provider: ConnectionProvider) =>
     request<{ ok: boolean }>(`/connections/${provider}`, { method: 'DELETE' }),
   // gdrive only — a short-lived Picker token, fetched fresh right before the

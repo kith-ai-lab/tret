@@ -673,6 +673,37 @@ class Settings(BaseSettings):
     connections_max_bytes_per_run: int = 100 * 1024 * 1024  # 100MB
     connections_max_searches_per_run: int = 30
 
+    # Read-only Postgres / Supabase connections (services/database_connections.py,
+    # api/database_connections.py): a workspace admin connects external databases
+    # and runs get list_database_tables / describe_database_table /
+    # query_database. `db_connect_allow_hosts` is a comma-separated suffix list: a
+    # connection's host must equal or be a subdomain of one entry (label-boundary
+    # match); `*` allows any PUBLIC host. Typed `list[str] | None` for the same
+    # reason as `extensions` above (pydantic-settings JSON-decodes a plain list
+    # field's env value); blank/None means the default, never "allow nothing" —
+    # switch the feature off with TRET_DB_CONNECTIONS=false instead. Opt-in per
+    # deployment: the default is off.
+    db_connections: bool = False
+    # Default None + validate_default: the validator below turns None/blank into
+    # the Supabase suffixes, and compose can pass an empty value through.
+    db_connect_allow_hosts: list[str] | None = Field(default=None, validate_default=True)
+    db_query_timeout_seconds: int = 10
+    db_query_max_rows: int = 200
+    # Per-run ceiling on database tool calls (list/describe/query together),
+    # spent before the call like the connected-source budgets above.
+    db_max_queries_per_run: int = 30
+    # PEM text of extra CA certificates trusted for database connections, in
+    # addition to the system/certifi store (e.g. Supabase's project CA). A literal
+    # `\n` in the value is read as a newline.
+    db_connect_ca_pem: str | None = None
+    # Only when true may a Supabase host whose certificate chain is not trusted
+    # (never a hostname mismatch, never with sslmode=verify-ca/verify-full in the
+    # DSN) fall back to an encrypted-but-unverified connection.
+    db_connect_allow_unverified_tls: bool = False
+    # Refuse (at create/test time) a role that is a superuser, bypasses RLS, can
+    # create roles or databases, or is postgres/service_role/supabase_admin.
+    db_connect_allow_privileged_roles: bool = False
+
     # Web search backend (tret/net/search/). Empty = no search: web_search is
     # registered but tells the model it is unconfigured, so a harness that lists
     # the tool still runs. `searxng` is the self-hosted option, which keeps the
@@ -1034,6 +1065,19 @@ class Settings(BaseSettings):
                 "`replay` is meaningful only for TRET_EGRESS_RESEARCH."
             )
         return candidate
+
+    @field_validator("db_connect_allow_hosts", mode="before")
+    @classmethod
+    def _parse_db_connect_allow_hosts(cls, value):
+        """Comma-separated host suffixes, lower-cased. None or blank falls back
+        to the default (Supabase) rather than to an empty list."""
+        default = ["supabase.co", "pooler.supabase.com"]
+        if value is None:
+            return default
+        if isinstance(value, str):
+            parsed = [h.strip().lower() for h in value.split(",") if h.strip()]
+            return parsed or default
+        return value
 
     @field_validator("extensions", mode="before")
     @classmethod

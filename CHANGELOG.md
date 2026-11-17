@@ -10,6 +10,27 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Results open beside the chat.** Each drafted section, finding, verdict or connected-drive
+  write a chat turn produces shows as a card under the reply; opening one shows it in a pane
+  next to the conversation, where an approver can approve or reject it and download an
+  approved section's deliverable, without leaving chat. `GET /api/findings` rows now carry
+  `approval_purpose`.
+- **Word and PowerPoint exports, and a choice of style.** Deliverables export as `.docx` and
+  `.pptx` as well as Markdown, HTML and PDF, and the Deliverables page has a Style choice
+  (Plain or Report). `GET /api/deliverables/{slug}/export` takes `theme` and `accent`; with
+  no `theme` it is `report` in the cohort edition and `plain` otherwise. The assistant can
+  write `.docx` and `.pptx` deliverables to a connected drive, with an optional `theme`.
+  Download filenames are now sent safely for any deliverable name.
+- **Read-only database connections (Postgres / Supabase), off by default.** With
+  `TRET_DB_CONNECTIONS=true`, a workspace admin can connect up to five databases in
+  Settings > Connections and the assistant gets `list_database_tables`,
+  `describe_database_table` and `query_database`. Hosts must sit under
+  `TRET_DB_CONNECT_ALLOW_HOSTS` (default: Supabase) and resolve to public addresses; TLS is
+  verified (extra CA certificates via `TRET_DB_CONNECT_CA_PEM`); every query runs in a
+  read-only transaction with a timeout, server-side size limits and a per-run budget;
+  superuser and other privileged roles are refused unless the operator allows them. The
+  connection string is stored encrypted and never shown again. Not yet exercised against a
+  live Supabase project.
 - **Editions: a lean, chat-first interface for courses.** `TRET_EDITION=cohort` (default
   `standard`, unchanged) shows only Chat, Approvals, Deliverables, Documents and Settings,
   hides the harness and model pickers in the chat composer, and sends the hidden pages back

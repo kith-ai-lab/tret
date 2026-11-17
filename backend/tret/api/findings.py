@@ -11,11 +11,13 @@ import contextlib
 import hashlib
 import logging
 import os
+import re
 import shutil
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -37,9 +39,10 @@ from tret.db.models import Approval, DataRequest, Document, Finding, User
 from tret.services import connections as connections_service
 from tret.services import packaging as packaging_service
 from tret.services.documents import ingest_document
+from tret.services.edition import default_export_theme
 from tret.services.export import strip_draft_status_banner
 from tret.storage import document_local_path, get_store, package_key
-from tret.services.outcomes import record_outcome_for_finding
+from tret.services.outcomes import latest_approval_purposes, record_outcome_for_finding
 from tret.services.auto_approve import AUTO_PURPOSE
 
 router = APIRouter(prefix="/api", tags=["findings"])
@@ -150,7 +153,11 @@ async def list_findings(
     if run_id:
         q = q.where(Finding.run_id == run_id)
     findings = (await db.execute(q)).scalars().all()
-    return [_finding_out(f) for f in findings]
+    # One batched query for every listed finding: whether an approval was a
+    # person's review, a packaging approval or automatic, without the per-row
+    # detail fetch. Null when the finding has no approval row.
+    purposes = await latest_approval_purposes(db, [f.id for f in findings])
+    return [{**_finding_out(f), "approval_purpose": purposes.get(f.id)} for f in findings]
 
 
 @router.get("/findings/{finding_id}")
@@ -424,7 +431,12 @@ async def _render_write_bytes(
         slug = source.get("slug")
         try:
             return await render_deliverable_bytes(
-                db, project_id, slug, source.get("format") or "markdown"
+                db,
+                project_id,
+                slug,
+                source.get("format") or "markdown",
+                # Older proposals carry no theme: render them exactly as before.
+                **({"theme": source["theme"]} if source.get("theme") else {}),
             )
         except DeliverableEmpty as e:
             raise ValueError(f"No approved sections exist for deliverable '{slug}'.") from e
@@ -1085,11 +1097,36 @@ async def list_deliverables(
     return out
 
 
+# Export formats the human route serves, with their download extension.
+_EXPORT_FORMAT_EXTENSION = {
+    "markdown": "md",
+    "html": "html",
+    "pdf": "pdf",
+    "docx": "docx",
+    "pptx": "pptx",
+}
+
+
+def _content_disposition(slug: str, extension: str) -> str:
+    """An attachment header for a model-chosen slug: an ASCII-safe fallback
+    `filename` (only [A-Za-z0-9._-], so no quote or CR/LF can add header
+    parameters or split the header) plus an RFC 5987 `filename*` carrying the
+    real name percent-encoded."""
+    fallback = re.sub(r"[^A-Za-z0-9._-]", "-", slug)[:120]
+    if not fallback.strip("-._"):
+        fallback = "deliverable"
+    printable = re.sub(r"[\x00-\x1f\x7f]", "-", slug).strip() or "deliverable"
+    encoded = quote(f"{printable}.{extension}", safe="", encoding="utf-8", errors="replace")
+    return f"attachment; filename=\"{fallback}.{extension}\"; filename*=UTF-8''{encoded}"
+
+
 @router.get("/deliverables/{deliverable_slug}/export")
 async def export_deliverable(
     deliverable_slug: str,
     format: str = "markdown",
     include_draft: bool = False,
+    theme: str | None = None,
+    accent: str | None = None,
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
@@ -1098,13 +1135,20 @@ async def export_deliverable(
 
     from tret.services.export import (
         DeliverableEmpty,
+        ExportOptionError,
         PdfUnavailable,
+        RendererUnavailable,
         assemble_deliverable,
         render_deliverable_bytes,
     )
 
-    if format not in ("markdown", "html", "json", "pdf"):
-        raise HTTPException(422, "format must be markdown|html|json|pdf")
+    if format != "json" and format not in _EXPORT_FORMAT_EXTENSION:
+        raise HTTPException(422, "format must be markdown|html|json|pdf|docx|pptx")
+    resolved_theme = (
+        theme
+        if theme is not None
+        else default_export_theme(ctx.workspace.settings, get_settings().edition)
+    )
     project = await current_project(db, ctx.id)
     if project is None:
         raise HTTPException(404, "No approved sections exist for this deliverable")
@@ -1115,10 +1159,26 @@ async def export_deliverable(
         return result
     try:
         data, content_type = await render_deliverable_bytes(
-            db, project.id, deliverable_slug, format, include_draft
+            db,
+            project.id,
+            deliverable_slug,
+            format,
+            include_draft,
+            theme=resolved_theme,
+            accent=accent,
+            subtitle=ctx.workspace.name,
         )
     except DeliverableEmpty:
         raise HTTPException(404, "No approved sections exist for this deliverable")
+    except ExportOptionError as e:
+        # Unknown theme / malformed accent / unsupported format.
+        raise HTTPException(422, str(e))
+    except RendererUnavailable as e:
+        raise HTTPException(501, str(e))
+    except ValueError:
+        # Not a caller mistake: log the detail, answer without it.
+        log.exception("deliverable export failed (slug=%r, format=%s)", deliverable_slug, format)
+        raise HTTPException(500, "Export failed")
     except PdfUnavailable as e:
         raise HTTPException(
             501,
@@ -1140,11 +1200,15 @@ async def export_deliverable(
                 "Referrer-Policy": "no-referrer",
             },
         )
-    if format == "pdf":
+    if format in ("pdf", "docx", "pptx"):
         return Response(
             data,
             media_type=content_type,
-            headers={"Content-Disposition": f'attachment; filename="{deliverable_slug}.pdf"'},
+            headers={
+                "Content-Disposition": _content_disposition(
+                    deliverable_slug, _EXPORT_FORMAT_EXTENSION[format]
+                )
+            },
         )
     return PlainTextResponse(data.decode("utf-8"), media_type="text/markdown")
 
