@@ -210,6 +210,8 @@ services:
       TRET_STORAGE_CACHE_MAX_MB: ${TRET_STORAGE_CACHE_MAX_MB:-512}
       # Batch runs refuse to start/release below targets x this many MB free on the capture store (0 = off).
       TRET_BATCHES_MIN_FREE_MB_PER_TARGET: ${TRET_BATCHES_MIN_FREE_MB_PER_TARGET:-50}
+      # A batch that was running resumes on its own after a restart (false = pause it instead).
+      TRET_BATCHES_AUTO_RESUME: ${TRET_BATCHES_AUTO_RESUME:-true}
       TRET_BATCH_EVALUATOR_JUDGE: ${TRET_BATCH_EVALUATOR_JUDGE:-anthropic/claude-opus-5-5,openrouter/google/gemini-3.8-flash}
       TRET_BATCH_EVALUATOR_CONCURRENCY: ${TRET_BATCH_EVALUATOR_CONCURRENCY:-2}
       TRET_BATCH_EVALUATOR_RUN_TIMEOUT_SECONDS: ${TRET_BATCH_EVALUATOR_RUN_TIMEOUT_SECONDS:-300}

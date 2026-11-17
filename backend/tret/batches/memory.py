@@ -152,6 +152,11 @@ def _gap_line(c: dict) -> str:
     return line + "."
 
 
+def _cut_off_by_restart(error: Any) -> bool:
+    """A run the server's restart killed says nothing about the row."""
+    return str(error or "").startswith(core.RESTART_MARKER)
+
+
 def _outcome_candidate(
     *, cls: str, outcome: Any, error: Any, finished: Any, started: Any = None, created: Any = None, tid: Any = ""
 ) -> dict | None:
@@ -294,6 +299,8 @@ async def earlier_attempts(db: AsyncSession, batch: Batch, targets: list[BatchTa
     candidates: dict[str, list[dict]] = {}
     for t in other_targets:
         owner = by_batch[t.collection_id]
+        if _cut_off_by_restart(t.error):
+            continue
         c = _outcome_candidate(
             cls=scoring.target_class(t),
             outcome=t.outcome,
@@ -318,6 +325,8 @@ async def earlier_attempts(db: AsyncSession, batch: Batch, targets: list[BatchTa
     for t in targets:
         mine = list(candidates.get(keys[t.id], []))
         for h in own_history[t.id]:
+            if _cut_off_by_restart(h.get("error")):
+                continue
             ghost = SimpleNamespace(status=h.get("status"), outcome=h.get("outcome"), error=h.get("error"))
             c = _outcome_candidate(
                 cls=scoring.target_class(ghost),  # type: ignore[arg-type]
