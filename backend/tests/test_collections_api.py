@@ -1032,7 +1032,20 @@ def test_packages_ready_after_finalize_wait_for_retry_write(client, world):
 
 
 # ── boot sweep ────────────────────────────────────────────────────────────────
-def test_the_boot_sweep_fails_orphaned_targets_and_pauses_unfinished_collections(client, world):
+@pytest.fixture
+def auto_resume_off(monkeypatch):
+    """The old boot behaviour, kept behind `batches_auto_resume=false`
+    (test_batches_restart_recovery.py covers the default)."""
+    from tret.config import get_settings
+
+    monkeypatch.setenv("TRET_BATCHES_AUTO_RESUME", "false")
+    get_settings.cache_clear()
+    yield
+    monkeypatch.undo()
+    get_settings.cache_clear()
+
+
+def test_the_boot_sweep_fails_orphaned_targets_and_pauses_unfinished_collections(client, world, auto_resume_off):
     cid = create(client).json()["id"]
 
     async def orphan(db):

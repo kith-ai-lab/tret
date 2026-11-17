@@ -272,6 +272,7 @@ async def lifespan(app: FastAPI):
     # double-meter it when it does.
     from tret.services.reconcile import sweep_orphaned_runs
 
+    boot_swept = False
     if instance_lock.state == "lost":
         log.error(
             "skipping the orphaned-run sweep: this process lost the instance lock "
@@ -300,6 +301,7 @@ async def lifespan(app: FastAPI):
                 await sweep_orphaned_collections(db)
         except Exception:  # noqa: BLE001 — boot must not depend on this sweep
             log.warning("orphaned-collection sweep skipped", exc_info=True)
+        boot_swept = True
     # M2: a stored workspace's emissions override document can stop validating
     # without anyone touching it (tret itself tightening a rule, e.g.
     # `PROVIDER_KEY_RE`) — a run against it already fails open, silently, so
@@ -336,6 +338,15 @@ async def lifespan(app: FastAPI):
     # Where document bytes live (docs/storage.md). Resolved here so a misconfigured
     # s3 backend (no bucket) stops the boot instead of failing the first upload.
     log.info("%s", describe_line(get_store(get_settings())))
+    # Batches that were running pick up where they left off. Last, after the
+    # extension startup tasks, and only on a process that held the instance lock
+    # for the sweeps: a second machine never launches rows the first is running.
+    # Background tasks, never awaited; failing here must not break startup.
+    if boot_swept:
+        try:
+            await collections_service.launch_auto_resumed()
+        except Exception:  # noqa: BLE001
+            log.warning("batch auto-resume skipped", exc_info=True)
     log.info("tret is ready")
     try:
         yield

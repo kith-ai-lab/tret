@@ -434,6 +434,8 @@ def collection_out(
         ),
         "finalize": c.finalize,
         "last_error": (c.settings or {}).get("last_error"),
+        "last_resumed_at": (c.settings or {}).get("last_resumed_at"),
+        "last_resume_note": (c.settings or {}).get("last_resume_note"),
         "family_key": family_key(c),
         "evaluation_cost_usd": float(evaluation.get("cost") or 0),
         "evaluation_status": evaluation.get("status"),
@@ -909,6 +911,11 @@ async def _settle_target(
         t.error = summarise_run_error(error)
         if status in TERMINAL_TARGET_STATUSES:
             t.finished_at = t.finished_at or _now()
+            # Progress that is not a restart's doing resets the crash-loop breaker.
+            if (c.settings or {}).get("auto_resume_count") and not str(t.error or "").startswith(
+                RESTART_MARKER
+            ):
+                c.settings = {**c.settings, "auto_resume_count": 0}
         else:
             t.finished_at = None
         await db.commit()
@@ -1270,14 +1277,73 @@ async def drain_collection_tasks(deadline_seconds: float) -> bool:
         await asyncio.wait(pending, timeout=remaining)
 
 
+# Batches the boot sweep put back to work, launched by `launch_auto_resumed` once
+# startup has finished its sweeps (main.py's lifespan).
+_auto_resume_ids: list[uuid.UUID] = []
+
+# A target's run failed by the orphan sweep carries this marker in its error
+# (`reconcile.ORPHAN_ERROR`, kept verbatim by `summarise_run_error`).
+RESTART_MARKER = "process_restart"
+MAX_RESTART_RETRIES = 2
+# Crash-loop breaker: a batch is auto-resumed at most this many times in a row
+# without any target settling for a reason other than a restart.
+MAX_AUTO_RESUMES = 2
+
+
+def _restart_interrupts(t: BatchTarget) -> int:
+    """How many earlier attempts of `t` a restart cut off (from its history)."""
+    return sum(
+        1 for h in (t.history or []) if str(h.get("error") or "").startswith(RESTART_MARKER)
+    )
+
+
+async def launch_auto_resumed() -> int:
+    """Start the launch loop of every batch the boot sweep auto-resumed, as
+    background tasks (never awaited: startup must not wait on a launch). Called
+    by main's lifespan after the sweeps, only on a process that holds the
+    instance lock. Returns how many batches were scheduled."""
+    ids, _auto_resume_ids[:] = list(_auto_resume_ids), []
+    for cid in ids:
+        _spawn(_auto_resume(cid))
+    return len(ids)
+
+
+async def _auto_resume(collection_id: uuid.UUID) -> None:
+    """`_advance` for a batch the boot sweep resumed; if it fails, pause the
+    batch with a note rather than leave it `running` with nothing launching."""
+    try:
+        await _advance(collection_id)
+    except Exception:  # noqa: BLE001 - a background task has no caller to raise to
+        log.exception("batch %s: the automatic resume after a restart failed", collection_id)
+        with contextlib.suppress(Exception):
+            async with _session_factory()() as db:
+                c = await db.get(Batch, collection_id)
+                if c is not None and c.status == "running":
+                    c.status = "paused"
+                    c.settings = {
+                        **(c.settings or {}),
+                        "last_error": "The automatic resume after a server restart failed; resume to continue.",
+                    }
+                    await db.commit()
+
+
 async def sweep_orphaned_collections(db: AsyncSession) -> int:
     """Boot sweep, after `sweep_orphaned_runs` and the packaging sweep. Targets
     left `running` whose run is no longer queued/running, and targets in
     `review`/`packaging`, are re-settled from the facts (a run that completed
     is judged by its maps; only one the orphan sweep failed becomes `failed`;
-    a restart mid-upload resumes the upload). Collections still `running` with
-    pending targets are paused for an operator's resume rather than launched at
-    boot. Returns how many targets were re-settled."""
+    a restart mid-upload resumes the upload). With `batches_auto_resume` (the
+    default) a batch that was `running` stays `running`: a target whose run the
+    restart cut off goes back to `pending` (at most `MAX_RESTART_RETRIES` times
+    per target, archived like a manual retry) and the batch is queued for
+    `launch_auto_resumed`. With it off, a batch still `running` with pending
+    targets is paused for an operator's resume. Returns how many targets were
+    re-settled."""
+    auto = get_settings().batches_auto_resume
+    _auto_resume_ids.clear()
+    was_running = {
+        c.id for c in (await db.execute(select(Batch).where(Batch.status == "running"))).scalars()
+    }
     targets = list(
         (
             await db.execute(
@@ -1297,16 +1363,64 @@ async def sweep_orphaned_collections(db: AsyncSession) -> int:
     if to_settle:
         await _resettle_targets(db, to_settle)
         log.warning("boot sweep: re-settled %d collection target(s)", len(to_settle))
-    collections = list(
-        (await db.execute(select(Batch).where(Batch.status == "running"))).scalars()
+    # Read after the re-settle: a target that settled for a non-restart reason
+    # has just reset its batch's breaker count.
+    collections = (
+        list((await db.execute(select(Batch).where(Batch.id.in_(was_running)))).scalars())
+        if was_running
+        else []
     )
+    tripped = {
+        c.id
+        for c in collections
+        if int((c.settings or {}).get("auto_resume_count") or 0) >= MAX_AUTO_RESUMES
+    }
+    if auto:
+        for tid in to_settle:
+            t = await db.get(BatchTarget, tid, populate_existing=True)
+            if (
+                t is None
+                or t.collection_id not in was_running
+                or t.collection_id in tripped
+                or t.status != "failed"
+                or not str(t.error or "").startswith(RESTART_MARKER)
+            ):
+                continue
+            interrupted = _restart_interrupts(t) + 1
+            if interrupted > MAX_RESTART_RETRIES:
+                t.error = (
+                    f"Interrupted by server restarts {interrupted} times; "
+                    "retry it by hand once the cause is clear"
+                )
+                await db.commit()
+                continue
+            run = await db.get(Run, t.run_id) if t.run_id else None
+            _archive_attempt(t, run)
+            t.status = "pending"
+            await db.commit()
     for c in collections:
         if await _recompute(db, c) == "running":
-            c.status = "paused"
-            c.settings = {
-                **(c.settings or {}),
-                "last_error": "The server restarted during this collection; resume to continue.",
-            }
+            if auto and c.id not in tripped:
+                c.settings = {
+                    **{k: v for k, v in (c.settings or {}).items() if k != "last_error"},
+                    "auto_resume_count": int((c.settings or {}).get("auto_resume_count") or 0) + 1,
+                    "last_resumed_at": _now().isoformat(),
+                    "last_resume_note": (
+                        "The server restarted during this collection; it resumed on its own."
+                    ),
+                }
+                _auto_resume_ids.append(c.id)
+            else:
+                c.status = "paused"
+                c.settings = {
+                    **(c.settings or {}),
+                    "last_error": (
+                        "The server restarted repeatedly during this collection with no row finishing "
+                        "in between; resume once the cause is clear."
+                        if auto
+                        else "The server restarted during this collection; resume to continue."
+                    ),
+                }
             await db.commit()
     try:
         from tret.batches import evaluation

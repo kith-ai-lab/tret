@@ -173,6 +173,15 @@ the batch then waits in `gate` until an approver releases the rest
 `failed` or `rejected` target can be retried (`POST .../targets/{id}/retry`), which
 archives the earlier attempt in the target's `history`.
 
+A restart does not stop a running batch. At boot it resumes on its own, and a target
+whose run the restart cut off is put back to `pending` (at most twice per target, the
+attempt archived in `history` like a retry; then it stays `failed` for a manual retry).
+A batch a person paused stays paused. A batch is auto-resumed at most twice in a row (the
+count resets when any row settles for a reason other than a restart); a third restart
+pauses it with a note, so a crash loop cannot keep rebooting the server. `TRET_BATCHES_AUTO_RESUME=false` restores the old
+behaviour: the batch is paused with a note and an operator resumes it and retries the
+cut-off rows. The batch detail carries `last_resumed_at` and `last_resume_note`.
+
 ## Viewing written files
 
 A disclosure target's `written_files` (the package files uploaded to SharePoint) can be

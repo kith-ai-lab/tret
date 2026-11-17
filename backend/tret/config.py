@@ -308,6 +308,12 @@ class Settings(BaseSettings):
     # before a batch starts or releases targets; 409 otherwise. 0 disables the
     # check; it is skipped on the s3 backend (tret/batches/core.py).
     batches_min_free_mb_per_target: int = 50
+    # After a restart, a batch that was `running` resumes on its own and a target
+    # whose run the restart cut off goes back to `pending` (at most twice per
+    # target; later it stays `failed`). False restores the old behaviour: the
+    # batch is paused with a note and an operator resumes it and retries the
+    # cut-off rows. A batch an operator paused stays paused either way.
+    batches_auto_resume: bool = True
 
     # ── batch evaluator (tret/batches/evaluation.py) ──────────────────────────
     # The judge model a batch's evaluation pass uses unless the request names one,

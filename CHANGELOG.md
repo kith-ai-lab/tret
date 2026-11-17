@@ -162,6 +162,14 @@ one that needs action on an existing install.
 
 ### Changed
 
+- **Batches resume on their own after a restart.** A batch that was `running` when the server
+  restarted now starts launching again at boot instead of pausing, and a row whose run the
+  restart cut off goes back to `pending` (at most twice per row, the attempt archived in its
+  history; after that it stays `failed`). A batch a person paused stays paused, and a batch
+  that is restarted three times in a row with no row finishing in between is paused with a
+  note rather than resumed again. The batch
+  detail carries `last_resumed_at` and `last_resume_note`. Set `TRET_BATCHES_AUTO_RESUME=false`
+  for the old behaviour (pause with a note, resume and retry by hand).
 - **Each model's most recent batch is shown beside its pooled figure.** Family models and
   the advice evidence carry `latest_batch` (the model's most recent batch with at least five
   scored rows for it, so a tiny check batch does not displace a large one), and the advice

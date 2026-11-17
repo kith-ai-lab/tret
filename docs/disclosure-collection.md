@@ -483,7 +483,7 @@ The collection's own status follows from its targets, in the order below, except
 | `review` | nothing running or pending, and at least one target is in `review` or `packaging` (this outranks `gate`, so decisions still owed stay visible) |
 | `gate` | nothing running, pending, in review or packaging, and some targets are still `held` |
 | `completed` | every target is in a final state |
-| `paused` | an operator paused it, or a restart paused it (below) |
+| `paused` | an operator paused it, or (with `TRET_BATCHES_AUTO_RESUME=false`) a restart paused it (below) |
 | `finalized` | the run-level records were written |
 
 ### The review gate
@@ -538,10 +538,19 @@ whatever the number of collections. Maps approved faster than that wait their tu
 - **A restart.** Runs and packaging tasks live in the server process. At boot, the sweep
   re-settles every target that was `running`, in `review` or `packaging`: one whose run
   was killed by the restart (and proposed no map) becomes `failed` (retry); the others
-  settle to `review`, `packaging`, `written` and so on from their maps. A collection
-  that still has pending targets after the sweep is set to `paused` with a note that
-  the server restarted; nothing launches by itself at boot. The operator presses
-  Resume, then Retry on the failed targets. Other collections settle to `review`,
+  settle to `review`, `packaging`, `written` and so on from their maps. A collection that
+  was `running` resumes on its own: its launch loop starts again in the background once startup
+  (sweeps and extension startup tasks) has finished, `last_resumed_at` and `last_resume_note` record it, and a target whose
+  run the restart cut off (the run error starts `process_restart`) goes back to `pending`,
+  its attempt archived in `history` like a manual retry. A target is put back at most twice
+  this way; after that it stays `failed` with an error saying how many restarts
+  interrupted it, and an operator retries it. A collection is auto-resumed at most twice in
+  a row: if the server restarts a third time without any row settling for another reason, it
+  is `paused` with a note about repeated restarts and its cut-off rows stay `failed`. A
+  collection an operator had paused stays paused. With `TRET_BATCHES_AUTO_RESUME=false` the old behaviour applies: a collection
+  that still has pending targets is set to `paused` with a note that the server restarted,
+  nothing launches at boot, and the operator presses Resume, then Retry on the failed
+  targets. Other collections settle to `review`,
   `gate` or `completed`. On a clean shutdown the server waits for in-flight target runs
   the same way it waits for packaging, and launches no new target while it drains.
 
@@ -689,7 +698,7 @@ The collection tools are off until an operator turns them on.
 | `TRET_EGRESS_CAPTURE_MAX_PER_RUN` | capture attempts per run, default 40 |
 | `TRET_EGRESS_CAPTURE_ANY_PUBLIC_HOST` | default `false`. When `true`, `capture_source` (only) may fetch from any public https host; `fetch_url` and `web_search` stay on the allowlist. Boot logs a note when it is on |
 | `TRET_COLLECTIONS_MAX_CONCURRENT` | collection target runs executing at once across the process, default 3 (clamped 1 to 6) |
-| `TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS` | wall-clock limit for one target's run, default 1200; the run is cancelled and the target fails with `timeout`. No new target is launched while the server drains for shutdown, and a restart pauses a collection that still has pending targets (section 6) |
+| `TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS` | wall-clock limit for one target's run, default 1200; the run is cancelled and the target fails with `timeout`. No new target is launched while the server drains for shutdown, and a restart resumes a running collection on its own, or pauses it with `TRET_BATCHES_AUTO_RESUME=false` (section 6); also `TRET_BATCHES_AUTO_RESUME`, default true |
 
 `propose_package_map` itself makes no network request; it works on documents already
 in the project, so it is available whether or not research is enabled (a PDF someone

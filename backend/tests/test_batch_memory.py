@@ -124,6 +124,21 @@ async def test_own_history_is_used_on_a_retry(w):
     assert "zeta" not in block and "3.2" not in block
 
 
+async def test_an_attempt_cut_off_by_a_restart_is_not_remembered(w):
+    from tret.services.reconcile import ORPHAN_ERROR
+
+    earlier = await mk_batch(w, "Cut off", "cutoff")
+    await mk_target(w, earlier, "acme", "failed", finished=T0 + timedelta(days=2), error=ORPHAN_ERROR)
+    batch, t = await current(w)
+    t.history = [
+        {"attempt": 1, "run_id": None, "status": "failed", "error": ORPHAN_ERROR, "cost_usd": 0.1,
+         "model_used": None, "outcome": None, "started_at": "2026-11-02T10:00:00+00:00",
+         "finished_at": "2026-11-02T10:05:00+00:00"},
+    ]
+    await w.db.commit()
+    assert await memory.earlier_attempts(w.db, batch, [t]) == {}
+
+
 async def test_other_families_and_workspaces_are_ignored(w):
     await delivered(w, "Other FY", "ofy", "acme", days=1, quality=90, fy=2024, sources=[("https://fy.example/r", "primary_disclosure", 1)])
     await delivered(w, "Other ws", "ows", "acme", days=1, quality=90, ws=w.other_ws, sources=[("https://ws.example/r", "primary_disclosure", 1)])
