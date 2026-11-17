@@ -263,6 +263,10 @@ one that needs action on an existing install.
 
 ### Fixed
 
+- **A NUL character in a tool result no longer fails the run.** Postgres refuses `\u0000`
+  in JSONB, and extracted PDF text can carry one, so saving the run's messages raised
+  `UntranslatableCharacterError` and the run (and its batch row) ended as failed. NUL
+  characters are now removed from the persisted copy of the messages.
 - **Two causes of flaky tests.** The PostgreSQL `UUID` column type now compiles to
   `CHAR(32)` on SQLite (tests only): the type name `UUID` got NUMERIC affinity there, so a
   uuid4 made only of digits came back as a float. And `tests/conftest.py` restores the
