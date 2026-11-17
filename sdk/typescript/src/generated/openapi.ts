@@ -4382,6 +4382,8 @@ export interface components {
         TargetIn: {
             /** Category */
             category?: string | null;
+            /** Cik */
+            cik?: string | null;
             /** Company */
             company: string;
             /** Domicile Country */
@@ -4392,6 +4394,8 @@ export interface components {
             fiscal_year?: number | null;
             /** Known Urls */
             known_urls?: string[] | string | null;
+            /** Lei */
+            lei?: string | null;
             /** Market */
             market: string;
             /** Notes */
@@ -4400,6 +4404,10 @@ export interface components {
             sector?: string | null;
             /** Slug */
             slug?: string | null;
+            /** Source Filing Url */
+            source_filing_url?: string | null;
+            /** Ticker */
+            ticker?: string | null;
         };
         /** TelemetryToggle */
         TelemetryToggle: {
