@@ -300,6 +300,11 @@ services:
       # Empty (the default here) is what this image ships: the extension seam
       # in tret/engine/extensions.py is entirely inert.
       TRET_EXTENSIONS: ${TRET_EXTENSIONS:-}
+      # Which screens the web interface shows (standard | cohort); not an
+      # access control. And which kinds of draft are approved as they are
+      # created (draft_section, connected_write, findings; empty = none).
+      TRET_EDITION: ${TRET_EDITION:-standard}
+      TRET_AUTO_APPROVE_DEFAULT: ${TRET_AUTO_APPROVE_DEFAULT:-}
       # Workspace connections (Google Drive / Microsoft 365 OAuth,
       # tret/services/connections.py, tret/api/connections.py). All blank by
       # default — every self-hosted deployment ships with connections
