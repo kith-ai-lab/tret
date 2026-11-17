@@ -135,6 +135,22 @@ from tret.engine.grounding import (
 
 log = logging.getLogger("tret.harness")
 
+
+def _jsonb_safe(value):
+    """`value` with every NUL character removed from its strings.
+
+    Postgres refuses `\\u0000` inside JSONB (and TEXT), so one NUL in a tool
+    result (extracted PDF text often carries them) made saving `runs.messages`
+    fail and the whole run end as failed. Only the persisted copy is cleaned.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "") if "\x00" in value else value
+    if isinstance(value, dict):
+        return {k: _jsonb_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_jsonb_safe(v) for v in value]
+    return value
+
 # Run statuses `execute()` refuses to start from (see `_execute_registered`).
 TERMINAL_RUN_STATUSES = ("completed", "failed", "cancelled")
 DEFAULT_MAX_ITERATIONS = 24
@@ -2538,7 +2554,7 @@ class HarnessEngine:
                 )
             )
 
-            run.messages = [m.to_json() for m in messages]
+            run.messages = _jsonb_safe([m.to_json() for m in messages])
             await db.commit()
             await self.bus.publish(
                 run.id,
@@ -3136,7 +3152,7 @@ class HarnessEngine:
         # bound that keeps an uncollected handoff from growing without limit.
         if run.parent_run_id is not None and ctx.retrieved_values:
             self._stash_retrieved_values(run.id, ctx.retrieved_values)
-        run.messages = [m.to_json() for m in messages]
+        run.messages = _jsonb_safe([m.to_json() for m in messages])
         run.overhead = overhead_block(overhead_calls)
         run.finished_at = _utcnow()
         # A healthy single-segment run never persisted its timeline mid-run
