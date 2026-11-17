@@ -81,6 +81,7 @@ from tret.net.search import (
 )
 from tret.providers.base import ToolSpec
 from tret.router_llm.objectives import THRIFT_OBJECTIVES
+from tret.services import auto_approve as auto_approve_service
 from tret.services import connections as connections_service
 from tret.services import lessons as lessons_service
 from tret.services import packaging as packaging_service
@@ -1714,6 +1715,20 @@ async def propose_connected_write(
     ctx.db.add(finding)
     await ctx.db.flush()
     ctx.findings_created.append(finding.id)
+    if await _auto_approve_draft(ctx, finding):
+        upload = (finding.payload or {}).get("upload") or {}
+        if upload.get("status") == "uploaded":
+            outcome = f"The upload succeeded{(' (' + upload['web_url'] + ')') if upload.get('web_url') else ''}."
+        else:
+            outcome = (
+                f"The upload was attempted but failed: {upload.get('error') or 'unknown error'}. "
+                "It can be retried from the Approvals page."
+            )
+        return (
+            f"Proposed {safe_name} to {write_target.label}/tret (finding {finding.id}) and it "
+            f"was approved automatically by this workspace's policy; no one needs to approve it. "
+            f"{outcome}"
+        )
     return (
         f"Proposed {safe_name} to {write_target.label}/tret — awaiting approval "
         f"(finding {finding.id}). Nothing has been written to SharePoint."
@@ -2525,6 +2540,38 @@ async def propose_pack_lesson(ctx: RunContext, text: str, rationale: str) -> str
     )
 
 
+# ── auto-approval ─────────────────────────────────────────────────────────────
+async def _auto_approve_draft(ctx: RunContext, finding: Finding) -> bool:
+    """Approve the draft `finding` just flushed, when the workspace's auto-approve
+    policy covers its category (`services/auto_approve.py`). The approval is
+    stamped with the user who started the run (`Run.created_by`, inherited by
+    delegated children); a run nobody started leaves the draft for a human.
+    Commits the draft first (the engine would commit it right after this tool
+    returns anyway), so a failed approval can never lose it. Never raises."""
+    try:
+        category = auto_approve_service.category_for(finding)
+        if category is None or ctx.workspace_id is None:
+            return False
+        run = await ctx.db.get(Run, ctx.run_id)
+        actor = run.created_by if run is not None else None
+        if actor is None:
+            return False
+        if category not in await auto_approve_service.enabled_categories(ctx.db, ctx.workspace_id):
+            return False
+        finding_id = finding.id
+        await ctx.db.commit()
+        approved = await auto_approve_service.maybe_auto_approve(
+            ctx.db, finding_id, workspace_id=ctx.workspace_id, actor_user_id=actor
+        )
+        # A failed attempt rolls the session back, which expires `finding`; the
+        # tool reads it again to build its reply.
+        await ctx.db.refresh(finding)
+        return approved
+    except Exception:  # noqa: BLE001 - the draft stands; a human can still approve it
+        logging.getLogger("tret.auto_approve").warning("auto-approval check failed", exc_info=True)
+        return False
+
+
 # ── structured outputs ────────────────────────────────────────────────────────
 async def _record(ctx: RunContext, schema_slug: str, subject: dict, payload: dict) -> Finding:
     schema = ctx.output_schemas.get(schema_slug)
@@ -2674,6 +2721,13 @@ async def record_verdict(ctx: RunContext, schema_slug: str, subject: dict, paylo
             "is needed. In your final answer, say what data was missing and that a data "
             "request was filed."
         )
+    if await _auto_approve_draft(ctx, finding):
+        return (
+            f"Verdict recorded as finding {finding.id}: {_verdict_headline(payload)}. It was "
+            "approved automatically by this workspace's policy, so no human approval is needed "
+            "(and it is not a human review). In your final answer, state the verdict, the reason "
+            "and the two or three cited values that drove it."
+        )
     return (
         f"Verdict recorded as draft finding {finding.id}: {_verdict_headline(payload)}. "
         "It awaits human approval. In your final answer, state the verdict, the reason and "
@@ -2700,6 +2754,12 @@ async def record_finding(ctx: RunContext, schema_slug: str, subject: dict, paylo
         return (
             f"Finding recorded as a noted finding {finding.id}; no approval is needed. In your "
             "final answer, summarise what it says."
+        )
+    if await _auto_approve_draft(ctx, finding):
+        return (
+            f"Finding recorded as {finding.id}. It was approved automatically by this "
+            "workspace's policy, so no human approval is needed (and it is not a human review). "
+            "In your final answer, summarise what it says and the key values behind it."
         )
     return (
         f"Finding recorded as draft {finding.id}. It awaits human approval. In your final "
@@ -2739,6 +2799,11 @@ async def draft_section(ctx: RunContext, deliverable_slug: str, section_slug: st
     ctx.db.add(finding)
     await ctx.db.flush()
     ctx.findings_created.append(finding.id)
+    if await _auto_approve_draft(ctx, finding):
+        return (
+            f"Section '{section_slug}' of '{deliverable_slug}' stored as finding {finding.id} and "
+            "approved automatically by this workspace's policy; no human approval is needed."
+        )
     return f"Section '{section_slug}' of '{deliverable_slug}' stored as draft finding {finding.id}."
 
 

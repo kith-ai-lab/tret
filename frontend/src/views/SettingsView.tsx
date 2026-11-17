@@ -5,6 +5,8 @@ import { Link } from 'react-router-dom'
 import {
   api,
   ApiError,
+  type AutoApproveCategory,
+  autoApproveApi,
   budgetApi,
   type BudgetPeriod,
   type EgressMode,
@@ -39,12 +41,120 @@ export function SettingsView() {
       <ConnectionsTeaser />
       <BillingSection />
       <SpendBudgetSection />
+      <AutoApproveSection />
       <FootprintCard />
       <EmissionsFactorsSection />
       <RouterInfo />
       <NetworkAccess />
       <TelemetrySection />
       <DataRequests />
+    </div>
+  )
+}
+
+// ── Automatic approvals ──────────────────────────────────────────────────
+// Which kinds of agent output are approved the moment they are created, with no
+// one in the loop. Admin/owner only (the same `me.role` gate as the budget form
+// below); package maps are never automatic, so they have no checkbox. Each
+// change saves immediately: the server stores the full list as this
+// workspace's override, and "Reset to default" clears it.
+
+const AUTO_APPROVE_OPTIONS: { value: AutoApproveCategory; label: string; hint: string; warning?: string }[] = [
+  { value: 'draft_section', label: 'Drafted sections', hint: 'Sections of a deliverable written by the agent.' },
+  {
+    value: 'connected_write',
+    label: 'Writes to connected drives',
+    hint: 'Files the agent proposes to upload to SharePoint are uploaded straight away.',
+    warning:
+      'With this on, the assistant can write files to the connected drive without anyone checking them first, including content it picked up from web pages.',
+  },
+  { value: 'findings', label: 'Findings and verdicts', hint: 'Structured findings and verdicts recorded by the agent.' },
+]
+
+function AutoApproveSection() {
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const canEdit = ['owner', 'admin'].includes(meQuery.data?.role ?? '')
+  const queryClient = useQueryClient()
+  const query = useQuery({ queryKey: ['auto-approve'], queryFn: autoApproveApi.get })
+  const mutation = useMutation({
+    mutationFn: (categories: AutoApproveCategory[] | null) => autoApproveApi.set(categories),
+    onSuccess: (res) => queryClient.setQueryData(['auto-approve'], res),
+  })
+  if (!canEdit) return null
+
+  const data = query.data
+  const effective = data?.effective ?? []
+  const error = mutation.error as ApiError | null
+
+  function toggle(value: AutoApproveCategory) {
+    const next = effective.includes(value) ? effective.filter((c) => c !== value) : [...effective, value]
+    mutation.mutate(next)
+  }
+
+  return (
+    <div>
+      <div className="mono-label" style={{ marginBottom: 8 }}>
+        Automatic approvals
+      </div>
+      <div className="panel stack" style={{ gap: 12 }}>
+        <div className="mono-body" style={{ color: 'var(--text-muted)' }}>
+          Approve these kinds of output as soon as the agent creates them, without waiting in
+          Approvals. They are recorded as approved automatically, are attributed to whoever started
+          the run, and are not treated as reviews, so they do not count as evidence about how good a
+          model is. Package maps always need a person.
+        </div>
+        {query.isLoading ? (
+          <div className="empty pulse">Loading…</div>
+        ) : query.isError ? (
+          <QueryError error={query.error} />
+        ) : (
+          <>
+            {AUTO_APPROVE_OPTIONS.map((opt) => (
+              <label key={opt.value} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                <input
+                  type="checkbox"
+                  checked={effective.includes(opt.value)}
+                  disabled={mutation.isPending}
+                  onChange={() => toggle(opt.value)}
+                />
+                <span>
+                  {opt.label}
+                  <span style={{ display: 'block', fontSize: 'var(--fs-sm)', color: 'var(--text-muted)' }}>
+                    {opt.hint}
+                  </span>
+                  {opt.warning && (
+                    <span style={{ display: 'block', fontSize: 'var(--fs-sm)', color: 'var(--warn, var(--text-muted))' }}>
+                      {opt.warning}
+                    </span>
+                  )}
+                </span>
+              </label>
+            ))}
+            <div className="row" style={{ gap: 12, alignItems: 'center' }}>
+              <span className="mono-body" style={{ color: 'var(--text-muted)', fontSize: 'var(--fs-sm)' }}>
+                {data?.override === null || data?.override === undefined
+                  ? 'Using the deployment default.'
+                  : 'Set for this workspace.'}
+              </span>
+              {data?.override != null && (
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={mutation.isPending}
+                  onClick={() => mutation.mutate(null)}
+                >
+                  Reset to default
+                </button>
+              )}
+            </div>
+          </>
+        )}
+        {error && (
+          <div className="error-text">
+            {error.status === 403 ? 'Requires admin role.' : error.message}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

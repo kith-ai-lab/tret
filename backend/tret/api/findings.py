@@ -40,6 +40,7 @@ from tret.services.documents import ingest_document
 from tret.services.export import strip_draft_status_banner
 from tret.storage import document_local_path, get_store, package_key
 from tret.services.outcomes import record_outcome_for_finding
+from tret.services.auto_approve import AUTO_PURPOSE
 
 router = APIRouter(prefix="/api", tags=["findings"])
 
@@ -48,6 +49,10 @@ log = logging.getLogger("tret.findings")
 APPROVAL_ACTIONS = ("approve", "reject")
 # Why a decision was made. Only 'review' is a verdict on the output and counts as
 # quality evidence; 'packaging' approves a page map solely so it can be packaged.
+# These are the purposes a client may send. A third STORED purpose, "auto" (an
+# approval made by the workspace's auto-approve policy, `services/auto_approve.py`),
+# is deliberately absent: only `_decide(..., auto=True)` writes it, so a person
+# cannot claim an automatic approval, and it is not a review either.
 APPROVAL_PURPOSES = ("review", "packaging")
 
 # Wall-clock bound on one approval-time packaging run (Poppler per mode plus the
@@ -310,17 +315,25 @@ async def _decide(
     approver_name: str,
     workspace_id: uuid.UUID,
     purpose: str | None = None,
+    auto: bool = False,
 ) -> dict:
     """Decide one finding: the body of `decide_finding`, shared with
     `decide_findings_batch`. Raises `HTTPException` (404/409/422) for a finding
     that cannot be decided. Takes plain values, never ORM objects: a refused
     item in a batch rolls the session back, which expires `User`/`Workspace`
-    objects the next item would otherwise read. `None` purpose means 'review'."""
-    if purpose is None:
+    objects the next item would otherwise read. `None` purpose means 'review'.
+
+    `auto=True` is the auto-approve policy's own path (`services/auto_approve.py`,
+    called from inside a running tool): the approval is stored with purpose "auto"
+    and the outcome re-score is skipped, because the run is still going (the
+    engine scores it when it ends) and an automatic approval is not a review."""
+    if auto:
+        purpose = AUTO_PURPOSE
+    elif purpose is None:
         purpose = "review"
     if action not in APPROVAL_ACTIONS:
         raise HTTPException(422, "action must be 'approve' or 'reject'")
-    if purpose not in APPROVAL_PURPOSES:
+    if purpose not in APPROVAL_PURPOSES and not auto:
         raise HTTPException(422, "purpose must be 'review' or 'packaging'")
     if purpose == "packaging" and action != "approve":
         raise HTTPException(422, "purpose 'packaging' is only valid with action 'approve': a rejection is always a review")
@@ -330,9 +343,11 @@ async def _decide(
     # could be overwritten by a concurrent approve with no 409 anywhere. The
     # lock makes the second request re-read the committed status and lose to the
     # 'already decided' branch below.
-    f = await db.get(Finding, finding_id, with_for_update=True)
+    f = await db.get(Finding, finding_id, with_for_update=True, populate_existing=True)
     if f is None or await project_in_workspace(db, f.project_id, workspace_id) is None:
         raise HTTPException(404, "Finding not found")
+    if auto and f.schema_slug == "package_map":
+        raise HTTPException(422, "a package_map is never approved automatically")
     if purpose == "packaging" and f.schema_slug != "package_map":
         raise HTTPException(422, "purpose 'packaging' is only valid for a package_map finding")
     if f.status != "draft":
@@ -385,7 +400,8 @@ async def _decide(
     # it so routing can learn from the verdict. After the commit, deliberately:
     # the approval is the thing that must succeed, and outcome bookkeeping is
     # rebuildable (`tret outcomes backfill`). It never raises.
-    await record_outcome_for_finding(db, fid)
+    if not auto:
+        await record_outcome_for_finding(db, fid)
     return {"ok": True, "status": new_status, "approver": approver_name, "purpose": purpose}
 
 

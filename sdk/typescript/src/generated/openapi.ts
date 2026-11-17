@@ -3353,6 +3353,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspace/settings/auto-approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Auto Approve */
+        get: operations["get_auto_approve_api_workspace_settings_auto_approve_get"];
+        /** Put Auto Approve */
+        put: operations["put_auto_approve_api_workspace_settings_auto_approve_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspace/settings/budget": {
         parameters: {
             query?: never;
@@ -3367,6 +3385,23 @@ export interface paths {
         post?: never;
         /** Delete Budget Settings */
         delete: operations["delete_budget_settings_api_workspace_settings_budget_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspace/settings/edition": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Put Edition */
+        put: operations["put_edition_api_workspace_settings_edition_put"];
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -3577,6 +3612,11 @@ export interface components {
         AuthConfigOut: {
             /** Auth Mode */
             auth_mode: string;
+            /**
+             * Edition
+             * @default standard
+             */
+            edition: string;
             /** Oidc Configured */
             oidc_configured: boolean;
             /** Oidc Login Url */
@@ -3590,6 +3630,11 @@ export interface components {
              * @enum {string}
              */
             scope_set: "read" | "write";
+        };
+        /** AutoApproveBody */
+        AutoApproveBody: {
+            /** Categories */
+            categories: ("draft_section" | "connected_write" | "findings")[] | null;
         };
         /** Body_install_archive_api_packs_install_archive_post */
         Body_install_archive_api_packs_install_archive_post: {
@@ -3844,6 +3889,11 @@ export interface components {
              * @enum {unknown}
              */
             purpose?: "review" | "packaging";
+        };
+        /** EditionBody */
+        EditionBody: {
+            /** Edition */
+            edition: ("standard" | "cohort") | null;
         };
         /** EgressOverride */
         EgressOverride: {
@@ -4320,6 +4370,11 @@ export interface components {
             current_workspace_id?: string | null;
             /** Display Name */
             display_name: string;
+            /**
+             * Edition
+             * @default standard
+             */
+            edition: string;
             /** Email */
             email: string;
             /** Global Role */
@@ -9685,6 +9740,59 @@ export interface operations {
             };
         };
     };
+    get_auto_approve_api_workspace_settings_auto_approve_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    put_auto_approve_api_workspace_settings_auto_approve_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AutoApproveBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_budget_settings_api_workspace_settings_budget_get: {
         parameters: {
             query?: never;
@@ -9756,6 +9864,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    put_edition_api_workspace_settings_edition_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EditionBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -10,6 +10,24 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Editions: a lean, chat-first interface for courses.** `TRET_EDITION=cohort` (default
+  `standard`, unchanged) shows only Chat, Approvals, Deliverables, Documents and Settings,
+  hides the harness and model pickers in the chat composer, and sends the hidden pages back
+  to Chat. A global admin can override it for one workspace
+  (`PUT /api/workspace/settings/edition`). It shapes the interface only; it is not an
+  access control. `/api/auth/config` and `/api/auth/me` now carry `edition`.
+- **Automatic approvals.** A workspace admin can have drafted sections, writes to a
+  connected drive, and findings and verdicts approved as they are created (Settings,
+  or `PUT /api/workspace/settings/auto-approve`; deployment default
+  `TRET_AUTO_APPROVE_DEFAULT`, empty). They are recorded with approval purpose `auto`,
+  stamped with the member who started the run, never count as review evidence for
+  routing, and are labelled as automatic in the approval history and in a deliverable's
+  provenance. Page maps are never approved automatically, the public approval routes
+  refuse the `auto` purpose, and a run started by someone no longer an active member
+  leaves its drafts for a person.
+- **A `report` theme for deliverable exports** (renderer only; not yet selectable in the
+  interface): cover page, running header and page numbers, styled tables and callouts.
+  The existing output is the `plain` theme and is unchanged.
 - **Share a batch with another workspace, read-only.** An approver can share a batch with a
   person by email (pending until they accept it from a workspace) or with a workspace they
   belong to (approver role there); the recipient sees the rows, statuses, evaluation scores,

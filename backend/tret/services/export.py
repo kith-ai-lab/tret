@@ -18,6 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.db.models import Finding, Run
 from tret.services.emissions import complete_water, energy_wh_field, grid_comparison_signature
 from tret.services.emissions_validation import number
+from tret.services.export_themes import (
+    EXPORT_THEMES,  # noqa: F401  (re-exported: the public theme list)
+    build_report_document,
+    validate_accent,
+    validate_theme,
+)
 from tret.services.html_sanitize import render_markdown
 
 
@@ -87,6 +93,10 @@ async def assemble_deliverable(
         return {"markdown": "", "sections": [], "html": ""}
 
     runs = await _runs_behind(db, sections.values())
+    # Lazy: outcomes pulls in the engine and router; export stays light to import.
+    from tret.services.outcomes import latest_approval_purposes
+
+    purposes = await latest_approval_purposes(db, [f.id for f in sections.values()])
     parts = [f"# {deliverable_slug.replace('-', ' ').title()}"]
     parts.append(
         f"_Assembled {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} from "
@@ -109,6 +119,9 @@ async def assemble_deliverable(
                 "section": slug,
                 "finding_id": str(f.id),
                 "status": f.status,
+                # Purpose of the section's latest approval ("auto" = approved by
+                # workspace policy, not reviewed by a person); None when unknown.
+                "approval_purpose": purposes.get(f.id),
                 "model": f.provenance.get("model"),
                 "doctrine_sha": (f.provenance.get("doctrine_sha") or "")[:12],
                 "run_id": str(f.run_id) if f.run_id else None,
@@ -350,13 +363,19 @@ def _energy_cell(section: dict) -> str:
     return f"~{wh:.3g} Wh{carbon}"
 
 
-def render_pdf(html_body: str, title: str, sections: list[dict], doctrine_sha: str | None) -> bytes:
-    """Render the assembled deliverable HTML to a styled PDF with a
-    provenance appendix. Raises PdfUnavailable if WeasyPrint can't load."""
-    try:
-        from weasyprint import HTML
-    except (ImportError, OSError) as e:
-        raise PdfUnavailable(str(e)) from e
+def _is_auto(section: dict) -> bool:
+    return section.get("approval_purpose") == "auto"
+
+
+def _status_cell(section: dict) -> str:
+    """The provenance status, saying so when approval was automatic."""
+    if section["status"] == "approved" and _is_auto(section):
+        return "approved (automatic)"
+    return section["status"]
+
+
+def _provenance_block(sections: list[dict], doctrine_sha: str | None) -> str:
+    """The provenance appendix markup shared by the pdf and report-html paths."""
 
     # Section slugs, statuses and model ids are interpolated into HTML, and the
     # slug is model-chosen — escape every cell rather than trusting the source.
@@ -364,18 +383,26 @@ def render_pdf(html_body: str, title: str, sections: list[dict], doctrine_sha: s
         return html.escape(str(value if value not in (None, "") else "—"))
 
     provenance_rows = "".join(
-        f"<tr><td>{esc(s['section'])}</td><td>{esc(s['status'])}</td>"
+        f"<tr><td>{esc(s['section'])}</td><td>{esc(_status_cell(s))}</td>"
         f"<td>{esc(s.get('model'))}</td><td>{esc(s.get('doctrine_sha'))}</td>"
         f"<td>{esc(_energy_cell(s))}</td></tr>"
         for s in sections
     )
-    document = f"""<html><head><meta charset="utf-8">
-<style>{_PDF_CSS}</style></head><body>
-{html_body}
-<div class="provenance">
+    auto_count = sum(1 for s in sections if _is_auto(s) and s["status"] == "approved")
+    if auto_count:
+        review_sentence = (
+            "Each section below was drafted under the doctrine version shown and validated. "
+            f"{auto_count} of {len(sections)} sections were approved automatically under the "
+            "workspace's automatic-approval policy and were not reviewed by a person."
+        )
+    else:
+        review_sentence = (
+            "Each section below was drafted under the doctrine version shown,\n"
+            "validated, and approved by a named reviewer before inclusion in this document."
+        )
+    return f"""<div class="provenance">
 <h2>Provenance</h2>
-<p class="meta">Each section below was drafted under the doctrine version shown,
-validated, and approved by a named reviewer before inclusion in this document.
+<p class="meta">{review_sentence}
 {f"Pack doctrine hash: <code>{html.escape(doctrine_sha[:16])}</code>." if doctrine_sha else ""}
 The energy column is an <em>estimate</em> of the compute drawn by the run that
 drafted each section — derived from token counts and the model's energy class,
@@ -385,7 +412,69 @@ never measured, and shared by sections drafted in the same run.</p>
 <th>Energy (est.)</th></tr>
 {provenance_rows}
 </table>
-</div>
+</div>"""
+
+
+def render_html(
+    html_body: str,
+    title: str,
+    sections: list[dict],
+    doctrine_sha: str | None,
+    *,
+    theme: str | None = None,
+    accent: str | None = None,
+    subtitle: str | None = None,
+) -> str:
+    """The standalone HTML export. `plain` (the default) is the sanitised body
+    fragment exactly as assembled; `report` is a complete themed document with
+    the provenance appendix."""
+    theme = validate_theme(theme)
+    validate_accent(accent)
+    if theme == "plain":
+        return html_body
+    return build_report_document(
+        html_body,
+        title,
+        _provenance_block(sections, doctrine_sha),
+        accent=accent,
+        subtitle=subtitle,
+    )
+
+
+def render_pdf(
+    html_body: str,
+    title: str,
+    sections: list[dict],
+    doctrine_sha: str | None,
+    *,
+    theme: str | None = None,
+    accent: str | None = None,
+    subtitle: str | None = None,
+) -> bytes:
+    """Render the assembled deliverable HTML to a styled PDF with a
+    provenance appendix. Raises PdfUnavailable if WeasyPrint can't load.
+
+    `theme` is "plain" (default; the original look) or "report" (cover page,
+    running header/footer; see `export_themes`). `accent` is an optional
+    `#rrggbb` colour for the report theme; `subtitle` an optional cover line.
+    """
+    theme = validate_theme(theme)
+    validate_accent(accent)
+    try:
+        from weasyprint import HTML
+    except (ImportError, OSError) as e:
+        raise PdfUnavailable(str(e)) from e
+
+    provenance = _provenance_block(sections, doctrine_sha)
+    if theme == "report":
+        document = build_report_document(
+            html_body, title, provenance, accent=accent, subtitle=subtitle
+        )
+    else:
+        document = f"""<html><head><meta charset="utf-8">
+<style>{_PDF_CSS}</style></head><body>
+{html_body}
+{provenance}
 </body></html>"""
     # url_fetcher is the SSRF/local-file gate: see blocked_url_fetcher.
     return HTML(string=document, url_fetcher=blocked_url_fetcher).write_pdf()
@@ -397,6 +486,10 @@ async def render_deliverable_bytes(
     deliverable_slug: str,
     format: str,
     include_draft: bool = False,
+    *,
+    theme: str | None = None,
+    accent: str | None = None,
+    subtitle: str | None = None,
 ) -> tuple[bytes, str]:
     """Assemble a deliverable and render it to `(bytes, content_type)` in
     `format` ("markdown"|"html"|"pdf") — the one rendering path shared by the
@@ -409,14 +502,30 @@ async def render_deliverable_bytes(
     Raises `DeliverableEmpty` when the deliverable has no (approved, or
     approved+draft) sections, and `PdfUnavailable` (unchanged) when
     `format="pdf"` and WeasyPrint's native libraries are missing.
+
+    `theme` ("plain" default | "report"), `accent` (`#rrggbb`) and `subtitle`
+    apply to html and pdf only; an unknown theme or a malformed accent raises
+    ValueError before any database work.
     """
     if format not in ("markdown", "html", "pdf"):
         raise ValueError(f"format must be markdown|html|pdf, got {format!r}")
+    validate_theme(theme)
+    validate_accent(accent)
     result = await assemble_deliverable(db, project_id, deliverable_slug, include_draft)
     if not result["sections"]:
         raise DeliverableEmpty(deliverable_slug)
     if format == "html":
-        return result["html"].encode("utf-8"), "text/html"
+        shas = {s.get("doctrine_sha") for s in result["sections"] if s.get("doctrine_sha")}
+        page = render_html(
+            result["html"],
+            deliverable_slug,
+            result["sections"],
+            shas.pop() if len(shas) == 1 else None,
+            theme=theme,
+            accent=accent,
+            subtitle=subtitle,
+        )
+        return page.encode("utf-8"), "text/html"
     if format == "pdf":
         shas = {s.get("doctrine_sha") for s in result["sections"] if s.get("doctrine_sha")}
         pdf = render_pdf(
@@ -424,6 +533,9 @@ async def render_deliverable_bytes(
             deliverable_slug,
             result["sections"],
             shas.pop() if len(shas) == 1 else None,
+            theme=theme,
+            accent=accent,
+            subtitle=subtitle,
         )
         return pdf, "application/pdf"
     return result["markdown"].encode("utf-8"), "text/markdown"

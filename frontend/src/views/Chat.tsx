@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router-dom'
 
 import {
   api,
+  autoApproveApi,
   ApiError,
   type ChatAttachment,
   type ChatMessage,
@@ -36,6 +37,7 @@ import {
 import { LiveFootprint } from '../components/shared/LiveFootprint'
 import { MarkdownDoc } from '../components/shared/MarkdownDoc'
 import { RoutingBadge, shortModelName } from '../components/shared/RoutingBadge'
+import { useEdition } from '../edition'
 import { ModelSelect, overrideWarning } from './Workbench'
 
 // localStorage keys for the composer's per-turn overrides. Both persist across
@@ -126,6 +128,15 @@ export function Chat() {
   // here only to notice a workspace switch — see the reset effect below.
   const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
   const workspaceId = meQuery.data?.current_workspace_id ?? null
+  // When every category is approved automatically nothing waits in Approvals,
+  // so the "responses are drafts" hint would be wrong. Fails open: while loading
+  // or on error the hint stays.
+  const autoApproveQuery = useQuery({
+    queryKey: ['auto-approve'],
+    queryFn: autoApproveApi.get,
+    staleTime: 60_000,
+  })
+  const allAutoApproved = (autoApproveQuery.data?.effective.length ?? 0) >= 3
   // Read for the composer's model picker only: a per-turn `model_override` is
   // confined to the chat harness's own policy (router.py's
   // `_assert_override_within_policy`), so the picker has to know that policy or
@@ -140,28 +151,38 @@ export function Chat() {
   const [objective, setObjective] = useState<string>(
     () => localStorage.getItem(OBJECTIVE_STORAGE_KEY) ?? '',
   )
-  const [modelOverride, setModelOverride] = useState<string>(
+  const [storedModelOverride, setModelOverride] = useState<string>(
     () => localStorage.getItem(MODEL_OVERRIDE_STORAGE_KEY) ?? '',
   )
   useEffect(() => localStorage.setItem(OBJECTIVE_STORAGE_KEY, objective), [objective])
-  useEffect(() => localStorage.setItem(MODEL_OVERRIDE_STORAGE_KEY, modelOverride), [modelOverride])
+  useEffect(
+    () => localStorage.setItem(MODEL_OVERRIDE_STORAGE_KEY, storedModelOverride),
+    [storedModelOverride],
+  )
+  // The cohort edition hides the model override and harness pickers, so a value
+  // saved from an earlier standard-edition session must not still be sent. It is
+  // ignored here, not deleted: the stored value (above) comes back untouched if
+  // the workspace returns to the standard edition.
+  const cohort = useEdition() === 'cohort'
+  const modelOverride = cohort ? '' : storedModelOverride
 
   // Which harness the *next new* chat will start on. Empty means "default".
   // Persisted the same way as the two overrides above, but it only ever
   // applies before a conversation exists — once one does, its harness is
   // fixed and this selection is irrelevant to it.
-  const [selectedHarnessId, setSelectedHarnessId] = useState<string>(
+  const [storedHarnessId, setSelectedHarnessId] = useState<string>(
     () => localStorage.getItem(HARNESS_STORAGE_KEY) ?? '',
   )
-  useEffect(() => localStorage.setItem(HARNESS_STORAGE_KEY, selectedHarnessId), [selectedHarnessId])
+  useEffect(() => localStorage.setItem(HARNESS_STORAGE_KEY, storedHarnessId), [storedHarnessId])
+  const selectedHarnessId = cohort ? '' : storedHarnessId
   // A stored id from a harness that has since been archived or deleted falls
   // back to "default" rather than silently sending a dangling id.
   useEffect(() => {
     if (harnessesQuery.data === undefined) return
-    if (selectedHarnessId && !harnessesQuery.data.some((h) => h.id === selectedHarnessId)) {
+    if (storedHarnessId && !harnessesQuery.data.some((h) => h.id === storedHarnessId)) {
       setSelectedHarnessId('')
     }
-  }, [harnessesQuery.data, selectedHarnessId])
+  }, [harnessesQuery.data, storedHarnessId])
 
   // Default to the most recent conversation once the list first loads. Never
   // override the user's explicit selection (incl. the deliberate null of a
@@ -480,9 +501,11 @@ export function Chat() {
                   onAddFiles={addFiles}
                   onRemoveAttachment={removeAttachment}
                 />
-                <div className="chat-hint">
-                  Responses are drafts — structured findings go to Approvals before they count.
-                </div>
+                {!allAutoApproved && (
+                  <div className="chat-hint">
+                    Responses are drafts — structured findings go to Approvals before they count.
+                  </div>
+                )}
               </div>
             </div>
           </>
@@ -1251,6 +1274,8 @@ function ComposerControls({
   // A per-turn override the chat harness's policy would refuse is called out
   // here rather than discovered as a failed run after the message is sent.
   const overrideProblem = overrideWarning(modelOverride, models, policy)
+  // The cohort edition keeps the composer to text, attachments and objective.
+  const lean = useEdition() === 'cohort'
   // The value picked for a chat that no longer exists in the harness list
   // (deleted since, or — while fixed — a harness this account can no longer
   // see) still needs its own option, same reasoning as ModelSelect: dropping
@@ -1258,6 +1283,7 @@ function ComposerControls({
   const harnessKnown = harnesses.some((h) => h.id === harnessValue)
   return (
     <div className="chat-controls">
+      {!lean && (
       <span className="chat-control">
         <select
           className="chat-control-select"
@@ -1284,6 +1310,7 @@ function ComposerControls({
           )}
         </select>
       </span>
+      )}
       <span className="chat-control">
         <select
           className="chat-control-select"
@@ -1300,6 +1327,7 @@ function ComposerControls({
           ))}
         </select>
       </span>
+      {!lean && (
       <span className="chat-control" style={{ maxWidth: 260 }}>
         <ModelSelect
           models={models}
@@ -1309,7 +1337,8 @@ function ComposerControls({
           policy={policy}
         />
       </span>
-      {overrideProblem && (
+      )}
+      {!lean && overrideProblem && (
         <span className="error-text" style={{ flexBasis: '100%', fontSize: 'var(--fs-xs)' }}>
           {overrideProblem}
         </span>
