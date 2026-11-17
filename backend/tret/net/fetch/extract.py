@@ -7,9 +7,10 @@ and treats them as the risk they are (`services/documents.py::extract_bounded`).
 `html.parser` is the one that ships with Python.
 
 What it does: drop the elements whose text is never content (`script`, `style`,
-`nav`, `header`, `footer`, `form`, `svg`), keep the `<title>`, insert line breaks
-at block boundaries so headings and paragraphs do not run together, and collapse
-runs of whitespace. What it does not do: interpret layout, follow frames, or run
+`nav`, `header`, `footer`, `form`, `svg`), drop inline XBRL's hidden facts block
+(`ix:header`, any prefix) and anything with an inline `display:none`, keep the
+`<title>`, insert line breaks at block boundaries so headings and paragraphs do
+not run together, and collapse runs of whitespace. What it does not do: interpret layout, follow frames, or run
 anything. A page whose text only exists after JavaScript comes back nearly empty,
 and the caller says so rather than pretending otherwise.
 """
@@ -31,20 +32,53 @@ _BLOCK_ELEMENTS = frozenset(
     }
 )
 
+# Elements with no end tag: never the root of a hidden subtree.
+_VOID_ELEMENTS = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+)
+_XBRL_STACK_SCAN = 256
+_DISPLAY_NONE = re.compile(r"display\s*:\s*none\b", re.IGNORECASE)
+
+
+def _is_hidden(tag: str, attrs) -> bool:
+    """Inline XBRL's hidden facts block (`ix:header`, any prefix) or an inline `display:none`."""
+    if tag in _VOID_ELEMENTS:
+        return False
+    if tag.endswith(":header"):
+        return True
+    return any(name == "style" and value and _DISPLAY_NONE.search(value) for name, value in attrs)
+
+
 _BLANK_LINES = re.compile(r"\n{3,}")
 _TRAILING_SPACE = re.compile(r"[ \t]+\n")
 _RUNS_OF_SPACE = re.compile(r"[ \t]{2,}")
 
 
 class _TextExtractor(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, inline_xbrl: bool = False) -> None:
         super().__init__(convert_charrefs=True)
         self.title = ""
         self._parts: list[str] = []
         self._skip_depth = 0
         self._in_title = False
+        # Inline XBRL documents only: hidden regions (`*:header`, inline `display:none`)
+        # are skipped. An ordinary page keeps the plain behaviour above exactly, because
+        # a page that omits an end tag (`<li style="display:none">x<li>y`) must not lose
+        # the rest of its text. The open-element stack makes a parent's end tag close an
+        # unclosed hidden child, as `esef_filing` does.
+        self._xbrl = inline_xbrl
+        self._open: list[tuple[str, bool]] = []
+        self._hidden = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:
+        if self._xbrl:
+            if tag not in _VOID_ELEMENTS:
+                starts = self._hidden == 0 and _is_hidden(tag, attrs)
+                self._open.append((tag, starts))
+                if starts:
+                    self._hidden += 1
+            if self._hidden:
+                return
         if tag in _SKIP_ELEMENTS:
             self._skip_depth += 1
         elif tag == "title":
@@ -53,6 +87,16 @@ class _TextExtractor(HTMLParser):
             self._parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
+        if self._xbrl and tag not in _VOID_ELEMENTS:
+            stack = self._open
+            for i in range(len(stack) - 1, max(-1, len(stack) - 1 - _XBRL_STACK_SCAN), -1):
+                if stack[i][0] == tag:
+                    while len(stack) > i:
+                        if stack.pop()[1]:
+                            self._hidden -= 1
+                    break
+            if self._hidden:
+                return
         if tag in _SKIP_ELEMENTS:
             # Never below zero: a stray `</script>` with no opener is common in
             # real pages, and letting the counter go negative would suppress the
@@ -64,7 +108,7 @@ class _TextExtractor(HTMLParser):
             self._parts.append("\n")
 
     def handle_data(self, data: str) -> None:
-        if self._skip_depth:
+        if self._skip_depth or self._hidden:
             return
         if self._in_title:
             self.title += data.strip()
@@ -79,9 +123,13 @@ class _TextExtractor(HTMLParser):
         return _BLANK_LINES.sub("\n\n", joined).strip()
 
 
+def _is_inline_xbrl(html: str) -> bool:
+    return "<ix:header" in html or "inlineXBRL" in html[:100_000]
+
+
 def html_to_text(html: str) -> tuple[str, str]:
     """(text, title). Malformed markup yields what could be read, never an error."""
-    parser = _TextExtractor()
+    parser = _TextExtractor(inline_xbrl=_is_inline_xbrl(html))
     try:
         parser.feed(html)
         parser.close()

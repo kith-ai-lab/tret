@@ -145,7 +145,7 @@ def test_the_package_sources_statement_reads_json_paths_with_arrow_text():
     from sqlalchemy.dialects import postgresql
 
     sql = str(scoring._package_sources_statement([uuid.uuid4()]).compile(dialect=postgresql.dialect()))
-    assert sql.count("->>") == 5 and "findings.payload," not in sql
+    assert sql.count("->>") == 6 and "findings.payload," not in sql
 
 
 async def test_package_sources_filter_status_and_package_state(world):

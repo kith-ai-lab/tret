@@ -759,6 +759,63 @@ def test_packaging_finished_uploads_with_auto_write(client, world):
     assert t["packages"][0]["retained_page_count"] == 38
 
 
+FILING_FILES = (
+    ("allianz.extract.html", "text/html"),
+    ("allianz.layout.md", "text/markdown"),
+    ("allianz.page_map.json", "application/json"),
+    ("allianz.extraction_stats.json", "application/json"),
+    ("allianz.package.json", "application/json"),
+)
+
+
+def test_an_esef_filing_package_uploads_all_five_files_and_reports_its_unit(client, world):
+    cid = _started(client, world)
+    fid = by_slug(detail(client, cid))["allianz"]["packages"][0]["finding_id"]
+
+    async def as_filing(db):
+        f = await db.get(Finding, uuid.UUID(fid))
+        payload = dict(f.payload)
+        payload["map"] = {**payload["map"], "unit": "filing_section", "keep_ranges": [[14, 19]]}
+        payload["source"] = {**payload["source"], "unit": "filing_section", "page_count": 52}
+        f.payload = payload
+        await db.commit()
+
+    run_db(client, world, as_filing)
+    batch(client, [fid], "approve")
+
+    async def package(db):
+        f = await db.get(Finding, uuid.UUID(fid))
+        docs = []
+        for name, ctype in FILING_FILES:
+            data = f"bytes of {name}".encode()
+            path = Path(world.tmp) / f"{fid}-{name}"
+            path.write_bytes(data)
+            doc = Document(
+                id=uuid.uuid4(), project_id=f.project_id, filename=name, content_type=ctype,
+                byte_size=len(data), storage_path=str(path), sha256=hashlib.sha256(data).hexdigest(),
+                source_kind="package", meta={},
+            )
+            db.add(doc)
+            docs.append({"role": name.split(".", 1)[1], "document_id": str(doc.id), "filename": name,
+                         "sha256": doc.sha256, "byte_size": doc.byte_size, "content_type": ctype})
+        f.payload = {**f.payload, "package": {
+            "status": "packaged", "documents": docs, "retained_sha256": docs[0]["sha256"],
+            "retained_page_count": 6, "retained_unit_count": 6, "source_page_count": 52,
+            "wall_seconds": 1.0, "limitations": ["regulated ESEF filing, not the issuer's own PDF"],
+            "error": None}}
+        await db.commit()
+
+    run_db(client, world, package)
+    client.portal.call(service.notify_package_finished, uuid.UUID(fid))
+    assert [u["filename"].rsplit("/", 1)[-1] for u in world.uploads] == [n for n, _ in FILING_FILES]
+    assert {u["max_bytes"] for u in world.uploads} == {62_914_560}
+    assert [u["content_type"] for u in world.uploads] == [c for _, c in FILING_FILES]
+    t = by_slug(detail(client, cid))["allianz"]
+    assert t["status"] == "written"
+    assert t["packages"][0]["unit"] == "filing_section"
+    assert t["packages"][0]["retained_page_count"] == 6
+
+
 def test_packaging_without_auto_write_completes_without_uploading(client, world):
     cid = _started(client, world, auto_write=False)
     fid = by_slug(detail(client, cid))["allianz"]["packages"][0]["finding_id"]

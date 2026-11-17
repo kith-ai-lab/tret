@@ -621,7 +621,7 @@ async def search_documents(
 # ctx.retrieved_values, so the cited-values check keeps refusing numbers that
 # came this way. See docs/trust-doctrine.md §1.
 
-WEB_TOOL_NAMES = ("web_search", "fetch_url", "capture_source")
+WEB_TOOL_NAMES = ("web_search", "fetch_url", "capture_source", "capture_filing")
 
 # How much of a fetched page comes back in the tool result. Enough to tell
 # whether the page is worth reading; the rest is behind read_document, which
@@ -2115,10 +2115,17 @@ def _read_head_sync(path: Path, n: int = 5) -> bytes:
         return fh.read(n)
 
 
-def _page_check_block(doc_id, text: str | None, keep_ranges, page_count: int) -> str:
+def _page_check_block(
+    doc_id, text: str | None, keep_ranges, page_count: int, unit: str = "pdf_page"
+) -> str:
     """Newline + the page-check block, or "" (never raises: the proposal must succeed)."""
     try:
-        block = page_check.describe_ranges(keep_ranges, page_check.split_pages(text), page_count)
+        if unit == "filing_section":
+            block = page_check.describe_sections(keep_ranges, page_check.split_sections(text), page_count)
+        else:
+            block = page_check.describe_ranges(
+                keep_ranges, page_check.split_pages(text), page_count, unit=unit
+            )
     except Exception:
         log.warning("page check failed for document %s", doc_id, exc_info=True)
         return ""
@@ -2144,7 +2151,9 @@ def _page_check_block(doc_id, text: str | None, keep_ranges, page_count: int) ->
     "Use status unresolved when you could not locate it, and say so in review_note; do not guess "
     "ranges. List any deliberately dropped pages in `exclusions` with a reason. Tret never infers "
     "pages for you, so an out-of-bounds, overlapping or unsorted range is returned as an error to "
-    "fix.",
+    "fix. A regulated ESEF filing captured with capture_filing is also a valid source: its ranges "
+    "count the filing's own units (the `## Page N` or `## Section N: heading` markers in its "
+    "text), not PDF pages; nothing else about the proposal changes, and ocr must stay off.",
     {
         "type": "object",
         "required": ["source_document_id", "title", "role", "scope"],
@@ -2152,7 +2161,8 @@ def _page_check_block(doc_id, text: str | None, keep_ranges, page_count: int) ->
             "source_document_id": {
                 "type": "string",
                 "description": (
-                    "A PDF document attached to this run (for example a capture_source result). "
+                    "A PDF document attached to this run (for example a capture_source result), or "
+                    "an ESEF filing document (a capture_filing result). "
                     "Its stored file must still match its recorded SHA-256."
                 ),
             },
@@ -2292,7 +2302,23 @@ async def propose_package_map(
         head = await asyncio.to_thread(_read_head_sync, path)
     except OSError as e:
         raise ToolError(f"The stored file could not be read: {type(e).__name__}.") from e
-    if head != b"%PDF-":
+    # An ESEF filing (capture_filing) is the one non-PDF source: its ranges count the
+    # filing's own pages or sections, recorded at capture. Everything below is the
+    # PDF path unchanged when `unit` stays "pdf_page".
+    is_filing = (doc.meta or {}).get("provenance") == "esef_filing"
+    unit = packaging_service.UNIT_PDF_PAGE
+    filing_unit_count = 0
+    if is_filing:
+        if head[:4] != b"PK\x03\x04":
+            raise ToolError("This filing document is not a ZIP archive (its stored file does not start with PK).")
+        unit = str((doc.meta or {}).get("unit") or "")
+        filing_unit_count = (doc.meta or {}).get("unit_count")
+        if unit not in ("filing_page", "filing_section") or type(filing_unit_count) is not int or filing_unit_count < 1:
+            raise ToolError(
+                "This filing document has no recorded layout or unit count, so it cannot be mapped; "
+                "capture it again with capture_filing."
+            )
+    elif head != b"%PDF-":
         raise ToolError("This document is not a PDF (its stored file does not start with %PDF-).")
 
     if stem is None:
@@ -2335,7 +2361,10 @@ async def propose_package_map(
         raise ToolError("review_note must be a string")
 
     try:
-        info = await asyncio.to_thread(packaging_service.source_info, path)
+        if is_filing:
+            info = await asyncio.to_thread(packaging_service.filing_source_info, path, filing_unit_count)
+        else:
+            info = await asyncio.to_thread(packaging_service.source_info, path)
     except packaging_service.PackagingError as e:
         raise ToolError(str(e)) from e
     if info.sha256 != doc.sha256:
@@ -2355,12 +2384,26 @@ async def propose_package_map(
         incorporations=tuple(incorporation_records),
         exclusions=tuple(exclusion_records),
         ocr=ocr,
+        unit=unit,
     )
     try:
         pages = packaging_service.validate_map(mapping, info.page_count)
     except packaging_service.PackageMapError as e:
         hint = ""
         if (
+            is_filing
+            and str(e).startswith("Out-of-bounds range")
+            and keep_pairs is not None
+            and any(b > info.page_count for _, b in keep_pairs)
+        ):
+            what = "pages" if unit == "filing_page" else "sections"
+            hint = (
+                f" This filing has {info.page_count} {what}. Use the numbers in the "
+                f"`## {'Page' if unit == 'filing_page' else 'Section'} N` markers of its text "
+                "(search_documents hits name them); a printed page number from a contents page "
+                "is not a unit number."
+            )
+        elif (
             str(e).startswith("Out-of-bounds range")
             and keep_pairs is not None
             and any(b > info.page_count for _, b in keep_pairs)
@@ -2388,6 +2431,45 @@ async def propose_package_map(
     meta = doc.meta or {}
     title = title.strip()
     full_original = len(pages) == info.page_count
+    source_record = {
+        "document_id": str(doc.id),
+        "filename": doc.filename,
+        "sha256": doc.sha256,
+        "byte_size": doc.byte_size,
+        "page_count": info.page_count,
+        "source_kind": doc.source_kind,
+        "provenance": meta.get("provenance"),
+        "url": meta.get("url"),
+    }
+    map_record = {
+        "title": title,
+        "role": role,
+        "scope": scope,
+        "keep_ranges": None if keep_pairs is None else [list(r) for r in mapping.keep_ranges],
+        "review_note": review_note,
+        "incorporations": incorporation_records,
+        "exclusions": exclusion_records,
+        "ocr": ocr,
+    }
+    if is_filing:
+        # `page_count` above holds the unit count so readers that total source pages
+        # keep working; these say what the units are. A PDF map carries neither key:
+        # an absent `unit` means "pdf_page".
+        source_record.update(
+            unit=unit,
+            unit_count=info.page_count,
+            filing={
+                "lei": meta.get("lei"),
+                "filing_url": meta.get("filing_url"),
+                "package_url": meta.get("package_url"),
+                "report_member": meta.get("report_member"),
+                "report_member_sha256": meta.get("report_member_sha256"),
+                "layout": meta.get("layout"),
+                "text_cap": meta.get("text_cap"),
+                "unit_text_sha256": meta.get("unit_text_sha256"),
+            },
+        )
+        map_record["unit"] = unit
     finding = Finding(
         run_id=ctx.run_id,
         project_id=ctx.project_id,
@@ -2395,26 +2477,8 @@ async def propose_package_map(
         schema_slug="package_map",
         subject={"source_document_id": str(doc.id), "stem": stem, "title": title},
         payload={
-            "source": {
-                "document_id": str(doc.id),
-                "filename": doc.filename,
-                "sha256": doc.sha256,
-                "byte_size": doc.byte_size,
-                "page_count": info.page_count,
-                "source_kind": doc.source_kind,
-                "provenance": meta.get("provenance"),
-                "url": meta.get("url"),
-            },
-            "map": {
-                "title": title,
-                "role": role,
-                "scope": scope,
-                "keep_ranges": None if keep_pairs is None else [list(r) for r in mapping.keep_ranges],
-                "review_note": review_note,
-                "incorporations": incorporation_records,
-                "exclusions": exclusion_records,
-                "ocr": ocr,
-            },
+            "source": source_record,
+            "map": map_record,
             "stem": stem,
             "selected_page_count": len(pages),
             "full_original": full_original,
@@ -2450,8 +2514,27 @@ async def propose_package_map(
         ctx, finding, [f for f in earlier if f.subject == finding.subject or f.id in revised_ids]
     )
     page_block = await asyncio.to_thread(
-        _page_check_block, doc.id, doc.extracted_text, keep_pairs, info.page_count
+        _page_check_block, doc.id, doc.extracted_text, keep_pairs, info.page_count, unit
     )
+    if is_filing:
+        what = "pages" if unit == "filing_page" else "sections"
+        return (
+            f"Proposed package map '{title}' for the regulated ESEF filing {doc.filename}: "
+            f"{len(pages)} of {info.page_count} filing {what} selected (role {role}, scope {scope}, "
+            f"{len(incorporation_records)} incorporation record(s)) — awaiting approval "
+            f"(finding {finding.id}). NOTHING has been packaged: files are produced only if and when "
+            "an approver accepts this map. This is the regulated filing, not the issuer's own PDF; "
+            f"ranges count the filing's {what} as numbered by the `## "
+            f"{'Page' if unit == 'filing_page' else 'Section'} N` markers in its text."
+            + (
+                f" Note: keep_ranges arrived as the flat list {json.dumps(keep_flat)} and was read "
+                f"as the pairs {json.dumps([list(r) for r in keep_pairs])}. If you meant other "
+                "units, propose this map again with the same source document and stem."
+                if keep_flat is not None
+                else ""
+            )
+            + page_block
+        )
     return (
         f"Proposed package map '{title}' for {doc.filename}: {len(pages)} of {info.page_count} "
         f"physical pages selected (role {role}, scope {scope}, {len(incorporation_records)} "

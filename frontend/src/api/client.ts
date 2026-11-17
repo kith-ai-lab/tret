@@ -1298,15 +1298,36 @@ export interface ConnectedWritePayload {
  *  on the same finding is `{ source_document_id, stem, title }`. `package` is
  *  null until a decision is made; approving triggers the packaging and the
  *  result is stored here (a failed one can be retried without re-approving). */
+/** What a map's page numbers count. Absent means `pdf_page` (every map made before
+ *  the ESEF filing fallback): `filing_page` and `filing_section` number the units of a
+ *  regulated ESEF filing captured with `capture_filing`, not PDF pages. */
+export type PackageMapUnit = 'pdf_page' | 'filing_page' | 'filing_section'
+
+/** Where a filing source came from (only on a filing source). */
+export interface PackageMapSourceFiling {
+  lei?: string | null
+  filing_url?: string | null
+  package_url?: string | null
+  report_member?: string | null
+  report_member_sha256?: string | null
+  /** `paged` when the filing's markup marks pages, otherwise `sections`. */
+  layout?: string | null
+}
+
 export interface PackageMapSource {
   document_id: string
   filename: string
   sha256: string
   byte_size: number
+  /** Pages of a PDF; for a filing source, the count of its units (see `unit`). */
   page_count: number | null
   source_kind: string
   provenance: string | null
   url: string | null
+  /** Filing sources only. */
+  unit?: PackageMapUnit
+  unit_count?: number
+  filing?: PackageMapSourceFiling
 }
 
 export interface PackageMapIncorporation {
@@ -1327,7 +1348,9 @@ export interface PackageMap {
   title: string
   role: string
   scope: 'standalone' | 'embedded' | (string & {})
-  /** Inclusive 1-based [first, last] page ranges to keep; null = whole original. */
+  /** What the ranges count; absent = `pdf_page`. */
+  unit?: PackageMapUnit
+  /** Inclusive 1-based [first, last] page (or filing page/section) ranges to keep; null = whole original. */
   keep_ranges: [number, number][] | null
   review_note: string | null
   incorporations: PackageMapIncorporation[]
@@ -1355,9 +1378,10 @@ export interface PackageResult {
   error: string | null
   documents: PackageResultDocument[]
   retained_sha256: string | null
+  /** Retained pages; for a filing package, retained filing pages or sections (see the map's `unit`). */
   retained_page_count: number | null
   source_page_count: number | null
-  /** pdftotext | pypdf */
+  /** pdftotext | pypdf (a filing package: esef_html) */
   text_mode: string | null
   poppler_version: string | null
   wall_seconds: number | null

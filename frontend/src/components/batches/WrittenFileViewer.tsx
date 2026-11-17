@@ -5,10 +5,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 
-import { api, ApiError, type BatchWrittenFile } from '../../api/client'
+import { api, ApiError, type BatchWrittenFile, type PackageMapUnit } from '../../api/client'
 import { formatDateTime } from '../shared/format'
 import { MarkdownDoc } from '../shared/MarkdownDoc'
 import { Modal } from '../shared/Modal'
+import { FILING_LABEL, isFilingUnit, unitNoun } from '../shared/packageUnit'
 import { ExtLink, safeHref, shorten } from './shared'
 
 /** Beyond this many characters of text we show only the head, to keep the
@@ -336,6 +337,11 @@ function TextFileView({
           Large file: showing the first 2 MB as source text. Download it for the whole file.
         </div>
       )}
+      {lower.endsWith('.extract.html') && (
+        <div className="fine-print" style={{ marginBottom: 8 }}>
+          Shown as source text; the HTML is never rendered here. {FILING_LABEL}.
+        </div>
+      )}
       {lower.endsWith('.md') ? (
         <MarkdownView text={text} forceSource={truncated} />
       ) : lower.endsWith('.json') && !truncated ? (
@@ -650,6 +656,7 @@ function num(v: unknown): number | null {
 
 function PageMapView({ v }: { v: unknown }) {
   if (!isObj(v)) return <Tree value={v} />
+  if (isFilingUnit(v.unit as PackageMapUnit)) return <FilingPageMapView v={v} />
   const pages = Array.isArray(v.pages) ? v.pages.filter(isObj) : []
   const src = pages.map((p) => num(p.source_pdf_page)).filter((n): n is number => n !== null)
   const retained = num(v.retained_page_count)
@@ -698,6 +705,60 @@ function PageMapView({ v }: { v: unknown }) {
   )
 }
 
+/** A page map of a regulated ESEF filing: units are filing pages or sections. */
+function FilingPageMapView({ v }: { v: Obj }) {
+  const unit = v.unit as PackageMapUnit
+  const units = Array.isArray(v.units) ? v.units.filter(isObj) : []
+  const kept = units.map((u) => num(u.source_unit)).filter((n): n is number => n !== null)
+  const retained = num(v.retained_unit_count)
+  const total = num(v.source_unit_count)
+  const section = unit === 'filing_section'
+  const rows: [string, ReactNode][] = [['Source', FILING_LABEL]]
+  if (retained !== null && total !== null) rows.push(['Retained', `${retained} of ${total} ${unitNoun(unit)}`])
+  if (kept.length > 0) rows.push([`${unitNoun(unit)} kept`, collapseRanges(kept)])
+  for (const k of ['source_filename', 'source_sha256', 'report_member', 'retained_sha256']) {
+    if (v[k] !== undefined) rows.push([k, scalarText(v[k])])
+  }
+  return (
+    <div>
+      <Section title="Summary">
+        <KeyValueTable rows={rows} />
+      </Section>
+      <Section title={`${unitNoun(unit)} (${units.length.toLocaleString('en-US')})`}>
+        {units.length === 0 ? (
+          <div className="fine-print">No entries.</div>
+        ) : (
+          <Scroll>
+            <table className="mono-table">
+              <thead>
+                <tr>
+                  <th className="num">Retained #</th>
+                  <th className="num">Source #</th>
+                  <th>{section ? 'Heading' : 'Printed folio'}</th>
+                  <th className="num">Characters</th>
+                </tr>
+              </thead>
+              <tbody>
+                {units.slice(0, MAX_ROWS).map((u, i) => (
+                  <tr key={i}>
+                    <td className="num">{scalarText(u.retained_position)}</td>
+                    <td className="num">{scalarText(u.source_unit)}</td>
+                    <td>{scalarText(section ? u.heading : u.printed_folio)}</td>
+                    <td className="num">{scalarText(u.characters)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {units.length > MAX_ROWS && (
+              <div className="fine-print">… {units.length - MAX_ROWS} more not shown</div>
+            )}
+          </Scroll>
+        )}
+      </Section>
+    </div>
+  )
+}
+
 // package -----------------------------------------------------------------
 
 const PACKAGE_HANDLED = new Set([
@@ -729,12 +790,20 @@ function PackageView({ v }: { v: unknown }) {
     : ranges === null || ranges === undefined
       ? 'Whole document'
       : scalarText(ranges)
-  const retained = num(v.retained_page_count)
-  const total = num(v.source_page_count)
+  const unit = v.unit as PackageMapUnit
+  const filing = isFilingUnit(unit)
+  const retained = num(filing ? (v.retained_unit_count ?? v.retained_page_count) : v.retained_page_count)
+  const total = num(filing ? (v.source_unit_count ?? v.source_page_count) : v.source_page_count)
   const top: [string, ReactNode][] = [
+    ...(filing ? ([['source', FILING_LABEL]] as [string, ReactNode][]) : []),
     ['keep_ranges', rangeText],
     ...(retained !== null && total !== null
-      ? ([['pages', `Retained ${retained} of ${total} source pages`]] as [string, ReactNode][])
+      ? ([
+          [
+            filing ? unitNoun(unit) : 'pages',
+            `Retained ${retained} of ${total} ${filing ? unitNoun(unit) : 'source pages'}`,
+          ],
+        ] as [string, ReactNode][])
       : []),
   ]
   const artifacts = isObj(v.artifacts) ? Object.entries(v.artifacts) : null

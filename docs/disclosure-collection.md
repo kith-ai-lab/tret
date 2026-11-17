@@ -288,6 +288,38 @@ Drive has no write path.
 A [collection run](#6-collection-runs-batches) does this for you for the packages an
 approver has approved, without a per-file proposal.
 
+## ESEF filing fallback
+
+Some issuers refuse an automated download of their own PDF (HTTP 403), or publish the
+sustainability statement only inside the annual report they file under ESEF. When a target
+carries a `source_filing_url`, the Collector's task says so, and it may call `capture_filing`
+**only** if the issuer's own copy is refused or does not exist for that fiscal year. The
+issuer's PDF always stays first, and a filing for a different fiscal year is never used. The
+tool takes no URL from the model: it fetches the one ESEF package (a ZIP) for the run's own
+target from filings.xbrl.org, stores the original ZIP as a document, and gives the run the
+report's text in units: `## Page N` when the filing is a PDF conversion, otherwise
+`## Section N: heading`. A page map over it uses `unit` `filing_page` or `filing_section`
+(a map without `unit` is a PDF map, as before). The package ceiling is
+`TRET_ESEF_FILING_MAX_BYTES` (default 200 MiB); a larger package is refused, not truncated.
+
+An approved filing map packages to `<stem>.extract.html` (text and table cells regenerated
+from the filing, no images, scripts or links), `<stem>.layout.md`, `<stem>.page_map.json`
+(unit, printed folio or heading per retained unit), `<stem>.extraction_stats.json` and
+`<stem>.package.json`. There is no PDF, and verification is a text read-back of the selected
+units (see [what verification establishes](#what-verification-establishes-and-what-it-does-not)).
+All five files are written back under the same size cap as any package.
+
+Review differs in what the approver checks: ranges are filing pages or sections, not PDF
+pages, and printed folios can differ from filing page numbers. The review screen and the
+written-file viewer label such a package "From the regulated ESEF filing (not the issuer's
+PDF)" with the filing link, and the package's limitations say the same. The run's outcome
+summary must state that the package comes from the ESEF filing and why. The evaluator's
+evidence names the unit and carries a note that its rubric's "retained pages" means filing
+pages or sections for those maps; it judges whether the issuer copy was really unavailable.
+Filing units are left out of the page-count metrics (retained and source pages, the
+cross-batch main-document check), because they are not PDF pages; the batch manifest
+reports them separately as `retained_filing_documents` and `retained_filing_units`.
+
 ## 6. Collection runs (batches)
 
 > The Collections page is now **Batches**, and this workflow is its `disclosure` profile.
@@ -386,7 +418,8 @@ exchange table; a company with no revenue fact is sized as 5% of its assets and 
 a financial figure.
 
 An ESEF report is inline XBRL, not a PDF. The importer supplies the target list and the
-filing of record; the Collector still has to find the sustainability disclosure PDF.
+filing of record; the Collector still looks for the issuer's sustainability disclosure PDF
+first and uses the filing only as the [fallback below](#esef-filing-fallback).
 
 ### Creating a collection
 

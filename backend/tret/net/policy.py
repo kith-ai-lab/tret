@@ -55,6 +55,7 @@ from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
 from tret.config import get_settings
+from tret.services.esef_filing import FILINGS_HOST
 
 log = logging.getLogger("tret.net")
 
@@ -420,6 +421,38 @@ def capture_policy(settings=None) -> ClassPolicy:
     return replace(base, **changes)
 
 
+FILING_HOSTS = frozenset({FILINGS_HOST})
+
+
+def filing_policy(settings=None) -> ClassPolicy:
+    """The policy `capture_filing` runs under: research, pinned to filings.xbrl.org.
+
+    Mode narrowing (master switch, class switch, runtime override, replay) is
+    inherited from research untouched, and so are https-only, standard ports and
+    public-address verification. What changes: the host allowlist is exactly
+    `FILING_HOSTS` whatever the operator's research allowlist or
+    `egress_capture_any_public_host` say (the tool never takes a URL from the
+    model, so there is nothing for an allowlist to widen), and the byte ceiling is
+    `esef_filing_max_bytes`. A redirect off that host is refused by the per-hop
+    check in `fetch_page`.
+    """
+    s = settings or get_settings()
+    base = policy_for(CLASS_RESEARCH, s)
+    return replace(base, allow_hosts=FILING_HOSTS, max_bytes=int(s.esef_filing_max_bytes))
+
+
+def filing_host_permitted(settings=None) -> bool:
+    """Whether the operator's research allowlist lets `capture_filing` reach its host.
+
+    `filing_policy` pins the destination; it never widens what an operator allowed.
+    An empty research allowlist means any public host (the host is permitted); a
+    non-empty one must itself admit filings.xbrl.org.
+    """
+    s = settings or get_settings()
+    allow = research_allow_hosts(s)
+    return not allow or host_allowed(FILINGS_HOST, replace(policy_for(CLASS_RESEARCH, s), allow_hosts=allow))
+
+
 def host_allowed(host: str, policy: ClassPolicy) -> bool:
     """Exact host, or a subdomain of an allowlisted host. Empty list = any."""
     if not policy.allow_hosts:
@@ -449,6 +482,13 @@ def egress_status(settings=None) -> dict:
                 "this class only says whether the network path is open — a report is "
                 "sent only after an instance admin opts in (see docs/telemetry.md)"
             )
+        if name == CLASS_RESEARCH:
+            # `capture_filing` reads exactly one host, and only when the research
+            # allowlist (if any) admits it: say so, so an operator sees the gap.
+            status["filing_host"] = {
+                "host": FILINGS_HOST,
+                "permitted": filing_host_permitted(s),
+            }
         return status
 
     return {

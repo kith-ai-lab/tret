@@ -63,6 +63,8 @@ ELIDABLE_TOOLS = frozenset(
         # Same shape as `fetch_url`: a short preview and a document id, with the
         # complete original (hash included) in the Document row.
         "capture_source",
+        # Same shape again: a short summary and a document id for the stored package.
+        "capture_filing",
         # Same reasoning as the web tools, for the same shape of tool:
         # `list_connected_sources` and `search_connected_files` are short
         # listings/navigation, cheap to re-call. `read_connected_file`

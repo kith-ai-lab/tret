@@ -315,16 +315,16 @@ def test_the_prompt_names_the_identifiers_and_the_filing_of_record():
     ids = {"lei": LEI.upper(), "ticker": "SHEL", "source_filing_url": "https://filings.xbrl.org/a/r.xhtml"}
     prompt = build_prompt(c, _prompt_target(identifiers=ids), 5)
     assert f"- Identifiers: LEI {LEI.upper()}; ticker SHEL\n" in prompt
-    assert (
-        "- Filing of record (inline XBRL, not a PDF): https://filings.xbrl.org/a/r.xhtml "
-        "\u2014 use it only to confirm the reporting entity and fiscal year; "
-        "do not capture it as the document.\n"
-    ) in prompt
+    assert "- Regulated ESEF filing for this year (inline XBRL): https://filings.xbrl.org/a/r.xhtml" in prompt
+    assert "capture_filing on it ONLY if the issuer's own copy" in prompt
+    assert "Never use a filing for a different fiscal year" in prompt
+    assert "ESEF filing captured with capture_filing" in prompt  # doctrine point 4
+    assert "Regulated ESEF filing" not in plain and "ONLY if the issuer" not in plain
     # Nothing else moved: removing the two added lines gives the plain prompt back.
-    kept = [ln for ln in prompt.split("\n") if not ln.startswith(("- Identifiers:", "- Filing of record"))]
+    kept = [ln for ln in prompt.split("\n") if not ln.startswith(("- Identifiers:", "- Regulated ESEF filing"))]
     assert "\n".join(kept) == plain
     only_ticker = build_prompt(c, _prompt_target(identifiers={"cik": "12"}), 5)
-    assert "- Identifiers: CIK 12\n" in only_ticker and "Filing of record" not in only_ticker
+    assert "- Identifiers: CIK 12\n" in only_ticker and "Regulated ESEF filing" not in only_ticker
 
 
 def test_target_register_entry_carries_identifiers_only_when_present():
@@ -350,8 +350,8 @@ def test_evidence_task_text_names_identifiers_only_when_present():
     plain = _task_text(_prompt_target())
     assert _task_text(_prompt_target(identifiers={})) == plain
     text = _task_text(_prompt_target(identifiers={"lei": LEI.upper(), "source_filing_url": "https://filings.xbrl.org/a/r.xhtml"}))
-    assert f"Identifiers: LEI {LEI.upper()}" in text and "Filing of record" in text
-    kept = [ln for ln in text.split("\n") if not ln.startswith(("- Identifiers:", "- Filing of record"))]
+    assert f"Identifiers: LEI {LEI.upper()}" in text and "Regulated ESEF filing" in text
+    kept = [ln for ln in text.split("\n") if not ln.startswith(("- Identifiers:", "- Regulated ESEF filing"))]
     assert "\n".join(kept) == plain
 
 

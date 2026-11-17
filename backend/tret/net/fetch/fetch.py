@@ -62,6 +62,7 @@ CAPTURE_TYPES: dict[str, str] = {
 # Servers that do not know a PDF's type say octet-stream. It is accepted as a PDF
 # only on the evidence of the bytes themselves.
 PDF_MAGIC = b"%PDF-"
+ZIP_MAGIC = b"PK\x03\x04"
 SNIFFED_TYPE = "application/octet-stream"
 
 # The response headers kept as collection provenance. Nothing else is stored:
@@ -120,18 +121,29 @@ def _require_pdf(body: bytearray, content_type: str) -> None:
     )
 
 
+def _require_zip(body: bytearray, content_type: str) -> None:
+    if not body.startswith(ZIP_MAGIC):
+        raise FetchError(
+            f"content-type {content_type!r} is not something tret can read, and the body "
+            "does not start with a ZIP header so it is not an archive either"
+        )
+
+
 async def fetch_page(
     url: str,
     *,
     max_bytes: int | None = None,
     fail_on_truncate: bool = False,
     capture: bool = False,
+    sniff_zip: bool = False,
     policy: ClassPolicy | None = None,
 ) -> FetchedPage:
     """Retrieve one URL as bytes. Raises EgressDenied or FetchError.
 
     The defaults are the research-reading behaviour `fetch_url` relies on; the
-    keywords exist for `capture_source` (see the module docstring).
+    keywords exist for `capture_source` (see the module docstring). `sniff_zip`
+    (capture only; `capture_filing`) reads an `application/octet-stream` body as a
+    ZIP on the evidence of its first bytes, as a PDF is read, instead of as a PDF.
     """
     settings = get_settings()
     if max_bytes is None:
@@ -164,10 +176,13 @@ async def fetch_page(
                     if resp.status_code >= 400:
                         raise FetchError(f"HTTP {resp.status_code} from {current}")
                     content_type = _content_type(resp)
-                    sniff_pdf = capture and content_type == SNIFFED_TYPE
+                    sniff_zip_type = capture and sniff_zip and content_type == SNIFFED_TYPE
+                    sniff_pdf = capture and content_type == SNIFFED_TYPE and not sniff_zip_type
                     extension = (
                         CAPTURE_TYPES[content_type]
                         if capture and content_type in CAPTURE_TYPES
+                        else ".zip"
+                        if sniff_zip_type  # provisional: confirmed against the bytes below
                         else ".pdf"
                         if sniff_pdf  # provisional: confirmed against the bytes below
                         else READABLE_TYPES.get(content_type)
@@ -191,6 +206,7 @@ async def fetch_page(
                     # chunk boundary is not a promise about how many arrive first.
                     must_be_pdf = capture and (sniff_pdf or content_type == "application/pdf")
                     pdf_checked = not must_be_pdf
+                    zip_checked = not sniff_zip_type
                     body = bytearray()
                     truncated = False
                     async for chunk in resp.aiter_bytes(CHUNK_BYTES):
@@ -198,6 +214,9 @@ async def fetch_page(
                         if not pdf_checked and len(body) >= len(PDF_MAGIC):
                             _require_pdf(body, content_type)
                             pdf_checked = True
+                        if not zip_checked and len(body) >= len(ZIP_MAGIC):
+                            _require_zip(body, content_type)
+                            zip_checked = True
                         if fail_on_truncate and len(body) > max_bytes:
                             raise FetchError(
                                 f"{current} is larger than the {max_bytes}-byte limit; refusing "
@@ -209,6 +228,8 @@ async def fetch_page(
                             break
                     if not pdf_checked:
                         _require_pdf(body, content_type)
+                    if not zip_checked:
+                        _require_zip(body, content_type)
                     data = bytes(body)
                     return FetchedPage(
                         url=current,

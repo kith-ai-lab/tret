@@ -45,6 +45,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -56,6 +57,7 @@ import sys
 import tempfile
 import threading
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -69,6 +71,11 @@ log = logging.getLogger("tret.packaging")
 PACKAGING_VERSION = "1.0.0"
 
 SCOPES = ("standalone", "embedded")
+# What a map's ranges count. "pdf_page" is the default and the only one before the
+# ESEF filing fallback: physical pages of a PDF. The filing units are the pages or
+# sections `services/esef_filing.py` splits a regulated filing's report into.
+UNIT_PDF_PAGE = "pdf_page"
+UNITS = (UNIT_PDF_PAGE, "filing_page", "filing_section")
 OCR_MODES = ("off", "auto", "all")
 ROLES = (
     "primary_disclosure",
@@ -115,6 +122,9 @@ DEFAULT_DEADLINE_SECONDS = 600
 # the number), and `total` runs to just before them.
 TIMING_PHASES = ("open", "subset_write", "verify", "text_layout", "text_raw", "ocr", "publish", "total")
 DEFAULT_MAX_RSS_BYTES = 600 * 1024 * 1024
+# Address space for reading an ESEF report (130 MB of markup is streamed, but the parsed
+# lines and the 8M-character text are held).
+FILING_ANALYSIS_MAX_RSS_BYTES = 2048 * 1024 * 1024
 
 _REPAIR_WARNING_RE = re.compile(
     r"wrong pointing|incorrect|repair|rebuild|reconstruct|xref|not defined|invalid|ignoring", re.I
@@ -131,7 +141,16 @@ _FILE_SUFFIX = {
     "extraction_stats": ".extraction_stats.json",
     "package_record": ".package.json",
 }
+# The files of a filing package (no PDF in this version), by role.
+_FILING_FILE_SUFFIX = {
+    "extract_html": ".extract.html",
+    "layout_text": ".layout.md",
+    "page_map": ".page_map.json",
+    "extraction_stats": ".extraction_stats.json",
+    "package_record": ".package.json",
+}
 _CONTENT_TYPE = {
+    "extract_html": "text/html; charset=utf-8",
     "retained_pdf": "application/pdf",
     "layout_text": "text/markdown; charset=utf-8",
     "raw_text": "text/markdown; charset=utf-8",
@@ -180,6 +199,8 @@ class PackageMap:
     # OCR supplement: "off" | "auto" (retained pages whose native layout text is
     # empty) | "all" (every retained page). Never changes the native text.
     ocr: str = "off"
+    # What `keep_ranges` count: see UNITS. Omitted from every PDF map's payload.
+    unit: str = UNIT_PDF_PAGE
 
 
 @dataclass(frozen=True)
@@ -359,17 +380,45 @@ def _names_for(stem: str, ocr: bool = False) -> dict[str, str]:
     }
 
 
-def _check_pair(pair: Any, page_count: int, what: str) -> tuple[int, int]:
+def _names_for_map(stem: str, mapping: PackageMap) -> dict[str, str]:
+    """The files a package of this map writes (the OCR name is claimed when OCR is asked for)."""
+    if mapping.unit != UNIT_PDF_PAGE:
+        return {role: stem + suffix for role, suffix in _FILING_FILE_SUFFIX.items()}
+    return _names_for(stem, ocr=mapping.ocr != "off")
+
+
+def _unit_noun(unit: str) -> tuple[str, str]:
+    """(what the source is, what its units are called) for error messages."""
+    if unit == "filing_page":
+        return "filing", "pages"
+    if unit == "filing_section":
+        return "filing", "sections"
+    return "source", "pages"
+
+
+def _check_pair(pair: Any, unit_count: int, what: str, unit: str = UNIT_PDF_PAGE) -> tuple[int, int]:
     if not isinstance(pair, (list, tuple)) or len(pair) != 2 or any(type(v) is not int for v in pair):
         raise PackageMapError(f"{what} must be a [first, last] integer pair")
     a, b = pair
-    if a < 1 or b < a or b > page_count:
-        raise PackageMapError(f"Out-of-bounds range {list(pair)} in {what}, source has {page_count} pages")
+    if a < 1 or b < a or b > unit_count:
+        whole, noun = _unit_noun(unit)
+        raise PackageMapError(f"Out-of-bounds range {list(pair)} in {what}, {whole} has {unit_count} {noun}")
     return a, b
 
 
-def validate_map(mapping: PackageMap, page_count: int) -> list[int]:
-    """Return the ordered 1-based physical pages the map selects, or raise PackageMapError."""
+def validate_map(mapping: PackageMap, unit_count: int) -> list[int]:
+    """Return the ordered 1-based units the map selects, or raise PackageMapError.
+
+    `unit_count` is the source's page count for a PDF map (`mapping.unit == "pdf_page"`,
+    the default, whose behaviour and messages are unchanged) and a filing's unit
+    count (pages or sections) for a filing map.
+    """
+    page_count = unit_count
+    unit = mapping.unit
+    if unit not in UNITS:
+        raise PackageMapError(f"unit must be one of {', '.join(UNITS)}; got {unit!r}")
+    if unit != UNIT_PDF_PAGE and mapping.ocr != "off":
+        raise PackageMapError("ocr applies to PDF sources only; use ocr=off for a filing")
     if not isinstance(mapping.title, str) or not mapping.title.strip():
         raise PackageMapError("title is required")
     if mapping.role not in ROLES:
@@ -381,7 +430,7 @@ def validate_map(mapping: PackageMap, page_count: int) -> list[int]:
     if mapping.ocr not in OCR_MODES:
         raise PackageMapError(f"ocr must be one of {', '.join(OCR_MODES)}; got {mapping.ocr!r}")
     if type(page_count) is not int or page_count < 1:
-        raise PackageMapError("source has no pages")
+        raise PackageMapError("source has no pages" if unit == UNIT_PDF_PAGE else "filing has no units")
 
     ranges = mapping.keep_ranges
     if ranges is None:
@@ -393,7 +442,7 @@ def validate_map(mapping: PackageMap, page_count: int) -> list[int]:
             raise PackageMapError("keep_ranges must be a nonempty sequence or None")
         pages = []
         for pair in ranges:
-            a, b = _check_pair(pair, page_count, "keep_ranges")
+            a, b = _check_pair(pair, page_count, "keep_ranges", unit)
             pages.extend(range(a, b + 1))
         if pages != sorted(set(pages)):
             raise PackageMapError("Ranges must be increasing, disjoint and non-duplicated")
@@ -404,12 +453,12 @@ def validate_map(mapping: PackageMap, page_count: int) -> list[int]:
         if not isinstance(rec, dict):
             raise PackageMapError("incorporations entries must be objects")
         if rec.get("resolved_range") is not None:
-            _check_pair(rec["resolved_range"], page_count, "incorporations.resolved_range")
+            _check_pair(rec["resolved_range"], page_count, "incorporations.resolved_range", unit)
     for rec in mapping.exclusions:
         if not isinstance(rec, dict):
             raise PackageMapError("exclusions entries must be objects")
         if rec.get("range") is not None:
-            _check_pair(rec["range"], page_count, "exclusions.range")
+            _check_pair(rec["range"], page_count, "exclusions.range", unit)
     try:
         json.dumps([list(mapping.incorporations), list(mapping.exclusions)])
     except (TypeError, ValueError) as exc:
@@ -1023,6 +1072,8 @@ def package_pdf(
     source_path = Path(source_path)
     out_dir = Path(out_dir)
 
+    if mapping.unit != UNIT_PDF_PAGE:
+        raise PackageMapError(f"package_pdf packages PDF maps; this map counts {mapping.unit}")
     _check_stem(stem)
     try:
         json.dumps(source_meta)
@@ -1431,6 +1482,365 @@ def package_pdf(
     )
 
 
+
+# -- ESEF filing packages -------------------------------------------------------
+
+FILING_SOURCE_NOTICE = (
+    "Regulated ESEF filing, not the issuer's own PDF; units are filing pages/sections. "
+    "Text and HTML are regenerated from the filing's report, unit by unit, with no images."
+)
+
+
+def _esef_module() -> Any:
+    """`services/esef_filing.py`, loaded by path when this file runs in the worker.
+
+    The worker loads this file by path with no `tret` package behind it, so it
+    cannot import its sibling; the sibling is stdlib-only for that reason. In the API
+    process the already-imported module is used.
+    """
+    for name in ("tret.services.esef_filing", "_tret_esef_filing_child"):
+        mod = sys.modules.get(name)
+        if mod is not None:
+            return mod
+    path = Path(__file__).with_name("esef_filing.py")
+    spec = importlib.util.spec_from_file_location("_tret_esef_filing_child", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _safe_member_name(name: str) -> str:
+    """A member name for the layout header: printable, no backticks, clipped."""
+    return _esef_module().clip_name(name).strip("'\"").replace("`", "'")
+
+
+def filing_source_info(path: Path, unit_count: int) -> SourceInfo:
+    """The `source_info` of a stored ESEF package: its SHA-256 and the unit count recorded at capture."""
+    return SourceInfo(
+        page_count=unit_count, sha256=_digest(Path(path)), pdf_state={}, parser_warnings=[], page_labels=[]
+    )
+
+
+def analyse_filing(source_path: Path, *, max_chars: int, max_uncompressed: int | None = None) -> dict:
+    """Open an ESEF package, choose its report and read it once; JSON-ready result.
+
+    The archive's central directory is opened once. Raises PackagingError with a
+    message fit for the model (zip bombs, unsafe names, no report, no text).
+    """
+    esef = _esef_module()
+    try:
+        with zipfile.ZipFile(source_path) as zf:
+            esef.refuse_oversized_archive(zf, max_uncompressed or esef.MAX_ARCHIVE_UNCOMPRESSED_BYTES)
+            choice = esef.select_report_member(zf)
+            stream = esef.MemberStream(zf, choice.name)
+            filing = esef.extract_filing_text(stream, max_chars=max_chars)
+            stream.drain()  # the hash must cover the whole member even if parsing stopped early
+            member_sha, member_bytes = stream.sha256, stream.size
+    except zipfile.BadZipFile as exc:
+        raise PackagingError("the file is not a readable ZIP archive") from exc
+    except esef.FilingError as exc:
+        raise PackagingError(str(exc)) from exc
+    return {
+        "member": {
+            "name": choice.name,
+            "others": list(choice.others),
+            "ambiguous": choice.ambiguous,
+            "sha256": member_sha,
+            "bytes": member_bytes,
+        },
+        "text": filing.text,
+        "layout": filing.layout,
+        "unit": filing.unit,
+        "unit_count": filing.unit_count,
+        "units_total": filing.units_total,
+        "units_dropped": filing.units_dropped,
+        "text_truncated": filing.text_truncated,
+        "folios": {str(n): f for n, f in filing.folios.items()},
+        "structure": filing.structure,
+        # Per-unit text hashes, checked again at packaging time.
+        "unit_text_sha256": [hashlib.sha256(u.text.encode("utf-8")).hexdigest() for u in filing.units],
+    }
+
+
+def package_filing(
+    source_path: Path,
+    mapping: PackageMap,
+    out_dir: Path,
+    *,
+    stem: str,
+    source_meta: dict | None = None,
+    deadline_seconds: float | None = None,
+    _stage_dir: Path | None = None,
+) -> PackageOutput:
+    """Package the reviewed units of a stored ESEF package (a ZIP) into `out_dir`.
+
+    `source_meta` is the map's `source` record: it must carry the ZIP's `sha256` and
+    `filing.report_member` / `filing.report_member_sha256` as captured. The ZIP is
+    re-hashed, the report member is chosen and re-read (one streaming parse) and its
+    hash and layout must match the record, so the units the reviewer saw are the
+    units packaged. Writes `.extract.html`, `.layout.md`, `.page_map.json`,
+    `.extraction_stats.json` and `.package.json`, all or nothing, never over
+    existing files. No PDF is produced.
+
+    Raises PackageMapError for an invalid map or stem and PackagingError when the
+    source differs from the record or a verification fails.
+    """
+    esef = _esef_module()
+    started = _utc()
+    clock = time.monotonic()
+    source_path = Path(source_path)
+    out_dir = Path(out_dir)
+
+    if mapping.unit not in esef.FILING_UNITS:
+        raise PackageMapError(f"package_filing packages filing maps; this map counts {mapping.unit}")
+    _check_stem(stem)
+    meta = source_meta or {}
+    try:
+        json.dumps(meta)
+    except (TypeError, ValueError) as exc:
+        raise PackageMapError(f"source_meta must be JSON-serializable: {exc}") from exc
+    if not source_path.is_file():
+        raise PackagingError(f"source file not found: {source_path.name}")
+    filing_meta = meta.get("filing") or {}
+    expected_sha = meta.get("sha256")
+    expected_member = filing_meta.get("report_member")
+    expected_member_sha = filing_meta.get("report_member_sha256")
+    if not (expected_sha and expected_member and expected_member_sha):
+        raise PackagingError("the map's source record lacks the filing hashes it must be checked against")
+
+    names = _names_for_map(stem, mapping)
+    taken = [n for n in names.values() if (out_dir / n).exists()]
+    if taken:
+        raise PackagingError(f"refusing to overwrite existing package files: {', '.join(sorted(taken))}")
+
+    timings: dict[str, float] = {}
+    with _timed(timings, "open"):
+        source_sha = _digest(source_path)
+        if source_sha != expected_sha:
+            raise PackagingError("source bytes changed since the map was reviewed; recapture and re-review")
+        try:
+            with zipfile.ZipFile(source_path) as zf:
+                esef.refuse_oversized_archive(zf)
+                choice = esef.select_report_member(zf)
+                if choice.name != expected_member:
+                    raise PackagingError(
+                        f"the report member is now {choice.name!r}, not the recorded {expected_member!r}"
+                    )
+                stream = esef.MemberStream(zf, choice.name)
+                text_cap = filing_meta.get("text_cap")
+                filing = esef.extract_filing_text(
+                    stream, max_chars=text_cap if type(text_cap) is int and text_cap > 0 else esef.MAX_EXTRACTED_CHARS
+                )
+                stream.drain()
+                member_sha, member_bytes = stream.sha256, stream.size
+        except zipfile.BadZipFile as exc:
+            raise PackagingError("the stored source is not a readable ZIP archive") from exc
+        except esef.FilingError as exc:
+            raise PackagingError(f"the filing cannot be read: {exc}") from exc
+    if member_sha != expected_member_sha:
+        raise PackagingError("the report inside the package changed since capture; recapture and re-review")
+    if filing.unit != mapping.unit:
+        raise PackagingError(
+            f"the filing now reads as {filing.unit}, not the {mapping.unit} the map was proposed against"
+        )
+    recorded_count = meta.get("unit_count")
+    if isinstance(recorded_count, int) and recorded_count != filing.unit_count:
+        raise PackagingError(
+            f"the filing now has {filing.unit_count} units, not the {recorded_count} the map was checked against"
+        )
+
+    units = validate_map(mapping, filing.unit_count)
+    wanted = set(units)
+    kept = [u for u in filing.units if u.number in wanted]
+    if [u.number for u in kept] != units:
+        raise PackagingError("selected units are missing from the re-read filing")
+    recorded_hashes = filing_meta.get("unit_text_sha256")
+    if isinstance(recorded_hashes, list) and len(recorded_hashes) == filing.unit_count:
+        for u in kept:
+            if hashlib.sha256(u.text.encode("utf-8")).hexdigest() != recorded_hashes[u.number - 1]:
+                raise PackagingError(
+                    f"the text of {u.kind} {u.number} differs from what was captured; "
+                    "recapture and re-review"
+                )
+
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    stage = _stage_dir or Path(tempfile.mkdtemp(prefix=".packaging-stage-", dir=out_dir.parent))
+    try:
+        with _timed(timings, "text_layout"):
+            blocks = esef.render_unit_blocks(kept)
+            header = (
+                f"# {mapping.title}\n\n"
+                f"Source: ESEF filing package, original SHA-256 `{source_sha}`; report `{_safe_member_name(choice.name)}` "
+                f"(SHA-256 `{member_sha}`). {FILING_SOURCE_NOTICE}\n\n"
+            )
+            layout_path = stage / names["layout_text"]
+            layout_path.write_text(header + blocks + "\n", encoding="utf-8")
+            extract_path = stage / names["extract_html"]
+            extract_path.write_text(
+                esef.render_extract_html(mapping.title, kept, source_note=FILING_SOURCE_NOTICE),
+                encoding="utf-8",
+            )
+        retained_sha = _digest(extract_path)
+
+        # Verification: what is on disk reads back as the source units. The layout
+        # file must contain exactly the source blocks of the kept units, and the HTML
+        # must carry exactly their lines (cells and all), with nothing that could load
+        # a resource. The source text is the re-read filing, checked above to be the
+        # bytes the reviewer saw.
+        with _timed(timings, "verify"):
+            if (layout_path.read_text(encoding="utf-8")) != header + blocks + "\n":
+                raise PackagingError("layout text on disk differs from the source units")
+            html_units, foreign = esef.html_unit_lines(extract_path.read_text(encoding="utf-8"))
+            if foreign:
+                raise PackagingError(f"retained HTML carries disallowed elements: {sorted(set(foreign))}")
+            if sorted(html_units) != units:
+                raise PackagingError("retained HTML holds different units than the map selected")
+            for u in kept:
+                if html_units[u.number] != [ln.text for ln in u.lines]:
+                    raise PackagingError(f"text changed in {u.kind} {u.number}")
+
+        page_map_units = []
+        for i, u in enumerate(kept):
+            entry: dict[str, Any] = {
+                "retained_position": i + 1,
+                "source_unit": u.number,
+                "kind": u.kind,
+                "characters": len(u.text),
+                "text_sha256": hashlib.sha256(u.text.encode("utf-8")).hexdigest(),
+            }
+            if u.kind == "page":
+                entry["printed_folio"] = u.folio
+            else:
+                entry["heading"] = u.heading
+            page_map_units.append(entry)
+        _write_json(
+            stage / names["page_map"],
+            {
+                "unit": mapping.unit,
+                "source_filename": source_path.name,
+                "source_unit_count": filing.unit_count,
+                "retained_unit_count": len(kept),
+                "source_sha256": source_sha,
+                "report_member": choice.name,
+                "report_member_sha256": member_sha,
+                "retained_sha256": retained_sha,
+                "units": page_map_units,
+            },
+        )
+        stats: dict[str, Any] = {
+            "layout": filing.layout,
+            "signal": filing.structure.get("signal"),
+            "source_unit_count": filing.unit_count,
+            "retained_unit_count": len(kept),
+            "source_units_total": filing.units_total,
+            "source_text_truncated": filing.text_truncated,
+            "characters": sum(len(u.text) for u in kept),
+            "empty_units": [u.number for u in kept if not u.text.strip()],
+            "images_dropped": sum(u.images for u in kept),
+            "structure": filing.structure,
+            "report_member_bytes": member_bytes,
+            "content_verification": (
+                "retained layout text equals the source units' text; retained HTML lines equal the "
+                "source units' lines, cell by cell; no scripts, links, images or ix: elements"
+            ),
+        }
+        limitations = [
+            "regulated ESEF filing, not the issuer's own PDF; units are filing pages/sections",
+            "The HTML is regenerated from parsed text and table cells: styling, images, inline XBRL "
+            "tags and the hidden facts block are not retained. The original markup is in the stored ZIP.",
+            "A filing page or section is a unit of the filing's own structure; it is not a PDF page, "
+            "and printed folios can differ from filing page numbers.",
+        ]
+        if filing.layout == "paged":
+            limitations.append(
+                "Pages were detected from the report's markup (page containers or page-break styles); "
+                "a unit boundary the markup does not mark is not found."
+            )
+        if filing.text_truncated:
+            limitations.append(
+                f"The readable text of the filing was cut at {filing.units_dropped} unit(s); "
+                "those units cannot be selected."
+            )
+        verification = {
+            "checked": [
+                "SHA-256 of the stored ZIP equals the hash the map was reviewed against",
+                "the report member and its SHA-256 equal the captured record",
+                "the filing re-reads to the same layout and unit count",
+                "retained layout text and HTML read back equal to the source units",
+            ],
+            "oracle": "text_readback",
+            "establishes": "text and table-cell retention of the selected units",
+            "does_not_establish": _VERIFICATION_NOT_ESTABLISHED,
+        }
+        timings["total"] = time.monotonic() - clock
+        stats["timings"] = {k: round(v, 3) for k, v in timings.items()}
+        _write_json(stage / names["extraction_stats"], stats)
+        record: dict[str, Any] = {
+            "packaging_version": PACKAGING_VERSION,
+            "title": mapping.title,
+            "role": mapping.role,
+            "scope": mapping.scope,
+            "keep_ranges": [list(r) for r in mapping.keep_ranges] if mapping.keep_ranges is not None else None,
+            "unit": mapping.unit,
+            "review_note": mapping.review_note,
+            "incorporations": [dict(x) for x in mapping.incorporations],
+            "exclusions": [dict(x) for x in mapping.exclusions],
+            "source_meta": meta,
+            "source_sha256": source_sha,
+            "report_member": choice.name,
+            "report_member_sha256": member_sha,
+            "filing_url": filing_meta.get("filing_url") or meta.get("url"),
+            "package_url": filing_meta.get("package_url"),
+            "lei": filing_meta.get("lei"),
+            "retained_sha256": retained_sha,
+            "source_unit_count": filing.unit_count,
+            "retained_unit_count": len(kept),
+            "retained_page_count": len(kept),
+            "full_original_retained": False,
+            "text_mode": "esef_html",
+            "runtime": {"python": sys.version.split()[0]},
+            "started_utc": started,
+            "completed_utc": _utc(),
+            "wall_seconds": round(time.monotonic() - clock, 3),
+            "artifacts": dict(names),
+            "limitations": limitations,
+            "verification": verification,
+            "timings": stats["timings"],
+        }
+        _write_json(stage / names["package_record"], record)
+        _publish(stage, out_dir, list(names.values()))
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+    files = tuple(
+        PackageFile(
+            role=role,
+            path=out_dir / name,
+            filename=name,
+            content_type=_CONTENT_TYPE[role],
+            sha256=_digest(out_dir / name),
+            byte_size=(out_dir / name).stat().st_size,
+        )
+        for role, name in names.items()
+    )
+    return PackageOutput(
+        files=files,
+        source_sha256=source_sha,
+        retained_sha256=retained_sha,
+        source_page_count=filing.unit_count,
+        retained_page_count=len(kept),
+        full_original_retained=False,
+        text_mode="esef_html",
+        poppler_version=None,
+        wall_seconds=record["wall_seconds"],
+        parser_warning_count=0,
+        stats=stats,
+        record=record,
+    )
+
+
 # -- isolated execution --------------------------------------------------------
 
 _WORKER_PATH = Path(__file__).with_name("packaging_worker.py")
@@ -1447,6 +1857,77 @@ def _kill_group(proc: subprocess.Popen) -> None:
         os.killpg(proc.pid, signal.SIGKILL)
     with contextlib.suppress(ProcessLookupError):
         proc.kill()
+
+
+def _run_child(job: dict, deadline_seconds: float, lost: list[bool], what: str = "packaging") -> dict:
+    """Run one job in the worker child with a hard deadline; return its JSON result.
+
+    The one killable-child mechanism, shared by packaging and by capture-time reading
+    of an ESEF filing. `lost` gets an item appended when the child was killed or died
+    (a caller that stages files then knows it may have been mid-publish).
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-I", str(_WORKER_PATH)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_tool_env(),
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(json.dumps(job).encode("utf-8"), timeout=deadline_seconds)
+    except subprocess.TimeoutExpired:
+        lost.append(True)
+        _kill_group(proc)
+        proc.communicate()
+        raise PackagingError(f"{what} exceeded {deadline_seconds:g} s") from None
+    except BaseException:
+        lost.append(True)
+        _kill_group(proc)
+        proc.communicate()
+        raise
+    tail = stderr.decode("utf-8", errors="replace").strip()[-500:]
+    if proc.returncode != 0:
+        lost.append(True)
+        if proc.returncode < 0:
+            try:
+                how = f"signal {signal.Signals(-proc.returncode).name}"
+            except ValueError:
+                how = f"signal {-proc.returncode}"
+        else:
+            how = f"exit {proc.returncode}"
+        raise PackagingError(f"{what} worker died ({how}): {tail}")
+    try:
+        return json.loads(stdout.decode("utf-8"))
+    except ValueError:
+        raise PackagingError(f"{what} worker returned no result: {tail}") from None
+
+
+def run_filing_analysis(
+    source_path: Path,
+    *,
+    max_chars: int,
+    max_uncompressed: int | None = None,
+    deadline_seconds: float = 300.0,
+    max_rss_bytes: int = FILING_ANALYSIS_MAX_RSS_BYTES,
+) -> dict:
+    """`analyse_filing` in the killable child (deadline, address-space limit, process group kill).
+
+    What `capture_filing` calls: reading a stranger's 130 MB report must not be an
+    uncancellable thread in the API process. Raises PackagingError on any failure.
+    """
+    job = {
+        "op": "analyse_filing",
+        "source_path": str(source_path),
+        "max_chars": int(max_chars),
+        "max_uncompressed": max_uncompressed,
+        "deadline_seconds": deadline_seconds,
+        "max_rss_bytes": max_rss_bytes,
+    }
+    result = _run_child(job, deadline_seconds, [], what="reading the filing")
+    if not result.get("ok"):
+        raise PackagingError(result.get("message", "reading the filing failed"))
+    return result["analysis"]
 
 
 def run_packaging(
@@ -1497,7 +1978,7 @@ def run_packaging(
     except (TypeError, ValueError) as exc:
         raise PackageMapError(f"map and source_meta must be JSON-serializable: {exc}") from exc
 
-    names = list(_names_for(stem, ocr=mapping.ocr != "off").values())
+    names = list(_names_for_map(stem, mapping).values())
     taken = [n for n in names if (out_dir / n).exists()]
     if taken:
         raise PackagingError(f"refusing to overwrite existing package files: {', '.join(sorted(taken))}")
@@ -1509,41 +1990,11 @@ def run_packaging(
     try:
         job = json.loads(payload)
         job["stage_dir"] = str(stage)
-        proc = subprocess.Popen(
-            [sys.executable, "-I", str(_WORKER_PATH)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=_tool_env(),
-            start_new_session=True,
-        )
+        lost: list[bool] = []
         try:
-            stdout, stderr = proc.communicate(json.dumps(job).encode("utf-8"), timeout=deadline_seconds)
-        except subprocess.TimeoutExpired:
-            child_lost = True
-            _kill_group(proc)
-            proc.communicate()
-            raise PackagingError(f"packaging exceeded {deadline_seconds:g} s") from None
-        except BaseException:
-            child_lost = True
-            _kill_group(proc)
-            proc.communicate()
-            raise
-        tail = stderr.decode("utf-8", errors="replace").strip()[-500:]
-        if proc.returncode != 0:
-            child_lost = True
-            if proc.returncode < 0:
-                try:
-                    how = f"signal {signal.Signals(-proc.returncode).name}"
-                except ValueError:
-                    how = f"signal {-proc.returncode}"
-            else:
-                how = f"exit {proc.returncode}"
-            raise PackagingError(f"packaging worker died ({how}): {tail}")
-        try:
-            result = json.loads(stdout.decode("utf-8"))
-        except ValueError:
-            raise PackagingError(f"packaging worker returned no result: {tail}") from None
+            result = _run_child(job, deadline_seconds, lost)
+        finally:
+            child_lost = bool(lost)
         if not result.get("ok"):
             error = PackageMapError if result.get("kind") == "map" else PackagingError
             raise error(result.get("message", "packaging failed"))

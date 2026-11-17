@@ -10,6 +10,17 @@ one that needs action on an existing install.
 
 ### Added
 
+- **ESEF filing fallback for the Disclosure Collector.** When an issuer's own PDF is refused
+  (or does not exist for the year) and the target carries a `source_filing_url`, the Collector
+  can now capture the regulated ESEF filing with the new `capture_filing` tool (one package
+  from filings.xbrl.org, ceiling `TRET_ESEF_FILING_MAX_BYTES`, default 200 MiB), page-map it
+  by filing page or section (page maps gain an optional `unit`; absent means PDF pages) and
+  package the selected units as `.extract.html`, `.layout.md`, `.page_map.json`,
+  `.extraction_stats.json` and `.package.json`, with no PDF. The issuer's PDF stays first.
+  The review screens, pending-review list and written-file viewer show the unit and a
+  "From the regulated ESEF filing (not the issuer's PDF)" label, the evaluator's evidence names
+  the unit, and filing units stay out of the page-count metrics. The Collector's doctrine
+  text changed, so its recorded doctrine hash changes with it.
 - **Results open beside the chat.** Each drafted section, finding, verdict or connected-drive
   write a chat turn produces shows as a card under the reply; opening one shows it in a pane
   next to the conversation, where an approver can approve or reject it and download an
