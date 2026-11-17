@@ -653,9 +653,9 @@ def test_the_json_format_carries_the_sections_and_the_footprint():
 
 
 def test_an_unknown_export_format_is_refused():
-    """Falling through to markdown for `format=docx` looks like success."""
+    """Falling through to markdown for `format=rtf` looks like success."""
     client = _client(FakeSession([section("governance")]))
-    response = client.get("/api/deliverables/tcfd-assessment/export?format=docx")
+    response = client.get("/api/deliverables/tcfd-assessment/export?format=rtf")
     assert response.status_code == 422
 
 
@@ -664,7 +664,9 @@ def test_the_pdf_response_is_an_attachment_named_after_the_deliverable(fake_weas
     response = client.get("/api/deliverables/tcfd-assessment/export?format=pdf")
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/pdf"
-    assert response.headers["content-disposition"] == 'attachment; filename="tcfd-assessment.pdf"'
+    assert response.headers["content-disposition"] == (
+        'attachment; filename="tcfd-assessment.pdf"; filename*=UTF-8\'\'tcfd-assessment.pdf'
+    )
     assert response.content == b"%PDF-1.7 fake"
 
 

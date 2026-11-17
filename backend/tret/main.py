@@ -19,6 +19,7 @@ from tret.api import (
     budgets as budgets_api,
     chat,
     connections as connections_api,
+    database_connections as database_connections_api,
     docs,
     documents,
     edition as edition_api,
@@ -480,6 +481,8 @@ def create_app() -> FastAPI:
     # `configured: false` (GET /api/connections/providers) until an operator
     # sets its client id/secret or an extension supplies one.
     app.include_router(connections_api.router)
+    # Read-only Postgres/Supabase connections (404 unless TRET_DB_CONNECTIONS).
+    app.include_router(database_connections_api.router)
     # Opt-in anonymous telemetry admin card (tret/api/telemetry.py) — always
     # mounted, like settings_api above: it reports the effective state
     # honestly (locked off by default) rather than the route disappearing.

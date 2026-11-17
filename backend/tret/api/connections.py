@@ -212,7 +212,10 @@ async def list_connections(
             select(WorkspaceConnection).where(WorkspaceConnection.workspace_id == ctx.id)
         )
     ).scalars().all()
-    return {"connections": [_connection_out(c) for c in rows]}
+    # Only the OAuth providers: a workspace's `postgres:<slug>` database rows
+    # (services/database_connections.py) live in the same table but have their own
+    # router and must never be shaped as an OAuth connection here.
+    return {"connections": [_connection_out(c) for c in rows if c.provider in PROVIDER_SPECS]}
 
 
 @router.get("/providers")

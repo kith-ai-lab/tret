@@ -1,0 +1,211 @@
+/* Chat result cards (under an assistant message) and the document pane beside
+   the thread. Tokens only, so the kith-climate brand layer and the dark theme
+   apply without a rule of their own. Visual language follows the delegated-work
+   and batch cards: --bg-panel surface, hairline border, 8-12px radius. */
+
+.rc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 10px;
+}
+
+.rc-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-control, 8px);
+  background: var(--bg-panel);
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.rc-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.rc-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.rc-card.active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.rc-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rc-kind {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.rc-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rc-side {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.rc-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+}
+
+/* ── Pane ────────────────────────────────────────────────────────────── */
+
+.chat-root.has-pane {
+  position: relative;
+}
+
+.doc-pane {
+  flex: 0 0 42%;
+  min-width: 360px;
+  max-width: 760px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  color: var(--text);
+}
+
+.doc-pane:focus {
+  outline: none;
+}
+
+.doc-pane:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.doc-pane-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.doc-pane-headtext {
+  flex: 1;
+  min-width: 0;
+}
+
+.doc-pane-title {
+  margin: 2px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.doc-pane-head .badge {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.doc-pane-head .icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.doc-pane-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px;
+}
+
+.doc-pane-foot {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.doc-pane-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.doc-pane-spacer {
+  flex: 1;
+}
+
+.doc-pane-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.doc-pane-link {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--accent);
+}
+
+/* Tight widths: with the pane open the conversation rail steps aside. */
+@media (max-width: 1279px) {
+  .chat-root.has-pane .chat-rail {
+    display: none;
+  }
+}
+
+/* Narrow: the pane covers the thread instead of squeezing it. */
+@media (max-width: 899px) {
+  .doc-pane {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    flex: none;
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    border-left: none;
+  }
+}

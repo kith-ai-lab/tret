@@ -8,6 +8,7 @@ venv may not; the API returns 501 with instructions in that case).
 
 from __future__ import annotations
 
+import asyncio
 import html
 import uuid
 from datetime import datetime, timezone
@@ -20,11 +21,16 @@ from tret.services.emissions import complete_water, energy_wh_field, grid_compar
 from tret.services.emissions_validation import number
 from tret.services.export_themes import (
     EXPORT_THEMES,  # noqa: F401  (re-exported: the public theme list)
+    ExportOptionError,
+    RendererUnavailable,  # noqa: F401  (re-exported)
     build_report_document,
     validate_accent,
     validate_theme,
 )
 from tret.services.html_sanitize import render_markdown
+
+# Every format `render_deliverable_bytes` can produce.
+EXPORT_FORMATS = ("markdown", "html", "pdf", "docx", "pptx")
 
 
 def strip_draft_status_banner(markdown: str | None) -> str | None:
@@ -492,7 +498,7 @@ async def render_deliverable_bytes(
     subtitle: str | None = None,
 ) -> tuple[bytes, str]:
     """Assemble a deliverable and render it to `(bytes, content_type)` in
-    `format` ("markdown"|"html"|"pdf") — the one rendering path shared by the
+    `format` ("markdown"|"html"|"pdf"|"docx"|"pptx") — the one rendering path shared by the
     deliverable export endpoint and anything that uploads a deliverable
     elsewhere (`api/findings.py`'s approved-`connected_write` upload and its
     `POST /api/deliverables/{slug}/publish` route), so the PDF
@@ -504,38 +510,54 @@ async def render_deliverable_bytes(
     `format="pdf"` and WeasyPrint's native libraries are missing.
 
     `theme` ("plain" default | "report"), `accent` (`#rrggbb`) and `subtitle`
-    apply to html and pdf only; an unknown theme or a malformed accent raises
-    ValueError before any database work.
+    apply to html, pdf, docx and pptx; an unknown theme or a malformed accent raises
+    ExportOptionError (a ValueError) before any database work.
     """
-    if format not in ("markdown", "html", "pdf"):
-        raise ValueError(f"format must be markdown|html|pdf, got {format!r}")
+    if format not in EXPORT_FORMATS:
+        raise ExportOptionError(f"format must be {'|'.join(EXPORT_FORMATS)}, got {format!r}")
     validate_theme(theme)
     validate_accent(accent)
     result = await assemble_deliverable(db, project_id, deliverable_slug, include_draft)
     if not result["sections"]:
         raise DeliverableEmpty(deliverable_slug)
+    shas = {s.get("doctrine_sha") for s in result["sections"] if s.get("doctrine_sha")}
+    doctrine_sha = shas.pop() if len(shas) == 1 else None
+    if format == "markdown":
+        return result["markdown"].encode("utf-8"), "text/markdown"
+    # Assembly (database) is done; what is left is CPU-bound (WeasyPrint,
+    # python-docx, python-pptx) and must not block the event loop.
+    return await asyncio.to_thread(
+        _render_assembled,
+        format,
+        result,
+        deliverable_slug,
+        doctrine_sha,
+        theme,
+        accent,
+        subtitle,
+    )
+
+
+def _render_assembled(
+    format: str,
+    result: dict,
+    deliverable_slug: str,
+    doctrine_sha: str | None,
+    theme: str | None,
+    accent: str | None,
+    subtitle: str | None,
+) -> tuple[bytes, str]:
+    """The pure (no database, no event loop) rendering step of an assembled
+    deliverable, run in a worker thread by `render_deliverable_bytes`."""
+    args = (result["html"], deliverable_slug, result["sections"], doctrine_sha)
+    kwargs = {"theme": theme, "accent": accent, "subtitle": subtitle}
     if format == "html":
-        shas = {s.get("doctrine_sha") for s in result["sections"] if s.get("doctrine_sha")}
-        page = render_html(
-            result["html"],
-            deliverable_slug,
-            result["sections"],
-            shas.pop() if len(shas) == 1 else None,
-            theme=theme,
-            accent=accent,
-            subtitle=subtitle,
-        )
-        return page.encode("utf-8"), "text/html"
+        return render_html(*args, **kwargs).encode("utf-8"), "text/html"
     if format == "pdf":
-        shas = {s.get("doctrine_sha") for s in result["sections"] if s.get("doctrine_sha")}
-        pdf = render_pdf(
-            result["html"],
-            deliverable_slug,
-            result["sections"],
-            shas.pop() if len(shas) == 1 else None,
-            theme=theme,
-            accent=accent,
-            subtitle=subtitle,
-        )
-        return pdf, "application/pdf"
-    return result["markdown"].encode("utf-8"), "text/markdown"
+        return render_pdf(*args, **kwargs), "application/pdf"
+    # Lazy: export_office imports this module for the provenance helpers.
+    from tret.services import export_office
+
+    if format == "docx":
+        return export_office.render_docx(*args, **kwargs), export_office.DOCX_CONTENT_TYPE
+    return export_office.render_pptx(*args, **kwargs), export_office.PPTX_CONTENT_TYPE

@@ -180,7 +180,13 @@ def findings_client(monkeypatch):
     app.include_router(findings_api.router)
     app.dependency_overrides[current_user] = lambda: _FakeAdmin()
     app.dependency_overrides[current_workspace] = lambda: type(
-        "Ctx", (), {"id": uuid.uuid4()}
+        "Ctx",
+        (),
+        {
+            "id": uuid.uuid4(),
+            # The export route reads the workspace's name and settings.
+            "workspace": type("Workspace", (), {"name": "Test", "settings": {}})(),
+        },
     )()
     app.dependency_overrides[get_db] = lambda: None
     return TestClient(app)

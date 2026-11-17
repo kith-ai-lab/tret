@@ -17,3 +17,9 @@ def resolve_edition(workspace_settings: dict | None, default: str) -> str:
     an error)."""
     value = (workspace_settings or {}).get(EDITION_SETTINGS_KEY)
     return value if isinstance(value, str) and value in EDITIONS else default
+
+
+def default_export_theme(workspace_settings: dict | None, default_edition: str) -> str:
+    """The document export style used when none is named: "report" in the
+    cohort edition, "plain" everywhere else (existing deployments unchanged)."""
+    return "report" if resolve_edition(workspace_settings, default_edition) == "cohort" else "plain"

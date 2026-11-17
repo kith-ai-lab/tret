@@ -53,6 +53,7 @@ from tret.engine.tools import (
     ALLOWED_TOOLS_KEY,
     CONNECTOR_TOOL_NAMES,
     COST_CAP_KEY,
+    DATABASE_TOOL_NAMES,
     DELEGATION_DEPTH_KEY,
     LESSON_TOOL_NAMES,
     SUBAGENT_ALLOWED_TOOLS,
@@ -62,6 +63,7 @@ from tret.engine.tools import (
     RunContext,
     execute_tool,
     get_builtin_tools,
+    offered_database_tools,
     withheld_connector_tools,
     withheld_web_tools,
 )
@@ -1712,7 +1714,16 @@ class HarnessEngine:
         # check in the first place.
         project = await db.get(Project, run.project_id)
         workspace_id = project.workspace_id if project else None
-        if set(enabled_names) & (CONNECTOR_TOOL_NAMES | WRITE_CONNECTOR_TOOL_NAMES):
+        # External-database tools (read-only Postgres/Supabase) are added to a run
+        # whose harness lists a connector read tool, when the workspace has a
+        # usable database connection; `[]` (the common case) changes nothing.
+        # Never for a subagent: its tool list is the narrowed one above.
+        database_offer = (
+            []
+            if run.task_type == SUBAGENT_TASK_TYPE
+            else await offered_database_tools(db, workspace_id, enabled_names)
+        )
+        if set(enabled_names) & (CONNECTOR_TOOL_NAMES | WRITE_CONNECTOR_TOOL_NAMES | DATABASE_TOOL_NAMES):
             withheld_connector, connector_reason = await withheld_connector_tools(
                 db, workspace_id, enabled_names
             )
@@ -1731,6 +1742,8 @@ class HarnessEngine:
                         },
                     ),
                 )
+        if database_offer:
+            enabled_names = [*enabled_names, *database_offer]
         # Pack lessons (services/lessons.py): on for every pack-bound run unless
         # the harness opts out, so the model can read what reviewers approved
         # and propose more. Sorted, and never duplicated if a pack task already

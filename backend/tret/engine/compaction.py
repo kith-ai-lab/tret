@@ -73,6 +73,12 @@ ELIDABLE_TOOLS = frozenset(
         "list_connected_sources",
         "search_connected_files",
         "read_connected_file",
+        # External-database reads: re-callable on demand like the connector
+        # tools, and their output is unverified external data, so an elided
+        # result costs nothing a re-call could not recover.
+        "list_database_tables",
+        "describe_database_table",
+        "query_database",
         # A pack's approved lessons are also in the doctrine-adjacent context
         # block every iteration (engine/context.py), so an elided read here
         # costs nothing a re-call couldn't recover cheaply.

@@ -23,17 +23,31 @@ DEFAULT_ACCENT = "#1f5f4a"
 _ACCENT_RE = re.compile(r"#[0-9a-fA-F]{6}")
 
 
+class ExportOptionError(ValueError):
+    """A caller-supplied export option (format, theme, accent) is invalid.
+
+    A `ValueError` subclass so existing `except ValueError` sites keep working;
+    the export route maps exactly this class to a 422 with its message, and
+    treats any other `ValueError` from rendering as an internal failure.
+    """
+
+
+class RendererUnavailable(ValueError):
+    """An optional renderer's package is missing in this environment (the route
+    answers 501, like `PdfUnavailable`)."""
+
+
 def validate_accent(accent: str | None) -> str | None:
     """Return a safe `#rrggbb` accent (lower-cased) or None when not given.
 
-    Raises ValueError for anything else: the value is interpolated into CSS,
+    Raises ExportOptionError (a ValueError) for anything else: the value is interpolated into CSS,
     so nothing but a six-digit hex colour may pass (`fullmatch`, so a trailing
     newline or `;}` payload cannot ride along).
     """
     if accent is None:
         return None
     if not isinstance(accent, str) or not _ACCENT_RE.fullmatch(accent):
-        raise ValueError("accent must be a #rrggbb hex colour")
+        raise ExportOptionError("accent must be a #rrggbb hex colour")
     return accent.lower()
 
 
@@ -42,7 +56,7 @@ def validate_theme(theme: str | None) -> str:
     if theme is None:
         return "plain"
     if theme not in EXPORT_THEMES:
-        raise ValueError(f"theme must be one of {'|'.join(EXPORT_THEMES)}, got {theme!r}")
+        raise ExportOptionError(f"theme must be one of {'|'.join(EXPORT_THEMES)}, got {theme!r}")
     return theme
 
 

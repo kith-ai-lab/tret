@@ -17,6 +17,8 @@ import {
 import { useRunStream } from '../api/useRunStream'
 import { BatchCards } from '../components/chat/BatchCard'
 import { DelegatedWork, DelegatedWorkDisclosure } from '../components/chat/DelegatedWork'
+import { DocumentPaneLayout } from '../components/chat/documentPaneContext'
+import { TurnResults } from '../components/chat/ResultCard'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
 import { WaterPanel } from '../components/shared/WaterFootprint'
 import { MethodV3Line } from '../components/shared/MethodV3Line'
@@ -414,7 +416,7 @@ export function Chat() {
   const threadLoading = !!selectedId && conversationQuery.isLoading && !pending
 
   return (
-    <div className="chat-root">
+    <DocumentPaneLayout resetKey={selectedId}>
       {railOpen && (
         <ConversationRail
           conversations={conversations}
@@ -511,7 +513,7 @@ export function Chat() {
           </>
         )}
       </div>
-    </div>
+    </DocumentPaneLayout>
   )
 }
 
@@ -783,6 +785,7 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
             first-child/last-child margin rules pointing at the wrapper instead of
             at the first heading. */}
         <MarkdownDoc source={message.content || '_(no output)_'} className="chat-prose md" />
+        <TurnResults runId={message.run_id} activity={activity} />
 
         {hasFootprint ? (
           <details className="chat-footprint">
@@ -984,6 +987,7 @@ function LiveTurn({ runId, stream }: { runId: string; stream: ReturnType<typeof 
             <span className="chat-caret" /> {finalizing ? 'finalizing…' : 'thinking…'}
           </div>
         )}
+        <TurnResults runId={runId} live={stream} />
         {/* Only the engine's own verdict is rendered as an error. A dropped
             connection is reported below in the status slot instead — telling a
             user their turn failed because their wifi hiccuped is a lie. */}

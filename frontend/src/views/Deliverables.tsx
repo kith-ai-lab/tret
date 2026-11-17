@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 
 import { api, ApiError, type Deliverable, type WriteTarget } from '../api/client'
 import {
@@ -11,14 +11,18 @@ import {
   orDash,
 } from '../components/shared/format'
 import { ApproveAllSections } from '../components/shared/ApproveAllSections'
+import { downloadDeliverable, EXPORT_FORMATS, type ExportTheme } from '../components/shared/downloadDeliverable'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { MarkdownDoc } from '../components/shared/MarkdownDoc'
 import { Modal } from '../components/shared/Modal'
 import { StatusBadge } from '../components/shared/StatusBadge'
+import { useEdition } from '../edition'
 
 export function Deliverables() {
   const deliverablesQuery = useQuery({ queryKey: ['deliverables'], queryFn: api.listDeliverables })
-  const [selectedSlug, setSelectedSlug] = useState<string | null>(null)
+  // `?slug=` pre-selects a deliverable (the chat document pane links here).
+  const [searchParams] = useSearchParams()
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(searchParams.get('slug'))
 
   const deliverables = deliverablesQuery.data ?? []
 
@@ -80,17 +84,14 @@ export function Deliverables() {
   )
 }
 
-/** The three export formats, and the file each one lands as. */
-const EXPORT_FORMATS = [
-  { format: 'markdown', label: 'Markdown', extension: 'md' },
-  { format: 'html', label: 'HTML', extension: 'html' },
-  { format: 'pdf', label: 'PDF', extension: 'pdf' },
-] as const
-
 function DeliverableDetail({ deliverable }: { deliverable: Deliverable }) {
   const [includeDraft, setIncludeDraft] = useState(false)
   const [exportError, setExportError] = useState<string | null>(null)
   const [busyFormat, setBusyFormat] = useState<string | null>(null)
+  // The style the server would pick by default for this workspace's edition.
+  const defaultTheme: ExportTheme = useEdition() === 'cohort' ? 'report' : 'plain'
+  const [themeChoice, setThemeChoice] = useState<ExportTheme | null>(null)
+  const theme = themeChoice ?? defaultTheme
 
   // Reset per-deliverable UI state when switching.
   useEffect(() => {
@@ -105,51 +106,16 @@ function DeliverableDetail({ deliverable }: { deliverable: Deliverable }) {
     retry: false,
   })
 
-  const exportHref = (format: string) =>
-    `/api/deliverables/${encodeURIComponent(deliverable.slug)}/export?format=${format}${
-      includeDraft ? '&include_draft=true' : ''
-    }`
-
-  /** Fetch first, save only on success.
-   *
-   *  All three formats go through here, and they have to: a plain
-   *  `<a href download>` hands the browser whatever the server answers with. When
-   *  a deliverable has nothing exportable the endpoint answers 404 with a JSON
-   *  `detail` body, and the anchor saved that body to disk as `tcfd.md` — a file
-   *  that looks like the document and contains an error. Markdown and HTML used
-   *  the anchor; only PDF checked. */
+  /** All formats go through the shared fetch-then-save helper; a failure
+   *  (nothing exportable, a format the server cannot render yet) shows inline. */
   const download = async (format: string, extension: string) => {
     setExportError(null)
     setBusyFormat(format)
-    let objectUrl: string | null = null
     try {
-      const res = await fetch(exportHref(format), { credentials: 'include' })
-      if (!res.ok) {
-        let detail = `${res.status} ${res.statusText}`
-        try {
-          const data: unknown = await res.json()
-          if (data && typeof data === 'object' && 'detail' in data) {
-            const d = (data as { detail: unknown }).detail
-            detail = typeof d === 'string' ? d : JSON.stringify(d)
-          }
-        } catch {
-          /* non-JSON error body */
-        }
-        setExportError(detail)
-        return
-      }
-      const blob = await res.blob()
-      objectUrl = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = objectUrl
-      a.download = `${deliverable.slug}.${extension}`
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
+      await downloadDeliverable(deliverable.slug, format, extension, { includeDraft, theme })
     } catch (e) {
       setExportError(e instanceof Error ? e.message : String(e))
     } finally {
-      if (objectUrl) URL.revokeObjectURL(objectUrl)
       setBusyFormat(null)
     }
   }
@@ -235,6 +201,18 @@ function DeliverableDetail({ deliverable }: { deliverable: Deliverable }) {
               {busyFormat === format ? 'Preparing…' : label}
             </button>
           ))}
+          <label className="check-row" style={{ padding: 0, marginLeft: 8 }}>
+            <span>Style</span>
+            <select
+              value={theme}
+              onChange={(e) => setThemeChoice(e.target.value === 'report' ? 'report' : 'plain')}
+              aria-label="Export style"
+              title="Applies to HTML, PDF, Word and PowerPoint"
+            >
+              <option value="plain">Plain</option>
+              <option value="report">Report</option>
+            </select>
+          </label>
           <label className="check-row" style={{ padding: 0, marginLeft: 8 }}>
             <input
               type="checkbox"
@@ -386,6 +364,12 @@ function PublishToSharePointButton({ deliverable }: { deliverable: Deliverable }
   )
 }
 
+/** `POST /deliverables/{slug}/publish` still renders markdown, HTML and PDF only. */
+const PUBLISH_FORMATS = EXPORT_FORMATS.filter(
+  (f): f is Extract<(typeof EXPORT_FORMATS)[number], { format: 'markdown' | 'html' | 'pdf' }> =>
+    f.format === 'markdown' || f.format === 'html' || f.format === 'pdf',
+)
+
 function PublishToSharePointModal({
   deliverable,
   targets,
@@ -398,7 +382,7 @@ function PublishToSharePointModal({
   onClose: () => void
 }) {
   const [targetSlug, setTargetSlug] = useState(targets[0]?.slug ?? '')
-  const [format, setFormat] = useState<(typeof EXPORT_FORMATS)[number]['format']>('markdown')
+  const [format, setFormat] = useState<(typeof PUBLISH_FORMATS)[number]['format']>('markdown')
   const [filename, setFilename] = useState(`${deliverable.slug}.md`)
   const [filenameTouched, setFilenameTouched] = useState(false)
 
@@ -414,10 +398,10 @@ function PublishToSharePointModal({
     }
   }, [open, deliverable.slug, targets])
 
-  const onFormatChange = (f: (typeof EXPORT_FORMATS)[number]['format']) => {
+  const onFormatChange = (f: (typeof PUBLISH_FORMATS)[number]['format']) => {
     setFormat(f)
     if (!filenameTouched) {
-      const extension = EXPORT_FORMATS.find((x) => x.format === f)?.extension ?? 'md'
+      const extension = PUBLISH_FORMATS.find((x) => x.format === f)?.extension ?? 'md'
       setFilename(`${deliverable.slug}.${extension}`)
     }
   }
@@ -511,7 +495,7 @@ function PublishToSharePointModal({
           <div className="field">
             <label className="mono-label">Format</label>
             <div className="row" style={{ gap: 12 }}>
-              {EXPORT_FORMATS.map(({ format: f, label }) => (
+              {PUBLISH_FORMATS.map(({ format: f, label }) => (
                 <label key={f} className="check-row" style={{ padding: 0 }}>
                   <input
                     type="radio"

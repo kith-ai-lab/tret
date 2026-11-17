@@ -13,6 +13,7 @@ import '@fontsource-variable/inter/wght.css'
 import '@fontsource-variable/jetbrains-mono/wght.css'
 import './theme/global.css'
 import './components/chat/delegated-work.css'
+import './components/chat/document-pane.css'
 // Hosted-build brand layer. Every rule is scoped to <html data-brand="kith-climate">,
 // so it is inert in the open-source build.
 import './theme/brand-kith-climate.css'

@@ -13,6 +13,7 @@ import {
   type WorkspaceConnection,
   type WriteTarget,
 } from '../api/client'
+import { DatabaseConnections } from '../components/connections/DatabaseConnections'
 import { M365ReadAccessPicker } from '../components/connections/M365ReadAccessPicker'
 import { M365WriteTargetPicker } from '../components/connections/M365WriteTargetPicker'
 import { formatDateTime } from '../components/shared/format'
@@ -47,6 +48,7 @@ export function ConnectionsView() {
       </div>
       <CallbackNotice />
       <ProviderCards />
+      <DatabaseConnections />
     </div>
   )
 }
