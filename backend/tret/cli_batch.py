@@ -2,9 +2,10 @@
 
 A batch executes inside the server (its runs, slots, review gate and records
 all live there), so this is an httpx client of `/api/batches`, not a database
-tool. The same calls the Batches page makes; see docs/batch-runs.md. The one
-exception is `search-outages`, which reads the database like
-`tret approvals mark-packaging` does.
+tool. The same calls the Batches page makes; see docs/batch-runs.md. The
+exceptions are `search-outages`, which reads the database like
+`tret approvals mark-packaging` does, and `register-esef`, which builds a register
+CSV from filings.xbrl.org and needs no server at all.
 
 Connection and auth (options on the `batch` group, accepted before or after the
 subcommand):
@@ -139,6 +140,25 @@ def register(sub: argparse._SubParsersAction) -> None:
     outages.add_argument("--batch", action="append", required=True, metavar="BATCH_ID", help="Batch to scan (repeatable)")
     outages.add_argument("--mark", action="append", metavar="TARGET_ID", help="Target to mark (repeatable)")
     outages.add_argument("--apply", action="store_true", help="With --mark: write the marks (default: say what would happen)")
+    esef = bsub.add_parser(
+        "register-esef",
+        help="Build a register CSV of EU/UK companies from the ESEF filings index (offline of any Tret server)",
+        description="Download (or read) the filings.xbrl.org index for a year, keep one filing per LEI and "
+        "write a register CSV that `tret batch create` accepts, plus <out>.ranking.csv. With --rank-by "
+        "revenue each company's xBRL-JSON is fetched (sequentially, rate-limited, cached) to order the list "
+        "by size. ESEF reports are inline XBRL; the Collector still has to find the PDF. Needs no server, "
+        "token or database.",
+    )
+    esef.add_argument("--year", type=int, required=True, help="Filing year of the index (period_end year)")
+    esef.add_argument("--countries", help="Only these filing countries, comma separated (e.g. FR,NL)")
+    esef.add_argument("--exclude-countries", help="Skip these filing countries, comma separated (UA is always skipped)")
+    esef.add_argument("--top", type=int, help="Keep only the N largest (or first N alphabetically without ranking)")
+    esef.add_argument("--rank-by", choices=("revenue", "none"), default="none", help="Order by size (default: none)")
+    esef.add_argument("--out", required=True, help="Register CSV to write")
+    esef.add_argument("--index-file", help="Read this local index JSON instead of downloading it")
+    esef.add_argument("--cache-dir", help="Where fetched size metrics are cached (default: <out>.cache)")
+    esef.add_argument("--min-interval", type=float, default=1.5, help="Seconds between requests (default 1.5)")
+    esef.add_argument("--limit-fetch", type=int, help="At most this many report fetches in this invocation")
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
@@ -486,10 +506,71 @@ def _search_outages(args: argparse.Namespace) -> int:
     return 1 if (refused_all or problems or unfound) else 0
 
 
+def _csv_list(value: str | None) -> list[str] | None:
+    items = [v.strip().upper() for v in (value or "").split(",") if v.strip()]
+    return items or None
+
+
+def _register_esef(args: argparse.Namespace) -> int:
+    """`tret batch register-esef`: filings index -> register CSV. No server needed."""
+    import httpx
+
+    from tret.batches.registers import esef
+
+    if args.top is not None and args.top < 1:
+        print("error: --top must be at least 1", file=sys.stderr)
+        return 2
+    if args.limit_fetch is not None and args.limit_fetch < 0:
+        print("error: --limit-fetch must not be negative", file=sys.stderr)
+        return 2
+    cache_dir = args.cache_dir or f"{args.out}.cache"
+    fetcher = esef.HttpFetcher(min_interval=args.min_interval)
+    try:
+        summary = esef.build_register(
+            args.year,
+            args.out,
+            countries=_csv_list(args.countries),
+            exclude_countries=_csv_list(args.exclude_countries) or (),
+            top=args.top,
+            rank_by=args.rank_by,
+            index_file=args.index_file,
+            cache_dir=cache_dir,
+            fetcher=fetcher,
+            limit_fetch=args.limit_fetch,
+            progress=lambda m: print(f"  {m}", file=sys.stderr),
+        )
+    except (esef.FetchError, ValueError, RecursionError, OSError, httpx.HTTPError) as e:
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    finally:
+        fetcher.close()
+    print(f"{summary.filings} filings in the {summary.year} index, {summary.candidates} candidates (one per LEI)")
+    for reason, n in sorted(summary.dropped.items(), key=lambda kv: -kv[1]):
+        print(f"  dropped {n}: {reason}")
+    if summary.stats is not None:
+        st = summary.stats
+        print(
+            f"ranking: {st.fetched} fetched, {st.cached} from cache, {st.unreadable} with no usable size, "
+            f"{st.not_fetched} not sized (fetch limit or transient error); "
+            f"{fetcher.requests} request(s), {fetcher.rate_limited} HTTP 429"
+        )
+        if st.aborted:
+            print(
+                "warning: fetching stopped early after repeated transient failures (403/429/5xx/network); "
+                "rerun later to size the rest (sized results are cached)",
+                file=sys.stderr,
+            )
+    print(f"wrote {summary.written} row(s) to {summary.register_path}")
+    print(f"wrote ranking of {summary.candidates} candidate(s) to {summary.sidecar}")
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
     """Execute the parsed `batch` command; returns the exit status."""
     if args.batch_command == "search-outages":
         return _search_outages(args)
+    if args.batch_command == "register-esef":
+        return _register_esef(args)
     api = None
     try:
         api = Api(args)

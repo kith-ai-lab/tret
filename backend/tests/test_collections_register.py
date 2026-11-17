@@ -71,7 +71,7 @@ def test_row_validation_errors(row, fragment):
 
 def test_unknown_columns_and_missing_header_columns_are_refused():
     with pytest.raises(RegisterError, match="Unknown CSV column"):
-        parse_register(None, "company,market,ticker\nA,US,AAA\n", default_fiscal_year=2025)
+        parse_register(None, "company,market,isin\nA,US,AAA\n", default_fiscal_year=2025)
     with pytest.raises(RegisterError, match="'market'"):
         parse_register(None, "company\nA\n", default_fiscal_year=2025)
 
@@ -211,3 +211,151 @@ def test_the_prompt_names_only_real_packaging_roles_and_the_target_year():
     assert "primary_disclosure for a standalone sustainability report" in prompt
     assert "fy2025_gap=true when the period collected is not FY2024" in prompt
     assert "target 2 of 5" in prompt
+
+
+# ── identifier columns (lei, cik, ticker, source_filing_url) ─────────────────
+ID_HEADER = HEADER.strip() + ",lei,cik,ticker,source_filing_url\n"
+LEI = "549300abcdefghij1234"
+
+
+def _id_csv(*rows: str) -> str:
+    return ID_HEADER + "".join(r + "\n" for r in rows)
+
+
+def test_identifier_columns_are_parsed_and_normalised():
+    rows, _ = parse_register(
+        None,
+        _id_csv(f"A plc,UK,,,,,,,,{LEI},0000320193,abc.b,https://filings.xbrl.org/x/r.xhtml"),
+        default_fiscal_year=2025,
+    )
+    assert rows[0]["identifiers"] == {
+        "lei": LEI.upper(),
+        "cik": "320193",
+        "ticker": "ABC.B",
+        "source_filing_url": "https://filings.xbrl.org/x/r.xhtml",
+    }
+
+
+def test_only_the_identifiers_given_are_kept():
+    rows, _ = parse_register(None, _id_csv("A plc,UK,,,,,,,,,,tsla,"), default_fiscal_year=2025)
+    assert rows[0]["identifiers"] == {"ticker": "TSLA"}
+
+
+def test_old_registers_parse_exactly_as_before():
+    rows, _ = parse_register(None, _csv("A plc,UK,,,,,,,"), default_fiscal_year=2025)
+    assert "identifiers" not in rows[0]
+    rows, _ = parse_register(None, _id_csv("A plc,UK,,,,,,,,,,,"), default_fiscal_year=2025)
+    assert "identifiers" not in rows[0]
+
+
+def test_identifiers_are_accepted_in_a_json_register():
+    rows, _ = parse_register(
+        [{"company": "A", "market": "US", "cik": "0000000012", "lei": None}], None, default_fiscal_year=2025
+    )
+    assert rows[0]["identifiers"] == {"cik": "12"}
+
+
+@pytest.mark.parametrize(
+    ("cells", "fragment"),
+    [
+        ("tooshort,,,", "lei 'TOOSHORT'"),
+        ("549300ABCDEFGHIJ123!,,,", "lei"),
+        (",12345678901,,", "cik"),
+        (",12a,,", "cik"),
+        (",,WAYTOOLONGTICKER1,", "ticker"),
+        (",,AB CD,", "ticker"),
+        (",,,http://x.example/r.xhtml", "source_filing_url"),
+        (",,,https://x.example/a b", "source_filing_url"),
+        (",,,https://x.example/" + "a" * 2000, "source_filing_url"),
+    ],
+)
+def test_identifier_validation_errors(cells, fragment):
+    with pytest.raises(RegisterError, match=fragment):
+        parse_register(None, _id_csv(f"A plc,UK,,,,,,,,{cells}"), default_fiscal_year=2025)
+
+
+def _prompt_target(**extra):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        position=2, company="Shell plc", market="UK", domicile_country=None, sector=None,
+        category=None, expected_form="embedded", fiscal_year=2024, known_urls=[], notes=None,
+        slug="shell", **extra,
+    )
+
+
+# build_prompt's output for a target without identifiers, as it was before the identifier columns.
+_PROMPT_HEAD = (
+    "You are collecting one company's sustainability disclosure for the Kith Climate disclosure "
+    'repository. Collection run "r1", target 2 of 5.\n\nTARGET\n- Company: Shell plc\n'
+    "- Market: UK; domicile: not recorded; sector: not recorded; category: not recorded; "
+    "expected form: embedded\n- Fiscal year wanted: FY2024\n"
+)
+
+
+def test_the_prompt_is_unchanged_for_a_target_without_identifiers():
+    from types import SimpleNamespace
+
+    from tret.services.collections import build_prompt
+
+    c = SimpleNamespace(run_slug="r1")
+    plain = build_prompt(c, _prompt_target(), 5)
+    assert plain.startswith(_PROMPT_HEAD + "- Known URLs (open these first, exactly as given): none\n")
+    assert build_prompt(c, _prompt_target(identifiers=None), 5) == plain
+    assert build_prompt(c, _prompt_target(identifiers={}), 5) == plain
+
+
+def test_the_prompt_names_the_identifiers_and_the_filing_of_record():
+    from types import SimpleNamespace
+
+    from tret.services.collections import build_prompt
+
+    c = SimpleNamespace(run_slug="r1")
+    plain = build_prompt(c, _prompt_target(), 5)
+    ids = {"lei": LEI.upper(), "ticker": "SHEL", "source_filing_url": "https://filings.xbrl.org/a/r.xhtml"}
+    prompt = build_prompt(c, _prompt_target(identifiers=ids), 5)
+    assert f"- Identifiers: LEI {LEI.upper()}; ticker SHEL\n" in prompt
+    assert (
+        "- Filing of record (inline XBRL, not a PDF): https://filings.xbrl.org/a/r.xhtml "
+        "\u2014 use it only to confirm the reporting entity and fiscal year; "
+        "do not capture it as the document.\n"
+    ) in prompt
+    # Nothing else moved: removing the two added lines gives the plain prompt back.
+    kept = [ln for ln in prompt.split("\n") if not ln.startswith(("- Identifiers:", "- Filing of record"))]
+    assert "\n".join(kept) == plain
+    only_ticker = build_prompt(c, _prompt_target(identifiers={"cik": "12"}), 5)
+    assert "- Identifiers: CIK 12\n" in only_ticker and "Filing of record" not in only_ticker
+
+
+def test_target_register_entry_carries_identifiers_only_when_present():
+    import json
+
+    from tret.batches.profiles.disclosure import _target_register_entry
+
+    base = _prompt_target()
+    plain = _target_register_entry(base)
+    assert "identifiers" not in plain
+    # Empty or missing identifiers serialise byte-identically (batch hashes do not move).
+    for ids in (None, {}):
+        t = _prompt_target(identifiers=ids)
+        assert json.dumps(_target_register_entry(t), sort_keys=True) == json.dumps(plain, sort_keys=True)
+    with_ids = _target_register_entry(_prompt_target(identifiers={"lei": LEI.upper(), "ticker": "SHEL"}))
+    assert with_ids["identifiers"] == {"lei": LEI.upper(), "ticker": "SHEL"}
+    assert {k: v for k, v in with_ids.items() if k != "identifiers"} == plain
+
+
+def test_evidence_task_text_names_identifiers_only_when_present():
+    from tret.batches.profiles.disclosure import _task_text
+
+    plain = _task_text(_prompt_target())
+    assert _task_text(_prompt_target(identifiers={})) == plain
+    text = _task_text(_prompt_target(identifiers={"lei": LEI.upper(), "source_filing_url": "https://filings.xbrl.org/a/r.xhtml"}))
+    assert f"Identifiers: LEI {LEI.upper()}" in text and "Filing of record" in text
+    kept = [ln for ln in text.split("\n") if not ln.startswith(("- Identifiers:", "- Filing of record"))]
+    assert "\n".join(kept) == plain
+
+
+@pytest.mark.parametrize("bad", ["https://x.example/a​b", "https://x.example/a b", "https://x.example/a\x07b"])
+def test_source_filing_url_rejects_invisible_and_control_characters(bad):
+    with pytest.raises(RegisterError, match="source_filing_url"):
+        parse_register(None, _id_csv("A plc,UK,,,,,,,,,,," + bad), default_fiscal_year=2025)

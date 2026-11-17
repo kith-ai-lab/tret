@@ -1126,6 +1126,8 @@ async def create_batch(
             attempts=0,
             written_files=[],
         )
+        if row.get("identifiers"):
+            t.identifiers = row["identifiers"]  # left unset otherwise: SQL NULL, not JSON null
         targets.append(t)
     await db.flush()  # the batch row first: targets reference it
     for t in targets:

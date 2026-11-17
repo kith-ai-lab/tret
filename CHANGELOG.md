@@ -49,6 +49,15 @@ one that needs action on an existing install.
 - **A `report` theme for deliverable exports** (renderer only; not yet selectable in the
   interface): cover page, running header and page numbers, styled tables and callouts.
   The existing output is the `plain` theme and is unchanged.
+- **Company identifiers on register targets, and an ESEF register importer.** A disclosure
+  register can carry optional `lei`, `cik`, `ticker` and `source_filing_url` columns, kept in
+  a new nullable `identifiers` column on the target (migration `d3a7b1c6e904`), returned by
+  the API and shown to a recipient of a shared batch. When present, the run's task names
+  them and the filing of record; without them the task is unchanged. `tret batch
+  register-esef --year 2024 --out register.csv` builds a register of EU and UK companies from
+  the filings.xbrl.org index (one row per LEI, optionally ranked by revenue from each
+  filing's xBRL-JSON, rate-limited and cached) and writes a `.ranking.csv` beside it. It needs
+  no server. ESEF reports are inline XBRL, so the Collector still finds the PDF.
 - **Share a batch with another workspace, read-only.** An approver can share a batch with a
   person by email (pending until they accept it from a workspace) or with a workspace they
   belong to (approver role there); the recipient sees the rows, statuses, evaluation scores,

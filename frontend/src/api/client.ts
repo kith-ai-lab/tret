@@ -3347,6 +3347,13 @@ export interface BatchTarget {
   expected_form?: 'standalone' | 'embedded' | 'unknown' | (string & {})
   fiscal_year?: number
   known_urls?: string[]
+  /** Public company identifiers from the register; only the keys that were given. */
+  identifiers?: {
+    lei?: string
+    cik?: string
+    ticker?: string
+    source_filing_url?: string
+  } | null
   notes?: string | null
   packages?: BatchTargetPackage[]
 }
@@ -3365,6 +3372,10 @@ export interface BatchTargetIn {
   known_urls?: string[]
   notes?: string | null
   slug?: string | null
+  lei?: string | null
+  cik?: string | null
+  ticker?: string | null
+  source_filing_url?: string | null
 }
 
 export interface CreateDisclosureBatchBody {

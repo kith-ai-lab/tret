@@ -318,8 +318,9 @@ One row per company. As CSV the header row is:
 company,market,domicile_country,sector,category,expected_form,fiscal_year,known_urls,notes
 ```
 
-An optional tenth column, `slug`, is also accepted. Any other column is refused, and an
-error names the row it found the problem on. Blank cells take the default.
+Optional columns after these: `slug`, and the identifier columns `lei`, `cik`, `ticker` and
+`source_filing_url` (below). Any other column is refused, and an error names the row it found
+the problem on. Blank cells take the default.
 
 | Column | Meaning |
 |---|---|
@@ -332,6 +333,10 @@ error names the row it found the problem on. Blank cells take the default.
 | `known_urls` | up to 20 `https://` URLs separated by `\|`. The run opens these first, exactly as given |
 | `notes` | at most 2000 characters, passed to the run |
 | `slug` | optional. Lowercase letters, digits and hyphens, at most 40. It names the target's folder and the file stems. Left out, it is derived from the company name (corporate suffixes such as plc, SE, Inc. dropped) and made unique |
+| `lei` | optional. Exactly 20 letters or digits, upper-cased on input |
+| `cik` | optional. 1 to 10 digits, stored without leading zeros |
+| `ticker` | optional. 1 to 12 letters, digits, dots or hyphens, upper-cased |
+| `source_filing_url` | optional. An `https://` URL of at most 2000 characters |
 
 A register has at most 500 targets. The API also accepts the same rows as JSON
 (`register`) instead of `register_csv`; exactly one of the two must be given.
@@ -341,6 +346,47 @@ errors: a market with no targets; fewer than 3 `financial` or fewer than 5
 `industrial` targets in a market; fewer than 6 `expected_form=embedded` targets in UK or
 EU. The warnings show in a box on the collection and are copied into
 `target_register.json`. A register that trips them can still be run.
+
+#### Identifier columns
+
+`lei`, `cik`, `ticker` and `source_filing_url` are stored together in one nullable JSON
+column on the target (`identifiers`, keys only for the values given) and returned with the
+target by the API, including in a shared batch. When a target has them the run's task adds
+one line (`Identifiers: LEI ...; ticker ...`) and, for a `source_filing_url`, a line naming it
+as the filing of record, to be used only to confirm the reporting entity and fiscal year and
+never captured as the document. A target without identifiers gets exactly the task it got
+before.
+
+#### Building a register from the ESEF filings index
+
+`tret batch register-esef` writes a register CSV of EU and UK companies from the yearly index
+at filings.xbrl.org. It runs offline of any Tret server (no URL, token or database).
+
+```sh
+tret batch register-esef --year 2024 [--countries FR,NL] [--exclude-countries GB] \
+    [--top 500] [--rank-by revenue|none] --out register.csv \
+    [--index-file PATH] [--cache-dir PATH] [--min-interval 1.5] [--limit-fetch N]
+```
+
+It drops filings whose period end is not a date in the requested year, entities whose
+identifier is not a LEI, and filings from Ukraine; keeps one filing per LEI (fewest errors,
+then latest processed); and writes one row per company: market `UK` for filing country `GB`
+and `EU` otherwise, `domicile_country` set to the filing's country (the filing jurisdiction,
+which the notes say, and not necessarily the company's home), category `other`, expected form
+`embedded`, no known URLs, and the LEI and the filing's report URL as `source_filing_url`.
+`--rank-by revenue` fetches each filing's xBRL-JSON, one request at a time with the minimum
+interval, back-off on HTTP 429 and 5xx, and a size cap per response, and orders companies by
+`ifrs-full:Revenue`, else `RevenueFromContractsWithCustomers`, else `InsuranceRevenue`
+(undimensioned, latest period end, preferring a full-year period over a shorter one) converted to EUR with a rough built-in
+exchange table; a company with no revenue fact is sized as 5% of its assets and marked
+`assets_proxy`, and one with neither sorts last. Only the extracted figure is cached
+(`--cache-dir`, default `<out>.cache`), so a rerun resumes without refetching;
+`--limit-fetch` caps the fetches in one invocation. Next to the register it writes
+`<out>.ranking.csv` with every candidate and its size, which is for ranking only and is not
+a financial figure.
+
+An ESEF report is inline XBRL, not a PDF. The importer supplies the target list and the
+filing of record; the Collector still has to find the sustainability disclosure PDF.
 
 ### Creating a collection
 
