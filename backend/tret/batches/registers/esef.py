@@ -127,9 +127,9 @@ class HttpFetcher:
 
     def __init__(
         self,
+        client: Any,
         *,
         min_interval: float = DEFAULT_MIN_INTERVAL,
-        timeout: float = 60.0,
         max_retries: int = 5,
         max_backoff: float = 120.0,
         sleep: Callable[[float], None] = time.sleep,
@@ -146,11 +146,11 @@ class HttpFetcher:
         self._last = None  # type: float | None
         self.requests = 0
         self.rate_limited = 0  # 429 responses seen
-        self._client = httpx.Client(
-            timeout=timeout,
-            headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-            follow_redirects=False,
-        )
+        # The client is built by the caller (the `tret batch` operator CLI, the one
+        # module outside tret/net allowed to construct an httpx client; see
+        # tests/test_egress_chokepoint.py). It should send USER_AGENT, set no
+        # redirect following, and carry its own timeout.
+        self._client = client
 
     def close(self) -> None:
         self._client.close()
@@ -226,7 +226,8 @@ def load_index(year: int, *, index_file: str | Path | None = None, fetcher: Fetc
     if index_file is not None:
         raw = Path(index_file).read_bytes()
     else:
-        fetcher = fetcher or HttpFetcher()
+        if fetcher is None:
+            raise ValueError("no index_file and no fetcher to download the index with")
         raw = fetcher.get_bytes(index_url(year), max_bytes=MAX_INDEX_BYTES)
     try:
         doc = json.loads(raw)

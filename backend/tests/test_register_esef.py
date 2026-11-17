@@ -318,8 +318,7 @@ def test_http_fetcher_backs_off_on_429_and_respects_the_size_cap(monkeypatch):
         return httpx.Response(200, content=b"{}")
 
     sleeps: list[float] = []
-    f = esef.HttpFetcher(min_interval=1.5, sleep=sleeps.append)
-    f._client = httpx.Client(transport=httpx.MockTransport(handler), headers={"User-Agent": esef.USER_AGENT})
+    f = esef.HttpFetcher(httpx.Client(transport=httpx.MockTransport(handler), headers={"User-Agent": esef.USER_AGENT}), min_interval=1.5, sleep=sleeps.append)
     assert f.get_bytes("https://filings.xbrl.org/a.json", max_bytes=1000) == b"{}"
     assert f.rate_limited == 1 and 7 in sleeps
     with pytest.raises(esef.FetchError) as e:
@@ -395,8 +394,7 @@ def test_http_fetcher_turns_decoding_errors_into_transient_fetch_errors():
         return httpx.Response(200, headers={"content-encoding": "gzip"}, content=b"this is not gzip")
 
     sleeps: list[float] = []
-    f = esef.HttpFetcher(min_interval=0, max_retries=1, sleep=sleeps.append)
-    f._client = httpx.Client(transport=httpx.MockTransport(handler), headers={"User-Agent": esef.USER_AGENT})
+    f = esef.HttpFetcher(httpx.Client(transport=httpx.MockTransport(handler), headers={"User-Agent": esef.USER_AGENT}), min_interval=0, max_retries=1, sleep=sleeps.append)
     with pytest.raises(esef.FetchError) as e:
         f.get_bytes("https://filings.xbrl.org/a.json", max_bytes=1000)
     assert not e.value.permanent and "DecodingError" in str(e.value)
@@ -408,8 +406,7 @@ def test_http_fetcher_403_is_transient_and_404_permanent():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403 if "forbidden" in request.url.path else 404)
 
-    f = esef.HttpFetcher(min_interval=0, max_retries=2, sleep=lambda s: None)
-    f._client = httpx.Client(transport=httpx.MockTransport(handler), headers={"User-Agent": esef.USER_AGENT})
+    f = esef.HttpFetcher(httpx.Client(transport=httpx.MockTransport(handler), headers={"User-Agent": esef.USER_AGENT}), min_interval=0, max_retries=2, sleep=lambda s: None)
     with pytest.raises(esef.FetchError) as e:
         f.get_bytes("https://filings.xbrl.org/forbidden.json", max_bytes=10)
     assert not e.value.permanent and f.requests == 3  # retried with back-off
@@ -428,8 +425,7 @@ def test_streamed_body_without_content_length_is_capped():
 
         return httpx.Response(200, content=body())  # a generator: chunked, no content-length
 
-    f = esef.HttpFetcher(min_interval=0, sleep=lambda s: None)
-    f._client = httpx.Client(transport=httpx.MockTransport(handler), headers={"User-Agent": esef.USER_AGENT})
+    f = esef.HttpFetcher(httpx.Client(transport=httpx.MockTransport(handler), headers={"User-Agent": esef.USER_AGENT}), min_interval=0, sleep=lambda s: None)
     with pytest.raises(esef.FetchError) as e:
         f.get_bytes("https://filings.xbrl.org/big.json", max_bytes=50)
     assert e.value.permanent and str(e.value) == esef.OVER_SIZE_REASON

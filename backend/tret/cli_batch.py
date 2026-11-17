@@ -524,7 +524,12 @@ def _register_esef(args: argparse.Namespace) -> int:
         print("error: --limit-fetch must not be negative", file=sys.stderr)
         return 2
     cache_dir = args.cache_dir or f"{args.out}.cache"
-    fetcher = esef.HttpFetcher(min_interval=args.min_interval)
+    client = httpx.Client(
+        timeout=60.0,
+        headers={"User-Agent": esef.USER_AGENT, "Accept": "application/json"},
+        follow_redirects=False,
+    )
+    fetcher = esef.HttpFetcher(client, min_interval=args.min_interval)
     try:
         summary = esef.build_register(
             args.year,
