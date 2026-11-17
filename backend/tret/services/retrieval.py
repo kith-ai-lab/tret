@@ -127,6 +127,11 @@ ROWS_CHAR_CEILING = TARGET_CHARS * 3
 # inside a per-block helper like `_chunk_rows`, which has no way to know how
 # many chunks other blocks in the same document have already produced.
 MAX_CHUNKS_PER_DOCUMENT = 2000
+# An ESEF filing's text (`esef_filing_max_chars`, 8,000,000) is about 4x an ordinary
+# document's cap, and what matters in it sits late; its ceiling is scaled to match.
+# tsvectors are per chunk (~1,600 characters), so no single value approaches
+# Postgres's 1 MB tsvector limit.
+MAX_CHUNKS_PER_FILING = 8000
 
 # Appended as one extra chunk when a document is truncated at the cap above,
 # so a search that only ever sees the top MAX_CHUNKS_PER_DOCUMENT chunks knows
@@ -477,10 +482,11 @@ def chunk_document(filename: str, text: str, meta: dict | None = None) -> list[C
                 drafts.extend(_chunk_table_block(title, block))
             else:
                 drafts.extend(_chunk_prose_block(title, block))
-    truncated = len(drafts) > MAX_CHUNKS_PER_DOCUMENT
-    drafts = drafts[:MAX_CHUNKS_PER_DOCUMENT]
+    limit = MAX_CHUNKS_PER_FILING if (meta or {}).get("provenance") == "esef_filing" else MAX_CHUNKS_PER_DOCUMENT
+    truncated = len(drafts) > limit
+    drafts = drafts[:limit]
     if truncated:
-        marker = TRUNCATION_MARKER_TEMPLATE.format(n=MAX_CHUNKS_PER_DOCUMENT)
+        marker = TRUNCATION_MARKER_TEMPLATE.format(n=limit)
         drafts.append(
             ChunkDraft(
                 kind="text",

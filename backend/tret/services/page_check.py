@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 _PAGE_MARKER = re.compile(r"^## Page (\d+)$", re.MULTILINE)
+_SECTION_MARKER = re.compile(r"^## Section (\d+): ?(.*)$", re.MULTILINE)
 _FOLIO = re.compile(r"(?<![\w.,])\d{1,4}(?![\w.,%])")
 _EDGE_LINES = 2
 _MAX_INTS_PER_LINE = 6
@@ -37,6 +38,13 @@ _REPROPOSE = (
 )
 
 
+_REPROPOSE_FILING = (
+    " If your ranges came from a contents page or an index they are printed numbers and "
+    "select the wrong pages: propose this map again with the same source document and stem, "
+    "using the filing page numbers in the `## Page N` markers."
+)
+
+
 def split_pages(extracted_text: str | None) -> dict[int, str]:
     """Split stored text on its `## Page N` markers into {physical page: text}.
 
@@ -55,6 +63,21 @@ def split_pages(extracted_text: str | None) -> dict[int, str]:
         end = marks[i + 1].start() if i + 1 < len(marks) else len(extracted_text)
         pages[i + 1] = extracted_text[start:end]
     return pages
+
+
+def split_sections(extracted_text: str | None) -> dict[int, str]:
+    """{section number: heading} from a filing's `## Section N: heading` markers.
+
+    As for pages, a marker counts only when N is one more than the previous accepted
+    marker (starting at 1); any other such line is ordinary text.
+    """
+    if not extracted_text:
+        return {}
+    out: dict[int, str] = {}
+    for m in _SECTION_MARKER.finditer(extracted_text):
+        if int(m.group(1)) == len(out) + 1:
+            out[len(out) + 1] = m.group(2).strip()
+    return out
 
 
 def _clean(text: str) -> str:
@@ -163,10 +186,18 @@ def describe_ranges(
     pages: dict[int, str],
     page_count: int | None = None,
     max_ranges: int = 8,
+    unit: str = "pdf_page",
 ) -> str:
-    """The text block quoting the first and last page of each kept range ("" without ranges)."""
+    """The text block quoting the first and last page of each kept range ("" without ranges).
+
+    `unit="filing_page"` is the same check over an ESEF filing's `## Page N` units:
+    the words say "filing page" and "this filing" instead of "physical page" and
+    "this PDF".
+    """
     if not keep_ranges:
         return ""
+    filing = unit == "filing_page"
+    page_word = "filing page" if filing else "page"
     cache: dict[int, set[int]] = {}
 
     def cands(n: int) -> set[int]:
@@ -198,16 +229,16 @@ def describe_ranges(
         for n in ([first] if first == last else [first, last]):
             if n > last_stored:
                 if not pages:
-                    parts.append(f"page {n}: not checked (no stored text for this document)")
+                    parts.append(f"{page_word} {n}: not checked (no stored text for this document)")
                 else:
                     of = f" of {page_count}" if page_count else ""
                     parts.append(
-                        f"page {n}: not checked (the stored text covers pages 1-{last_stored}{of})"
+                        f"{page_word} {n}: not checked (the stored text covers pages 1-{last_stored}{of})"
                     )
                 continue
             words = opening_words(pages.get(n, ""))
             if not words:
-                parts.append(f"page {n} has no extractable text")
+                parts.append(f"{page_word} {n} has no extractable text")
                 continue
             p = shown(n)
             label = ""
@@ -215,7 +246,7 @@ def describe_ranges(
                 label = f" (printed {_span(p[0], p[-1])})"
                 if first_shown is None:
                     first_shown = (n, p)
-            parts.append(f'page {n}{label} opens "{words}"')
+            parts.append(f'{page_word} {n}{label} opens "{words}"')
         lines.append(f"- {_span(first, last)}: " + "; ".join(parts))
     hidden = len(keep_ranges) - max_ranges
     if hidden > 0:
@@ -226,19 +257,59 @@ def describe_ranges(
         return "\n".join(lines)
 
     n, p = first_shown
+    doc_word, where = ("filing", "filing page") if filing else ("PDF", "physical page")
     if numbering.per_page == 1:
         closing = (
-            "Printed page numbers in this PDF differ from physical positions: "
-            f"physical page {n} carries the printed number {p[0]}."
+            f"Printed page numbers in this {doc_word} differ from {'filing page' if filing else 'physical'} "
+            f"positions: {where} {n} carries the printed number {p[0]}."
         )
     else:
         carried = f"numbers {p[0]}-{p[1]}" if len(p) == 2 else f"number {p[0]}"
         closing = (
-            "This PDF shows two printed pages on each physical page: "
-            f"physical page {n} carries the printed {carried}."
+            f"This {doc_word} shows two printed pages on each {where}: "
+            f"{where} {n} carries the printed {carried}."
         )
     t = numbering.physical(n)
     if t != n and t in pages and n in (shown(t) or ()):
-        closing += f" Physical page {t} carries the printed number {n}."
-    lines.append(closing + _REPROPOSE)
+        closing += f" {where.capitalize()} {t} carries the printed number {n}."
+    lines.append(closing + (_REPROPOSE_FILING if filing else _REPROPOSE))
+    return "\n".join(lines)
+
+
+def describe_sections(
+    keep_ranges: Sequence[Sequence[int]] | None,
+    headings: dict[int, str],
+    section_count: int | None = None,
+    max_ranges: int = 8,
+) -> str:
+    """The block quoting the headings of the first and last section of each kept range.
+
+    For a filing read as `## Section N: heading` units, where there are no page
+    openings to quote: the heading is what a wrong pick shows up in. "" without ranges.
+    """
+    if not keep_ranges:
+        return ""
+    lines = [HEADER]
+    for first, last in keep_ranges[:max_ranges]:
+        parts = []
+        for n in ([first] if first == last else [first, last]):
+            if n not in headings:
+                of = f" of {section_count}" if section_count else ""
+                parts.append(
+                    f"section {n}: not checked (the stored text has sections 1-{max(headings, default=0)}{of})"
+                )
+                continue
+            title = opening_words(headings[n]) or "(no heading text)"
+            parts.append(f'section {n} is "{title}"')
+        count = last - first + 1
+        extra = f" ({count} sections)" if count > 2 else ""
+        lines.append(f"- {_span(first, last)}{extra}: " + "; ".join(parts))
+    hidden = len(keep_ranges) - max_ranges
+    if hidden > 0:
+        lines.append(f"- … and {hidden} more range(s) not shown")
+    lines.append(
+        "If a range does not open or close on the section you meant, propose this map again "
+        "with the same source document and stem, using the section numbers in the "
+        "`## Section N: heading` markers."
+    )
     return "\n".join(lines)

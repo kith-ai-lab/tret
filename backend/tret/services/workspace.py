@@ -36,6 +36,7 @@ from tret.db.models import Harness, Project, User, Workspace, WorkspaceMember
 from tret.engine.delegation import SUBAGENT_ALLOWED_TOOLS, SUBAGENT_TASK_PROFILE
 from tret.engine.extensions import GateResult, get_extension_registry
 import tret.engine.collection_tools  # noqa: F401 - registers report_collection_outcome
+import tret.engine.filing_tools  # noqa: F401 - registers capture_filing
 import tret.engine.evaluation_tools  # noqa: F401 - registers submit_evaluation, submit_batch_review
 import tret.engine.batch_tools  # noqa: F401 - registers start_batch, batch_status, batch_results
 from tret.engine.batch_tools import BATCH_COMPARE_SEEDED_KEY, BATCH_TOOLS, BATCH_TOOLS_SEEDED_KEY
@@ -383,6 +384,9 @@ COLLECTION_HARNESS_TOOLS = [
     "web_search",
     "fetch_url",
     "capture_source",
+    # The regulated ESEF filing behind the run's target, when the issuer's own PDF
+    # cannot be collected (engine/filing_tools.py); refuses outside a collection run.
+    "capture_filing",
     "read_document",
     "search_documents",
     "propose_package_map",

@@ -69,6 +69,8 @@ from tret.engine.tools import (
 )
 # Registers `report_collection_outcome` (collection runs) with the builtins above.
 import tret.engine.collection_tools  # noqa: E402,F401
+# Registers `capture_filing` (ESEF filing fallback for collection runs).
+import tret.engine.filing_tools  # noqa: E402,F401
 from tret.providers.base import (
     Msg,
     ProviderError,

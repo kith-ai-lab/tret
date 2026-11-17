@@ -9,6 +9,7 @@ import {
   type BatchTarget,
   type PackageMapPayload,
 } from '../../api/client'
+import { FILING_LABEL, isFilingUnit, mapUnit, rangesText, unitNoun } from '../shared/packageUnit'
 import { errText, ExtLink, shorten } from './shared'
 
 function payloadSummary(payload: Record<string, unknown>): string {
@@ -230,6 +231,8 @@ export function PendingReviews({
               }
               const p = m.payload as unknown as PackageMapPayload
               const map = p.map
+              const unit = mapUnit(p)
+              const filing = isFilingUnit(unit)
               return (
                 <tr key={m.id}>
                   {checkbox}
@@ -251,11 +254,19 @@ export function PendingReviews({
                   </td>
                   <td>
                     {map.keep_ranges
-                      ? map.keep_ranges.map(([a, b]) => (a === b ? `${a}` : `${a}–${b}`)).join(', ')
+                      ? filing
+                        ? rangesText(unit, map.keep_ranges)
+                        : map.keep_ranges.map(([a, b]) => (a === b ? `${a}` : `${a}–${b}`)).join(', ')
                       : 'whole file'}
+                    {filing && (
+                      <div className="fine-print" title={FILING_LABEL}>
+                        {FILING_LABEL}
+                      </div>
+                    )}
                   </td>
                   <td className="num">
                     {p.selected_page_count}/{p.source.page_count ?? '?'}
+                    {filing && <div className="fine-print">{unitNoun(unit)}</div>}
                   </td>
                   <td style={{ overflowWrap: 'anywhere', maxWidth: 240 }}>
                     <ExtLink url={p.source.url}>{p.source.url ?? p.source.filename}</ExtLink>

@@ -459,6 +459,7 @@ async def ingest_document(
     source_kind: str = "upload",
     meta_extra: dict | None = None,
     storage_key: str | None = None,
+    extract: bool = True,
 ) -> Document:
     """Extract `data`'s text (bounded) and build the `Document` row for it.
 
@@ -473,7 +474,10 @@ async def ingest_document(
     `storage_key` is the BlobStore key the bytes were stored under (tret/storage);
     `storage_path` stays the local file for readers that need one.
     """
-    text, meta, status = await extract_bounded(filename, data)
+    if extract:
+        text, meta, status = await extract_bounded(filename, data)
+    else:  # stored as a file; its text lives in a sibling document (e.g. a filing package's .layout.md)
+        text, meta, status = "", {"error": "stored as a file; not text-extracted"}, "skipped"
     if meta_extra:
         meta = {**meta, **meta_extra}
     return Document(

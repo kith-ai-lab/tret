@@ -198,9 +198,12 @@ def _disclosure_pages(findings: list[Finding]) -> tuple[int | None, int | None]:
         package = _package_of(f)
         if f.status != "approved" or not package or package.get("status") != "packaged":
             continue
+        payload = f.payload or {}
+        if _filing_unit((payload.get("map") or {}).get("unit") or (payload.get("source") or {}).get("unit")):
+            continue  # filing pages/sections are not PDF pages: kept out of the page metrics
         any_packaged = True
         retained += int(package.get("retained_page_count") or 0)
-        source = (f.payload or {}).get("source") or {}
+        source = payload.get("source") or {}
         key = str(source.get("document_id") or f.id)
         sources[key] = max(sources.get(key, 0), int(source.get("page_count") or 0))
     if not any_packaged:
@@ -492,6 +495,10 @@ def _page_count(value: Any) -> int | None:
         return None
 
 
+def _filing_unit(unit: Any) -> bool:
+    return unit in ("filing_page", "filing_section")
+
+
 def package_sources(findings: Iterable[Any]) -> list[dict]:
     """The sources of the run's approved, packaged `package_map` findings: role, URL,
     sha256 and page count of each (what `delivered_elsewhere` reads for its URLs)."""
@@ -510,7 +517,9 @@ def package_sources(findings: Iterable[Any]) -> list[dict]:
                 "role": map_.get("role"),
                 "url": source.get("url"),
                 "sha256": source.get("sha256"),
-                "page_count": _page_count(source.get("page_count")),
+                # A filing's count is filing pages or sections, not PDF pages: it is
+                # unknown for the cross-run page comparisons.
+                "page_count": None if _filing_unit(map_.get("unit") or source.get("unit")) else _page_count(source.get("page_count")),
             }
         )
     return out
@@ -1126,6 +1135,7 @@ def _package_sources_statement(run_ids: list[uuid.UUID]) -> Select:
             Finding.payload["source"]["url"].as_string(),
             Finding.payload["source"]["sha256"].as_string(),
             Finding.payload["source"]["page_count"].as_string(),
+            Finding.payload["map"]["unit"].as_string(),
         )
         .where(
             Finding.run_id.in_(run_ids),
@@ -1147,9 +1157,10 @@ async def _package_sources_by_run(
         return {}
     rows = await db.execute(_package_sources_statement(ids))
     out: dict[uuid.UUID, list[dict]] = {}
-    for run_id, role, url, sha, pages in rows:
-        # Postgres may render a JSON number as text such as "100.0".
-        page_count = _page_count(pages)
+    for run_id, role, url, sha, pages, unit in rows:
+        # Postgres may render a JSON number as text such as "100.0". A filing's unit
+        # count is not a PDF page count: unknown here.
+        page_count = None if _filing_unit(unit) else _page_count(pages)
         out.setdefault(run_id, []).append(
             {"role": role, "url": url, "sha256": sha, "page_count": page_count}
         )

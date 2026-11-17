@@ -10,11 +10,20 @@ import {
   type Finding,
   type FindingDetail,
   type PackageMapPayload,
+  type PackageMapUnit,
   type PackageResult,
 } from '../api/client'
 import { VerdictCard } from '../components/findings/VerdictCard'
 import { ApproveAllSections } from '../components/shared/ApproveAllSections'
 import { formatDateTime } from '../components/shared/format'
+import {
+  FILING_LABEL,
+  filingSelectionText,
+  isFilingUnit,
+  mapUnit,
+  rangesText,
+  unitNoun,
+} from '../components/shared/packageUnit'
 import { ListDetail, ListItem } from '../components/shared/ListDetail'
 import { ProvenanceCard } from '../components/shared/ProvenanceCard'
 import { StatusBadge } from '../components/shared/StatusBadge'
@@ -335,6 +344,7 @@ const PREVIEW_CHAR_LIMIT = 4000
 const PROVENANCE_LABELS: Record<string, string> = {
   web_capture: 'web capture',
   web: 'web fetch',
+  esef_filing: 'ESEF filing',
 }
 
 /** The `document` write source: the stored file uploaded exactly as it is, so
@@ -578,6 +588,7 @@ function pageCount(n: number): string {
 /** The page selection as one human sentence, e.g. "Pages 28–143, 314–315 ·
  *  118 of 339 physical pages" or "Whole original · 66 pages". */
 function selectionText(payload: PackageMapPayload): string {
+  if (isFilingUnit(mapUnit(payload))) return filingSelectionText(payload)
   const total = payload.source.page_count
   if (payload.full_original || !payload.map.keep_ranges) {
     const n = total ?? payload.selected_page_count
@@ -616,8 +627,11 @@ function packagingLooksDead(result: PackageResult): boolean {
 function PackageResultBlock({
   findingId,
   result,
+  unit = 'pdf_page',
 }: {
   findingId: string
+  /** What the retained count counts (filing pages or sections for an ESEF filing). */
+  unit?: PackageMapUnit
   /** null: the finding is approved but no packaging outcome was ever recorded. */
   result: PackageResult | null
 }) {
@@ -752,7 +766,7 @@ function PackageResultBlock({
       <div className="row" style={{ gap: 24, flexWrap: 'wrap' }}>
         {result.retained_page_count !== null && (
           <div>
-            <div className="mono-label">Retained pages</div>
+            <div className="mono-label">Retained {unitNoun(unit)}</div>
             <div className="mono-body">
               {result.retained_page_count}
               {result.source_page_count !== null && ` of ${result.source_page_count}`}
@@ -848,6 +862,9 @@ function PackageMapBlock({ finding }: { finding: FindingDetail }) {
   const provenance = source.provenance
     ? (PROVENANCE_LABELS[source.provenance] ?? source.provenance)
     : null
+  const unit = mapUnit(payload)
+  const filing = isFilingUnit(unit)
+  const filingUrl = source.filing?.filing_url ?? source.url
 
   return (
     <div className="stack" style={{ gap: 14 }}>
@@ -855,6 +872,19 @@ function PackageMapBlock({ finding }: { finding: FindingDetail }) {
         <div className="mono-label" style={{ marginBottom: 4 }}>
           Proposed package
         </div>
+        {filing && (
+          <div className="fine-print" style={{ marginBottom: 4, overflowWrap: 'anywhere' }}>
+            <strong>{FILING_LABEL}</strong>
+            {filingUrl && /^https?:\/\//i.test(filingUrl) && (
+              <>
+                {' · '}
+                <a href={filingUrl} target="_blank" rel="noopener noreferrer">
+                  Filing
+                </a>
+              </>
+            )}
+          </div>
+        )}
         <div className="mono-body">{map.title}</div>
         <div className="row" style={{ gap: 24, flexWrap: 'wrap', marginTop: 6 }}>
           <div>
@@ -883,7 +913,7 @@ function PackageMapBlock({ finding }: { finding: FindingDetail }) {
           </div>
           {source.page_count !== null && (
             <div>
-              <div className="mono-label">Pages</div>
+              <div className="mono-label">{filing ? `Filing ${unitNoun(unit)}` : 'Pages'}</div>
               <div className="mono-body">{source.page_count}</div>
             </div>
           )}
@@ -919,9 +949,9 @@ function PackageMapBlock({ finding }: { finding: FindingDetail }) {
           <table className="mono-table">
             <thead>
               <tr>
-                <th>Cited on page</th>
+                <th>{filing ? `Cited in ${unitNoun(unit, 1)}` : 'Cited on page'}</th>
                 <th>Component</th>
-                <th>Resolved pages</th>
+                <th>{filing ? `Resolved ${unitNoun(unit)}` : 'Resolved pages'}</th>
                 <th>Status</th>
                 <th>Note</th>
               </tr>
@@ -949,7 +979,7 @@ function PackageMapBlock({ finding }: { finding: FindingDetail }) {
           <ul className="mono-body" style={{ margin: 0, paddingLeft: 18 }}>
             {exclusions.map((x, i) => (
               <li key={i}>
-                Pages {rangeText(x.range)} — {x.reason}
+                {filing ? rangesText(unit, [x.range]) : `Pages ${rangeText(x.range)}`} — {x.reason}
               </li>
             ))}
           </ul>
@@ -972,7 +1002,7 @@ function PackageMapBlock({ finding }: { finding: FindingDetail }) {
           <div className="mono-label" style={{ marginBottom: 6 }}>
             Package result
           </div>
-          <PackageResultBlock findingId={finding.id} result={payload.package} />
+          <PackageResultBlock findingId={finding.id} result={payload.package} unit={unit} />
         </div>
       )}
 

@@ -847,6 +847,8 @@ async def _package_approved_map(
             incorporations=tuple(raw_map.get("incorporations") or ()),
             exclusions=tuple(raw_map.get("exclusions") or ()),
             ocr=raw_map.get("ocr") or "off",
+            # Absent on every PDF map; a filing map (ESEF package) says what it counts.
+            unit=raw_map.get("unit") or "pdf_page",
         )
         output = await asyncio.to_thread(
             packaging_service.run_packaging,
@@ -881,6 +883,8 @@ async def _package_approved_map(
             "scope": mapping.scope,
             "keep_ranges": raw_map.get("keep_ranges"),
         }
+        if mapping.unit != "pdf_page":
+            meta_common["unit"] = mapping.unit
         # Build every row first and add them together, so a file that fails to
         # ingest leaves nothing in the session to undo.
         docs: list[tuple[packaging_service.PackageFile, Document]] = []
@@ -898,6 +902,9 @@ async def _package_approved_map(
                 uploaded_by=None,
                 source_kind="package",
                 meta_extra={**meta_common, "package_role": pf.role},
+                # The text of a filing package is in its .layout.md; reading the HTML
+                # as well would index every unit twice. Kept as a stored file only.
+                extract=pf.role != "extract_html",
             )
             docs.append((pf, doc))
         for _, doc in docs:

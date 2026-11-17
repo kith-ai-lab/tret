@@ -118,11 +118,15 @@ async def store_snapshot(
     *,
     provenance: str = PROVENANCE_WEB,
     extra_meta: dict | None = None,
+    extracted: tuple[str, dict, str] | None = None,
 ) -> Document:
     """Write the bytes, extract the text, and add the Document row. Caller commits.
 
     `extra_meta` is merged last: a caller collecting an original adds its record
     (hash check, headers, operator note) to the row without a second write.
+    `extracted` is (text, meta, status) from a caller that has already read the
+    bytes with a reader of its own (`capture_filing` reads the ESEF report inside
+    the archive); it replaces `_extract`, which would skip a ZIP.
     """
     store = get_store(get_settings())
     filename = snapshot_filename(page.url, page.extension)
@@ -133,8 +137,9 @@ async def store_snapshot(
     await store.put(key, page.body, content_type=page.content_type)
     storage_path = await store.local_path(key)
 
-    text, meta, status = await _extract(page, filename)
-    truncated_text = len(text) > MAX_EXTRACTED_CHARS
+    text, meta, status = extracted if extracted is not None else await _extract(page, filename)
+    # A caller-supplied extraction has applied its own, deliberate cap (whole units).
+    truncated_text = extracted is None and len(text) > MAX_EXTRACTED_CHARS
     if truncated_text:
         text = text[:MAX_EXTRACTED_CHARS]
 

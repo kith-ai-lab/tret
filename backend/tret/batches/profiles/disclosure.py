@@ -472,7 +472,7 @@ def doctrine_text(fy: Any) -> str:
     return f"""1. Collect the FY{fy} sustainability disclosure where it is published. If only an earlier period is available, collect the latest available period; report fy2025_gap=true when the period collected is not FY{fy}, with the period actually collected. Never switch to a later year because a live reporting hub has moved on.
 2. Prefer issuer sources, then official regulatory or report repositories (SEC EDGAR, FCA National Storage Mechanism, ESEF portals). A third-party copy is a last resort: report it as a substitution with the reason.
 3. Retain the actual disclosure (a standalone sustainability report, or the sustainability section of an annual or management report), the related assurance statement, substantive data appendices, and material explicitly incorporated by reference. General financial statements stay out. A marketing summary is not a disclosure. Distinguish an ESRS sustainability statement from voluntary reporting and record the issuer's stated framework without inferring mandatory status.
-4. Page ranges come only from pages you have read in the captured document; never infer them. For an embedded disclosure, map the physical PDF pages of the sustainability section, its assurance and incorporated sections, and exclude the rest.
+4. Page ranges come only from pages you have read in the captured document; never infer them. For an embedded disclosure, map the physical PDF pages (or, for an ESEF filing captured with capture_filing, its filing pages or sections) of the sustainability section, its assurance and incorporated sections, and exclude the rest.
 5. Record dates separately: reporting period start and end, publication date with its basis, assurance date. Unknown stays unknown."""
 
 
@@ -492,8 +492,12 @@ def _identifier_lines(target: Any) -> str:
         lines += f"- Identifiers: {'; '.join(parts)}\n"
     if ids.get("source_filing_url"):
         lines += (
-            f"- Filing of record (inline XBRL, not a PDF): {ids['source_filing_url']} \u2014 use it only "
-            "to confirm the reporting entity and fiscal year; do not capture it as the document.\n"
+            f"- Regulated ESEF filing for this year (inline XBRL): {ids['source_filing_url']} \u2014 the "
+            "issuer's own PDF stays first. Use capture_filing on it ONLY if the issuer's own copy of the "
+            "disclosure is refused (HTTP 403 or similar) or no issuer copy exists for the fiscal year; then "
+            "page-map the filing (filing pages or sections), and the outcome summary must say the package "
+            "comes from the ESEF filing and why. Never use a filing for a different fiscal year. Otherwise "
+            "use it only to confirm the reporting entity and fiscal year.\n"
         )
     return lines
 
@@ -522,8 +526,8 @@ DOCTRINE (from the Kith Climate collection briefing; follow it exactly)
 PROCEDURE
 a. Open the known URLs, or search with a few precise queries ("{company} sustainability report {fy} pdf", "{company} annual report {fy} sustainability statement"). Do not loop on searches: if the document cannot be reached, report it.
 b. capture_source the primary PDF, and separate assurance or appendix PDFs if they exist.
-c. read_document to confirm company, period and page layout before mapping. In a long report, locate the sustainability statement, its assurance report and any appendix with search_documents using the section titles from the contents page (each hit names its page and chunk), then read_document with that hit's chunk_ordinal and read forward from there. The numbers in a contents page or index are printed page numbers, not positions in the PDF file: they usually trail the file position by a few pages, and by far more when the file shows two printed pages per PDF page. Take page positions only from the page a search hit or chunk header names, or from the "## Page N" markers in the raw text, and read the first and last page of every range to confirm where the section starts and ends. Never page through a long document from the start and never guess chunk ordinals; the page ranges you map must come from pages you read this way.
-d. propose_package_map for each document to retain. Every stem must be unique within this target: use "{slug}" for the primary disclosure, "{slug}-assurance", "{slug}-appendix", and for each further document "{slug}-container-<short-topic>" (for example "{slug}-container-methodology"); never reuse a stem. role is one of {roles}: {role_guidance}. Request ocr="auto" when pages look scanned. The result quotes the opening words of the first and last page of each range: if they are not the section you meant, propose the map again with the same source document and stem before you report the outcome.
+c. read_document to confirm company, period and page layout before mapping. In a long report, locate the sustainability statement, its assurance report and any appendix with search_documents using the section titles from the contents page (each hit names its page and chunk), then read_document with that hit's chunk_ordinal and read forward from there. The numbers in a contents page or index are printed page numbers, not positions in the PDF file: they usually trail the file position by a few pages, and by far more when the file shows two printed pages per PDF page. Take page positions only from the page a search hit or chunk header names, or from the "## Page N" (filing: "## Section N") markers in the raw text, and read the first and last page of every range to confirm where the section starts and ends. Never page through a long document from the start and never guess chunk ordinals; the page ranges you map must come from pages you read this way.
+d. propose_package_map for each document to retain (for a captured ESEF filing, its filing pages or sections). Every stem must be unique within this target: use "{slug}" for the primary disclosure, "{slug}-assurance", "{slug}-appendix", and for each further document "{slug}-container-<short-topic>" (for example "{slug}-container-methodology"); never reuse a stem. role is one of {roles}: {role_guidance}. Request ocr="auto" when pages look scanned. The result quotes the opening words of the first and last page of each range: if they are not the section you meant, propose the map again with the same source document and stem before you report the outcome.
 e. Finish by calling report_collection_outcome exactly once with status captured, substituted, gap or blocked and the metadata you established. Call it even when you found nothing; it is how this target is scored.
 
 Do not call propose_connected_write: the collection run writes approved packages itself. There is no user in this run; do not ask questions. Stop after report_collection_outcome."""
@@ -616,6 +620,7 @@ def package_summaries(findings: Iterable[Finding]) -> list[dict]:
                 "status": f.status,
                 "package_status": package.get("status") if package else None,
                 "retained_page_count": package.get("retained_page_count") if package else None,
+                **({"unit": _unit_of(payload)} if _unit_of(payload) in FILING_UNITS else {}),
                 "retained_sha256": package.get("retained_sha256") if package else None,
                 "documents": [
                     {
@@ -819,6 +824,7 @@ async def build_records(
 
     companies = []
     retained_docs = retained_pages = 0
+    filing_docs = filing_units = 0
     packaging_rows = []
     for t in targets:
         maps = _relevant_maps(maps_by_run.get(t.run_id, []) if t.run_id else [])
@@ -847,8 +853,13 @@ async def build_records(
                 {"total": package.get("wall_seconds")} if package.get("wall_seconds") is not None else None
             )
             if package.get("status") == "packaged":
-                retained_docs += 1
-                retained_pages += int(package.get("retained_page_count") or 0)
+                if _unit_of(payload) in FILING_UNITS:
+                    # No PDF is retained for a filing: its units are not PDF pages.
+                    filing_docs += 1
+                    filing_units += int(package.get("retained_unit_count") or package.get("retained_page_count") or 0)
+                else:
+                    retained_docs += 1
+                    retained_pages += int(package.get("retained_page_count") or 0)
                 pack_seconds += float(package.get("wall_seconds") or 0)
                 ocr = (record or {}).get("ocr")
                 if isinstance(ocr, dict) and isinstance(ocr.get("pages"), (int, list)):
@@ -859,6 +870,7 @@ async def build_records(
                 review["approver"] = approvers.get(approval.approver_id, str(approval.approver_id))
                 review["note"] = approval.note
                 review["decided_at"] = _iso(approval.created_at)
+            unit = _unit_of(payload)
             documents.append(
                 {
                     "finding_id": str(f.id),
@@ -866,6 +878,9 @@ async def build_records(
                     "role": m.get("role"),
                     "scope": m.get("scope"),
                     "keep_ranges": m.get("keep_ranges"),
+                    # Only for a filing (page_count is then a count of filing units);
+                    # a PDF entry stays as it was.
+                    **({"unit": unit, "source_type": "esef_filing"} if unit in FILING_UNITS else {}),
                     "source": {
                         "url": source.get("url"),
                         "sha256": source.get("sha256"),
@@ -943,6 +958,11 @@ async def build_records(
             "rejected": counts.get("rejected", 0),
             "retained_pdf_documents": retained_docs,
             "retained_pdf_pages": retained_pages,
+            **(
+                {"retained_filing_documents": filing_docs, "retained_filing_units": filing_units}
+                if filing_docs
+                else {}
+            ),
         },
         "completeness_definition": COMPLETENESS_DEFINITION,
         "companies": companies,
@@ -1102,10 +1122,18 @@ def _results_summary(
             lines += ["| Company | Status | Retained pages | Score | Gap / note |", "|---|---|---:|---:|---|"]
         for t in in_market:
             maps = _relevant_maps(maps_by_run.get(t.run_id, []) if t.run_id else [])
+            packaged = [
+                f for f in maps if f.status == "approved" and (_package_of(f) or {}).get("status") == "packaged"
+            ]
             pages = sum(
                 int((_package_of(f) or {}).get("retained_page_count") or 0)
-                for f in maps
-                if f.status == "approved" and (_package_of(f) or {}).get("status") == "packaged"
+                for f in packaged
+                if _unit_of(f.payload or {}) not in FILING_UNITS
+            )
+            filing_n = sum(
+                int((_package_of(f) or {}).get("retained_unit_count") or (_package_of(f) or {}).get("retained_page_count") or 0)
+                for f in packaged
+                if _unit_of(f.payload or {}) in FILING_UNITS
             )
             outcome = t.outcome or {}
             note = str(summarise_run_error(t.error) or outcome.get("substitution_note") or "")[:200]
@@ -1117,6 +1145,8 @@ def _results_summary(
                     note += f" ({len(blocked)} URL(s) blocked)"
                 note = note[:200]
             note = note or ("FY gap" if outcome.get("fy2025_gap") else "")
+            if filing_n:  # no PDF: the retained text is from the regulated ESEF filing
+                note = f"ESEF filing ({filing_n} filing units, no PDF)" + (f"; {note}" if note else "")
             note = note.replace("|", "/").replace("\n", " ")
             if scored is None:
                 lines.append(f"| {t.company.replace('|', '/')} | {t.status} | {pages or ''} | {note} |")
@@ -1168,6 +1198,19 @@ PRIMARY_CHECK_TEXT = (
 )
 
 
+FILING_UNITS_NOTE = (
+    "Some of this run's page maps are of a regulated ESEF filing (captured with capture_filing), "
+    "not of the issuer's own PDF; they are marked 'source type' under Page maps. For those maps "
+    "read the rubric's \"retained pages\" as retained filing pages or sections and \"page ranges\" as "
+    "filing page or section ranges. They are not PDF pages and no PDF is retained. The filing is the "
+    "provenance URL (with the package hash). The run was allowed to use the filing only when the "
+    "issuer's own copy of the disclosure was refused or does not exist for that fiscal year, and its "
+    "outcome summary has to say that the package comes from the ESEF filing and why: if the issuer's "
+    "own copy was reachable or the reason is missing, count that against provenance and flag "
+    "unlogged_substitution."
+)
+
+
 async def _document_text(db: AsyncSession, document_id: Any) -> tuple[Document | None, str | None]:
     try:
         doc = await db.get(Document, uuid.UUID(str(document_id)))
@@ -1185,16 +1228,73 @@ async def _document_text(db: AsyncSession, document_id: Any) -> tuple[Document |
     return doc, None
 
 
-def _page_excerpt(text: str, page: Any, chars: int) -> str | None:
-    """The first `chars` characters after a `## Page N` marker, or None."""
+_UNIT_NOUNS = {
+    "pdf_page": ("page", "pages"),
+    "filing_page": ("filing page", "filing pages"),
+    "filing_section": ("section", "sections"),
+}
+FILING_UNITS = ("filing_page", "filing_section")
+
+
+def _unit_of(payload: dict) -> str:
+    """The unit a map's ranges are in. A PDF map carries no `unit` key (absent means
+    "pdf_page"); an unknown value is read as "pdf_page" too."""
+    m = payload.get("map") or {}
+    source = payload.get("source") or {}
+    unit = m.get("unit") or source.get("unit") or "pdf_page"
+    return unit if unit in _UNIT_NOUNS else "pdf_page"
+
+
+def _unit_marker(text: str, n: int, unit: str) -> re.Match | None:
+    word = "Section" if unit == "filing_section" else "Page"
+    return re.search(rf"^## {word} {n}\b([^\n]*)(?:\n|\Z)", text, flags=re.MULTILINE)
+
+
+def _unit_heading(text: str, page: Any, unit: str) -> str | None:
+    """The heading of a filing section (`## Section N: heading`), or None."""
     try:
         n = int(page)
     except (TypeError, ValueError):
         return None
-    match = re.search(rf"^## Page {n}\b[^\n]*\n", text, flags=re.MULTILINE)
+    match = _unit_marker(text, n, unit) if unit == "filing_section" else None
+    heading = match.group(1).lstrip(": ").strip() if match else ""
+    return heading or None
+
+
+def _page_excerpt(text: str, page: Any, chars: int, unit: str = "pdf_page") -> str | None:
+    """The first `chars` characters after a `## Page N` (or `## Section N: heading`)
+    marker, or None. A section's excerpt opens with its heading."""
+    try:
+        n = int(page)
+    except (TypeError, ValueError):
+        return None
+    match = _unit_marker(text, n, unit)
     if match is None:
         return None
-    return " ".join(text[match.end() : match.end() + chars].split())
+    body = " ".join(text[match.end() : match.end() + chars].split())
+    if unit == "filing_section":
+        heading = match.group(1).lstrip(": ").strip()
+        return f"[{heading}] {body}" if heading else body
+    return body
+
+
+def _range_summary(
+    keep_ranges: Any, unit: str, source_count: Any, source_text: str | None
+) -> str | None:
+    """One evidence line for a filing map's ranges: "filing pages 210\u2013268 of 412" or
+    "sections 14\u201319 of 52: <first heading> \u2026 <last heading>"."""
+    pairs = [r for r in (keep_ranges or []) if isinstance(r, (list, tuple)) and len(r) == 2]
+    if not pairs:
+        return None
+    noun = _UNIT_NOUNS[unit][1]
+    spans = "; ".join(f"{a}\u2013{b}" if a != b else f"{a}" for a, b in pairs)
+    out = f"{noun} {spans}" + (f" (of {source_count})" if source_count else "")
+    if unit == "filing_section" and source_text:
+        first = _unit_heading(source_text, pairs[0][0], unit)
+        last = _unit_heading(source_text, pairs[-1][1], unit)
+        if first or last:
+            out += f": {first or '?'} \u2026 {last or '?'}"
+    return out
 
 
 def _task_text(target: BatchTarget) -> str:
@@ -1271,17 +1371,34 @@ async def _run_parts(
         package = _package_of(f) or {}
         source_doc, source_text = await _document_text(db, source.get("document_id"))
         meta = (source_doc.meta or {}) if source_doc is not None else {}
+        unit = _unit_of(payload)
+        noun = _UNIT_NOUNS[unit][1]
+        is_filing = unit in FILING_UNITS
+        retained_count = package.get("retained_unit_count", package.get("retained_page_count"))
         lines = [
             f"### Map {payload.get('stem')}",
             f"- role: {m.get('role')}; scope: {m.get('scope')}; decision: {f.status}",
             f"- source file: {source.get('filename') or (source_doc.filename if source_doc else None)}; "
             f"url: {meta.get('url') or source.get('url')}; "
             f"sha256: {(source_doc.sha256 if source_doc else None) or source.get('sha256')}; "
-            f"source pages: {source.get('page_count')}",
-            f"- keep ranges (page numbers): {json.dumps(m.get('keep_ranges'))}",
+            f"source {noun}: {source.get('page_count')}",
+            f"- keep ranges ({_UNIT_NOUNS[unit][0]} numbers): {json.dumps(m.get('keep_ranges'))}",
             f"- packaging: {package.get('status') or 'not packaged'}; "
-            f"retained pages: {package.get('retained_page_count')}",
+            f"retained {noun}: {retained_count}",
         ]
+        if is_filing:
+            filing_url = (source.get("filing") or {}).get("filing_url") or source.get("url")
+            lines.insert(
+                2,
+                "- source type: the regulated ESEF filing"
+                + (f" ({filing_url})" if filing_url else "")
+                + ", not the issuer's own PDF; units are filing "
+                + ("pages" if unit == "filing_page" else "sections")
+                + ", not PDF pages; no PDF is retained",
+            )
+            summary = _range_summary(m.get("keep_ranges"), unit, source.get("page_count"), source_text)
+            if summary:
+                lines.append(f"- retained: {summary}")
         if m.get("review_note"):
             lines.append(f"- proposer's note: {evidence.clip(m['review_note'], 400)}")
         if package.get("limitations"):
@@ -1311,11 +1428,12 @@ async def _run_parts(
                 + " ".join(retained_text[: EXCERPT_HEAD_CHARS * 2].split())[:EXCERPT_HEAD_CHARS]
             )
         if source_text:
+            singular = _UNIT_NOUNS[unit][0]
             for start_page, end_page in [r for r in (m.get("keep_ranges") or []) if isinstance(r, (list, tuple)) and len(r) == 2]:
-                for label, page in (("first retained page", start_page), ("last retained page", end_page)):
-                    snippet = _page_excerpt(source_text, page, EXCERPT_BOUNDARY_CHARS)
+                for label, page in ((f"first retained {singular}", start_page), (f"last retained {singular}", end_page)):
+                    snippet = _page_excerpt(source_text, page, EXCERPT_BOUNDARY_CHARS, unit)
                     if snippet:
-                        excerpts.append(f"### {payload.get('stem')}: {label} (page {page})\n{snippet}")
+                        excerpts.append(f"### {payload.get('stem')}: {label} ({singular} {page})\n{snippet}")
     return result, map_blocks, excerpts, attached
 
 
@@ -1374,10 +1492,13 @@ async def build_evidence(
             )
         cross_section = [("Cross-check: main documents other runs delivered", "\n".join(lines))]
 
+    filing_maps = [f for f in _relevant_maps(findings) if _unit_of(f.payload or {}) in FILING_UNITS]
+    unit_section = [("Filing units", FILING_UNITS_NOTE)] if filing_maps else []
     sections = [
         ("Rubric", rubric_text(rubric, row_class)),
         ("Task", task),
         ("Result", result),
+        *unit_section,
         *cross_section,
         ("Page maps", "\n\n".join(map_blocks) or "(the run proposed no page map)"),
         ("Tool-call trail", evidence.run_digest(run) if run is not None else "(no run)"),

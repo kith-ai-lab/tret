@@ -52,6 +52,34 @@ def _url_list(value, name: str) -> list[str]:
     return [u.strip()[:_MAX_URL_CHARS] for u in value if u.strip()]
 
 
+async def resolve_collection_target(ctx: RunContext, tool_name: str) -> CollectionTarget:
+    """The batch target this run belongs to, or a ToolError.
+
+    The target id comes from the run's own `task_input`, never from the model, and
+    is accepted only when its collection is in this run's workspace and the target
+    names this run. Shared by every tool that acts on "my target".
+    """
+    run = await ctx.db.get(Run, ctx.run_id)
+    raw_tid = (run.task_input or {}).get(COLLECTION_TARGET_KEY) if run is not None else None
+    if not raw_tid:
+        raise ToolError(f"This run is not part of a collection; {tool_name} does nothing here.")
+    try:
+        target_id = uuid.UUID(str(raw_tid))
+    except ValueError as e:
+        raise ToolError("This run's collection target id is malformed; nothing was recorded.") from e
+    target = await ctx.db.get(CollectionTarget, target_id)
+    collection = await ctx.db.get(Collection, target.collection_id) if target is not None else None
+    if (
+        target is None
+        or collection is None
+        or ctx.workspace_id is None
+        or collection.workspace_id != ctx.workspace_id
+        or target.run_id != ctx.run_id
+    ):
+        raise ToolError("This run's collection target was not found; nothing was recorded.")
+    return target
+
+
 @builtin(
     "report_collection_outcome",
     "Record this collection target's outcome. Call exactly once, at the end of a collection "
@@ -109,24 +137,7 @@ async def report_collection_outcome(
     blocked_urls: list[str] | None = None,
     candidate_urls: list[str] | None = None,
 ) -> str:
-    run = await ctx.db.get(Run, ctx.run_id)
-    raw_tid = (run.task_input or {}).get(COLLECTION_TARGET_KEY) if run is not None else None
-    if not raw_tid:
-        raise ToolError("This run is not part of a collection; report_collection_outcome does nothing here.")
-    try:
-        target_id = uuid.UUID(str(raw_tid))
-    except ValueError as e:
-        raise ToolError("This run's collection target id is malformed; nothing was recorded.") from e
-    target = await ctx.db.get(CollectionTarget, target_id)
-    collection = await ctx.db.get(Collection, target.collection_id) if target is not None else None
-    if (
-        target is None
-        or collection is None
-        or ctx.workspace_id is None
-        or collection.workspace_id != ctx.workspace_id
-        or target.run_id != ctx.run_id
-    ):
-        raise ToolError("This run's collection target was not found; nothing was recorded.")
+    target = await resolve_collection_target(ctx, "report_collection_outcome")
 
     if status not in OUTCOME_STATUSES:
         raise ToolError(f"status must be one of {', '.join(OUTCOME_STATUSES)}.")

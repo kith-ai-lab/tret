@@ -632,6 +632,16 @@ class Settings(BaseSettings):
     # as untrusted documents: the model may read them with read_document, as
     # untrusted text under the unverified banner, and nothing in them becomes a
     # citable fact. Approvals gate packaging and writes.
+    # `capture_filing` fetches one ESEF package (a ZIP holding the whole inline-XBRL
+    # annual report) from filings.xbrl.org. Packages run 15-60 MB compressed, and
+    # like `capture_source` a truncated copy is worse than none, so it has its own
+    # ceiling (200 MiB) and refuses a package over it.
+    esef_filing_max_bytes: int = 209_715_200
+    # Characters of a filing's text kept in `Document.extracted_text` (whole units; the
+    # rest are dropped and counted). Larger than the 2,000,000 of ordinary documents
+    # because the sustainability statement sits late in a 300-700 page annual report;
+    # retrieval raises its chunk ceiling for these documents to match.
+    esef_filing_max_chars: int = 8_000_000
     egress_capture_any_public_host: bool = False
     # Its own per-run count for the same reason: captures are rare, deliberate and
     # large, so they must not spend (or be starved by) the fetch budget above.

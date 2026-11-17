@@ -58,6 +58,20 @@ def _load_packaging() -> Any:
 
 def _run(job: dict[str, Any]) -> dict[str, Any]:
     pk = _load_packaging()
+    if job.get("op") == "analyse_filing":
+        try:
+            analysis = pk.analyse_filing(
+                Path(job["source_path"]),
+                max_chars=int(job["max_chars"]),
+                max_uncompressed=job.get("max_uncompressed"),
+            )
+        except pk.PackagingError as exc:
+            return {"ok": False, "kind": "packaging", "message": str(exc)}
+        except MemoryError:
+            return {"ok": False, "kind": "packaging", "message": "reading the filing ran out of memory"}
+        except Exception as exc:
+            return {"ok": False, "kind": "packaging", "message": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "analysis": analysis}
     try:
         m = job["mapping"]
         mapping = pk.PackageMap(
@@ -69,8 +83,11 @@ def _run(job: dict[str, Any]) -> dict[str, Any]:
             incorporations=tuple(m.get("incorporations") or ()),
             exclusions=tuple(m.get("exclusions") or ()),
             ocr=m.get("ocr", "off"),
+            unit=m.get("unit", "pdf_page"),
         )
-        output = pk.package_pdf(
+        # A filing map (ESEF package) goes to its own packager; every PDF map takes the old path.
+        package = pk.package_pdf if mapping.unit == "pdf_page" else pk.package_filing
+        output = package(
             Path(job["source_path"]),
             mapping,
             Path(job["out_dir"]),
