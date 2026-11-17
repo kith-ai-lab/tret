@@ -41,7 +41,7 @@ SHARED_BATCH_KEYS = {
 }
 SHARED_TARGET_KEYS = {
     "id", "position", "slug", "label", "status", "company", "market", "domicile_country", "sector",
-    "category", "expected_form", "fiscal_year", "task_input", "outcome", "evaluation", "files",
+    "category", "expected_form", "fiscal_year", "identifiers", "task_input", "outcome", "evaluation", "files",
     "started_at", "finished_at",
 }
 FORBIDDEN_KEYS = {

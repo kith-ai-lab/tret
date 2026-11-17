@@ -1184,6 +1184,9 @@ class BatchTarget(Base):
     fiscal_year: Mapped[int | None] = mapped_column(Integer)
     known_urls: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     notes: Mapped[str | None] = mapped_column(Text)
+    # Public company identifiers from the register ({lei, cik, ticker, source_filing_url},
+    # only the keys that were given); null when none.
+    identifiers: Mapped[dict | None] = mapped_column(JSONB)
     label: Mapped[str] = mapped_column(Text, nullable=False, default="")
     task_input: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"

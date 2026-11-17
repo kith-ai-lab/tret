@@ -2074,6 +2074,17 @@
             ],
             "title": "Category"
           },
+          "cik": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cik"
+          },
           "company": {
             "title": "Company",
             "type": "string"
@@ -2128,6 +2139,17 @@
             ],
             "title": "Known Urls"
           },
+          "lei": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lei"
+          },
           "market": {
             "title": "Market",
             "type": "string"
@@ -2164,6 +2186,28 @@
               }
             ],
             "title": "Slug"
+          },
+          "source_filing_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Filing Url"
+          },
+          "ticker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticker"
           }
         },
         "required": [

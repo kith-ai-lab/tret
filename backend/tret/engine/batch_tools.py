@@ -187,7 +187,7 @@ async def _advice_for(ctx: RunContext, profile: str, body: Any) -> dict | None:
     "as {column}; write a literal brace as {{ or }}. Every placeholder must be a column. "
     "profile 'disclosure' is the Kith disclosure collection (register CSV of companies with "
     "columns company, market, domicile_country, sector, category, expected_form, fiscal_year, "
-    "known_urls, notes; runs the Disclosure Collector harness; writes to the M365 write target "
+    "known_urls, notes, plus optional lei, cik, ticker, source_filing_url; runs the Disclosure Collector harness; writes to the M365 write target "
     "`target_slug` under `write_root/run_slug`). Prefer it whenever the user asks to collect "
     "disclosures, sustainability or annual reports for a list of companies. It needs a write "
     "target; ask for its slug if the user does not name one. With it, give register_document_id "

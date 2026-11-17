@@ -89,7 +89,16 @@ CSV_COLUMNS = (
     "fiscal_year",
     "known_urls",
     "notes",
+    # Optional public company identifiers; stored together as `identifiers`.
+    "lei",
+    "cik",
+    "ticker",
+    "source_filing_url",
 )
+IDENTIFIER_FIELDS = ("lei", "cik", "ticker", "source_filing_url")
+LEI_RE = re.compile(r"^[A-Z0-9]{20}$")
+CIK_RE = re.compile(r"^[0-9]{1,10}$")
+TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,12}$")
 MAX_KNOWN_URLS = 20
 COMPLETENESS_DEFINITION = (
     "captured core disclosure within reviewed scope; not independently certified complete"
@@ -132,6 +141,10 @@ class TargetIn(BaseModel):
     known_urls: list[str] | str | None = None
     notes: str | None = None
     slug: str | None = None
+    lei: str | None = None
+    cik: str | None = None
+    ticker: str | None = None
+    source_filing_url: str | None = None
 
 
 class CreateCollectionBody(BaseModel):
@@ -309,7 +322,8 @@ def _parse_row(raw: dict, label: str, *, default_fiscal_year: int) -> dict:
         raise RegisterError(
             f"{named}: slug '{slug}' must be lowercase letters, digits and hyphens (at most 40)"
         )
-    return {
+    identifiers = _parse_identifiers(raw, named)
+    parsed = {
         "company": company,
         "market": market,
         "domicile_country": _clean(raw.get("domicile_country")),
@@ -321,6 +335,44 @@ def _parse_row(raw: dict, label: str, *, default_fiscal_year: int) -> dict:
         "notes": notes,
         "slug": slug,
     }
+    if identifiers:
+        parsed["identifiers"] = identifiers
+    return parsed
+
+
+def _parse_identifiers(raw: dict, named: str) -> dict[str, str]:
+    """The optional identifier columns, validated; only the keys that are present."""
+    out: dict[str, str] = {}
+    lei = _clean(raw.get("lei"))
+    if lei is not None:
+        lei = lei.upper()
+        if not LEI_RE.match(lei):
+            raise RegisterError(f"{named}: lei '{lei[:40]}' must be 20 letters or digits")
+        out["lei"] = lei
+    cik = _clean(raw.get("cik"))
+    if cik is not None:
+        if not CIK_RE.match(cik):
+            raise RegisterError(f"{named}: cik '{cik[:40]}' must be 1 to 10 digits")
+        out["cik"] = cik.lstrip("0") or "0"
+    ticker = _clean(raw.get("ticker"))
+    if ticker is not None:
+        if not TICKER_RE.match(ticker):
+            raise RegisterError(
+                f"{named}: ticker '{ticker[:40]}' must be 1 to 12 letters, digits, dots or hyphens"
+            )
+        out["ticker"] = ticker.upper()
+    url = _clean(raw.get("source_filing_url"))
+    if url is not None:
+        if (
+            not url.lower().startswith("https://")
+            or len(url) > 2000
+            or any(c.isspace() or unicodedata.category(c) in ("Cc", "Cf", "Zl", "Zp") for c in url)
+        ):
+            raise RegisterError(
+                f"{named}: source_filing_url '{url[:120]}' must be an https:// URL of at most 2000 characters"
+            )
+        out["source_filing_url"] = url
+    return out
 
 
 def register_warnings(rows: list[dict]) -> list[str]:
@@ -424,6 +476,28 @@ def doctrine_text(fy: Any) -> str:
 5. Record dates separately: reporting period start and end, publication date with its basis, assurance date. Unknown stays unknown."""
 
 
+def _identifier_lines(target: Any) -> str:
+    """Prompt lines for the optional identifiers, each ending in a newline; empty
+    (so the prompt is unchanged) when the target has none."""
+    ids = getattr(target, "identifiers", None) or {}
+    parts = []
+    if ids.get("lei"):
+        parts.append(f"LEI {ids['lei']}")
+    if ids.get("cik"):
+        parts.append(f"CIK {ids['cik']}")
+    if ids.get("ticker"):
+        parts.append(f"ticker {ids['ticker']}")
+    lines = ""
+    if parts:
+        lines += f"- Identifiers: {'; '.join(parts)}\n"
+    if ids.get("source_filing_url"):
+        lines += (
+            f"- Filing of record (inline XBRL, not a PDF): {ids['source_filing_url']} \u2014 use it only "
+            "to confirm the reporting entity and fiscal year; do not capture it as the document.\n"
+        )
+    return lines
+
+
 def build_prompt(collection: Batch, target: BatchTarget, total: int) -> str:
     fy = target.fiscal_year
     urls = "\n".join(f"  {u}" for u in (target.known_urls or [])) if target.known_urls else "none"
@@ -438,7 +512,7 @@ def build_prompt(collection: Batch, target: BatchTarget, total: int) -> str:
 TARGET
 - Company: {company}
 - Market: {target.market}; domicile: {target.domicile_country or "not recorded"}; sector: {target.sector or "not recorded"}; category: {target.category or "not recorded"}; expected form: {target.expected_form}
-- Fiscal year wanted: FY{fy}
+{_identifier_lines(target)}- Fiscal year wanted: FY{fy}
 - Known URLs (open these first, exactly as given): {urls}
 - Notes: {target.notes or "none"}
 
@@ -703,6 +777,25 @@ def _seconds_between(a: datetime | None, b: datetime | None) -> float | None:
     return round((b - a).total_seconds(), 3)
 
 
+def _target_register_entry(t: Any) -> dict:
+    entry = {
+        "position": t.position,
+        "slug": t.slug,
+        "company": t.company,
+        "market": t.market,
+        "domicile_country": t.domicile_country,
+        "sector": t.sector,
+        "category": t.category,
+        "expected_form": t.expected_form,
+        "fiscal_year": t.fiscal_year,
+        "known_urls": list(t.known_urls or []),
+        "notes": t.notes,
+    }
+    if getattr(t, "identifiers", None):  # only when present: other batches hash as before
+        entry["identifiers"] = dict(t.identifiers)
+    return entry
+
+
 async def build_records(
     db: AsyncSession, c: Batch, *, finalized_at: datetime | None = None
 ) -> dict:
@@ -936,22 +1029,7 @@ async def build_records(
         "fiscal_year": settings.get("fiscal_year"),
         "first_batch_size": settings.get("first_batch_size"),
         "warnings": list(c.warnings or []),
-        "targets": [
-            {
-                "position": t.position,
-                "slug": t.slug,
-                "company": t.company,
-                "market": t.market,
-                "domicile_country": t.domicile_country,
-                "sector": t.sector,
-                "category": t.category,
-                "expected_form": t.expected_form,
-                "fiscal_year": t.fiscal_year,
-                "known_urls": list(t.known_urls or []),
-                "notes": t.notes,
-            }
-            for t in targets
-        ],
+        "targets": [_target_register_entry(t) for t in targets],
     }
 
     records = {
@@ -1124,6 +1202,7 @@ def _task_text(target: BatchTarget) -> str:
     was held to."""
     fy = target.fiscal_year
     urls = "; ".join(target.known_urls or []) or "none"
+    ids_line = _identifier_lines(target).rstrip("\n")
     return "\n".join(
         [
             f"- Company: {target.company}",
@@ -1133,6 +1212,7 @@ def _task_text(target: BatchTarget) -> str:
             f"- Fiscal year wanted: FY{fy}",
             f"- Known URLs: {urls}",
             f"- Register notes (may be out of date; the documents decide): {target.notes or 'none'}",
+            *([ids_line] if ids_line else []),
             "",
             f"The run was held to this doctrine:\n{doctrine_text(fy)}",
         ]
@@ -1425,6 +1505,7 @@ class DisclosureProfile:
             "expected_form": target.expected_form,
             "fiscal_year": target.fiscal_year,
             "known_urls": list(target.known_urls or []),
+            "identifiers": getattr(target, "identifiers", None),
             "notes": target.notes,
             "packages": package_summaries(findings),
         }

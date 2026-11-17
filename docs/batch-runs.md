@@ -462,7 +462,9 @@ tret batch [--url URL] [--token T | --email E --password P] [--workspace ID] [--
 The options may come before or after the command. Commands: `create` (both profiles),
 `start ID`, `status ID [--watch] [--targets] [--interval S]`, `release ID`,
 `approve ID (--all | --finding ID ...) [--reject] [--note TEXT]`, `finalize ID [--force]`,
-`list`. Exit codes: 0 ok, 1 the server refused (its detail is printed) or was unreachable
+`list`. Two commands need no server: `search-outages` (reads the database) and
+`register-esef` (builds a disclosure register CSV from the ESEF filings index; see
+[disclosure-collection.md](disclosure-collection.md)). Exit codes: 0 ok, 1 the server refused (its detail is printed) or was unreachable
 (or a watched batch ended `failed`), 2 usage or configuration. Neither the token nor the
 password is ever printed.
 

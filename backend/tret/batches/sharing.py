@@ -586,6 +586,7 @@ def shared_target_out(
         "category": t.category,
         "expected_form": t.expected_form,
         "fiscal_year": t.fiscal_year,
+        "identifiers": getattr(t, "identifiers", None),
         "task_input": {k: v for k, v in dict(t.task_input or {}).items() if not str(k).startswith("_")},
         "outcome": _outcome_out(t.outcome, profile),
         "evaluation": (
