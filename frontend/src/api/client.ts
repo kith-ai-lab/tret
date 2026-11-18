@@ -1683,12 +1683,33 @@ export interface ChatMessage {
   } | null
 }
 
+/** A OneDrive/SharePoint folder attached to a conversation (Tret Learning
+ *  "sessions"). `drive_id` + `item_id` identify it; the rest is display. */
+export interface SessionFolder {
+  drive_id: string
+  item_id: string
+  name: string
+  path: string
+  web_url: string | null
+}
+
+/** What the server accepts to attach a folder. */
+export interface SessionFolderRef {
+  drive_id: string
+  item_id: string
+}
+
+/** The server caps attached folders per conversation. */
+export const MAX_SESSION_FOLDERS = 10
+
 export interface ConversationSummary {
   id: string
   title: string | null
   harness_id: string
   message_count: number
   updated_at: string | null
+  /** Attached folders. Absent on a server predating the feature: read as []. */
+  folders?: SessionFolder[]
 }
 
 export interface ConversationDetail extends ConversationSummary {
@@ -4626,11 +4647,20 @@ export const api = {
 
   // chat
   listConversations: () => request<ConversationSummary[]>('/chat'),
-  createConversation: (harnessId?: string) =>
+  // `folders` attach OneDrive/SharePoint folders at creation; 409 (connection
+  // needs reconnecting), 403 (plan gate), 422 (invalid folder) and 502
+  // (Microsoft error) carry a `detail` string.
+  createConversation: (harnessId?: string, folders?: SessionFolderRef[]) =>
     request<ConversationDetail>('/chat', {
       method: 'POST',
-      body: { harness_id: harnessId ?? null },
+      body: {
+        harness_id: harnessId ?? null,
+        ...(folders && folders.length > 0 ? { folders } : {}),
+      },
     }),
+  // Replaces the whole list ([] clears). Returns the full conversation.
+  setConversationFolders: (id: string, folders: SessionFolderRef[]) =>
+    request<ConversationDetail>(`/chat/${id}/folders`, { method: 'PUT', body: { folders } }),
   getConversation: (id: string) => request<ConversationDetail>(`/chat/${id}`),
   sendChatMessage: (
     id: string,

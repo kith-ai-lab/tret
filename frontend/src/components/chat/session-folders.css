@@ -1,0 +1,155 @@
+/* Session folders — the composer "+" menu, folder chips and the OneDrive
+   folder picker modal. Tokens only, so both themes follow the chat CSS. */
+
+.chat-plus-wrap {
+  position: relative;
+  flex-shrink: 0;
+  margin-left: -8px;
+}
+
+.chat-plus-wrap .chat-attach {
+  margin-left: 0;
+}
+
+.chat-plus-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  min-width: 240px;
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop, 0 8px 24px rgba(0, 0, 0, 0.25));
+}
+
+.chat-plus-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-plus-item:hover,
+.chat-plus-item:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+
+.chat-plus-item:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.chat-plus-item .desc {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.chat-folder-chip a.chat-attachment-name {
+  color: inherit;
+  text-decoration: none;
+}
+
+.chat-folder-chip a.chat-attachment-name:hover,
+.chat-folder-chip a.chat-attachment-name:focus-visible {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.chat-attachment-remove:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.chat-folder-error {
+  flex-basis: 100%;
+  font-size: var(--fs-xs, 12px);
+}
+
+/* Folder picker */
+.folder-picker-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.folder-picker-list {
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.folder-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.folder-picker-row input[type='checkbox'] {
+  flex-shrink: 0;
+}
+
+.folder-picker-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-picker-open:hover,
+.folder-picker-open:focus-visible {
+  background: var(--bg-hover);
+}
+
+.folder-picker-open svg {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.folder-picker-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-picker-row.muted {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.folder-picker-note {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.chat-plus-item:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

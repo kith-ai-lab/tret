@@ -8,6 +8,8 @@ import {
   ApiError,
   type ChatAttachment,
   type ChatMessage,
+  type ConversationDetail,
+  type SessionFolder,
   type Harness,
   type ModelInfo,
   type ModelPolicy,
@@ -18,6 +20,13 @@ import { useRunStream } from '../api/useRunStream'
 import { BatchCards } from '../components/chat/BatchCard'
 import { DelegatedWork, DelegatedWorkDisclosure } from '../components/chat/DelegatedWork'
 import { DocumentPaneLayout } from '../components/chat/documentPaneContext'
+import {
+  ComposerPlusMenu,
+  FolderChips,
+  FolderPickerModal,
+  mergeFolders,
+  toRef,
+} from '../components/chat/SessionFolders'
 import { TurnResults } from '../components/chat/ResultCard'
 import { EnergyDetail } from '../components/shared/EnergyDetail'
 import { WaterPanel } from '../components/shared/WaterFootprint'
@@ -39,7 +48,7 @@ import {
 import { LiveFootprint } from '../components/shared/LiveFootprint'
 import { MarkdownDoc } from '../components/shared/MarkdownDoc'
 import { RoutingBadge, shortModelName } from '../components/shared/RoutingBadge'
-import { useEdition } from '../edition'
+import { type ChatWording, chatWording, useEdition } from '../edition'
 import { ModelSelect, overrideWarning } from './Workbench'
 
 // localStorage keys for the composer's per-turn overrides. Both persist across
@@ -119,6 +128,11 @@ export function Chat() {
   const [railOpen, setRailOpen] = useState(true)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const attachmentSeq = useRef(0)
+  const wording = chatWording(useEdition())
+  // Folders picked on the landing screen, before a conversation exists. They
+  // ride along on the create-conversation request at first send.
+  const [landingFolders, setLandingFolders] = useState<SessionFolder[]>([])
+  const [createError, setCreateError] = useState<string | null>(null)
 
   const conversationsQuery = useQuery({
     queryKey: ['conversations'],
@@ -273,6 +287,8 @@ export function Chat() {
     setPending(null)
     setDraft('')
     setAttachments([])
+    setLandingFolders([])
+    setCreateError(null)
     setSelectedId(null)
   }, [])
 
@@ -308,6 +324,26 @@ export function Chat() {
   const removeAttachment = useCallback((key: string) => {
     setAttachments((prev) => prev.filter((a) => a.key !== key))
   }, [])
+
+  // Thread folders: every change PUTs the full new list; the response is the
+  // whole conversation, which replaces the cached one.
+  const foldersMutation = useMutation({
+    mutationFn: ({ id, folders }: { id: string; folders: SessionFolder[] }) =>
+      api.setConversationFolders(id, folders.map(toRef)),
+    onSuccess: (data, { id }) => {
+      queryClient.setQueryData(['conversation', id], (prev: ConversationDetail | undefined) =>
+        prev ? { ...prev, ...data } : data,
+      )
+      queryClient.invalidateQueries({ queryKey: ['conversations'] })
+    },
+  })
+  useEffect(() => {
+    setCreateError(null)
+  }, [selectedId])
+  const { reset: resetFolders } = foldersMutation
+  useEffect(() => {
+    resetFolders()
+  }, [selectedId, resetFolders])
 
   const sendMutation = useMutation({
     mutationFn: ({
@@ -357,8 +393,9 @@ export function Chat() {
     resetCancel()
   }, [pendingRunId, resetCancel])
   const stopping = cancelMutation.isPending || cancelMutation.isSuccess
-  const sendError =
-    sendMutation.isError && !activeRunIdOf409(sendMutation.error)
+  const sendError = createError
+    ? createError
+    : sendMutation.isError && !activeRunIdOf409(sendMutation.error)
       ? (sendMutation.error as Error).message
       : cancelMutation.isError
         ? `Could not stop the reply — ${(cancelMutation.error as Error).message}`
@@ -366,23 +403,59 @@ export function Chat() {
 
   const inFlight = pending !== null || sendMutation.isPending
 
+  const conversationNow = selectedId ? conversationQuery.data : undefined
+  const folderList: SessionFolder[] = selectedId ? (conversationNow?.folders ?? []) : landingFolders
+  // A thread whose conversation has not loaded yet has no list to edit.
+  const folderBusy = foldersMutation.isPending || (!!selectedId && !conversationNow)
+  const addFolders = (picked: SessionFolder[]) => {
+    if (!selectedId) {
+      setLandingFolders((prev) => mergeFolders(prev, picked))
+      return
+    }
+    foldersMutation.mutate({ id: selectedId, folders: mergeFolders(folderList, picked) })
+  }
+  const removeFolder = (folder: SessionFolder) => {
+    const next = folderList.filter((f) => !(f.drive_id === folder.drive_id && f.item_id === folder.item_id))
+    if (!selectedId) setLandingFolders(next)
+    else foldersMutation.mutate({ id: selectedId, folders: next })
+  }
+  const folderProps = {
+    folders: folderList,
+    folderBusy,
+    folderError: selectedId ? (foldersMutation.error as Error | null) : null,
+    onAddFolders: addFolders,
+    onRemoveFolder: removeFolder,
+  }
+
   const send = useCallback(
     async (text: string) => {
       const trimmed = text.trim()
       if (!trimmed || inFlight || attachmentBlockReason(attachments)) return
       const documentIds = attachments.flatMap((a) => (a.status === 'done' && a.docId ? [a.docId] : []))
       let conversationId = selectedId
+      setCreateError(null)
       if (!conversationId) {
-        const conv = await api.createConversation(selectedHarnessId || undefined)
+        let conv: ConversationDetail
+        try {
+          conv = await api.createConversation(
+            selectedHarnessId || undefined,
+            landingFolders.map(toRef),
+          )
+        } catch (err) {
+          // Nothing was created or sent: keep the text and folders, say why.
+          setCreateError(err instanceof Error ? err.message : `Could not start the ${wording.noun}`)
+          return
+        }
         queryClient.setQueryData(['conversation', conv.id], conv)
         queryClient.invalidateQueries({ queryKey: ['conversations'] })
         setSelectedId(conv.id)
+        setLandingFolders([])
         conversationId = conv.id
       }
       setDraft('')
       sendMutation.mutate({ conversationId, text: trimmed, documentIds })
     },
-    [inFlight, attachments, selectedId, selectedHarnessId, queryClient, sendMutation],
+    [inFlight, attachments, selectedId, selectedHarnessId, landingFolders, wording.noun, queryClient, sendMutation],
   )
 
   const conversation = selectedId ? conversationQuery.data : undefined
@@ -428,6 +501,7 @@ export function Chat() {
             setSelectedId(id)
           }}
           onNewChat={startNewChat}
+          wording={wording}
         />
       )}
 
@@ -435,16 +509,16 @@ export function Chat() {
         <div className="chat-topbar">
           <button
             className="icon-btn"
-            title={railOpen ? 'Hide conversations' : 'Show conversations'}
+            title={railOpen ? wording.hideList : wording.showList}
             onClick={() => setRailOpen((o) => !o)}
-            aria-label="Toggle conversation list"
+            aria-label={wording.toggleList}
           >
             <PanelIcon />
           </button>
           <div className="chat-topbar-title">
-            {conversation?.title ?? (isLanding ? 'New chat' : 'tret')}
+            {conversation?.title ?? (isLanding ? wording.newChat : 'tret')}
           </div>
-          <button className="icon-btn" title="New chat" onClick={startNewChat} aria-label="New chat">
+          <button className="icon-btn" title={wording.newChat} onClick={startNewChat} aria-label={wording.newChat}>
             <PlusIcon />
           </button>
         </div>
@@ -468,6 +542,8 @@ export function Chat() {
             attachments={attachments}
             onAddFiles={addFiles}
             onRemoveAttachment={removeAttachment}
+            {...folderProps}
+            error={createError}
           />
         ) : (
           <>
@@ -478,6 +554,7 @@ export function Chat() {
                 selectedId && !pending ? (conversationQuery.error as Error | null) : null
               }
               live={showLive ? { runId: pending.runId, stream } : null}
+              wording={wording}
             />
             <div className="chat-composer-dock">
               <div className="chat-column">
@@ -502,6 +579,7 @@ export function Chat() {
                   attachments={attachments}
                   onAddFiles={addFiles}
                   onRemoveAttachment={removeAttachment}
+                  {...folderProps}
                 />
                 {!allAutoApproved && (
                   <div className="chat-hint">
@@ -526,6 +604,7 @@ function ConversationRail({
   selectedId,
   onSelect,
   onNewChat,
+  wording,
 }: {
   conversations: { id: string; title: string | null; message_count: number; updated_at: string | null }[]
   loading: boolean
@@ -533,12 +612,13 @@ function ConversationRail({
   selectedId: string | null
   onSelect: (id: string) => void
   onNewChat: () => void
+  wording: ChatWording
 }) {
   return (
     <aside className="chat-rail">
       <button className="chat-newchat" onClick={onNewChat}>
         <PlusIcon />
-        <span>New chat</span>
+        <span>{wording.newChat}</span>
       </button>
       <div className="chat-rail-list">
         {loading ? (
@@ -549,11 +629,11 @@ function ConversationRail({
           // "No conversations yet" over a failed fetch reads as "your history is
           // gone", which would send a user off to retype work they still have.
           <div className="error-text" style={{ padding: '8px 4px', fontSize: 'var(--fs-xs)' }}>
-            Could not load conversations — {error.message}
+            {wording.loadFailed} — {error.message}
           </div>
         ) : conversations.length === 0 ? (
           <div className="empty" style={{ padding: '8px 4px', fontSize: 'var(--fs-xs)' }}>
-            No conversations yet.
+            {wording.empty}
           </div>
         ) : (
           conversations.map((c) => (
@@ -561,9 +641,9 @@ function ConversationRail({
               key={c.id}
               className={`chat-rail-item${c.id === selectedId ? ' active' : ''}`}
               onClick={() => onSelect(c.id)}
-              title={c.title ?? 'New conversation'}
+              title={c.title ?? wording.untitled}
             >
-              <span className="chat-rail-title">{c.title ?? 'New conversation'}</span>
+              <span className="chat-rail-title">{c.title ?? wording.untitled}</span>
               <span className="chat-rail-time">{relativeTime(c.updated_at)}</span>
             </button>
           ))
@@ -593,6 +673,12 @@ function Landing({
   attachments,
   onAddFiles,
   onRemoveAttachment,
+  folders,
+  folderBusy,
+  folderError,
+  onAddFolders,
+  onRemoveFolder,
+  error,
 }: {
   draft: string
   onDraft: (v: string) => void
@@ -611,6 +697,13 @@ function Landing({
   attachments: Attachment[]
   onAddFiles: (files: File[]) => void
   onRemoveAttachment: (key: string) => void
+  folders: SessionFolder[]
+  folderBusy: boolean
+  folderError: Error | null
+  onAddFolders: (picked: SessionFolder[]) => void
+  onRemoveFolder: (folder: SessionFolder) => void
+  /** Why starting the conversation failed (nothing was created or sent). */
+  error: string | null
 }) {
   return (
     <div className="chat-landing">
@@ -628,7 +721,7 @@ function Landing({
           onChange={onDraft}
           onSend={() => onSend(draft)}
           disabled={disabled}
-          error={null}
+          error={error}
           autoFocus
           models={models}
           objective={objective}
@@ -643,6 +736,11 @@ function Landing({
           attachments={attachments}
           onAddFiles={onAddFiles}
           onRemoveAttachment={onRemoveAttachment}
+          folders={folders}
+          folderBusy={folderBusy}
+          folderError={folderError}
+          onAddFolders={onAddFolders}
+          onRemoveFolder={onRemoveFolder}
         />
         <div className="chat-cards">
           {EXAMPLE_PROMPTS.map((ex) => (
@@ -664,7 +762,9 @@ function Thread({
   loading,
   error,
   live,
+  wording,
 }: {
+  wording: ChatWording
   messages: ChatMessage[]
   loading: boolean
   /** A failed fetch of the conversation. An empty thread and an unreachable one
@@ -694,12 +794,12 @@ function Thread({
       <div className="chat-column chat-messages">
         {loading && (
           <div className="empty pulse" style={{ padding: '24px 0' }}>
-            Loading conversation…
+            {wording.loading}
           </div>
         )}
         {error && (
           <div className="error-text" style={{ padding: '24px 0' }}>
-            Could not load this conversation — {error.message}
+            {wording.threadLoadFailed} — {error.message}
           </div>
         )}
 
@@ -1057,6 +1157,11 @@ function Composer({
   attachments,
   onAddFiles,
   onRemoveAttachment,
+  folders,
+  folderBusy,
+  folderError,
+  onAddFolders,
+  onRemoveFolder,
 }: {
   value: string
   onChange: (v: string) => void
@@ -1081,7 +1186,13 @@ function Composer({
   attachments: Attachment[]
   onAddFiles: (files: File[]) => void
   onRemoveAttachment: (key: string) => void
+  folders: SessionFolder[]
+  folderBusy: boolean
+  folderError: Error | null
+  onAddFolders: (picked: SessionFolder[]) => void
+  onRemoveFolder: (folder: SessionFolder) => void
 }) {
+  const [pickerOpen, setPickerOpen] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
@@ -1190,17 +1301,23 @@ function Composer({
           ))}
         </div>
       )}
+      <FolderChips folders={folders} busy={folderBusy} error={folderError} onRemove={onRemoveFolder} />
+      <FolderPickerModal
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        attached={folders}
+        onConfirm={(picked) => {
+          setPickerOpen(false)
+          onAddFolders(picked)
+        }}
+      />
       <div className={`chat-inputbox${disabled ? ' disabled' : ''}`}>
-        <button
-          type="button"
-          className="chat-attach"
-          aria-label="Attach documents"
-          title="Attach documents (25 MB max each)"
+        <ComposerPlusMenu
           disabled={disabled}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <PaperclipIcon />
-        </button>
+          folderDisabled={folderBusy}
+          onUploadFiles={() => fileInputRef.current?.click()}
+          onAddFolder={() => setPickerOpen(true)}
+        />
         <input
           ref={fileInputRef}
           type="file"

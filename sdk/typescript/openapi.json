@@ -399,6 +399,14 @@
       },
       "CreateConversationBody": {
         "properties": {
+          "folders": {
+            "items": {
+              "$ref": "#/components/schemas/FolderRef"
+            },
+            "maxItems": 10,
+            "title": "Folders",
+            "type": "array"
+          },
           "harness_id": {
             "anyOf": [
               {
@@ -1174,6 +1182,30 @@
           }
         },
         "title": "FinalizeBody",
+        "type": "object"
+      },
+      "FolderRef": {
+        "additionalProperties": false,
+        "description": "A OneDrive/SharePoint folder the client picked. Only the ids are taken\nfrom the client; name/path are re-read from Graph by `resolve_session_folders`.",
+        "properties": {
+          "drive_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Drive Id",
+            "type": "string"
+          },
+          "item_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Item Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "drive_id",
+          "item_id"
+        ],
+        "title": "FolderRef",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -2013,6 +2045,20 @@
           "text"
         ],
         "title": "SendMessageBody",
+        "type": "object"
+      },
+      "SetFoldersBody": {
+        "properties": {
+          "folders": {
+            "items": {
+              "$ref": "#/components/schemas/FolderRef"
+            },
+            "maxItems": 10,
+            "title": "Folders",
+            "type": "array"
+          }
+        },
+        "title": "SetFoldersBody",
         "type": "object"
       },
       "SetKeyBody": {
@@ -5189,6 +5235,58 @@
           }
         },
         "summary": "Get Conversation",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/{conversation_id}/folders": {
+      "put": {
+        "description": "Replace the OneDrive/SharePoint folders this conversation is restricted\nto. An empty list clears them and needs no connection or gate. Any\nworkspace member, same as browsing.",
+        "operationId": "set_conversation_folders_api_chat__conversation_id__folders_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetFoldersBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Conversation Folders",
         "tags": [
           "chat"
         ]

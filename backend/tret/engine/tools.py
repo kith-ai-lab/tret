@@ -55,7 +55,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.config import get_settings
@@ -123,6 +123,15 @@ class RunContext:
     conversation_id: uuid.UUID | None = None
     pack_manifest: dict | None = None  # stored manifest (methods, task types)
     pack_dir: str | None = None
+    # OneDrive/SharePoint folders attached to this run's conversation (from
+    # task_input["_session_folders"], harness.py). When set, every connected-file
+    # tool only sees inside them; None leaves the workspace allowlist as the only
+    # limit. `folder_scope_cache` memoises containment checks for this run.
+    session_folders: list[dict] | None = None
+    folder_scope_cache: dict = field(default_factory=dict)
+    # The run asked for folder scoping but no entry was usable (harness.py failed
+    # closed). Children inherit that state, so they fail closed too.
+    folders_unusable: bool = False
     terminal_tool: str | None = None
     # Set by the ENGINE when a call to `terminal_tool` succeeds — never by a tool
     # about itself. Tools used to flip this on their own, which meant a tool and
@@ -250,6 +259,7 @@ from tret.engine.delegation import (  # noqa: E402,F401
     MAX_DELEGATION_DEPTH,
     MIN_CHILD_BUDGET_USD,
     PROJECT_DOCS_KEY,
+    SESSION_FOLDERS_KEY,
     SUBAGENT_ALLOWED_TOOLS,
     SUBAGENT_TASK_PROFILE,
     SUBAGENT_TASK_TYPE,
@@ -441,9 +451,18 @@ async def _document_scope(ctx: RunContext) -> tuple[list[uuid.UUID], bool]:
         return list(ctx.document_ids), False
     if run.task_type == SUBAGENT_TASK_TYPE and run.task_input.get(PROJECT_DOCS_KEY) is not True:
         return list(ctx.document_ids), False
-    ids = (
-        await ctx.db.execute(select(Document.id).where(Document.project_id == ctx.project_id))
-    ).scalars().all()
+    query = select(Document.id).where(Document.project_id == ctx.project_id)
+    if ctx.session_folders:
+        # A folder session must not read, through the document tools, a connected
+        # file an earlier run pulled in from outside this session's folders. What
+        # `ctx.document_ids` holds (attached to this run, or materialized by
+        # `read_connected_file` in this run, which enforced containment) is
+        # unioned back in below; any other connected file is re-read through
+        # `read_connected_file`.
+        query = query.where(
+            or_(Document.source_kind.is_(None), Document.source_kind != CONNECTED_SOURCE_KIND)
+        )
+    ids = (await ctx.db.execute(query)).scalars().all()
     merged = list(ids)
     for doc_id in ctx.document_ids:
         if doc_id not in merged:
@@ -1149,8 +1168,19 @@ def _capture_result_text(doc: Document, *, replayed: bool, expected_sha256: str 
 # `withheld_connector_tools` is the connected-source analogue of
 # `withheld_web_tools`, checked from the engine the same way.
 
+# `list_connected_folder` is a member on purpose: every use of this set is a
+# membership test (withholding when the connection is unusable, gating the
+# database-tool offer), and the folder listing must be withheld exactly when
+# the other connector tools are. harness.py only ever auto-offers it next to
+# search/read, and engine/delegation.SUBAGENT_ALLOWED_TOOLS lists it so a
+# subagent can hold it only when its parent did.
 CONNECTOR_TOOL_NAMES = frozenset(
-    {"list_connected_sources", "search_connected_files", "read_connected_file"}
+    {
+        "list_connected_sources",
+        "search_connected_files",
+        "read_connected_file",
+        "list_connected_folder",
+    }
 )
 
 _FRAME_UNSAFE_RE = re.compile(r"[\s\x00-\x1f\x7f]+")
@@ -1205,6 +1235,17 @@ async def _require_connection(ctx: RunContext) -> None:
 )
 async def list_connected_sources(ctx: RunContext) -> str:
     await _require_connection(ctx)
+    if ctx.session_folders:
+        lines = [
+            f"- {_frame_safe(f.get('name'))} ({_frame_safe(f.get('path'))}) — item_ref: "
+            f"{connections_service.make_item_ref(connections_service.M365, f['drive_id'], f['item_id'])}"
+            for f in ctx.session_folders
+        ]
+        return (
+            "This session is restricted to these folders; search_connected_files, "
+            "read_connected_file and list_connected_folder only see inside them:\n"
+            + "\n".join(lines)
+        )
     try:
         sources = await connections_service.list_connected_sources(ctx.db, ctx.workspace_id)
     except connections_service.ConnectionUnavailable as e:
@@ -1248,6 +1289,13 @@ async def search_connected_files(
     # and must count against the run's search budget — a caller retrying a
     # failing search must not get it for free.
     ctx.connected_searches += 1
+    # Only passed when the session has folders: a session without them calls
+    # the service exactly as it always did.
+    scope_kwargs = (
+        {"folders": ctx.session_folders, "scope_cache": ctx.folder_scope_cache}
+        if ctx.session_folders
+        else {}
+    )
     try:
         hits = await connections_service.search_connected_files(
             ctx.db,
@@ -1256,6 +1304,7 @@ async def search_connected_files(
             source_slug=source,
             max_results=int(max_results),
             actor_run_id=ctx.run_id,
+            **scope_kwargs,
         )
     except ValueError as e:
         raise ToolError(str(e)) from e
@@ -1263,8 +1312,13 @@ async def search_connected_files(
         raise ToolError(e.reason) from e
     except RuntimeError as e:
         raise ToolError(f"Connected-source search failed: {e}") from e
+    scope_note = (
+        "(This session is restricted to its attached folders, so the source argument was ignored.)\n"
+        if ctx.session_folders and source
+        else ""
+    )
     if not hits:
-        return f"No connected-source matches for '{query}'."
+        return f"{scope_note}No connected-source matches for '{query}'."
     lines = [
         f"{i}. {_frame_safe(h.name)}\n"
         f"   path: {_frame_safe(h.path)}\n"
@@ -1274,7 +1328,7 @@ async def search_connected_files(
         f"   item_ref: {h.item_ref}"
         for i, h in enumerate(hits[: int(max_results)], start=1)
     ]
-    return f"Connected-source results for '{query}':\n\n" + "\n\n".join(lines)
+    return f"{scope_note}Connected-source results for '{query}':\n\n" + "\n\n".join(lines)
 
 
 @builtin(
@@ -1320,6 +1374,11 @@ async def read_connected_file(
     # provider) still made requests and must count against the run's read
     # budget rather than being free to retry indefinitely.
     ctx.connected_reads += 1
+    scope_kwargs = (
+        {"folders": ctx.session_folders, "scope_cache": ctx.folder_scope_cache}
+        if ctx.session_folders
+        else {}
+    )
     try:
         doc = await connections_service.materialize_connected_file(
             ctx.db,
@@ -1327,6 +1386,7 @@ async def read_connected_file(
             project_id=ctx.project_id,
             item_ref=item_ref,
             actor_run_id=ctx.run_id,
+            **scope_kwargs,
         )
     except ValueError as e:
         raise ToolError(str(e)) from e
@@ -1373,6 +1433,68 @@ async def read_connected_file(
         f"# {doc.filename} (chars {offset}-{offset + len(chunk)} of {len(text)})\n\n"
         f"{banner}\n{chunk}{suffix}"
     )
+
+
+@builtin(
+    "list_connected_folder",
+    "List what is inside this session's attached folders. With no item_ref, lists the folders "
+    "themselves; pass a folder's item_ref to see its contents (one level, files and sub-folders).",
+    {
+        "type": "object",
+        "properties": {
+            "item_ref": {
+                "type": ["string", "null"],
+                "description": "A folder's item_ref from an earlier listing; omit to list the session's folders",
+            },
+        },
+    },
+)
+async def list_connected_folder(ctx: RunContext, item_ref: str | None = None) -> str:
+    await _require_connection(ctx)
+    if not ctx.session_folders:
+        raise ToolError("This session has no attached folders; use search_connected_files.")
+    max_searches = int(get_settings().connections_max_searches_per_run)
+    if ctx.connected_searches >= max_searches:
+        raise ToolError(
+            f"This run has already made {ctx.connected_searches} connected-source searches or "
+            f"folder listings, which is the per-run limit "
+            f"(TRET_CONNECTIONS_MAX_SEARCHES_PER_RUN={max_searches}). Work with what you have "
+            "already found."
+        )
+    # Spent before the call, same reasoning as search_connected_files.
+    ctx.connected_searches += 1
+    try:
+        entries = await connections_service.list_connected_folder(
+            ctx.db,
+            ctx.workspace_id,
+            ctx.session_folders,
+            item_ref or None,
+            scope_cache=ctx.folder_scope_cache,
+            actor_run_id=ctx.run_id,
+        )
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    except connections_service.ConnectionUnavailable as e:
+        raise ToolError(e.reason) from e
+    except RuntimeError as e:
+        raise ToolError(f"Connected-source listing failed: {e}") from e
+    if not entries:
+        return "This folder is empty." if item_ref else "None of this session's folders are available."
+    lines = []
+    for i, e in enumerate(entries, start=1):
+        size = f", {e['size']} bytes" if e.get("size") is not None else ""
+        where = f"\n   path: {_frame_safe(e['path'])}" if e.get("path") else ""
+        lines.append(
+            f"{i}. {_frame_safe(e['name'])} ({e['kind']}{size}, modified {e.get('modified')})"
+            f"{where}\n   item_ref: {e['item_ref']}"
+        )
+    note = (
+        f"\n\n[Only the first {len(entries)} entries are shown; use search_connected_files to "
+        "find others.]"
+        if getattr(entries, "truncated", False)
+        else ""
+    )
+    return "\n".join(lines) + note
 
 
 # ── external databases: read-only Postgres / Supabase ───────────────────────
@@ -3449,6 +3571,15 @@ async def _prepare_child(
         # named fields only, never a verbatim copy of the model's request.
         task_input = {k: v for k, v in task_input.items() if not k.startswith("_")}
     child_task_input = {**task_input, DELEGATION_DEPTH_KEY: ctx.delegation_depth + 1}
+    if ctx.session_folders:
+        # Stamped after the `_`-key drop above so it always comes from the
+        # parent's own run, never from the model: a delegated run must not be
+        # able to read outside the session's folders.
+        child_task_input[SESSION_FOLDERS_KEY] = [dict(f) for f in ctx.session_folders]
+    elif ctx.folders_unusable:
+        # No usable entry to hand on; an unusable marker makes the child fail
+        # closed the same way instead of reading as unrestricted.
+        child_task_input[SESSION_FOLDERS_KEY] = [{"unusable": True}]
     if label:
         # Engine-stamped from the tool's own `label` argument only, applied
         # after the drop above — so it always wins regardless.

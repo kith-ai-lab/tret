@@ -268,6 +268,7 @@ def test_the_connector_tools_are_always_registered():
         "list_connected_sources",
         "search_connected_files",
         "read_connected_file",
+        "list_connected_folder",
     }
 
 

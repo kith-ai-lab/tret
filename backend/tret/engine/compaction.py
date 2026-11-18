@@ -75,6 +75,7 @@ ELIDABLE_TOOLS = frozenset(
         "list_connected_sources",
         "search_connected_files",
         "read_connected_file",
+        "list_connected_folder",
         # External-database reads: re-callable on demand like the connector
         # tools, and their output is unverified external data, so an elided
         # result costs nothing a re-call could not recover.

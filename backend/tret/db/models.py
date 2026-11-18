@@ -362,6 +362,15 @@ class Conversation(Base):
     # nothing writes is how the 9ba228f09f91 migration's dead backfill branch
     # happened.
     messages: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # OneDrive/SharePoint folders attached to this conversation, each
+    # {drive_id, item_id, name, path, web_url} as resolved server-side by
+    # services/connections.py::resolve_session_folders (never client-supplied
+    # names). Non-empty means every connected-file tool in this conversation's
+    # runs only sees inside these folders; `[]` leaves the workspace-wide
+    # allowlist as the only limit.
+    connected_folders: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = created_at_col()
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)

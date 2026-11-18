@@ -73,6 +73,11 @@ SUBAGENT_TASK_PROFILE = "subagent"
 # task_input keys the engine reads when starting a subagent run.
 ALLOWED_TOOLS_KEY = "_allowed_tools"  # list[str]: the parent's own grant, narrowing further
 PROJECT_DOCS_KEY = "_project_docs"  # bool: the parent itself had project-wide document scope
+# list[dict]: OneDrive/SharePoint folders the run's conversation is restricted to
+# (chat's `Conversation.connected_folders`). Inherited by every child run so a
+# delegated run cannot read outside them; stamped by `_prepare_child`, never
+# copied from a model-written task_input.
+SESSION_FOLDERS_KEY = "_session_folders"
 
 # An ALLOWlist, not a denylist, so a write tool added to the engine later is
 # denied to a subagent by default rather than needing to be remembered here.
@@ -97,5 +102,6 @@ SUBAGENT_ALLOWED_TOOLS = frozenset(
         "list_connected_sources",
         "search_connected_files",
         "read_connected_file",
+        "list_connected_folder",
     }
 )

@@ -14,11 +14,12 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
+from tret.api.connections import USE_ACTION, require_connections_gate
 from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.db.engine import get_db, get_session_factory
 from tret.db.models import Conversation, Dataset, Document, Harness, Pack, Project, Run, User
@@ -27,6 +28,12 @@ from tret.engine.tools import DELEGATION_TOOLS
 from tret.packs.links import pack_map_for_harnesses, packs_for_harness, resolve_pack_for_task
 from tret.router_llm.objectives import OBJECTIVES
 from tret.services import lifecycle
+from tret.services.connections import (
+    MAX_SESSION_FOLDERS,
+    ConnectionAuthError,
+    ConnectionUnavailable,
+    resolve_session_folders,
+)
 from tret.services.emissions import emission_summary_fields, energy_wh_field
 from tret.services.emissions_v3_wiring import method_v3_of, public_routing
 from tret.services.reconcile import NON_TERMINAL_STATUSES
@@ -51,6 +58,7 @@ def _conversation_out(c: Conversation, full: bool = False) -> dict:
         "harness_id": str(c.harness_id),
         "message_count": len(c.messages or []),
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+        "folders": c.connected_folders or [],
     }
     if full:
         out["messages"] = c.messages
@@ -170,8 +178,46 @@ async def _capability_catalog(db: AsyncSession, workspace_id, project_id) -> str
     return "\n".join(lines)
 
 
+class FolderRef(BaseModel):
+    """A OneDrive/SharePoint folder the client picked. Only the ids are taken
+    from the client; name/path are re-read from Graph by `resolve_session_folders`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    drive_id: str = Field(min_length=1, max_length=512)
+    item_id: str = Field(min_length=1, max_length=512)
+
+
 class CreateConversationBody(BaseModel):
     harness_id: uuid.UUID | None = None  # default: the seeded Chat Assistant
+    # OneDrive/SharePoint folders this conversation's connected-file tools are
+    # restricted to (max 10); empty leaves them workspace-wide.
+    folders: list[FolderRef] = Field(default_factory=list, max_length=MAX_SESSION_FOLDERS)
+
+
+class SetFoldersBody(BaseModel):
+    folders: list[FolderRef] = Field(default_factory=list, max_length=MAX_SESSION_FOLDERS)
+
+
+async def _resolve_folders(
+    db: AsyncSession, ctx: WorkspaceContext, folders: list[FolderRef]
+) -> list[dict]:
+    """Gate, then resolve a non-empty folder list against Graph; the status
+    mapping is shared by create and PUT /folders: connection unusable or
+    needing reconnect 409, a bad folder 422, Graph failing 502."""
+    await require_connections_gate(db, ctx.id, USE_ACTION)
+    try:
+        return await resolve_session_folders(
+            db, ctx.id, [{"drive_id": f.drive_id, "item_id": f.item_id} for f in folders]
+        )
+    except ConnectionUnavailable as exc:
+        raise HTTPException(409, exc.reason) from exc
+    except ConnectionAuthError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(502, str(exc)) from exc
 
 
 class SendMessageBody(BaseModel):
@@ -291,8 +337,14 @@ async def create_conversation(
     project = await current_project(db, ctx.id)
     if project is None:
         raise HTTPException(500, "No project exists")
+    # Validated before the row exists, so a rejected folder creates nothing.
+    folders = await _resolve_folders(db, ctx, body.folders) if body.folders else []
     conv = Conversation(
-        project_id=project.id, harness_id=harness.id, created_by=user.id, messages=[]
+        project_id=project.id,
+        harness_id=harness.id,
+        created_by=user.id,
+        messages=[],
+        connected_folders=folders,
     )
     db.add(conv)
     await db.commit()
@@ -312,6 +364,25 @@ async def get_conversation(
     out = _conversation_out(conv, full=True)
     out["active_run_id"] = await _active_run_id(db, conv.id)
     return out
+
+
+@router.put("/{conversation_id}/folders")
+async def set_conversation_folders(
+    conversation_id: uuid.UUID,
+    body: SetFoldersBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replace the OneDrive/SharePoint folders this conversation is restricted
+    to. An empty list clears them and needs no connection or gate. Any
+    workspace member, same as browsing."""
+    conv = await db.get(Conversation, conversation_id)
+    if conv is None or await project_in_workspace(db, conv.project_id, ctx.id) is None:
+        raise HTTPException(404, "Conversation not found")
+    conv.connected_folders = await _resolve_folders(db, ctx, body.folders) if body.folders else []
+    await db.commit()
+    return _conversation_out(conv, full=True)
 
 
 @router.post("/{conversation_id}/messages")
@@ -399,6 +470,10 @@ async def send_message(
         created_by=user.id,
         document_ids=document_ids,
     )
+    if conv.connected_folders:
+        # Only when set: a conversation without folders produces exactly the
+        # task_input it always did.
+        run.task_input["_session_folders"] = conv.connected_folders
     db.add(run)
 
     now = datetime.now(timezone.utc).isoformat()
