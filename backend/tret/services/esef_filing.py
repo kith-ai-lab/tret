@@ -87,7 +87,7 @@ def package_url_from_report_url(url: str) -> str:
     """The ESEF package (.zip) URL for a filings.xbrl.org report or package URL.
 
     `/{LEI}/{period}/ESEF/{country}/{n}/{name}/reports/{file}.xhtml` becomes
-    `/{LEI}/{period}/ESEF/{country}/{n}/{name}.zip`; a `.zip` URL is returned as it
+    `/{LEI}/{period}/ESEF/{country}/{n}/{name}.zip`; a `.zip` or `.xbri` URL is returned as it
     is. Query and fragment are dropped. Anything else raises FilingError.
     """
     from urllib.parse import urlsplit
@@ -103,7 +103,7 @@ def package_url_from_report_url(url: str) -> str:
     if any(s in (".", "..") for s in segments):
         raise FilingError("the filing URL path is not a plain path")
     lower = [s.lower() for s in segments]
-    if lower and lower[-1].endswith(".zip"):
+    if lower and lower[-1].endswith(PACKAGE_EXTENSIONS):
         base = segments
     elif len(segments) >= 3 and lower[-2] == "reports" and lower[-1].endswith((".xhtml", ".html", ".htm")):
         base = [*segments[:-2]]
@@ -119,6 +119,125 @@ def package_url_from_report_url(url: str) -> str:
             "the filing URL does not look like /<LEI>/<period>/ESEF/<country>/<n>/<name>"
         )
     return "https://" + FILINGS_HOST + "/" + "/".join(base)
+
+
+# A package is a ZIP; an XBRL Report Package (.xbri) is the same container.
+PACKAGE_EXTENSIONS = (".zip", ".xbri")
+FILINGS_API_URL = "https://" + FILINGS_HOST + "/api/filings"
+# The JSON:API answer is a few KB for page[size]=5; anything bigger is not that API.
+MAX_API_BYTES = 1024 * 1024
+
+
+def filings_api_lookup_url(report_url: str) -> str:
+    """`/api/filings` URL selecting the filings of this report's LEI and period end.
+
+    The site's firewall refuses a filter on `report_url` (HTTP 403), so the report is
+    found by `entity.identifier` + `period_end` taken from its path, and the right
+    filing is picked from the answer by `package_url_from_filings_api`.
+    """
+    import json
+    from urllib.parse import quote, urlsplit
+
+    package_url_from_report_url(report_url)  # same host / scheme / shape checks
+    segments = [s for s in urlsplit(report_url.strip()).path.split("/") if s]
+    flt = json.dumps(
+        [
+            {"name": "period_end", "op": "eq", "val": segments[1]},
+            {"name": "entity.identifier", "op": "eq", "val": segments[0]},
+        ],
+        separators=(",", ":"),
+    )
+    return f"{FILINGS_API_URL}?filter={quote(flt, safe='')}&page[size]=10"
+
+
+def _api_path(raw: Any) -> str | None:
+    """A path from an API url attribute (relative path, or absolute URL on exactly the host)."""
+    from urllib.parse import urlsplit
+
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    raw = raw.strip()
+    parts = urlsplit(raw)
+    if parts.scheme or parts.netloc:
+        if (
+            parts.scheme != "https"
+            or (parts.hostname or "").lower().rstrip(".") != FILINGS_HOST
+            or parts.port not in (None, 443)
+            or parts.username
+            or parts.password
+        ):
+            raise FilingError(f"the filings API named a package off {FILINGS_HOST}")
+    elif not raw.startswith("/") or raw.startswith("//"):
+        raise FilingError("the filings API named a package URL that is not a path on the host")
+    return parts.path
+
+
+def package_url_from_filings_api(body: bytes | str, report_url: str) -> str | None:
+    """The package URL the filings API names for `report_url`, or None when it names none.
+
+    The answer lists the filings of the report's LEI and period. The one whose
+    `report_url` equals ours wins; else one whose package shares the report's
+    `/{LEI}/{period}/ESEF/{country}/{n}/` directory; else the lowest `error_count`,
+    then the latest `processed`. The chosen `package_url` (a path relative to the host, or
+    an absolute URL on exactly the host) must end in `.zip` or `.xbri` and sit under the
+    same `/{LEI}/{period_end}/ESEF/` prefix as the report; anything else raises
+    FilingError rather than being followed. Malformed JSON, or no filing, is None.
+    """
+    import json
+    from urllib.parse import urlsplit
+
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    entries = []
+    for item in data if isinstance(data, list) else []:
+        attrs = item.get("attributes") if isinstance(item, dict) else None
+        if isinstance(attrs, dict) and isinstance(attrs.get("package_url"), str) and attrs["package_url"].strip():
+            entries.append(attrs)
+    if not entries:
+        return None
+    report_path = urlsplit(report_url.strip()).path
+    report_segments = [s for s in report_path.split("/") if s]
+
+    def seg(raw: Any) -> list[str]:
+        try:
+            return [s for s in (_api_path(raw) or "").split("/") if s]
+        except FilingError:
+            return []
+
+    chosen = next((e for e in entries if (_api_path_safe(e.get("report_url"))) == report_path), None)
+    if chosen is None:
+        directory = [s.upper() for s in report_segments[:5]]
+        chosen = next((e for e in entries if [s.upper() for s in seg(e["package_url"])[:5]] == directory), None)
+    if chosen is None:
+        def number(v: Any) -> float:
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else float("inf")
+
+        ranked = sorted(entries, key=lambda e: str(e.get("processed") or ""), reverse=True)
+        ranked.sort(key=lambda e: number(e.get("error_count")))
+        chosen = ranked[0]
+    path = _api_path(chosen["package_url"])
+    segments = [s for s in (path or "").split("/") if s]
+    if any(s in (".", "..") for s in segments):
+        raise FilingError("the filings API named a package URL that is not a plain path")
+    if (
+        len(segments) < 6
+        or not segments[-1].lower().endswith(PACKAGE_EXTENSIONS)
+        or [s.upper() for s in segments[:3]] != [s.upper() for s in report_segments[:3]]
+    ):
+        raise FilingError(
+            "the filings API named a package outside this filing's /<LEI>/<period>/ESEF/ path"
+        )
+    return "https://" + FILINGS_HOST + (path or "")
+
+
+def _api_path_safe(raw: Any) -> str | None:
+    try:
+        return _api_path(raw)
+    except FilingError:
+        return None
 
 
 def lei_from_filing_url(url: str) -> str | None:

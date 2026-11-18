@@ -282,6 +282,16 @@ one that needs action on an existing install.
 
 ### Fixed
 
+- **`capture_filing` finds the package when its file name differs from the report directory.**
+  The package URL was guessed from the report URL, which returned 404 for filings such as
+  Iberdrola's. The tool now asks the filings.xbrl.org API for the filings of the report's LEI
+  and period end and picks the right one (accepting only a `.zip` or `.xbri` package under the
+  same LEI, period and `/ESEF/` path on that host), falls back to the guess if the lookup fails,
+  and retries the lookup once after a 404. XBRL Report Packages (`.xbri`), which the site serves
+  without a Content-Type, are accepted on the evidence of the ZIP header. The stored document
+  records `package_url` and `package_url_source` (`register`, `lookup` or `derived`).
+  `capture_source` now refuses filings.xbrl.org URLs and points to `capture_filing`, which keeps
+  the filing page-mappable.
 - **A NUL character in a tool result no longer fails the run.** Postgres refuses `\u0000`
   in JSONB, and extracted PDF text can carry one, so saving the run's messages raised
   `UntranslatableCharacterError` and the run (and its batch row) ended as failed. NUL
