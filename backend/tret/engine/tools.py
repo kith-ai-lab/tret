@@ -950,6 +950,10 @@ async def capture_source(
     parts = urlsplit(url)
     if parts.scheme != "https" or not parts.hostname:
         raise ToolError("url must be an absolute https:// URL.")
+    from tret.services.esef_filing import FILINGS_HOST
+
+    if parts.hostname.lower().rstrip(".") == FILINGS_HOST:
+        raise ToolError("Use capture_filing for ESEF filings; it records the filing for page mapping.")
     expected = None
     if expected_sha256 is not None and str(expected_sha256).strip():
         expected = str(expected_sha256).strip()

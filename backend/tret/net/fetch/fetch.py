@@ -46,6 +46,8 @@ READABLE_TYPES: dict[str, str] = {
     "text/markdown": ".md",
     "text/csv": ".csv",
     "application/json": ".json",
+    # JSON:API (filings.xbrl.org's /api/filings answers in this type).
+    "application/vnd.api+json": ".json",
     "application/pdf": ".pdf",
 }
 
@@ -64,6 +66,12 @@ CAPTURE_TYPES: dict[str, str] = {
 PDF_MAGIC = b"%PDF-"
 ZIP_MAGIC = b"PK\x03\x04"
 SNIFFED_TYPE = "application/octet-stream"
+# With `sniff_zip` (ESEF packages and XBRL Report Packages, .xbri), these types, or none at
+# all (filings.xbrl.org sends no Content-Type for .xbri files), count as a ZIP only on the
+# evidence of the first bytes.
+ZIP_SNIFF_TYPES = frozenset(
+    {"", SNIFFED_TYPE, "application/vnd.xbrl.report+zip", "application/x-xbrl-report-package"}
+)
 
 # The response headers kept as collection provenance. Nothing else is stored:
 # cookies and auth-adjacent headers have no business in a document row.
@@ -82,6 +90,10 @@ CHUNK_BYTES = 64 * 1024
 
 class FetchError(RuntimeError):
     """The fetch was permitted but did not produce a readable page."""
+
+    def __init__(self, message: str = "", *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -174,9 +186,9 @@ async def fetch_page(
                         current = str(httpx.URL(current).join(location))
                         continue
                     if resp.status_code >= 400:
-                        raise FetchError(f"HTTP {resp.status_code} from {current}")
+                        raise FetchError(f"HTTP {resp.status_code} from {current}", status_code=resp.status_code)
                     content_type = _content_type(resp)
-                    sniff_zip_type = capture and sniff_zip and content_type == SNIFFED_TYPE
+                    sniff_zip_type = capture and sniff_zip and content_type in ZIP_SNIFF_TYPES
                     sniff_pdf = capture and content_type == SNIFFED_TYPE and not sniff_zip_type
                     extension = (
                         CAPTURE_TYPES[content_type]

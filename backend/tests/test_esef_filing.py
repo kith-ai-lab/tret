@@ -63,6 +63,18 @@ def _zip(entries: dict[str, bytes]) -> zipfile.ZipFile:
 
 
 # ── member picking ────────────────────────────────────────────────────────────
+def test_the_report_is_found_when_the_top_folder_differs_from_the_package_name():
+    # An XBRL Report Package: {top}/reports/{file}, whatever the .xbri/.zip file is called.
+    zf = zipfile.ZipFile(io.BytesIO(make_esef_zip(make_paged_report(), name="5QK37QC7NWOJ8D7WVQ45-2025-12-31-1-es")))
+    assert ef.pick_report_member(zf) == (
+        "5QK37QC7NWOJ8D7WVQ45-2025-12-31-1-es/reports/5QK37QC7NWOJ8D7WVQ45-2025-12-31-1-es.xhtml")
+
+
+def test_xbri_package_urls_are_accepted_as_they_are():
+    url = "https://filings.xbrl.org/5QK37QC7NWOJ8D7WVQ45/2025-12-31/ESEF/ES/0/5QK37QC7NWOJ8D7WVQ45-2025-12-31.xbri"
+    assert ef.package_url_from_report_url(url) == url
+
+
 def test_picks_the_report_member():
     zf = zipfile.ZipFile(io.BytesIO(make_esef_zip(make_paged_report())))
     assert ef.pick_report_member(zf) == "acme-2025/reports/acme-2025.xhtml"
