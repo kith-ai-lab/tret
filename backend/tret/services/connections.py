@@ -982,6 +982,26 @@ async def _graph_get(access_token: str, path: str, *, params: dict | None = None
         raise RuntimeError(f"could not reach Microsoft Graph: {exc}") from exc
 
 
+def _graph_status(exc: BaseException) -> int | None:
+    """The HTTP status behind a `_graph_get` RuntimeError, or None when it was
+    a transport or egress failure rather than a Graph response."""
+    cause = exc.__cause__
+    if isinstance(cause, httpx.HTTPStatusError):
+        return cause.response.status_code
+    return None
+
+
+# Only these statuses mean "that item/endpoint is not there for this account" (a
+# missing item, no SharePoint on a personal account). 401, 429 and 5xx are
+# failures to ask, not answers, and must never be turned into a cached verdict
+# or a cached (shorter) sources list.
+_GRAPH_NOT_FOUND_STATUSES = frozenset({400, 403, 404})
+
+
+def _is_graph_client_error(exc: BaseException) -> bool:
+    return _graph_status(exc) in _GRAPH_NOT_FOUND_STATUSES
+
+
 def _m365_site_out(site: dict) -> dict:
     return {"id": site.get("id"), "name": site.get("displayName") or site.get("name") or "", "kind": "site"}
 
@@ -1041,7 +1061,15 @@ async def browse_m365(
     """
     token = await get_access_token(db, workspace_id, M365)
     if scope == "sites":
-        body = await _graph_get(token, "/sites", params={"search": "*"})
+        try:
+            body = await _graph_get(token, "/sites", params={"search": "*"})
+        except RuntimeError as exc:
+            # A personal Microsoft account has no SharePoint: `/sites` answers
+            # 4xx. Their OneDrive is still browsable, so return just that.
+            if not _is_graph_client_error(exc):
+                raise
+            log.info("connections: /sites unavailable (%s); returning OneDrive only", exc)
+            body = {}
         items = [_m365_site_out(s) for s in body.get("value", [])]
         my_drive = await _graph_get(token, "/me/drive", params={"$select": "id,name"})
         if my_drive.get("id"):
@@ -1401,7 +1429,15 @@ async def _derive_connected_sources(db: AsyncSession, workspace_id: uuid.UUID) -
     next_link: str | None = None
     for _ in range(_MAX_SITE_PAGES):
         if next_link is None:
-            body = await _graph_get(token, "/sites", params={"search": "*"})
+            try:
+                body = await _graph_get(token, "/sites", params={"search": "*"})
+            except RuntimeError as exc:
+                # Personal Microsoft accounts have no SharePoint, so `/sites`
+                # answers 4xx; their own OneDrive below is still a source.
+                if not _is_graph_client_error(exc):
+                    raise
+                log.info("connections: /sites unavailable (%s); deriving OneDrive only", exc)
+                break
         elif next_link.startswith(GRAPH_API_BASE):
             # @odata.nextLink is a full URL; _graph_get only takes a path,
             # so strip the base it always shares with every other Graph call
@@ -1682,6 +1718,8 @@ async def search_connected_files(
     max_results: int = 20,
     actor_user_id: uuid.UUID | None = None,
     actor_run_id: uuid.UUID | None = None,
+    folders: list[dict] | None = None,
+    scope_cache: dict | None = None,
 ) -> list[SearchHit]:
     """Full-text search over the workspace's allowed m365 drives
     (`list_connected_sources`), narrowed to one source when `source_slug` is
@@ -1694,7 +1732,11 @@ async def search_connected_files(
     fallback where no drive answered is raised as a `RuntimeError` rather
     than reported as "no matches". A transport failure that outlasts the
     retry raises straight away. `max_results` is clamped to
-    `[1, 20]` regardless of what is asked for. Raises `ValueError` for an
+    `[1, 20]` regardless of what is asked for. With a non-empty `folders`
+    (a session's attached folders, see `resolve_session_folders`) the tenant
+    Search API is skipped and `source_slug` ignored: each folder is searched
+    on its own and every hit is verified to sit inside one of them
+    (`item_in_folders`). Raises `ValueError` for an
     empty (or whitespace-only) `query`, and `ConnectionUnavailable` (via
     `list_connected_sources`) under the same conditions that function does.
 
@@ -1714,6 +1756,18 @@ async def search_connected_files(
     max_results = max(1, min(_MAX_SEARCH_RESULTS, max_results))
 
     sources = await list_connected_sources(db, workspace_id)
+    if folders:
+        all_by_drive = {s.drive_id: s for s in sources}
+        active = [f for f in folders if f["drive_id"] in all_by_drive]
+        if not active:
+            return []
+        token = await get_access_token(db, workspace_id, M365)
+        hits = await _search_within_folders(
+            token, query, active, all_by_drive, scope_cache if scope_cache is not None else {}, max_results
+        )
+        return await _finish_search(
+            db, workspace_id, query, hits[:max_results], actor_user_id, actor_run_id
+        )
     if source_slug is not None:
         sources = [s for s in sources if s.slug == source_slug]
     if not sources:
@@ -1734,7 +1788,17 @@ async def search_connected_files(
             # Every drive failed too: report the outage rather than a clean
             # "no matches" a run would act on.
             raise RuntimeError(f"{exc}; per-drive search failed as well") from exc
-    result = hits[:max_results]
+    return await _finish_search(db, workspace_id, query, hits[:max_results], actor_user_id, actor_run_id)
+
+
+async def _finish_search(
+    db: AsyncSession,
+    workspace_id: uuid.UUID,
+    query: str,
+    result: list[SearchHit],
+    actor_user_id: uuid.UUID | None,
+    actor_run_id: uuid.UUID | None,
+) -> list[SearchHit]:
     await record_connection_activity(
         db,
         workspace_id=workspace_id,
@@ -1746,6 +1810,313 @@ async def search_connected_files(
         actor_run_id=actor_run_id,
     )
     return result
+
+
+# ── session folders: a chat conversation restricted to OneDrive/SharePoint folders
+# A conversation can carry up to `MAX_SESSION_FOLDERS` folders
+# (`Conversation.connected_folders`). When it does, every connected-file tool in
+# its runs only sees items inside them — verified against Graph's own parent
+# chain (`item_in_folders`), never by matching path strings and never by
+# trusting a client-supplied name or path (`resolve_session_folders` re-reads
+# both from Graph).
+MAX_SESSION_FOLDERS = 10
+_MAX_ANCESTOR_HOPS = 25
+_FOLDER_CHILDREN_PAGE = 200
+
+
+def _folder_key(folder: dict) -> tuple[str, str]:
+    return folder["drive_id"], folder["item_id"]
+
+
+async def resolve_session_folders(
+    db: AsyncSession, workspace_id: uuid.UUID, refs: list[dict]
+) -> list[dict]:
+    """Turn client-sent `{drive_id, item_id}` refs into stored folder entries
+    `{drive_id, item_id, name, path, web_url}`, with name/path/web_url read
+    from Graph. Raises `ConnectionUnavailable` (no usable connection),
+    `ConnectionAuthError` (token cannot be refreshed), `ValueError` (not a
+    folder, outside the workspace's allowed sources, more than
+    `MAX_SESSION_FOLDERS`, or not found) and `RuntimeError` (Graph failed)."""
+    await ensure_connection_usable(db, workspace_id, M365)
+    unique: dict[tuple[str, str], dict] = {}
+    for ref in refs:
+        unique.setdefault((ref["drive_id"], ref["item_id"]), ref)
+    if len(unique) > MAX_SESSION_FOLDERS:
+        raise ValueError(f"A session can have at most {MAX_SESSION_FOLDERS} folders.")
+    if not unique:
+        return []
+    sources = await list_connected_sources(db, workspace_id)
+    labels = {s.drive_id: s.label for s in sources}
+    token = await get_access_token(db, workspace_id, M365)
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for drive_id, item_id in unique:
+        if drive_id not in labels:
+            raise ValueError("That folder is outside the workspace's allowed sources.")
+        try:
+            meta = await _graph_get(
+                token,
+                f"/drives/{quote(drive_id, safe='')}/items/{quote(item_id, safe='')}",
+                params={"$select": "id,name,folder,parentReference,webUrl"},
+            )
+        except RuntimeError as exc:
+            if _is_graph_client_error(exc):
+                raise ValueError("That folder could not be found or is not accessible.") from exc
+            raise
+        name = meta.get("name") or item_id
+        if "folder" not in meta:
+            raise ValueError(f"{name} is not a folder.")
+        # Store Graph's own ids, not the client's spelling. The canonical drive
+        # id is used only when it is itself an allowed source (personal accounts
+        # can spell the same drive with different case).
+        item_id = meta.get("id") or item_id
+        canonical_drive = (meta.get("parentReference") or {}).get("driveId")
+        if canonical_drive and canonical_drive in labels:
+            drive_id = canonical_drive
+        if (drive_id, item_id) in seen:
+            continue
+        seen.add((drive_id, item_id))
+        if "root" in meta:
+            path = labels[drive_id]
+        else:
+            parent_path = (meta.get("parentReference") or {}).get("path") or ""
+            path = _humanize_path(parent_path, name, labels[drive_id])
+        out.append(
+            {
+                "drive_id": drive_id,
+                "item_id": item_id,
+                "name": name,
+                "path": path,
+                "web_url": meta.get("webUrl"),
+            }
+        )
+    return out
+
+
+async def item_in_folders(
+    token: str,
+    drive_id: str,
+    item_id: str,
+    folders: list[dict],
+    cache: dict,
+    *,
+    trust_seeded: bool = False,
+) -> bool:
+    """True when `item_id` IS one of `folders` or has one as an ancestor in the
+    same drive. Walks `parentReference.id` upward (at most `_MAX_ANCESTOR_HOPS`
+    hops, stopping at the drive root); a walk that runs out of hops, or hits an
+    item Graph answers 4xx for, is False. `cache` (one per run) memoises both
+    parent links and verdicts keyed by `(drive_id, item_id)`, so repeated
+    checks in one run cost few Graph calls. A different drive is False without
+    any call; 401, 429, 5xx and transport failures raise `RuntimeError` and
+    cache nothing (only 400/403/404 count as "not there" and give False).
+
+    Cache entries are of two kinds. Verified ones come from a Graph GET of the
+    item (or of its parent folder's listing) and are always trusted. Seeded ones
+    are a parent link a search hit claimed for itself; they are used only with
+    `trust_seeded=True` (filtering search hits for display), with their
+    verdicts kept apart, so a read or a listing never rests on them."""
+    folder_ids = {f["item_id"] for f in folders if f["drive_id"] == drive_id}
+    if not folder_ids:
+        return False
+    parents: dict = cache.setdefault("parents", {})
+    verdicts: dict = cache.setdefault("inside", {})
+    seeded: dict = cache.setdefault("seeded_parents", {})
+    loose: dict = cache.setdefault("inside_seeded", {})
+    walked: list[str] = []
+    current = item_id
+    result = False
+    for hop in range(_MAX_ANCESTOR_HOPS + 1):
+        known = verdicts.get((drive_id, current))
+        if known is None and trust_seeded:
+            known = loose.get((drive_id, current))
+        if known is not None:
+            result = known
+            break
+        walked.append(current)
+        if current in folder_ids:
+            result = True
+            break
+        if hop == _MAX_ANCESTOR_HOPS:
+            break  # out of hops: no further fetch, treated as outside
+        if (drive_id, current) in parents:
+            parent = parents[(drive_id, current)]
+        elif trust_seeded and (drive_id, current) in seeded:
+            parent = seeded[(drive_id, current)]
+        else:
+            try:
+                meta = await _graph_get(
+                    token,
+                    f"/drives/{quote(drive_id, safe='')}/items/{quote(current, safe='')}",
+                    params={"$select": "id,parentReference"},
+                )
+            except RuntimeError as exc:
+                if _is_graph_client_error(exc):
+                    result = False
+                    break
+                raise
+            parent = (meta.get("parentReference") or {}).get("id") or None
+            parents[(drive_id, current)] = parent
+        if parent is None:
+            break  # reached the drive root without meeting a folder
+        current = parent
+    for node in walked:
+        (loose if trust_seeded else verdicts)[(drive_id, node)] = result
+    return result
+
+
+def _seed_parent(cache: dict, drive_id: str, item_id: str, parent_id: str | None) -> None:
+    """Record a parent link Graph already told us (a search hit's or child's
+    own `parentReference.id`) so a later `item_in_folders` skips that call."""
+    if parent_id:
+        cache.setdefault("seeded_parents", {}).setdefault((drive_id, item_id), parent_id)
+
+
+async def _search_within_folders(
+    token: str,
+    query: str,
+    folders: list[dict],
+    sources_by_drive: dict[str, ConnectedSource],
+    cache: dict,
+    max_results: int,
+) -> list[SearchHit]:
+    """Per-folder `GET /drives/{d}/items/{folder}/search(q='...')`, every hit
+    re-verified with `item_in_folders` (some tenants answer a folder-scoped
+    search with drive-wide results). A folder whose search fails is skipped;
+    when every one fails the outage is raised rather than reported as "no
+    matches"."""
+    encoded_query = quote(query.replace("'", "''"), safe="")
+    hits: list[SearchHit] = []
+    seen: set[str] = set()
+    answered = 0
+    failure: RuntimeError | None = None
+    for folder in folders:
+        if len(hits) >= max_results:
+            break
+        drive_id = folder["drive_id"]
+        source = sources_by_drive[drive_id]
+        path = (
+            f"/drives/{quote(drive_id, safe='')}/items/{quote(folder['item_id'], safe='')}"
+            f"/search(q='{encoded_query}')"
+        )
+        try:
+            body = await _graph_get(token, path)
+        except RuntimeError as exc:
+            failure = exc
+            continue
+        answered += 1
+        for item in body.get("value", []):
+            if len(hits) >= max_results:
+                break
+            item_id = item.get("id")
+            parent = item.get("parentReference") or {}
+            if not item_id or parent.get("driveId", drive_id) != drive_id:
+                continue
+            ref = make_item_ref(M365, drive_id, item_id)
+            if ref in seen:
+                continue
+            _seed_parent(cache, drive_id, item_id, parent.get("id"))
+            if not await item_in_folders(
+                token, drive_id, item_id, folders, cache, trust_seeded=True
+            ):
+                continue
+            parsed = _search_hit_from_resource(item, summary=None, source=source)
+            if parsed is None:
+                continue
+            seen.add(ref)
+            hits.append(replace(parsed, item_ref=ref))
+    if folders and not answered and failure is not None:
+        raise RuntimeError(f"folder search failed: {failure}") from failure
+    return hits
+
+
+class FolderListing(list):
+    """`list_connected_folder`'s entries, plus whether the one page fetched
+    was cut short (`truncated`)."""
+
+    truncated: bool = False
+
+
+async def list_connected_folder(
+    db: AsyncSession,
+    workspace_id: uuid.UUID,
+    folders: list[dict],
+    item_ref: str | None,
+    *,
+    scope_cache: dict,
+    actor_run_id: uuid.UUID | None = None,
+) -> list[dict]:
+    """What is inside a session's attached folders. `item_ref=None` lists the
+    folders themselves; a folder's `item_ref` lists its children (one page of
+    `_FOLDER_CHILDREN_PAGE`; `.truncated` says when there were more). Entries:
+    `{name, kind, size, modified, item_ref}` (folder roots also carry `path`).
+    Folders whose drive is no longer allowed are dropped. Raises `ValueError`
+    for a malformed ref, an item outside the folders, or a non-folder."""
+    sources = await list_connected_sources(db, workspace_id)
+    allowed = {s.drive_id for s in sources}
+    active = [f for f in folders if f["drive_id"] in allowed]
+    if item_ref is None:
+        return FolderListing(
+            {
+                "name": f["name"],
+                "kind": "folder",
+                "size": None,
+                "modified": None,
+                "item_ref": make_item_ref(M365, f["drive_id"], f["item_id"]),
+                "path": f.get("path"),
+            }
+            for f in active
+        )
+    provider, drive_id, item_id = parse_item_ref(item_ref)
+    if provider != M365:
+        raise ValueError(f"unsupported provider in item_ref: {provider!r}")
+    token = await get_access_token(db, workspace_id, M365)
+    if drive_id not in allowed or not await item_in_folders(
+        token, drive_id, item_id, active, scope_cache
+    ):
+        raise ValueError("That item is outside this session's folders.")
+    meta = await _graph_get(
+        token,
+        f"/drives/{quote(drive_id, safe='')}/items/{quote(item_id, safe='')}",
+        params={"$select": "id,name,folder"},
+    )
+    if "folder" not in meta:
+        raise ValueError(f"{meta.get('name') or item_id} is not a folder.")
+    body = await _graph_get(
+        token,
+        f"/drives/{quote(drive_id, safe='')}/items/{quote(item_id, safe='')}/children",
+        params={"$top": _FOLDER_CHILDREN_PAGE},
+    )
+    entries = FolderListing()
+    for child in body.get("value", []):
+        child_id = child.get("id")
+        if not child_id:
+            continue
+        # A child of a folder inside the scope is inside it: remember that. This
+        # comes from Graph's own listing of a verified folder, so it is a verified
+        # entry, unlike a search hit's claim about itself (`_seed_parent`).
+        scope_cache.setdefault("parents", {}).setdefault((drive_id, child_id), item_id)
+        scope_cache.setdefault("inside", {})[(drive_id, child_id)] = True
+        entries.append(
+            {
+                "name": child.get("name") or "",
+                "kind": "folder" if "folder" in child else "file",
+                "size": None if "folder" in child else child.get("size"),
+                "modified": child.get("lastModifiedDateTime"),
+                "item_ref": make_item_ref(M365, drive_id, child_id),
+            }
+        )
+    entries.truncated = bool(body.get("@odata.nextLink"))
+    await record_connection_activity(
+        db,
+        workspace_id=workspace_id,
+        provider=M365,
+        action="list",
+        target=(meta.get("name") or item_id)[:200],
+        detail=str(len(entries)),
+        actor_run_id=actor_run_id,
+    )
+    return entries
 
 
 def _safe_connected_filename(raw: str | None) -> str:
@@ -1803,6 +2174,8 @@ async def materialize_connected_file(
     item_ref: str,
     uploaded_by: uuid.UUID | None = None,
     actor_run_id: uuid.UUID | None = None,
+    folders: list[dict] | None = None,
+    scope_cache: dict | None = None,
 ) -> Document:
     """Pull one `item_ref` (from a `SearchHit`, or anything else that names
     an m365 drive item) into `project_id`'s documents, downloading it only
@@ -1834,6 +2207,10 @@ async def materialize_connected_file(
     `Document` it creates, so a second "who was this for" parameter would
     be redundant; `actor_run_id` has no existing equivalent to reuse, hence
     the new parameter.
+
+    With a non-empty `folders` (a session's attached folders) the item must be
+    one of them or inside one (`item_in_folders`), else `ValueError` — before
+    any download.
     """
     provider, drive_id, item_id = parse_item_ref(item_ref)
     if provider != M365:
@@ -1845,6 +2222,12 @@ async def materialize_connected_file(
         raise ConnectionUnavailable("That file is outside the folders this workspace allows.")
 
     token = await get_access_token(db, workspace_id, M365)
+    if folders and not await item_in_folders(
+        token, drive_id, item_id, folders, scope_cache if scope_cache is not None else {}
+    ):
+        # Checked before the metadata fetch and any download: a session
+        # restricted to folders never pulls anything from outside them.
+        raise ValueError("That file is outside this session's folders.")
     metadata = await m365_item_metadata(token, drive_id=drive_id, item_id=item_id)
     if "folder" in metadata:
         raise ValueError(f"item_ref {item_ref!r} names a folder, not a file")

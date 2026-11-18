@@ -1145,6 +1145,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/chat/{conversation_id}/folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Conversation Folders
+         * @description Replace the OneDrive/SharePoint folders this conversation is restricted
+         *     to. An empty list clears them and needs no connection or gate. Any
+         *     workspace member, same as browsing.
+         */
+        put: operations["set_conversation_folders_api_chat__conversation_id__folders_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/chat/{conversation_id}/messages": {
         parameters: {
             query?: never;
@@ -3763,6 +3785,8 @@ export interface components {
         };
         /** CreateConversationBody */
         CreateConversationBody: {
+            /** Folders */
+            folders?: components["schemas"]["FolderRef"][];
             /** Harness Id */
             harness_id?: string | null;
         };
@@ -4034,6 +4058,17 @@ export interface components {
              * @default false
              */
             force: boolean;
+        };
+        /**
+         * FolderRef
+         * @description A OneDrive/SharePoint folder the client picked. Only the ids are taken
+         *     from the client; name/path are re-read from Graph by `resolve_session_folders`.
+         */
+        FolderRef: {
+            /** Drive Id */
+            drive_id: string;
+            /** Item Id */
+            item_id: string;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -4357,6 +4392,11 @@ export interface components {
             objective?: string | null;
             /** Text */
             text: string;
+        };
+        /** SetFoldersBody */
+        SetFoldersBody: {
+            /** Folders */
+            folders?: components["schemas"]["FolderRef"][];
         };
         /** SetKeyBody */
         SetKeyBody: {
@@ -6415,6 +6455,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    set_conversation_folders_api_chat__conversation_id__folders_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetFoldersBody"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

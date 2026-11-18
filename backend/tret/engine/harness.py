@@ -56,10 +56,12 @@ from tret.engine.tools import (
     DATABASE_TOOL_NAMES,
     DELEGATION_DEPTH_KEY,
     LESSON_TOOL_NAMES,
+    SESSION_FOLDERS_KEY,
     SUBAGENT_ALLOWED_TOOLS,
     SUBAGENT_TASK_TYPE,
     WEB_TOOL_NAMES,
     WRITE_CONNECTOR_TOOL_NAMES,
+    _frame_safe,
     RunContext,
     execute_tool,
     get_builtin_tools,
@@ -273,6 +275,57 @@ def _effective_max_cost(harness_cap: Decimal, task_input: dict) -> Decimal:
     if not stamped_cap.is_finite() or stamped_cap <= 0:
         return harness_cap
     return min(harness_cap, stamped_cap)
+
+
+MAX_SESSION_FOLDERS = 10
+
+
+def _session_folders(task_input: dict) -> list[dict] | None:
+    """The run's attached OneDrive/SharePoint folders from
+    `task_input["_session_folders"]`: only well-formed entries (dicts with
+    non-empty string `drive_id` and `item_id`), at most 10, None when none."""
+    raw = (task_input or {}).get(SESSION_FOLDERS_KEY)
+    if not isinstance(raw, list):
+        return None
+    folders = [
+        f
+        for f in raw
+        if isinstance(f, dict)
+        and isinstance(f.get("drive_id"), str)
+        and f["drive_id"]
+        and isinstance(f.get("item_id"), str)
+        and f["item_id"]
+    ][:MAX_SESSION_FOLDERS]
+    return folders or None
+
+
+def _with_folder_context(extra_context: str | None, folders: list[dict] | None) -> str | None:
+    """`extra_context` with the folder paragraph appended when folders apply."""
+    if not folders:
+        return extra_context
+    paragraph = _session_folders_context(folders)
+    return f"{extra_context}\n\n{paragraph}" if extra_context else paragraph
+
+
+def _session_folders_requested(task_input: dict) -> bool:
+    """True when the run asked for folder scoping at all (a non-empty value under
+    `_session_folders`), whether or not any entry is usable."""
+    return bool((task_input or {}).get(SESSION_FOLDERS_KEY))
+
+
+def _session_folders_context(folders: list[dict]) -> str:
+    """The short context paragraph telling the model its connected-file tools
+    are restricted. Names and paths are Graph-supplied, so they go through
+    `_frame_safe`; the text is a pure function of `folders` (stable for caching)."""
+    lines = "\n".join(
+        f"- {_frame_safe(f.get('name') or f['item_id'])} ({_frame_safe(f.get('path'))})" for f in folders
+    )
+    return (
+        "This session has these OneDrive/SharePoint folders attached:\n"
+        f"{lines}\n"
+        "Connected-file tools only see inside these folders. Start with list_connected_folder "
+        "to see what is there."
+    )
 
 
 def _subagent_tool_names(
@@ -1762,6 +1815,46 @@ class HarnessEngine:
                 )
         if database_offer:
             enabled_names = [*enabled_names, *database_offer]
+        session_folders = _session_folders(run.task_input)
+        folders_unusable = session_folders is None and _session_folders_requested(run.task_input)
+        # A folder session fails closed. `start_batch` creates row runs that carry
+        # no `_session_folders`, so they could read outside the folders: withheld.
+        # A folder list present but with no valid entry must not read as
+        # "unrestricted": every connector read tool is withheld instead.
+        folder_held: set[str] = set()
+        if session_folders or folders_unusable:
+            folder_held.add("start_batch")
+        if folders_unusable:
+            folder_held |= CONNECTOR_TOOL_NAMES
+        folder_withheld = [n for n in enabled_names if n in folder_held]
+        if folder_withheld:
+            enabled_names = [n for n in enabled_names if n not in folder_held]
+            await self.bus.publish(
+                run.id,
+                RunEvent(
+                    "tools_withheld",
+                    {
+                        "tools": sorted(folder_withheld),
+                        "reason": "session_folders_invalid" if folders_unusable else "session_folders",
+                        "detail": (
+                            "This conversation's attached folders could not be read, so connected "
+                            "files are unavailable for this run."
+                            if folders_unusable
+                            else "Batches are not available in a session restricted to attached "
+                            "folders: their rows would not carry the folder restriction."
+                        ),
+                    },
+                ),
+            )
+        if (
+            session_folders
+            and "list_connected_folder" not in enabled_names
+            and ({"search_connected_files", "read_connected_file"} & set(enabled_names))
+        ):
+            # After the connector withholding above (so an unusable connection
+            # never gains a tool) and before the subagent narrowing below (so a
+            # subagent still only holds what its parent granted).
+            enabled_names = [*enabled_names, "list_connected_folder"]
         # Pack lessons (services/lessons.py): on for every pack-bound run unless
         # the harness opts out, so the model can read what reviewers approved
         # and propose more. Sorted, and never duplicated if a pack task already
@@ -1808,7 +1901,10 @@ class HarnessEngine:
             pack,
             run.task_type,
             output_schemas,
-            extra_context=run.task_input.get("_capabilities"),
+            extra_context=_with_folder_context(
+                run.task_input.get("_capabilities"),
+                session_folders if "list_connected_folder" in enabled_names else None,
+            ),
             web_tools_enabled=any(n in WEB_TOOL_NAMES for n in enabled_names),
             lessons=(
                 await approved_lessons(db, workspace_id, pack.slug) if lessons_on else None
@@ -1925,6 +2021,8 @@ class HarnessEngine:
             output_schemas=output_schemas,
             pack_manifest=pack.manifest if pack else None,
             pack_dir=pack.source_path if pack else None,
+            session_folders=session_folders,
+            folders_unusable=folders_unusable,
             terminal_tool=task.get("terminal_tool"),
             # Clamped at zero: a negative depth would buy extra hops under
             # `MAX_DELEGATION_DEPTH`. The runs API strips this key from what a

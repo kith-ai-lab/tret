@@ -10,6 +10,20 @@ one that needs action on an existing install.
 
 ### Added
 
+- **OneDrive and SharePoint folders on a chat.** The composer's paperclip is now a "+" menu:
+  "Upload files" as before, and "Add OneDrive folder", which opens a folder picker over the
+  workspace's Microsoft 365 connection (or "Connect OneDrive…" when there is none). A
+  conversation can carry up to 10 folders, shown as chips above the message box. While it has
+  folders, the connected-file tools in its runs, and in any run they delegate to, only see
+  items inside them: search hits and reads are checked against the folder's ancestry in
+  Microsoft Graph, and a new `list_connected_folder` tool lists what is inside. Folders must
+  sit in drives the workspace's read allowlist permits. A chat without folders behaves as
+  before. New `PUT /api/chat/{id}/folders`, optional `folders` on `POST /api/chat`, and
+  `folders` on every conversation; migration `e5b8c2d7f013` adds
+  `conversations.connected_folders`. Personal Microsoft accounts, which have no SharePoint,
+  can now browse their OneDrive and use it as a connected source.
+- **The cohort edition calls chat "Sessions".** Its sidebar item, "New session" button and
+  related labels use the word session; the standard edition is unchanged.
 - **ESEF filing fallback for the Disclosure Collector.** When an issuer's own PDF is refused
   (or does not exist for the year) and the target carries a `source_filing_url`, the Collector
   can now capture the regulated ESEF filing with the new `capture_filing` tool (one package

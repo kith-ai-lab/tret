@@ -173,6 +173,69 @@ more. What a run (or a person, from a future write-back UI) may write
 *to* is a separate, independent allowlist — see [Write-back](#write-back)
 below.
 
+## Session folders
+
+A chat conversation can carry up to 10 OneDrive/SharePoint **folders**
+(`Conversation.connected_folders`). While it has any, every connected-file
+tool in that conversation's runs, including delegated child runs and
+subagents, only sees items inside those folders. With none, behaviour is
+exactly as described in [Live access in runs](#live-access-in-runs), limited
+only by the [read allowlist](#read-allowlist).
+
+- **Verified, not assumed.** `search_connected_files` searches each folder
+  with Graph's folder-scoped search and re-checks every hit;
+  `read_connected_file` and `list_connected_folder` check the item's
+  `parentReference.id` chain upward (at most 25 hops, same drive) before
+  fetching anything. A per-run cache keeps repeat checks cheap. The `source`
+  argument of search is ignored while folders are attached.
+- **`list_connected_folder`** is offered automatically next to
+  search/read when the session has folders. With no `item_ref` it lists the
+  attached folders; with a folder's `item_ref` it lists that folder's children
+  (one page of 200; it says when truncated). It counts against the per-run
+  search budget.
+- **Names and paths are server-side.** Clients send only `drive_id` and
+  `item_id`; the name, path and URL are read from Graph. A folder must be a
+  folder, in a drive the workspace's read allowlist permits.
+- **Personal Microsoft accounts** have no SharePoint, so `/sites` answers
+  400, 403 or 404 for them; browsing and source derivation then still return
+  the user's OneDrive. Any other failure (401, 429, 5xx, network) is raised,
+  never read as "no SharePoint", and nothing is cached from it. The same
+  statuses decide the containment check: 400/403/404 on an item mean "not
+  inside"; throttling or auth errors fail the call and cache no verdict.
+- **Containment is never decided by a search hit.** A search hit's own claim
+  about its parent may be used to filter what search lists, but reading a file
+  or listing a folder walks Graph's parent chain from a fresh fetch of the item.
+- **Batches are not offered in a folder session.** `start_batch` is withheld
+  (a batch's row runs do not carry the folder restriction); delegated runs and
+  subagents do inherit it. If a conversation's folder list is present but no
+  entry in it is usable, the connected-file tools are withheld for the run
+  rather than treated as unrestricted.
+- **Earlier connected documents stay out of reach.** In a folder session
+  `read_document` and `search_documents` skip connected documents (files
+  pulled from OneDrive/SharePoint by earlier runs) unless they are attached to
+  this run or were read by `read_connected_file` in it, since that read
+  checked the folders. Re-read an earlier file with `read_connected_file`.
+  Uploaded and web documents are unaffected.
+- **Changes apply from the next message.** Changing a conversation's folders
+  does not affect a reply that is already running.
+
+### API
+
+All routes need a workspace member and, when folders are non-empty, an active
+m365 connection plus the `connections.use` gate.
+
+- `POST /api/chat` accepts `{"folders": [{"drive_id", "item_id"}, ...]}`
+  (optional, max 10, unknown keys rejected).
+- `PUT /api/chat/{conversation_id}/folders` with `{"folders": [...]}` replaces
+  the list and returns the conversation (`messages` included). An empty list
+  clears it and needs no connection or gate.
+- Every conversation response carries `"folders": [{drive_id, item_id, name,
+  path, web_url}]` (`[]` when none).
+- Status codes: 403 gate refused (`{reason, detail}`), 404 unknown
+  conversation or another workspace's, 409 connection unusable or needs
+  reconnecting, 422 not a folder / drive outside the allowed sources / more
+  than 10 / malformed body, 502 Graph failed.
+
 ## Write-back
 
 Beyond reading, an m365 connection can be upgraded to let runs write

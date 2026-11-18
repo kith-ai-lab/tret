@@ -37,7 +37,7 @@ const EDITIONS: Record<Edition, { nav: NavItem[]; hiddenPrefixes: string[]; exac
   },
   cohort: {
     nav: [
-      { to: '/', label: 'Chat' },
+      { to: '/', label: 'Sessions' },
       { to: '/approvals', label: 'Approvals', count: 'approvals' },
       { to: '/deliverables', label: 'Deliverables', count: 'deliverables' },
       { to: '/documents', label: 'Documents' },
@@ -74,6 +74,57 @@ export function isRouteHidden(edition: Edition, pathname: string): boolean {
     hiddenPrefixes.some((p) => pathname === p || pathname.startsWith(`${p}/`)) ||
     exactPrefixes.includes(path)
   )
+}
+
+/** The nouns the chat page uses for itself. Tret Learning calls a chat a
+ *  "session" so learners connect it with Claude Code; standard keeps "chat". */
+export interface ChatWording {
+  /** Rail button, topbar title and icon button: "New chat" / "New session". */
+  newChat: string
+  /** Lower-case singular, for sentences. */
+  noun: string
+  /** Lower-case plural, for sentences. */
+  nouns: string
+  /** Capitalised plural, for the toggle titles. */
+  showList: string
+  hideList: string
+  toggleList: string
+  empty: string
+  loadFailed: string
+  untitled: string
+  loading: string
+  threadLoadFailed: string
+}
+
+export function chatWording(edition: Edition): ChatWording {
+  if (edition === 'cohort') {
+    return {
+      newChat: 'New session',
+      noun: 'session',
+      nouns: 'sessions',
+      showList: 'Show sessions',
+      hideList: 'Hide sessions',
+      toggleList: 'Toggle session list',
+      empty: 'No sessions yet.',
+      loadFailed: 'Could not load sessions',
+      untitled: 'New session',
+      loading: 'Loading session…',
+      threadLoadFailed: 'Could not load this session',
+    }
+  }
+  return {
+    newChat: 'New chat',
+    noun: 'conversation',
+    nouns: 'conversations',
+    showList: 'Show conversations',
+    hideList: 'Hide conversations',
+    toggleList: 'Toggle conversation list',
+    empty: 'No conversations yet.',
+    loadFailed: 'Could not load conversations',
+    untitled: 'New conversation',
+    loading: 'Loading conversation…',
+    threadLoadFailed: 'Could not load this conversation',
+  }
 }
 
 /** The logged-in user's edition, read from the shared ['me'] query (same key
