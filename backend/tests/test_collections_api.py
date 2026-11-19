@@ -577,6 +577,33 @@ def test_a_crashing_engine_fails_the_target(client, world):
     assert t["error"] == "RuntimeError: engine fell over"
 
 
+def test_a_hung_close_out_is_bounded_and_the_target_fails(client, world, monkeypatch):
+    import asyncio
+
+    from tret.batches import core
+
+    async def hung_close_out(run_id, error):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(core, "_close_out_run", hung_close_out)
+    monkeypatch.setenv("TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS", "1")
+    from tret.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setattr(service, "CANCEL_GRACE_SECONDS", 0.1)
+    world.engine.behaviour.update({s: "hang" for s in ("allianz",)})
+    world.engine.behaviour.update({s: "gap" for s in ("shell", "apple", "siemens", "hsbc-holdings")})
+    try:
+        cid = create(client).json()["id"]
+        client.post(f"/api/collections/{cid}/start")
+        settle(client)
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+    t = by_slug(detail(client, cid))["allianz"]
+    assert t["status"] == "failed" and t["error"] == "timeout"
+
+
 def test_a_run_past_the_timeout_is_cancelled_and_failed(client, world, monkeypatch):
     monkeypatch.setenv("TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS", "1")
     from tret.config import get_settings

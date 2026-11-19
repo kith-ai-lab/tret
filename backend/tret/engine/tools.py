@@ -4711,6 +4711,77 @@ def _argument_error(spec: ToolSpec, arguments: dict) -> str | None:
     return f"{spec.name}: " + "; ".join(problems) + f". {tail} Call it again with only these names."
 
 
+class ToolCallTimeout(ToolError):
+    """A tool call outlived `tool_call_timeout_seconds` and finished cancelling
+    within the grace: a tool error the model sees, and the run continues."""
+
+
+class ToolCallAbandoned(Exception):
+    """A timed-out tool call would not even finish cancelling. It may still be
+    using the run's shared session, so this is deliberately NOT a ToolError: it
+    propagates out of the harness and fails the run."""
+
+
+# How long a timed-out (or outer-cancelled) handler gets to unwind after
+# cancellation before it is abandoned. Not `wait_for`: that awaits the
+# cancelled task to finish, so a handler stuck in an uncancellable await (a
+# dead database socket) would hang the very timeout meant to bound it.
+TOOL_CANCEL_GRACE_SECONDS = 10.0
+
+# Strong references to handler tasks until they finish, so an abandoned one is
+# not garbage-collected mid-flight.
+_HANDLER_TASKS: set[asyncio.Task] = set()
+
+
+def _handler_task_done(task: asyncio.Task) -> None:
+    _HANDLER_TASKS.discard(task)
+    if not task.cancelled():
+        task.exception()  # retrieved, so asyncio never logs "exception was never retrieved"
+
+
+# Tools that run whole child runs inline: bounded by `delegation_timeout_seconds`
+# and the collections run limit instead, and a 600s default would cut them short.
+# `capture_filing` has its own bounds (200 MB download, 300 s analysis) that a
+# slow link can legitimately outlast 600 s.
+UNBOUNDED_TOOL_NAMES = frozenset(
+    {"run_harness_task", "delegate_parallel", "spawn_subagent", "capture_filing"}
+)
+
+
+async def _run_handler_bounded(ctx: RunContext, spec: ToolSpec, arguments: dict) -> str:
+    timeout = get_settings().tool_call_timeout_seconds
+    if timeout <= 0 or spec.name in UNBOUNDED_TOOL_NAMES:
+        return await spec.handler(ctx, **arguments)
+    task = asyncio.ensure_future(spec.handler(ctx, **arguments))
+    _HANDLER_TASKS.add(task)
+    task.add_done_callback(_handler_task_done)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        # The engine's finally commits and closes the shared session next:
+        # the handler's cleanup must finish first.
+        task.cancel()
+        await asyncio.wait({task}, timeout=TOOL_CANCEL_GRACE_SECONDS)
+        raise
+    if not done:
+        task.cancel()
+        await asyncio.wait({task}, timeout=TOOL_CANCEL_GRACE_SECONDS)
+        if not task.done():
+            log.error(
+                "tool %s exceeded %ss and ignored cancellation for %ss; abandoning it and failing the run",
+                spec.name, timeout, TOOL_CANCEL_GRACE_SECONDS,
+            )
+            raise ToolCallAbandoned(
+                f"{spec.name} did not finish within {timeout:g}s and could not be cancelled"
+            )
+        log.error("tool %s exceeded %ss wall-clock limit; cancelled", spec.name, timeout)
+        raise ToolCallTimeout(
+            f"{spec.name} did not finish within {timeout:g}s and was stopped. Try a narrower "
+            "call or a different approach; the run continues."
+        )
+    return task.result()
+
+
 async def execute_tool(ctx: RunContext, spec: ToolSpec, arguments: dict) -> tuple[str, bool]:
     """Run one tool call. Returns (result_text, is_error)."""
     try:
@@ -4725,8 +4796,10 @@ async def execute_tool(ctx: RunContext, spec: ToolSpec, arguments: dict) -> tupl
     if not isinstance(arguments, dict):  # pre-check could not describe it (no signature)
         return f"Tool error: {spec.name}: arguments must be a JSON object", True
     try:
-        result = await spec.handler(ctx, **arguments)
+        result = await _run_handler_bounded(ctx, spec, arguments)
         return _cap_result_text(result), False
+    except ToolCallAbandoned:
+        raise
     except ToolError as e:
         return f"Tool error: {e}", True
     except TypeError as e:

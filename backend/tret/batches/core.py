@@ -819,7 +819,15 @@ async def _run_target(collection_id: uuid.UUID, target_id: uuid.UUID, run_id: uu
                     # asyncio.wait never raises the task's CancelledError, so a
                     # cancellation of THIS task still propagates.
                     await asyncio.wait({task}, timeout=_compat().CANCEL_GRACE_SECONDS)
-                await _close_out_run(run_id, "timeout: stopped by the collection run's time limit")
+                # Bounded: this runs while holding a process-wide slot, and a
+                # database call stuck on a dead socket must not hold it forever.
+                closer = asyncio.ensure_future(
+                    _close_out_run(run_id, "timeout: stopped by the collection run's time limit")
+                )
+                await asyncio.wait({closer}, timeout=_compat().CANCEL_GRACE_SECONDS)
+                if not closer.done():
+                    closer.cancel()
+                    log.error("closing out timed-out run %s did not finish; slot released", run_id)
                 forget = getattr(engine, "forget_cancelled", None)
                 if forget is not None:
                     forget(run_id)
@@ -831,9 +839,14 @@ async def _run_target(collection_id: uuid.UUID, target_id: uuid.UUID, run_id: uu
             if c is None or t is None or t.run_id != run_id:
                 return
             status = await _settle_target(db, c, t)
-            if timed_out and status == "failed":
+            if timed_out and status in ("failed", "running"):
                 # A run that finished within the cancel grace settled normally
                 # above; only one the time limit actually stopped is a timeout.
+                # Still `running` means the close-out was abandoned (stuck DB
+                # call): fail it now rather than leave it to the next boot sweep.
+                if status == "running":
+                    t.status = "failed"
+                    t.finished_at = _now()
                 t.error = "timeout"
                 await db.commit()
     except asyncio.CancelledError:

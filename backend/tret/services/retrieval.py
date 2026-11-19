@@ -93,6 +93,7 @@ or a cross-encoder inside `rerank_seam`, and truncate to `max_results` there.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
@@ -518,7 +519,11 @@ async def ensure_chunks(db: AsyncSession, document: Document) -> list[DocumentCh
     if already is not None or not document.extracted_text:
         return []
     try:
-        drafts = chunk_document(document.filename, document.extracted_text, document.meta)
+        # Pure CPU over up to 2 MB of text: off the event loop so a large
+        # document cannot stall every other run and request while it chunks.
+        drafts = await asyncio.to_thread(
+            chunk_document, document.filename, document.extracted_text, document.meta
+        )
     except Exception:
         log.warning("chunking failed for document %s", document.id, exc_info=True)
         return []
