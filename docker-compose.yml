@@ -260,6 +260,8 @@ services:
       # Collection runs: target runs at once (1..6) and the per-target time limit.
       TRET_COLLECTIONS_MAX_CONCURRENT: ${TRET_COLLECTIONS_MAX_CONCURRENT:-3}
       TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS: ${TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS:-1200}
+      # Wall-clock limit for one tool call (0 disables); delegating tools and capture_filing are exempt.
+      TRET_TOOL_CALL_TIMEOUT_SECONDS: ${TRET_TOOL_CALL_TIMEOUT_SECONDS:-600}
       TRET_DB_POOL_SIZE: ${TRET_DB_POOL_SIZE:-10}
       TRET_DB_MAX_OVERFLOW: ${TRET_DB_MAX_OVERFLOW:-10}
       # Single sign-on (generic OIDC, tret/api/oidc.py). password is every

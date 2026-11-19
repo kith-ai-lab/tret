@@ -304,6 +304,11 @@ class Settings(BaseSettings):
     # Wall-clock limit (seconds) for one target's engine run. A run still going
     # is cancelled and the target marked failed with error "timeout" (retryable).
     collections_run_timeout_seconds: int = 1200
+    # Wall-clock limit (seconds) for ONE tool call inside a run (engine/tools.py
+    # `execute_tool`). A call still going is cancelled and the model gets a tool
+    # error, so one stuck tool (a database call on a dead socket, say) can never
+    # hold a run, and the concurrency slot it occupies, forever. 0 disables.
+    tool_call_timeout_seconds: int = 600
     # Free space (MB) the local capture store must have per target still to run
     # before a batch starts or releases targets; 409 otherwise. 0 disables the
     # check; it is skipped on the s3 backend (tret/batches/core.py).
