@@ -278,8 +278,13 @@ export function RunDetailView() {
             </div>
           ) : (
             <div className="mono-body">
-              {streamedFindings.length} draft finding{streamedFindings.length === 1 ? '' : 's'} recorded —{' '}
-              <Link to="/approvals">review in Approvals</Link>
+              {streamedFindings.length} draft finding{streamedFindings.length === 1 ? '' : 's'} recorded
+              {canOpen('/approvals') && (
+                <>
+                  {' — '}
+                  <Link to="/approvals">review in Approvals</Link>
+                </>
+              )}
             </div>
           )}
         </div>

@@ -61,6 +61,7 @@ export function ComposerPlusMenu({
   folderDisabled = false,
   onUploadFiles,
   onAddFolder,
+  returnTo,
 }: {
   disabled: boolean
   /** Only the folder item waits (conversation still loading, or a folder PUT
@@ -68,6 +69,9 @@ export function ComposerPlusMenu({
   folderDisabled?: boolean
   onUploadFiles: () => void
   onAddFolder: () => void
+  /** Where to come back to after "Connect OneDrive…" (an in-app path, e.g.
+   *  `/?session=<id>`). Defaults to the current location. */
+  returnTo?: string
 }) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -82,7 +86,7 @@ export function ComposerPlusMenu({
   const connectMutation = useMutation({
     mutationFn: () => api.authorizeConnection('m365'),
     onSuccess: (res) => {
-      rememberReturnPath(location.pathname + location.search)
+      rememberReturnPath(returnTo ?? location.pathname + location.search)
       window.location.assign(res.authorize_url)
     },
     onError: () => navigate('/settings/connections'),
