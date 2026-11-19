@@ -31,12 +31,15 @@ import { ProvenanceCard } from '../components/shared/ProvenanceCard'
 import { RoutingBadge } from '../components/shared/RoutingBadge'
 import { StatusBadge } from '../components/shared/StatusBadge'
 import { DelegationPanel } from '../components/runs/DelegationPanel'
+import { useCanOpen } from '../edition'
 
 const LIVE_STATUSES = ['queued', 'running']
 
 export function RunDetailView() {
   const { id } = useParams<{ id: string }>()
   const queryClient = useQueryClient()
+  // Approvals is hidden in the cohort edition, so findings show without a link.
+  const canOpen = useCanOpen()
 
   const runQuery = useQuery({
     queryKey: ['run', id],
@@ -262,7 +265,7 @@ export function RunDetailView() {
                   <div className="stack" style={{ gap: 10, marginTop: 10, paddingLeft: 4 }}>
                     <VerdictCard finding={f} />
                     {/* A superseded finding has no Approvals tab; its card links to the newer one. */}
-                    {f.status !== 'superseded' && (
+                    {f.status !== 'superseded' && canOpen(findingHref(f.id)) && (
                       <div>
                         <Link to={findingHref(f.id)} className="mono-body">
                           {f.status === 'draft' ? 'review →' : 'open in Approvals →'}
@@ -275,8 +278,13 @@ export function RunDetailView() {
             </div>
           ) : (
             <div className="mono-body">
-              {streamedFindings.length} draft finding{streamedFindings.length === 1 ? '' : 's'} recorded —{' '}
-              <Link to="/approvals">review in Approvals</Link>
+              {streamedFindings.length} draft finding{streamedFindings.length === 1 ? '' : 's'} recorded
+              {canOpen('/approvals') && (
+                <>
+                  {' — '}
+                  <Link to="/approvals">review in Approvals</Link>
+                </>
+              )}
             </div>
           )}
         </div>

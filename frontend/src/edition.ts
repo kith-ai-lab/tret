@@ -13,9 +13,12 @@ export interface NavItem {
 }
 
 // Single source of truth for per-edition navigation. `standard` is the full
-// sidebar, in today's order, with nothing hidden. `cohort` is a lean list.
-// Approvals stays visible in cohort because rejected, noted and non-automatic
-// items still need a home even when most approvals happen automatically.
+// sidebar, in today's order, with nothing hidden. `cohort` is a lean list:
+// sessions plus the audit and carbon pages (Runs, Analytics, Emissions).
+// Approvals, Deliverables and Documents are hidden in cohort because the cohort
+// deploy approves drafts, connected writes and findings automatically
+// (TRET_AUTO_APPROVE_DEFAULT) and members add files through the composer's "+"
+// menu. A workspace that turns automatic approval off belongs on standard.
 // `exactPrefixes` hides a list page but not its detail pages (`/runs/<id>`).
 const EDITIONS: Record<Edition, { nav: NavItem[]; hiddenPrefixes: string[]; exactPrefixes?: string[] }> = {
   standard: {
@@ -38,22 +41,22 @@ const EDITIONS: Record<Edition, { nav: NavItem[]; hiddenPrefixes: string[]; exac
   cohort: {
     nav: [
       { to: '/', label: 'Sessions' },
-      { to: '/approvals', label: 'Approvals', count: 'approvals' },
-      { to: '/deliverables', label: 'Deliverables', count: 'deliverables' },
-      { to: '/documents', label: 'Documents' },
+      { to: '/runs', label: 'Runs' },
+      { to: '/analytics', label: 'Analytics' },
+      { to: '/emissions', label: 'Emissions' },
       { to: '/settings', label: 'Settings' },
     ],
     hiddenPrefixes: [
       '/workbench',
+      '/approvals',
       '/batches',
-      '/analytics',
-      '/emissions',
+      '/deliverables',
+      '/documents',
       '/packs',
       '/harnesses',
       '/marketplace-review',
       '/collections',
     ],
-    exactPrefixes: ['/runs'],
   },
 }
 
@@ -74,6 +77,20 @@ export function isRouteHidden(edition: Edition, pathname: string): boolean {
     hiddenPrefixes.some((p) => pathname === p || pathname.startsWith(`${p}/`)) ||
     exactPrefixes.includes(path)
   )
+}
+
+/** Whether an in-app link (`/approvals?finding=…`) leads somewhere this edition
+ *  shows. A hidden page bounces home, so callers render plain text instead of
+ *  a link that goes nowhere useful. */
+export function canOpen(edition: Edition, href: string): boolean {
+  const pathname = href.split(/[?#]/, 1)[0] || '/'
+  return !isRouteHidden(edition, pathname)
+}
+
+/** `canOpen` for the logged-in user's edition. */
+export function useCanOpen(): (href: string) => boolean {
+  const edition = useEdition()
+  return (href) => canOpen(edition, href)
 }
 
 /** The nouns the chat page uses for itself. Tret Learning calls a chat a

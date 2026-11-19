@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { type DragEvent, type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import {
   api,
@@ -48,7 +48,7 @@ import {
 import { LiveFootprint } from '../components/shared/LiveFootprint'
 import { MarkdownDoc } from '../components/shared/MarkdownDoc'
 import { RoutingBadge, shortModelName } from '../components/shared/RoutingBadge'
-import { type ChatWording, chatWording, useEdition } from '../edition'
+import { type ChatWording, chatWording, useCanOpen, useEdition } from '../edition'
 import { ModelSelect, overrideWarning } from './Workbench'
 
 // localStorage keys for the composer's per-turn overrides. Both persist across
@@ -164,22 +164,24 @@ export function Chat() {
   // here, and an override is only sent when the user actually picked one.
   // Persisted per browser (not per conversation): the choice carries forward
   // to the next message and the next chat, same as leaving a filter set.
-  const [objective, setObjective] = useState<string>(
+  const [storedObjective, setObjective] = useState<string>(
     () => localStorage.getItem(OBJECTIVE_STORAGE_KEY) ?? '',
   )
   const [storedModelOverride, setModelOverride] = useState<string>(
     () => localStorage.getItem(MODEL_OVERRIDE_STORAGE_KEY) ?? '',
   )
-  useEffect(() => localStorage.setItem(OBJECTIVE_STORAGE_KEY, objective), [objective])
+  useEffect(() => localStorage.setItem(OBJECTIVE_STORAGE_KEY, storedObjective), [storedObjective])
   useEffect(
     () => localStorage.setItem(MODEL_OVERRIDE_STORAGE_KEY, storedModelOverride),
     [storedModelOverride],
   )
-  // The cohort edition hides the model override and harness pickers, so a value
-  // saved from an earlier standard-edition session must not still be sent. It is
-  // ignored here, not deleted: the stored value (above) comes back untouched if
-  // the workspace returns to the standard edition.
+  // The cohort edition hides the objective, model override and harness pickers
+  // (members get the default routing), so a value saved from an earlier
+  // standard-edition session must not still be sent. It is ignored here, not
+  // deleted: the stored value (above) comes back untouched if the workspace
+  // returns to the standard edition.
   const cohort = useEdition() === 'cohort'
+  const objective = cohort ? '' : storedObjective
   const modelOverride = cohort ? '' : storedModelOverride
 
   // Which harness the *next new* chat will start on. Empty means "default".
@@ -203,11 +205,29 @@ export function Chat() {
   // Default to the most recent conversation once the list first loads. Never
   // override the user's explicit selection (incl. the deliberate null of a
   // fresh chat).
+  // `?session=<id>` (or `new`) on arrival asks for a particular session
+  // instead: the "+" menu's Microsoft sign-in returns that way. Read once and
+  // removed from the URL; an id that is not in the list falls back to the
+  // most recent.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requestedSessionRef = useRef<string | null>(searchParams.get('session'))
   const initializedRef = useRef(false)
   useEffect(() => {
     if (conversationsQuery.data === undefined || initializedRef.current) return
     initializedRef.current = true
-    setSelectedId(conversationsQuery.data[0]?.id ?? null)
+    const requested = requestedSessionRef.current
+    requestedSessionRef.current = null
+    if (requested === 'new') {
+      setSelectedId(null)
+    } else if (requested && conversationsQuery.data.some((c) => c.id === requested)) {
+      setSelectedId(requested)
+    } else {
+      setSelectedId(conversationsQuery.data[0]?.id ?? null)
+    }
+    if (requested !== null) setSearchParams({}, { replace: true })
+    // setSearchParams changes identity on every navigation; this runs once per
+    // workspace, like the default pick it extends.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationsQuery.data])
 
   // `selectedId` and the "already defaulted" flag above are per-workspace:
@@ -425,6 +445,10 @@ export function Chat() {
     folderError: selectedId ? (foldersMutation.error as Error | null) : null,
     onAddFolders: addFolders,
     onRemoveFolder: removeFolder,
+    // Where "Connect OneDrive…" in the "+" menu comes back to after the
+    // Microsoft sign-in: this session, or a fresh landing (read by the
+    // `?session=` handling below). The open session is not otherwise in the URL.
+    connectReturnTo: `/?session=${selectedId ? encodeURIComponent(selectedId) : 'new'}`,
   }
 
   const send = useCallback(
@@ -581,7 +605,8 @@ export function Chat() {
                   onRemoveAttachment={removeAttachment}
                   {...folderProps}
                 />
-                {!allAutoApproved && (
+                {/* Cohort hides Approvals, so the hint would point nowhere. */}
+                {!allAutoApproved && !cohort && (
                   <div className="chat-hint">
                     Responses are drafts — structured findings go to Approvals before they count.
                   </div>
@@ -678,6 +703,7 @@ function Landing({
   folderError,
   onAddFolders,
   onRemoveFolder,
+  connectReturnTo,
   error,
 }: {
   draft: string
@@ -702,9 +728,11 @@ function Landing({
   folderError: Error | null
   onAddFolders: (picked: SessionFolder[]) => void
   onRemoveFolder: (folder: SessionFolder) => void
+  connectReturnTo?: string
   /** Why starting the conversation failed (nothing was created or sent). */
   error: string | null
 }) {
+  const lean = useEdition() === 'cohort'
   return (
     <div className="chat-landing">
       <div className="chat-column">
@@ -713,8 +741,9 @@ function Landing({
         </div>
         <h1 className="chat-hero-title">What can I help you assess?</h1>
         <p className="chat-hero-sub">
-          Ask in plain language. I delegate structured work to the right harness task, and every
-          turn is an auditable run.
+          {lean
+            ? 'Ask in plain language, or use + to add your OneDrive folder first. Every turn is an auditable run.'
+            : 'Ask in plain language. I delegate structured work to the right harness task, and every turn is an auditable run.'}
         </p>
         <Composer
           value={draft}
@@ -741,15 +770,20 @@ function Landing({
           folderError={folderError}
           onAddFolders={onAddFolders}
           onRemoveFolder={onRemoveFolder}
+          connectReturnTo={connectReturnTo}
         />
-        <div className="chat-cards">
-          {EXAMPLE_PROMPTS.map((ex) => (
-            <button key={ex.prompt} className="chat-card" onClick={() => onSend(ex.prompt)}>
-              <span className="chat-card-title">{ex.title}</span>
-              <span className="chat-card-prompt">{ex.prompt}</span>
-            </button>
-          ))}
-        </div>
+        {/* The cohort edition's new session is just the message box and the
+            "+" menu: members bring their own prompts and folders. */}
+        {!lean && (
+          <div className="chat-cards">
+            {EXAMPLE_PROMPTS.map((ex) => (
+              <button key={ex.prompt} className="chat-card" onClick={() => onSend(ex.prompt)}>
+                <span className="chat-card-title">{ex.title}</span>
+                <span className="chat-card-prompt">{ex.prompt}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -773,6 +807,7 @@ function Thread({
   live: { runId: string; stream: ReturnType<typeof useRunStream> } | null
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const canOpenDocuments = useCanOpen()('/documents')
   const liveTextLength = live?.stream.text.length ?? 0
   const liveItemCount = live?.stream.items.length ?? 0
 
@@ -810,18 +845,31 @@ function Thread({
                 {m.content}
                 {m.attachments && m.attachments.length > 0 && (
                   <div className="chat-bubble-attachments">
-                    {m.attachments.map((a: ChatAttachment) => (
-                      <Link
-                        key={a.id}
-                        className="chat-attachment-chip link"
-                        to={`/documents?doc=${a.id}`}
-                        title={`${a.filename} (${formatBytes(a.byte_size)}) — open in Documents`}
-                      >
-                        <PaperclipIcon />
-                        <span className="chat-attachment-name">{a.filename}</span>
-                        <span className="chat-attachment-meta">{formatBytes(a.byte_size)}</span>
-                      </Link>
-                    ))}
+                    {m.attachments.map((a: ChatAttachment) =>
+                      canOpenDocuments ? (
+                        <Link
+                          key={a.id}
+                          className="chat-attachment-chip link"
+                          to={`/documents?doc=${a.id}`}
+                          title={`${a.filename} (${formatBytes(a.byte_size)}) — open in Documents`}
+                        >
+                          <PaperclipIcon />
+                          <span className="chat-attachment-name">{a.filename}</span>
+                          <span className="chat-attachment-meta">{formatBytes(a.byte_size)}</span>
+                        </Link>
+                      ) : (
+                        // Documents is hidden in the cohort edition.
+                        <span
+                          key={a.id}
+                          className="chat-attachment-chip"
+                          title={`${a.filename} (${formatBytes(a.byte_size)})`}
+                        >
+                          <PaperclipIcon />
+                          <span className="chat-attachment-name">{a.filename}</span>
+                          <span className="chat-attachment-meta">{formatBytes(a.byte_size)}</span>
+                        </span>
+                      ),
+                    )}
                   </div>
                 )}
               </div>
@@ -1162,6 +1210,7 @@ function Composer({
   folderError,
   onAddFolders,
   onRemoveFolder,
+  connectReturnTo,
 }: {
   value: string
   onChange: (v: string) => void
@@ -1191,6 +1240,8 @@ function Composer({
   folderError: Error | null
   onAddFolders: (picked: SessionFolder[]) => void
   onRemoveFolder: (folder: SessionFolder) => void
+  /** In-app path the "+" menu's Microsoft sign-in returns to. */
+  connectReturnTo?: string
 }) {
   const [pickerOpen, setPickerOpen] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
@@ -1317,6 +1368,7 @@ function Composer({
           folderDisabled={folderBusy}
           onUploadFiles={() => fileInputRef.current?.click()}
           onAddFolder={() => setPickerOpen(true)}
+          returnTo={connectReturnTo}
         />
         <input
           ref={fileInputRef}
@@ -1395,16 +1447,17 @@ function ComposerControls({
   // A per-turn override the chat harness's policy would refuse is called out
   // here rather than discovered as a failed run after the message is sent.
   const overrideProblem = overrideWarning(modelOverride, models, policy)
-  // The cohort edition keeps the composer to text, attachments and objective.
+  // The cohort edition keeps the composer to text, attachments and folders:
+  // no harness, objective or model picker, so members get the default routing.
   const lean = useEdition() === 'cohort'
   // The value picked for a chat that no longer exists in the harness list
   // (deleted since, or — while fixed — a harness this account can no longer
   // see) still needs its own option, same reasoning as ModelSelect: dropping
   // it would make the select silently fall back to a different harness.
   const harnessKnown = harnesses.some((h) => h.id === harnessValue)
+  if (lean) return null
   return (
     <div className="chat-controls">
-      {!lean && (
       <span className="chat-control">
         <select
           className="chat-control-select"
@@ -1431,7 +1484,6 @@ function ComposerControls({
           )}
         </select>
       </span>
-      )}
       <span className="chat-control">
         <select
           className="chat-control-select"
@@ -1448,7 +1500,6 @@ function ComposerControls({
           ))}
         </select>
       </span>
-      {!lean && (
       <span className="chat-control" style={{ maxWidth: 260 }}>
         <ModelSelect
           models={models}
@@ -1458,8 +1509,7 @@ function ComposerControls({
           policy={policy}
         />
       </span>
-      )}
-      {!lean && overrideProblem && (
+      {overrideProblem && (
         <span className="error-text" style={{ flexBasis: '100%', fontSize: 'var(--fs-xs)' }}>
           {overrideProblem}
         </span>
