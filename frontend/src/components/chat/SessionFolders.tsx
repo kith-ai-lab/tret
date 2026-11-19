@@ -1,6 +1,6 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 
 import {
   api,
@@ -10,6 +10,7 @@ import {
   type SessionFolder,
   type SessionFolderRef,
 } from '../../api/client'
+import { rememberReturnPath } from '../connections/connectReturn'
 import { Modal } from '../shared/Modal'
 import './session-folders.css'
 
@@ -72,6 +73,20 @@ export function ComposerPlusMenu({
   const wrapRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const navigate = useNavigate()
+  const location = useLocation()
+
+  // "Connect OneDrive…" starts the Microsoft sign-in from here and comes back
+  // to this page afterwards (see connectReturn.ts). Any refusal (Microsoft 365
+  // not configured, no credits yet, not an admin of this workspace) goes to
+  // Settings > Connections, whose card explains it and offers the same button.
+  const connectMutation = useMutation({
+    mutationFn: () => api.authorizeConnection('m365'),
+    onSuccess: (res) => {
+      rememberReturnPath(location.pathname + location.search)
+      window.location.assign(res.authorize_url)
+    },
+    onError: () => navigate('/settings/connections'),
+  })
 
   // Same key and fn as the Connections view, so this is usually a cache read.
   const connectionsQuery = useQuery({ queryKey: ['connections'], queryFn: api.listConnections })
@@ -169,16 +184,16 @@ export function ComposerPlusMenu({
             type="button"
             role="menuitem"
             className="chat-plus-item"
-            disabled={folderDisabled && connected}
+            disabled={connected ? folderDisabled : connectMutation.isPending}
             onClick={() => {
               close(false)
               if (connected) onAddFolder()
-              else navigate('/settings/connections')
+              else connectMutation.mutate()
             }}
           >
-            {connected ? 'Add OneDrive folder' : 'Connect OneDrive…'}
+            {connected ? 'Add OneDrive folder' : connectMutation.isPending ? 'Redirecting…' : 'Connect OneDrive…'}
             <span className="desc">
-              {connected ? 'Let the session read a folder' : 'Connect Microsoft 365 to add folders'}
+              {connected ? 'Let the session read a folder' : 'Sign in to Microsoft 365 to add folders'}
             </span>
           </button>
         </div>

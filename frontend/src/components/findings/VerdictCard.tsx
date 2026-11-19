@@ -8,6 +8,7 @@
 import { Link } from 'react-router-dom'
 
 import type { Finding } from '../../api/client'
+import { useCanOpen } from '../../edition'
 
 interface CitedValue {
   dataset?: unknown
@@ -40,6 +41,7 @@ function display(v: unknown): string {
 }
 
 function Supersession({ finding }: { finding: Finding }) {
+  const canOpen = useCanOpen()
   const n = finding.supersedes?.length ?? 0
   if (n === 0 && !finding.superseded_by) return null
   return (
@@ -51,8 +53,13 @@ function Supersession({ finding }: { finding: Finding }) {
       )}
       {finding.superseded_by && (
         <div>
-          Superseded by <Link to={findingHref(finding.superseded_by)}>a newer finding</Link> for this
-          case.
+          Superseded by{' '}
+          {canOpen(findingHref(finding.superseded_by)) ? (
+            <Link to={findingHref(finding.superseded_by)}>a newer finding</Link>
+          ) : (
+            'a newer finding'
+          )}{' '}
+          for this case.
         </div>
       )}
     </div>

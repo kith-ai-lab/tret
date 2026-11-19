@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useEffect, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 
 import {
   api,
@@ -13,6 +13,7 @@ import {
   type WorkspaceConnection,
   type WriteTarget,
 } from '../api/client'
+import { forgetReturnPath, takeReturnPath } from '../components/connections/connectReturn'
 import { DatabaseConnections } from '../components/connections/DatabaseConnections'
 import { M365ReadAccessPicker } from '../components/connections/M365ReadAccessPicker'
 import { M365WriteTargetPicker } from '../components/connections/M365WriteTargetPicker'
@@ -62,14 +63,28 @@ export function ConnectionsView() {
 function CallbackNotice() {
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [notice, setNotice] = useState<{ kind: 'connected' | 'error'; value: string } | null>(null)
+  // Handle the callback params exactly once. StrictMode runs this effect twice
+  // in development, and a second pass would clear the params with a navigation
+  // of its own that overrides the return navigation below.
+  const handled = useRef(false)
 
   useEffect(() => {
+    if (handled.current) return
+    handled.current = true
     const connected = searchParams.get('connected')
     const error = searchParams.get('error')
+    // A flow started from the chat's "+" menu goes back there once it worked.
+    // On an error the path is dropped and the notice below explains it.
+    const returnTo = connected || error ? takeReturnPath() : null
     if (connected) {
-      setNotice({ kind: 'connected', value: connected })
       queryClient.invalidateQueries({ queryKey: ['connections'] })
+      if (returnTo) {
+        navigate(returnTo, { replace: true })
+        return
+      }
+      setNotice({ kind: 'connected', value: connected })
     } else if (error) {
       setNotice({ kind: 'error', value: error })
     }
@@ -160,7 +175,10 @@ function ProviderCard({
   const queryClient = useQueryClient()
 
   const authorizeMutation = useMutation({
-    mutationFn: () => api.authorizeConnection(info.provider),
+    mutationFn: () => {
+      forgetReturnPath()
+      return api.authorizeConnection(info.provider)
+    },
     onSuccess: (res) => {
       window.location.assign(res.authorize_url)
     },
@@ -520,7 +538,10 @@ function M365WriteBackSection({
   const writeEnabled = connection.write_enabled ?? false
 
   const enableMutation = useMutation({
-    mutationFn: () => api.authorizeConnection('m365', 'write'),
+    mutationFn: () => {
+      forgetReturnPath()
+      return api.authorizeConnection('m365', 'write')
+    },
     onSuccess: (res) => {
       window.location.assign(res.authorize_url)
     },

@@ -24,8 +24,30 @@ import { formatDateTime } from '../components/shared/format'
 import { type Column, MonoTable, QueryError } from '../components/shared/MonoTable'
 import { ProviderKeyForm } from '../components/shared/ProviderKeyForm'
 import { StatusBadge } from '../components/shared/StatusBadge'
+import { useEdition } from '../edition'
 
 export function SettingsView() {
+  // The cohort edition keeps what a member needs for their own work: their
+  // connection, credits, and the emissions numbers. Kith provides the model
+  // keys and the instance settings, and each member works alone in a personal
+  // workspace, so team, keys, router, network, telemetry, data requests,
+  // automatic approvals and spend budget are left off. Presentation only: the
+  // API behind them is unchanged, and a global admin can switch a workspace
+  // back to standard (PUT /api/workspace/settings/edition).
+  if (useEdition() === 'cohort') {
+    return (
+      <div className="stack" style={{ gap: 28, maxWidth: 780 }}>
+        <div>
+          <h1 className="view-title">Settings</h1>
+          <div className="view-sub">Your OneDrive connection, credits and emissions factors.</div>
+        </div>
+        <ConnectionsTeaser />
+        <BillingSection />
+        <FootprintCard />
+        <EmissionsFactorsSection />
+      </div>
+    )
+  }
   return (
     <div className="stack" style={{ gap: 28, maxWidth: 780 }}>
       <div>

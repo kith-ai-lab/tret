@@ -24,6 +24,10 @@ one that needs action on an existing install.
   can now browse their OneDrive and use it as a connected source.
 - **The cohort edition calls chat "Sessions".** Its sidebar item, "New session" button and
   related labels use the word session; the standard edition is unchanged.
+- **"Connect OneDrive…" in the "+" menu signs in directly.** It starts the Microsoft 365
+  sign-in from the chat and returns to the chat afterwards, instead of sending you to
+  Settings > Connections first. A refusal (not configured, no plan, not an admin) still lands
+  on Connections, which explains it.
 - **ESEF filing fallback for the Disclosure Collector.** When an issuer's own PDF is refused
   (or does not exist for the year) and the target carries a `source_filing_url`, the Collector
   can now capture the regulated ESEF filing with the new `capture_filing` tool (one package
@@ -187,6 +191,15 @@ one that needs action on an existing install.
 
 ### Changed
 
+- **A leaner cohort edition.** The sidebar is now Sessions, Runs, Analytics, Emissions and
+  Settings; Approvals, Deliverables and Documents are hidden alongside Workbench, Batches,
+  Packs and Harnesses, so the edition assumes automatic approval is on (the cohort deploy sets
+  `TRET_AUTO_APPROVE_DEFAULT=draft_section,connected_write,findings`). A new session shows
+  only the message box and the "+" menu: no example prompts and no objective picker, and a
+  saved objective is not sent. Settings shows only Connections, credits, the billed footprint
+  and emissions factors. Links to hidden pages (a finding's "Open in Approvals", a document's
+  "Open in Deliverables", a batch card) render as plain text or are left off. As before, the
+  edition shapes the UI only and gates no API route; the standard edition is unchanged.
 - **Batches resume on their own after a restart.** A batch that was `running` when the server
   restarted now starts launching again at boot instead of pausing, and a row whose run the
   restart cut off goes back to `pending` (at most twice per row, the attempt archived in its

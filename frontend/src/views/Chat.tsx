@@ -164,22 +164,24 @@ export function Chat() {
   // here, and an override is only sent when the user actually picked one.
   // Persisted per browser (not per conversation): the choice carries forward
   // to the next message and the next chat, same as leaving a filter set.
-  const [objective, setObjective] = useState<string>(
+  const [storedObjective, setObjective] = useState<string>(
     () => localStorage.getItem(OBJECTIVE_STORAGE_KEY) ?? '',
   )
   const [storedModelOverride, setModelOverride] = useState<string>(
     () => localStorage.getItem(MODEL_OVERRIDE_STORAGE_KEY) ?? '',
   )
-  useEffect(() => localStorage.setItem(OBJECTIVE_STORAGE_KEY, objective), [objective])
+  useEffect(() => localStorage.setItem(OBJECTIVE_STORAGE_KEY, storedObjective), [storedObjective])
   useEffect(
     () => localStorage.setItem(MODEL_OVERRIDE_STORAGE_KEY, storedModelOverride),
     [storedModelOverride],
   )
-  // The cohort edition hides the model override and harness pickers, so a value
-  // saved from an earlier standard-edition session must not still be sent. It is
-  // ignored here, not deleted: the stored value (above) comes back untouched if
-  // the workspace returns to the standard edition.
+  // The cohort edition hides the objective, model override and harness pickers
+  // (members get the default routing), so a value saved from an earlier
+  // standard-edition session must not still be sent. It is ignored here, not
+  // deleted: the stored value (above) comes back untouched if the workspace
+  // returns to the standard edition.
   const cohort = useEdition() === 'cohort'
+  const objective = cohort ? '' : storedObjective
   const modelOverride = cohort ? '' : storedModelOverride
 
   // Which harness the *next new* chat will start on. Empty means "default".
@@ -581,7 +583,8 @@ export function Chat() {
                   onRemoveAttachment={removeAttachment}
                   {...folderProps}
                 />
-                {!allAutoApproved && (
+                {/* Cohort hides Approvals, so the hint would point nowhere. */}
+                {!allAutoApproved && !cohort && (
                   <div className="chat-hint">
                     Responses are drafts — structured findings go to Approvals before they count.
                   </div>
@@ -705,6 +708,7 @@ function Landing({
   /** Why starting the conversation failed (nothing was created or sent). */
   error: string | null
 }) {
+  const lean = useEdition() === 'cohort'
   return (
     <div className="chat-landing">
       <div className="chat-column">
@@ -713,8 +717,9 @@ function Landing({
         </div>
         <h1 className="chat-hero-title">What can I help you assess?</h1>
         <p className="chat-hero-sub">
-          Ask in plain language. I delegate structured work to the right harness task, and every
-          turn is an auditable run.
+          {lean
+            ? 'Ask in plain language, or use + to add your OneDrive folder first. Every turn is an auditable run.'
+            : 'Ask in plain language. I delegate structured work to the right harness task, and every turn is an auditable run.'}
         </p>
         <Composer
           value={draft}
@@ -742,14 +747,18 @@ function Landing({
           onAddFolders={onAddFolders}
           onRemoveFolder={onRemoveFolder}
         />
-        <div className="chat-cards">
-          {EXAMPLE_PROMPTS.map((ex) => (
-            <button key={ex.prompt} className="chat-card" onClick={() => onSend(ex.prompt)}>
-              <span className="chat-card-title">{ex.title}</span>
-              <span className="chat-card-prompt">{ex.prompt}</span>
-            </button>
-          ))}
-        </div>
+        {/* The cohort edition's new session is just the message box and the
+            "+" menu: members bring their own prompts and folders. */}
+        {!lean && (
+          <div className="chat-cards">
+            {EXAMPLE_PROMPTS.map((ex) => (
+              <button key={ex.prompt} className="chat-card" onClick={() => onSend(ex.prompt)}>
+                <span className="chat-card-title">{ex.title}</span>
+                <span className="chat-card-prompt">{ex.prompt}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1395,16 +1404,17 @@ function ComposerControls({
   // A per-turn override the chat harness's policy would refuse is called out
   // here rather than discovered as a failed run after the message is sent.
   const overrideProblem = overrideWarning(modelOverride, models, policy)
-  // The cohort edition keeps the composer to text, attachments and objective.
+  // The cohort edition keeps the composer to text, attachments and folders:
+  // no harness, objective or model picker, so members get the default routing.
   const lean = useEdition() === 'cohort'
   // The value picked for a chat that no longer exists in the harness list
   // (deleted since, or — while fixed — a harness this account can no longer
   // see) still needs its own option, same reasoning as ModelSelect: dropping
   // it would make the select silently fall back to a different harness.
   const harnessKnown = harnesses.some((h) => h.id === harnessValue)
+  if (lean) return null
   return (
     <div className="chat-controls">
-      {!lean && (
       <span className="chat-control">
         <select
           className="chat-control-select"
@@ -1431,7 +1441,6 @@ function ComposerControls({
           )}
         </select>
       </span>
-      )}
       <span className="chat-control">
         <select
           className="chat-control-select"
@@ -1448,7 +1457,6 @@ function ComposerControls({
           ))}
         </select>
       </span>
-      {!lean && (
       <span className="chat-control" style={{ maxWidth: 260 }}>
         <ModelSelect
           models={models}
@@ -1458,8 +1466,7 @@ function ComposerControls({
           policy={policy}
         />
       </span>
-      )}
-      {!lean && overrideProblem && (
+      {overrideProblem && (
         <span className="error-text" style={{ flexBasis: '100%', fontSize: 'var(--fs-xs)' }}>
           {overrideProblem}
         </span>

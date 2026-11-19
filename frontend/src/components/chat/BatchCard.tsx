@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
 import { api, type Batch } from '../../api/client'
+import { useCanOpen } from '../../edition'
 import { formatCost } from '../shared/format'
 import { StatusBadge } from '../shared/StatusBadge'
 
@@ -59,26 +60,41 @@ export function BatchCard({ started }: { started: StartedBatch }) {
   const targets = batch?.counts.total ?? started.targets
   const profile = batch?.profile ?? started.profile
   const warnings = batch?.warnings?.length ?? started.warningsCount ?? 0
+  // The cohort edition hides the Batches page: the card still reports progress,
+  // without links that would bounce home.
+  const href = `/batches/${started.id}`
+  const linked = useCanOpen()(href)
   return (
     <div className="bc-card">
       <div className="bc-head">
-        <Link className="bc-name" to={`/batches/${started.id}`}>
-          {name}
-        </Link>
+        {linked ? (
+          <Link className="bc-name" to={href}>
+            {name}
+          </Link>
+        ) : (
+          <span className="bc-name">{name}</span>
+        )}
         <StatusBadge status={status} />
       </div>
       <div className="bc-meta">
         {profile && <span className="bc-profile">{profile}</span>}
         {targets !== null && <span>{targets} {targets === 1 ? 'target' : 'targets'}</span>}
         {batch && <span>{formatCost(batch.cost_usd)} so far</span>}
-        {warnings > 0 && (
-          <Link className="bc-link-warn" to={`/batches/${started.id}`}>
-            {warnings} {warnings === 1 ? 'warning' : 'warnings'}
+        {warnings > 0 &&
+          (linked ? (
+            <Link className="bc-link-warn" to={href}>
+              {warnings} {warnings === 1 ? 'warning' : 'warnings'}
+            </Link>
+          ) : (
+            <span className="bc-link-warn">
+              {warnings} {warnings === 1 ? 'warning' : 'warnings'}
+            </span>
+          ))}
+        {linked && (
+          <Link className="bc-link" to={href}>
+            Open batch →
           </Link>
         )}
-        <Link className="bc-link" to={`/batches/${started.id}`}>
-          Open batch →
-        </Link>
       </div>
     </div>
   )

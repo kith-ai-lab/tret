@@ -11,6 +11,7 @@ import {
   type ConnectedWritePayload,
   type FindingDetail,
 } from '../../api/client'
+import { useCanOpen } from '../../edition'
 import { VerdictCard, findingHref } from '../findings/VerdictCard'
 import { downloadDeliverable } from '../shared/downloadDeliverable'
 import { MarkdownDoc } from '../shared/MarkdownDoc'
@@ -35,6 +36,9 @@ export function DocumentPane({ findingId, onClose }: { findingId: string; onClos
   // the server would 403.
   const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
   const canApprove = APPROVER_ROLES.includes(meQuery.data?.role ?? '')
+  // The cohort edition hides Deliverables and Approvals; the pane's downloads
+  // are then the way out, so the "Open in …" link is left off.
+  const canOpen = useCanOpen()
 
   // Another card was opened, or the pane was just opened: start fresh and move
   // focus into the pane so a keyboard user lands on what they asked for.
@@ -177,15 +181,17 @@ export function DocumentPane({ findingId, onClose }: { findingId: string; onClos
               </>
             )}
             <span className="doc-pane-spacer" />
-            {deliverableSlug ? (
-              <Link className="doc-pane-link" to={`/deliverables?slug=${encodeURIComponent(deliverableSlug)}`}>
-                Open in Deliverables
-              </Link>
-            ) : (
-              <Link className="doc-pane-link" to={findingHref(f.id)}>
-                Open in Approvals
-              </Link>
-            )}
+            {deliverableSlug
+              ? canOpen('/deliverables') && (
+                  <Link className="doc-pane-link" to={`/deliverables?slug=${encodeURIComponent(deliverableSlug)}`}>
+                    Open in Deliverables
+                  </Link>
+                )
+              : canOpen(findingHref(f.id)) && (
+                  <Link className="doc-pane-link" to={findingHref(f.id)}>
+                    Open in Approvals
+                  </Link>
+                )}
           </div>
         </footer>
       )}
