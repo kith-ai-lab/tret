@@ -64,7 +64,7 @@ from tret.net import EgressDenied, build_client
 from tret.net.policy import MODE_OFF, VERIFY_NONE, VERIFY_PUBLIC, ClassPolicy, master_mode
 from tret.services.blobs import delete_blob_unless_referenced
 from tret.services.credentials import get_fernet
-from tret.services.documents import MAX_DOCUMENT_BYTES, ingest_document
+from tret.services.documents import MAX_DOCUMENT_BYTES, extract_bounded, ingest_document
 from tret.storage import document_key, get_store
 
 log = logging.getLogger("tret.connections")
@@ -2166,6 +2166,38 @@ async def _find_existing_connected_document(
     return None
 
 
+async def _retry_failed_extraction(doc: Document) -> None:
+    """A cached connected document whose earlier extraction produced no text is
+    extracted again from its stored bytes: the extractor may have learned the type
+    since (HTML, R03), and a stale failed row must not make the file unreadable
+    forever. In place, no new row; a bytes-missing or still-failing retry leaves
+    the row as it was."""
+    if doc.extracted_text and doc.extracted_text.strip():
+        return
+    # A timeout is a property of the bytes: running it again only burns another
+    # budget (and, on hostile input, another worker thread) for the same result.
+    if "timed out" in str((doc.meta or {}).get("error") or ""):
+        return
+    # At most once per document: the attempt is recorded either way.
+    if (doc.meta or {}).get("extraction_retry_at"):
+        return
+    attempted = {"extraction_retry_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        from tret.storage import document_bytes
+
+        data = await document_bytes(doc, get_settings())
+        text, meta, status = await extract_bounded(doc.filename, data)
+    except Exception as e:  # noqa: BLE001 - the cached row stands as it was
+        doc.meta = {**(doc.meta or {}), **attempted, "extraction_retry_error": f"{type(e).__name__}: {e}"[:300]}
+        return
+    if not text.strip():
+        doc.meta = {**(doc.meta or {}), **attempted, "extraction_retry_error": str(meta.get("error") or "no text")[:300]}
+    if text.strip():
+        doc.extracted_text = text
+        doc.extraction_status = status
+        doc.meta = {**{k: v for k, v in (doc.meta or {}).items() if k != "error"}, **meta, **attempted}
+
+
 async def materialize_connected_file(
     db: AsyncSession,
     *,
@@ -2241,6 +2273,7 @@ async def materialize_connected_file(
 
     existing = await _find_existing_connected_document(db, project_id, item_id=item_id, etag=etag)
     if existing is not None:
+        await _retry_failed_extraction(existing)
         await record_connection_activity(
             db,
             workspace_id=workspace_id,
@@ -2461,6 +2494,78 @@ async def list_write_targets(db: AsyncSession, workspace_id: uuid.UUID) -> list[
         )
         for entry in entries
     ]
+
+
+SESSION_TARGET_PREFIX = "session-"
+
+
+def session_write_targets(folders: list[dict] | None) -> list[WriteTarget]:
+    """The cohort edition's write targets for a session: each attached folder,
+    `session-<n>` (n is the 1-based position in the conversation's folder list).
+    Built from what `resolve_session_folders` already validated against the
+    workspace at attach time; nothing here talks to Graph."""
+    out: list[WriteTarget] = []
+    for n, f in enumerate(folders or [], start=1):
+        if not isinstance(f, dict) or not f.get("drive_id") or not f.get("item_id"):
+            continue
+        out.append(
+            WriteTarget(
+                slug=f"{SESSION_TARGET_PREFIX}{n}",
+                label=f.get("name") or f"Folder {n}",
+                path=f.get("path") or "",
+                site_id=f.get("site_id"),
+                drive_id=f["drive_id"],
+                item_id=f["item_id"],
+                web_url=f.get("web_url"),
+            )
+        )
+    return out
+
+
+def write_target_to_dict(t: WriteTarget, kind: str) -> dict:
+    return {
+        "slug": t.slug, "label": t.label, "path": t.path, "site_id": t.site_id,
+        "drive_id": t.drive_id, "item_id": t.item_id, "web_url": t.web_url, "kind": kind,
+    }
+
+
+def write_target_from_dict(d: dict) -> WriteTarget:
+    return WriteTarget(
+        slug=d["slug"], label=d.get("label") or d["slug"], path=d.get("path") or "",
+        site_id=d.get("site_id"), drive_id=d["drive_id"], item_id=d["item_id"],
+        web_url=d.get("web_url"),
+    )
+
+
+async def resolve_write_targets(
+    db: AsyncSession,
+    workspace_id: uuid.UUID,
+    *,
+    session_folders: list[dict] | None = None,
+    include_session: bool = False,
+) -> list[tuple[WriteTarget, str]]:
+    """`(target, kind)` pairs: the session's folders first (kind "session", only
+    when `include_session` — the cohort edition) then the workspace's own output
+    folders (kind "workspace"). Raises `ConnectionUnavailable` only when the
+    connection is unusable (the same condition `list_write_targets` raises
+    under)."""
+    # list_write_targets runs ensure_connection_usable first, so an unusable
+    # connection raises here before any session target is offered.
+    workspace_targets = await list_write_targets(db, workspace_id)
+    out: list[tuple[WriteTarget, str]] = []
+    taken: set[str] = set()
+    if include_session:
+        for t in session_write_targets(session_folders):
+            out.append((t, "session"))
+            taken.add(t.slug)
+    for t in workspace_targets:
+        if t.slug in taken:
+            # A session target is never silently replaced by (or shadowed as) a
+            # workspace folder of the same slug.
+            log.warning("connections: workspace output folder %r collides with a session target; skipped", t.slug)
+            continue
+        out.append((t, "workspace"))
+    return out
 
 
 _UPLOAD_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -2981,6 +3086,7 @@ async def upload_connected_file(
     actor_run_id: uuid.UUID | None = None,
     conflict: str = "rename",
     max_bytes: int | None = None,
+    target: WriteTarget | None = None,
 ) -> UploadResult:
     """Write `data` into workspace `workspace_id`'s m365 write target
     `target_slug`, under a `tret/` subfolder created on first use and reused
@@ -3030,6 +3136,10 @@ async def upload_connected_file(
        `max_bytes` when the caller passes one (a collection run uploads
        retained package PDFs under the larger capture cap).
 
+    `target`, when given, is an already-resolved folder (a cohort session
+    folder, which exists only in a conversation, never in the workspace's
+    `selected_resources`): step 4 is skipped, every other gate still applies.
+
     Only past all six does this module ever touch the network: ensuring the
     `tret` subfolder, then the small- or large-file upload path depending on
     `len(data)`. A Graph failure at either of those records `action=
@@ -3061,8 +3171,16 @@ async def upload_connected_file(
             reason=reason, actor_user_id=actor_user_id, actor_run_id=actor_run_id,
         )
 
-    targets = await list_write_targets(db, workspace_id)
-    target = next((t for t in targets if t.slug == target_slug), None)
+    if target is None:
+        targets = await list_write_targets(db, workspace_id)
+        target = next((t for t in targets if t.slug == target_slug), None)
+    else:
+        # A caller-supplied target (a session folder) skips the output-folder
+        # list, but its drive must still be one of the workspace's allowed
+        # sources: a forged `_session_folders` / payload never widens writes.
+        allowed_drives = {s.drive_id for s in await list_connected_sources(db, workspace_id)}
+        if target.drive_id not in allowed_drives:
+            target = None
     if target is None:
         reason = f"{target_slug!r} is not an allowed output folder."
         raise await _refuse_upload(

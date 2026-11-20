@@ -18,8 +18,12 @@ import {
 } from '../api/client'
 import { useRunStream } from '../api/useRunStream'
 import { BatchCards } from '../components/chat/BatchCard'
+import { ChecksBar, SavedFileChips } from '../components/chat/ChecksBar'
+import { createSendLock, runExclusive, shouldFlushQueue } from '../components/chat/sendLock'
+import '../components/chat/chat-thread.css'
 import { DelegatedWork, DelegatedWorkDisclosure } from '../components/chat/DelegatedWork'
 import { DocumentPaneLayout } from '../components/chat/documentPaneContext'
+import { SessionRail } from '../components/chat/SessionRail'
 import {
   ComposerPlusMenu,
   FolderChips,
@@ -67,6 +71,9 @@ const HARNESS_STORAGE_KEY = 'tret.chat.harness'
 // pills, since the pill summary alone ("delegated 3 tasks in parallel: a, b")
 // is not the only record of what ran.
 const DELEGATION_TOOLS = new Set(['run_harness_task', 'delegate_parallel', 'spawn_subagent'])
+
+/** R01: what the Continue button sends after a cut-off reply. */
+const CONTINUE_PROMPT = 'Continue exactly where you stopped. Do not repeat what you already wrote.'
 
 const EXAMPLE_PROMPTS = [
   {
@@ -120,6 +127,8 @@ interface PendingTurn {
   runId: string
 }
 
+type SendSource = 'composer' | 'queued' | 'continue'
+
 export function Chat() {
   const queryClient = useQueryClient()
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -133,6 +142,11 @@ export function Chat() {
   // ride along on the create-conversation request at first send.
   const [landingFolders, setLandingFolders] = useState<SessionFolder[]>([])
   const [createError, setCreateError] = useState<string | null>(null)
+  // R15: taken synchronously at the top of `send`, released when the request
+  // settles. React state alone cannot stop two Enters in one tick.
+  const sendLock = useRef(createSendLock()).current
+  // R16: the one message typed while a reply is running; sent when it ends.
+  const [queued, setQueued] = useState<string | null>(null)
 
   const conversationsQuery = useQuery({
     queryKey: ['conversations'],
@@ -175,13 +189,14 @@ export function Chat() {
     () => localStorage.setItem(MODEL_OVERRIDE_STORAGE_KEY, storedModelOverride),
     [storedModelOverride],
   )
-  // The cohort edition hides the objective, model override and harness pickers
-  // (members get the default routing), so a value saved from an earlier
-  // standard-edition session must not still be sent. It is ignored here, not
-  // deleted: the stored value (above) comes back untouched if the workspace
-  // returns to the standard edition.
+  // The cohort edition hides the model override and harness pickers (members
+  // get the default routing), so a value saved from an earlier standard-edition
+  // session must not still be sent. It is ignored here, not deleted: the stored
+  // value (above) comes back untouched if the workspace returns to the standard
+  // edition. The objective is different (R27): cohort shows it as a plain
+  // "Priority" control backed by the same stored value.
   const cohort = useEdition() === 'cohort'
-  const objective = cohort ? '' : storedObjective
+  const objective = storedObjective
   const modelOverride = cohort ? '' : storedModelOverride
 
   // Which harness the *next new* chat will start on. Empty means "default".
@@ -217,12 +232,25 @@ export function Chat() {
     initializedRef.current = true
     const requested = requestedSessionRef.current
     requestedSessionRef.current = null
+    const fallback = conversationsQuery.data[0]?.id ?? null
     if (requested === 'new') {
       setSelectedId(null)
     } else if (requested && conversationsQuery.data.some((c) => c.id === requested)) {
       setSelectedId(requested)
+    } else if (requested) {
+      // Not in the default (unarchived, newest 100) list: an archived or older
+      // session a link points at. Open it directly; only a 404 falls back.
+      setSelectedId(fallback)
+      api
+        .getConversation(requested)
+        .then((conv) => {
+          queryClient.setQueryData(['conversation', conv.id], conv)
+          // Only if the user has not picked something else meanwhile.
+          setSelectedId((cur) => (cur === fallback || cur === null ? conv.id : cur))
+        })
+        .catch(() => undefined)
     } else {
-      setSelectedId(conversationsQuery.data[0]?.id ?? null)
+      setSelectedId(fallback)
     }
     if (requested !== null) setSearchParams({}, { replace: true })
     // setSearchParams changes identity on every navigation; this runs once per
@@ -245,6 +273,7 @@ export function Chat() {
     if (workspaceRef.current !== undefined && workspaceRef.current !== workspaceId) {
       setSelectedId(null)
       setPending(null)
+      setQueued(null)
       // Chips hold document ids of the old workspace; sending them to the new
       // one would 404.
       setAttachments([])
@@ -305,6 +334,7 @@ export function Chat() {
 
   const startNewChat = useCallback(() => {
     setPending(null)
+    setQueued(null)
     setDraft('')
     setAttachments([])
     setLandingFolders([])
@@ -374,6 +404,7 @@ export function Chat() {
       conversationId: string
       text: string
       documentIds: string[]
+      source?: SendSource
     }) =>
       api.sendChatMessage(conversationId, text, {
         model_override: modelOverride || undefined,
@@ -388,14 +419,17 @@ export function Chat() {
       queryClient.invalidateQueries({ queryKey: ['conversation', data.conversation_id] })
       queryClient.invalidateQueries({ queryKey: ['conversations'] })
     },
-    onError: (error, { conversationId, text }) => {
+    onError: (error, { conversationId, text, source }) => {
       // 409: a reply is already being generated (another tab, or a send that
       // raced a reload). Nothing was sent, so follow the live run instead of
       // erroring and hand the unsent text back to the composer.
       // Any other error (e.g. 404 for an attachment deleted since upload)
       // keeps the text and chips too, so nothing typed is lost.
       const activeRunId = activeRunIdOf409(error)
-      setDraft((d) => d || text)
+      // A queued message that fails goes back to the queue slot, not the composer
+      // (which may hold newer typing); a failed Continue just shows the error.
+      if (source === 'queued') setQueued((q) => q ?? text)
+      else if (source !== 'continue') setDraft((d) => d || text)
       if (activeRunId) {
         setPending({ conversationId, runId: activeRunId })
         queryClient.invalidateQueries({ queryKey: ['conversation', conversationId] })
@@ -452,35 +486,60 @@ export function Chat() {
   }
 
   const send = useCallback(
-    async (text: string) => {
+    // `source`: 'queued' or 'continue' means the text did not come from the composer (the auto-sent
+    // queued message, the continue prompt), so whatever is in the composer now
+    // was typed afterwards and must survive.
+    async (text: string, source: SendSource = 'composer') => {
       const trimmed = text.trim()
-      if (!trimmed || inFlight || attachmentBlockReason(attachments)) return
-      const documentIds = attachments.flatMap((a) => (a.status === 'done' && a.docId ? [a.docId] : []))
-      let conversationId = selectedId
-      setCreateError(null)
-      if (!conversationId) {
-        let conv: ConversationDetail
-        try {
-          conv = await api.createConversation(
-            selectedHarnessId || undefined,
-            landingFolders.map(toRef),
-          )
-        } catch (err) {
-          // Nothing was created or sent: keep the text and folders, say why.
-          setCreateError(err instanceof Error ? err.message : `Could not start the ${wording.noun}`)
-          return
+      if (!trimmed || attachmentBlockReason(attachments)) return
+      // R15: a second Enter while a send is still being set up (including the
+      // new-session create) is ignored outright — never a second session.
+      if (sendLock.held) return
+      // R16: a reply is running. Keep ONE message to send when it finishes.
+      if (inFlight) {
+        if (queued === null) {
+          setQueued(trimmed)
+          setDraft('')
         }
-        queryClient.setQueryData(['conversation', conv.id], conv)
-        queryClient.invalidateQueries({ queryKey: ['conversations'] })
-        setSelectedId(conv.id)
-        setLandingFolders([])
-        conversationId = conv.id
+        return
       }
-      setDraft('')
-      sendMutation.mutate({ conversationId, text: trimmed, documentIds })
+      await runExclusive(sendLock, async () => {
+        const documentIds = attachments.flatMap((a) => (a.status === 'done' && a.docId ? [a.docId] : []))
+        let conversationId = selectedId
+        setCreateError(null)
+        if (!conversationId) {
+          let conv: ConversationDetail
+          try {
+            conv = await api.createConversation(
+              selectedHarnessId || undefined,
+              landingFolders.map(toRef),
+            )
+          } catch (err) {
+            // Nothing was created or sent: keep the text and folders, say why.
+            setCreateError(err instanceof Error ? err.message : `Could not start the ${wording.noun}`)
+            return
+          }
+          queryClient.setQueryData(['conversation', conv.id], conv)
+          queryClient.invalidateQueries({ queryKey: ['conversations'] })
+          setSelectedId(conv.id)
+          setLandingFolders([])
+          conversationId = conv.id
+        }
+        if (source === 'composer') setDraft('')
+        // onError (above) restores the text and follows a 409; nothing to add.
+        await sendMutation.mutateAsync({ conversationId, text: trimmed, documentIds, source }).catch(() => undefined)
+      })
     },
-    [inFlight, attachments, selectedId, selectedHarnessId, landingFolders, wording.noun, queryClient, sendMutation],
+    [inFlight, queued, attachments, selectedId, selectedHarnessId, landingFolders, wording.noun, queryClient, sendMutation, sendLock],
   )
+
+  // R16: the run ended — send the queued message.
+  useEffect(() => {
+    if (!shouldFlushQueue(queued, inFlight) || sendLock.held) return
+    const text = queued!
+    setQueued(null)
+    void send(text, 'queued')
+  }, [queued, inFlight, send, sendLock])
 
   const conversation = selectedId ? conversationQuery.data : undefined
   // The policy the composer's override is bound by: this conversation's own
@@ -515,7 +574,7 @@ export function Chat() {
   return (
     <DocumentPaneLayout resetKey={selectedId}>
       {railOpen && (
-        <ConversationRail
+        <SessionRail
           conversations={conversations}
           loading={conversationsQuery.isLoading}
           error={conversationsQuery.error as Error | null}
@@ -525,6 +584,12 @@ export function Chat() {
             setSelectedId(id)
           }}
           onNewChat={startNewChat}
+          onCreatedInGroup={(conv) => {
+            // R20: a session created inside a group; select it like a fresh chat.
+            queryClient.setQueryData(['conversation', conv.id], conv)
+            startNewChat()
+            setSelectedId(conv.id)
+          }}
           wording={wording}
         />
       )}
@@ -552,7 +617,7 @@ export function Chat() {
             draft={draft}
             onDraft={setDraft}
             onSend={send}
-            disabled={inFlight}
+            busy={inFlight}
             models={modelsQuery.data ?? []}
             objective={objective}
             onObjectiveChange={setObjective}
@@ -579,6 +644,10 @@ export function Chat() {
               }
               live={showLive ? { runId: pending.runId, stream } : null}
               wording={wording}
+              sessionKey={selectedId}
+              conversationId={selectedId}
+              onContinue={() => void send(CONTINUE_PROMPT, 'continue')}
+              canContinue={!inFlight && !sendLock.held}
             />
             <div className="chat-composer-dock">
               <div className="chat-column">
@@ -586,7 +655,9 @@ export function Chat() {
                   value={draft}
                   onChange={setDraft}
                   onSend={() => void send(draft)}
-                  disabled={inFlight}
+                  busy={inFlight}
+                  queued={queued}
+                  onCancelQueued={() => setQueued(null)}
                   error={sendError}
                   onStop={pendingRunId ? () => cancelMutation.mutate(pendingRunId) : undefined}
                   stopping={stopping}
@@ -620,71 +691,13 @@ export function Chat() {
   )
 }
 
-// ── Conversation rail ───────────────────────────────────────────────────────
-
-function ConversationRail({
-  conversations,
-  loading,
-  error,
-  selectedId,
-  onSelect,
-  onNewChat,
-  wording,
-}: {
-  conversations: { id: string; title: string | null; message_count: number; updated_at: string | null }[]
-  loading: boolean
-  error: Error | null
-  selectedId: string | null
-  onSelect: (id: string) => void
-  onNewChat: () => void
-  wording: ChatWording
-}) {
-  return (
-    <aside className="chat-rail">
-      <button className="chat-newchat" onClick={onNewChat}>
-        <PlusIcon />
-        <span>{wording.newChat}</span>
-      </button>
-      <div className="chat-rail-list">
-        {loading ? (
-          <div className="empty pulse" style={{ padding: '8px 4px' }}>
-            Loading…
-          </div>
-        ) : error ? (
-          // "No conversations yet" over a failed fetch reads as "your history is
-          // gone", which would send a user off to retype work they still have.
-          <div className="error-text" style={{ padding: '8px 4px', fontSize: 'var(--fs-xs)' }}>
-            {wording.loadFailed} — {error.message}
-          </div>
-        ) : conversations.length === 0 ? (
-          <div className="empty" style={{ padding: '8px 4px', fontSize: 'var(--fs-xs)' }}>
-            {wording.empty}
-          </div>
-        ) : (
-          conversations.map((c) => (
-            <button
-              key={c.id}
-              className={`chat-rail-item${c.id === selectedId ? ' active' : ''}`}
-              onClick={() => onSelect(c.id)}
-              title={c.title ?? wording.untitled}
-            >
-              <span className="chat-rail-title">{c.title ?? wording.untitled}</span>
-              <span className="chat-rail-time">{relativeTime(c.updated_at)}</span>
-            </button>
-          ))
-        )}
-      </div>
-    </aside>
-  )
-}
-
 // ── Empty landing ────────────────────────────────────────────────────────────
 
 function Landing({
   draft,
   onDraft,
   onSend,
-  disabled,
+  busy,
   models,
   objective,
   onObjectiveChange,
@@ -709,7 +722,7 @@ function Landing({
   draft: string
   onDraft: (v: string) => void
   onSend: (text: string) => void
-  disabled: boolean
+  busy: boolean
   models: ModelInfo[]
   objective: string
   onObjectiveChange: (v: string) => void
@@ -749,7 +762,7 @@ function Landing({
           value={draft}
           onChange={onDraft}
           onSend={() => onSend(draft)}
-          disabled={disabled}
+          busy={busy}
           error={error}
           autoFocus
           models={models}
@@ -791,14 +804,27 @@ function Landing({
 
 // ── Thread ────────────────────────────────────────────────────────────────
 
+/** R17: how close to the bottom still counts as "following". */
+const FOLLOW_THRESHOLD_PX = 80
+
 function Thread({
   messages,
   loading,
   error,
   live,
   wording,
+  sessionKey,
+  conversationId,
+  onContinue,
+  canContinue,
 }: {
   wording: ChatWording
+  /** Changes when the open session changes: the view re-sticks to the bottom. */
+  sessionKey: string | null
+  conversationId: string | null
+  /** R01: sends the Continue prompt. */
+  onContinue: () => void
+  canContinue: boolean
   messages: ChatMessage[]
   loading: boolean
   /** A failed fetch of the conversation. An empty thread and an unreachable one
@@ -811,11 +837,40 @@ function Thread({
   const liveTextLength = live?.stream.text.length ?? 0
   const liveItemCount = live?.stream.items.length ?? 0
 
-  // Stick to the bottom as content grows.
-  useEffect(() => {
+  // R17: follow new content only while the reader is within ~80px of the
+  // bottom. Scrolled further up, they are reading — leave them there and offer
+  // a "Jump to latest" button instead.
+  const stickRef = useRef(true)
+  const [showJump, setShowJump] = useState(false)
+  const onScroll = () => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [messages.length, liveTextLength, liveItemCount, loading])
+    if (!el) return
+    const stick = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_THRESHOLD_PX
+    stickRef.current = stick
+    setShowJump(!stick)
+  }
+  const jumpToLatest = () => {
+    const el = scrollRef.current
+    if (!el) return
+    stickRef.current = true
+    setShowJump(false)
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+  }
+  // Opening another session starts at the bottom.
+  useEffect(() => {
+    stickRef.current = true
+    setShowJump(false)
+  }, [sessionKey])
+  const lastRole = messages[messages.length - 1]?.role
+  useEffect(() => {
+    // The member's own just-sent message always brings them to the bottom.
+    if (lastRole === 'user') stickRef.current = true
+    const el = scrollRef.current
+    if (!el) return
+    if (stickRef.current) el.scrollTop = el.scrollHeight
+    else setShowJump(el.scrollHeight - el.scrollTop - el.clientHeight > FOLLOW_THRESHOLD_PX)
+  }, [messages.length, lastRole, liveTextLength, liveItemCount, loading])
+  const lastAssistantIndex = messages.reduce((acc, m, i) => (m.role === 'assistant' ? i : acc), -1)
 
   // The persisted assistant message for `live.runId` can land (and start
   // rendering its own completed-turn chip) a render or two before the
@@ -825,7 +880,8 @@ function Thread({
     !!live && messages.some((m) => m.role === 'assistant' && m.run_id === live.runId)
 
   return (
-    <div className="chat-scroll" ref={scrollRef}>
+    <div className="chat-scroll-wrap">
+    <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
       <div className="chat-column chat-messages">
         {loading && (
           <div className="empty pulse" style={{ padding: '24px 0' }}>
@@ -875,12 +931,25 @@ function Thread({
               </div>
             </div>
           ) : (
-            <AssistantTurn key={i} message={m} />
+            <AssistantTurn
+              key={i}
+              message={m}
+              conversationId={conversationId}
+              messageIndex={i}
+              onContinue={i === lastAssistantIndex && !live ? onContinue : undefined}
+              canContinue={canContinue}
+            />
           ),
         )}
 
         {live && !liveRunHasLanded && <LiveTurn runId={live.runId} stream={live.stream} />}
       </div>
+    </div>
+    {showJump && (
+      <button type="button" className="chat-jump" onClick={jumpToLatest}>
+        Jump to latest ↓
+      </button>
+    )}
     </div>
   )
 }
@@ -893,7 +962,21 @@ function AssistantAvatar() {
   )
 }
 
-function AssistantTurn({ message }: { message: ChatMessage }) {
+function AssistantTurn({
+  message,
+  conversationId,
+  messageIndex,
+  onContinue,
+  canContinue,
+}: {
+  message: ChatMessage
+  conversationId: string | null
+  /** Index in `conversation.messages` (addresses the server HTML preview). */
+  messageIndex: number
+  /** Set only on the latest assistant reply; shown when it was cut off. */
+  onContinue?: () => void
+  canContinue?: boolean
+}) {
   const navigate = useNavigate()
   const activity = message.activity ?? []
   // The compact chip only makes sense once the turn actually has a cost/carbon
@@ -932,7 +1015,21 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
             nesting it inside another `.chat-prose.md` would leave the
             first-child/last-child margin rules pointing at the wrapper instead of
             at the first heading. */}
-        <MarkdownDoc source={message.content || '_(no output)_'} className="chat-prose md" />
+        <MarkdownDoc
+          source={message.content || '_(no output)_'}
+          className="chat-prose md"
+          conversationId={conversationId ?? undefined}
+          messageIndex={messageIndex}
+          runId={message.run_id}
+        />
+        {message.truncated && onContinue && (
+          <div className="chat-cutoff" role="status">
+            <span>This reply was cut off at the output limit.</span>
+            <button type="button" onClick={onContinue} disabled={!canContinue}>
+              Continue
+            </button>
+          </div>
+        )}
         <TurnResults runId={message.run_id} activity={activity} />
 
         {hasFootprint ? (
@@ -957,19 +1054,8 @@ function AssistantTurn({ message }: { message: ChatMessage }) {
           )
         )}
 
-        {message.grounding?.status === 'unresolved' && (
-          <div className="chat-turn-footer">
-            <span className="err">
-              Unverified figures: {message.grounding.unsupported.join(', ')} — not found in
-              any retrieved data
-            </span>
-          </div>
-        )}
-        {message.grounding?.status === 'repaired' && (
-          <div className="chat-turn-footer">
-            Reply rewritten: an earlier draft cited figures that were not retrieved
-          </div>
-        )}
+        <SavedFileChips files={message.saved_files} />
+        <ChecksBar message={message} />
 
         {message.run_id && (
           <div className="chat-turn-footer">
@@ -1136,6 +1222,11 @@ function LiveTurn({ runId, stream }: { runId: string; stream: ReturnType<typeof 
           </div>
         )}
         <TurnResults runId={runId} live={stream} />
+        {stream.truncated && (
+          <div className="chat-cutoff" role="status">
+            <span>This reply was cut off at the output limit.</span>
+          </div>
+        )}
         {/* Only the engine's own verdict is rendered as an error. A dropped
             connection is reported below in the status slot instead — telling a
             user their turn failed because their wifi hiccuped is a lie. */}
@@ -1187,7 +1278,9 @@ function Composer({
   value,
   onChange,
   onSend,
-  disabled,
+  busy,
+  queued,
+  onCancelQueued,
   error,
   onStop,
   stopping,
@@ -1215,7 +1308,11 @@ function Composer({
   value: string
   onChange: (v: string) => void
   onSend: () => void
-  disabled: boolean
+  /** A reply is running. The box stays editable (R16): sending queues one message. */
+  busy: boolean
+  /** The message waiting for the run to finish, if any. */
+  queued?: string | null
+  onCancelQueued?: () => void
   error: string | null
   /** Set while a reply with a known run id is in flight: the send button
    *  becomes a Stop button. Absent (no run id yet) keeps the inert dot. */
@@ -1262,30 +1359,32 @@ function Composer({
 
   // Autofocus, and refocus when a turn completes.
   useEffect(() => {
-    if (!disabled) ref.current?.focus()
-  }, [disabled])
+    if (!busy) ref.current?.focus()
+  }, [busy])
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      if (!blockReason) onSend()
+      // `send` itself holds the synchronous lock (R15); this only skips Enter
+      // when a message is already queued, so the typed text is kept as is.
+      if (!blockReason && !(busy && queued)) onSend()
     }
   }
 
   const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer.types).includes('Files')
   const onDragEnter = (e: DragEvent) => {
-    if (disabled || !hasFiles(e)) return
+    if (!hasFiles(e)) return
     e.preventDefault()
     dragDepth.current += 1
     setDragging(true)
   }
   const onDragOver = (e: DragEvent) => {
-    if (disabled || !hasFiles(e)) return
+    if (!hasFiles(e)) return
     e.preventDefault()
     setDragging(true)
   }
   const onDragLeave = (e: DragEvent) => {
-    if (disabled || !hasFiles(e)) return
+    if (!hasFiles(e)) return
     dragDepth.current = Math.max(0, dragDepth.current - 1)
     if (dragDepth.current === 0) setDragging(false)
   }
@@ -1294,7 +1393,6 @@ function Composer({
     e.preventDefault()
     dragDepth.current = 0
     setDragging(false)
-    if (disabled) return
     const files = Array.from(e.dataTransfer.files)
     if (files.length > 0) onAddFiles(files)
   }
@@ -1308,6 +1406,17 @@ function Composer({
       onDrop={onDrop}
     >
       {error && <div className="error-text" style={{ marginBottom: 8 }}>{error}</div>}
+      {queued && (
+        <div className="chat-queued">
+          <span className="chat-queued-label">Sends when Tret finishes</span>
+          <span className="chat-queued-text" title={queued}>
+            {queued}
+          </span>
+          <button type="button" className="chat-queued-cancel" onClick={onCancelQueued} aria-label="Cancel queued message">
+            ✕
+          </button>
+        </div>
+      )}
       <ComposerControls
         models={models}
         objective={objective}
@@ -1362,9 +1471,9 @@ function Composer({
           onAddFolders(picked)
         }}
       />
-      <div className={`chat-inputbox${disabled ? ' disabled' : ''}`}>
+      <div className="chat-inputbox">
         <ComposerPlusMenu
-          disabled={disabled}
+          disabled={false}
           folderDisabled={folderBusy}
           onUploadFiles={() => fileInputRef.current?.click()}
           onAddFolder={() => setPickerOpen(true)}
@@ -1385,13 +1494,12 @@ function Composer({
           ref={ref}
           rows={1}
           value={value}
-          disabled={disabled}
-          placeholder={disabled ? 'Waiting for tret…' : 'Message tret…'}
+          placeholder={busy ? 'Type your next message — it sends when Tret finishes' : 'Message tret…'}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={onKeyDown}
           autoFocus={autoFocus}
         />
-        {disabled && onStop ? (
+        {busy && onStop && (
           <button
             className="chat-send"
             onClick={onStop}
@@ -1401,21 +1509,33 @@ function Composer({
           >
             <StopIcon />
           </button>
-        ) : (
+        )}
+        {(!busy || !onStop || value.trim() !== '') && (
           <button
             className="chat-send"
             onClick={onSend}
-            disabled={disabled || !value.trim() || !!blockReason}
-            aria-label="Send message"
-            title={blockReason ?? 'Send (Enter)'}
+            disabled={!value.trim() || !!blockReason || (busy && !!queued)}
+            aria-label={busy ? 'Queue message' : 'Send message'}
+            title={
+              blockReason ??
+              (busy ? (queued ? 'One message is already queued' : 'Queue — sends when Tret finishes') : 'Send (Enter)')
+            }
           >
-            {disabled ? <span className="chat-send-dot pulse" /> : <SendIcon />}
+            <SendIcon />
           </button>
         )}
       </div>
     </div>
   )
 }
+
+/** R27: cohort wording for the routing objective. */
+const PRIORITY_OPTIONS: [string, string][] = [
+  ['balanced', 'Balanced'],
+  ['eco', 'Lower climate impact'],
+  ['token_conservation', 'Lower cost'],
+  ['quality', 'Best quality'],
+]
 
 /** Model-selection controls: which objective the router optimizes for, and an
  *  optional model pin, both for this message only. Neither pre-selects
@@ -1455,7 +1575,26 @@ function ComposerControls({
   // see) still needs its own option, same reasoning as ModelSelect: dropping
   // it would make the select silently fall back to a different harness.
   const harnessKnown = harnesses.some((h) => h.id === harnessValue)
-  if (lean) return null
+  if (lean) {
+    // R27: a plain trade-off control; the router objective, in words.
+    return (
+      <div className="chat-priority">
+        <label htmlFor="chat-priority-select">Priority</label>
+        <select
+          id="chat-priority-select"
+          value={objective || 'balanced'}
+          onChange={(e) => onObjectiveChange(e.target.value)}
+          title={objectiveDescription(objective || 'balanced')}
+        >
+          {PRIORITY_OPTIONS.map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
+    )
+  }
   return (
     <div className="chat-controls">
       <span className="chat-control">
@@ -1591,11 +1730,3 @@ function GearIcon() {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function relativeTime(iso: string | null): string {
-  if (!iso) return '—'
-  const seconds = (Date.now() - new Date(iso).getTime()) / 1000
-  if (seconds < 60) return 'just now'
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`
-  return `${Math.floor(seconds / 86400)}d`
-}

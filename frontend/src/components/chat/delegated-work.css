@@ -196,3 +196,19 @@
 .bc-link-warn {
   color: var(--amber);
 }
+
+/* R18: failure reason and out-of-steps label on a delegated row. */
+.dw-warn {
+  color: var(--warn, #b7791f);
+  font-size: 10.5px;
+}
+
+.dw-error {
+  color: var(--danger, #c0392b);
+  font-size: 10.5px;
+  min-width: 0;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

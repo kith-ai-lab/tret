@@ -59,7 +59,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from itsdangerous import BadSignature, URLSafeTimedSerializer
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -587,6 +587,8 @@ class ResourceEntry(BaseModel):
 # WriteTarget's own docstring for why). `^[a-z0-9][a-z0-9-]{1,39}$` — starts
 # alphanumeric, otherwise lowercase/digits/hyphen, 2-40 characters — keeps it
 # legible in a URL or a tool call and unambiguous to type by hand.
+# `session-<n>` is reserved for a conversation's own folders (cohort write
+# targets), so a workspace folder can never collide with one.
 _WRITE_SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{1,39}$"
 
 
@@ -600,6 +602,13 @@ class WriteTargetEntry(BaseModel):
     drive_id: str = Field(min_length=1)
     item_id: str = Field(min_length=1)
     web_url: str | None = None
+
+    @field_validator("slug")
+    @classmethod
+    def _slug_not_reserved(cls, v: str) -> str:
+        if v.startswith("session-"):
+            raise ValueError("slug must not start with 'session-' (reserved for a session's own folders)")
+        return v
 
 
 class ResourcesBody(BaseModel):

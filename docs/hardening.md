@@ -222,6 +222,58 @@ the summed energy; each run additionally records the factor in force when it ran
 and `energy_basis` in the response says which is which. All of it is estimated —
 see [eco-accounting.md](eco-accounting.md).
 
+The response also carries a `checks` block counted over the same bounded scan:
+`runs_checked`, the number check's outcomes (`clean`, `repaired`, `unresolved`,
+`skipped`, `off`), `unvetted` (replies that used figures from the unvetted
+analysis lane), `html_issues` (and how many were `html_repaired`), `truncated`
+(cut off at the output limit), `out_of_steps` (subagents that ran out of steps)
+and `degenerate` (runs that hit the degenerate-output guard). Runs recorded
+before these columns existed count nowhere.
+
+### Guardrails: what each one is, who can change it
+
+`GET /api/guardrails` lists every guardrail in three tiers; the same list is
+Settings → Guardrails in the UI. Any member can read it. `PUT /api/guardrails`
+takes a partial object of the member settings below and is limited to workspace
+admins and owners (the same rule as auto-approval). Values are validated and
+clamped, stored on `Workspace.settings["guardrails"]`, and copied onto every run
+as `runs.guardrails["settings"]`, so a run's audit trail shows exactly what was
+on when it ran. A workspace that never changes anything behaves as before.
+
+**Always on (locked).** No switch exists, in the UI or the API:
+
+| Guardrail | What it guarantees |
+|---|---|
+| `numbers_from_lookups_or_methods` | Figures in a deliverable trace to a dataset lookup, a vetted method run or the member's own words. Figures from the cohort unvetted lane are always labelled unvetted and never feed verdict citations. |
+| `provenance` | Every run records what it read, which models answered, cost, energy and the guardrail settings in force. |
+| `draft_until_approved` | Findings and drafted sections stay drafts until a person, or the workspace's logged auto-approval policy, approves them. |
+| `create_only_writes` | Saving to a connected folder creates a new file; an existing file is never overwritten. |
+
+**Member settings (admins can change, can only tighten).**
+
+| Setting | Values | Default | Effect |
+|---|---|---|---|
+| `number_check` | true / false | true | Check every figure in a reply against what the run retrieved or the member wrote. Off records `grounding.status = "off"`. |
+| `repair_attempts` | 0 to 3 | 2 | How many rewrites the number check (and the HTML check) may ask for before the reply ships flagged. 0 ships it flagged straight away. |
+| `html_check` | true / false | true | Check HTML in a reply for unclosed tags, stray table cells and a missing `</html>`; one repair request when something is found and the reply was not cut off. |
+| `web_research` | true / false | true | Withholds `web_search`, `fetch_url` and `capture_source` when off. Cannot enable what the operator has not allowed (`TRET_EGRESS`, `TRET_EGRESS_RESEARCH`). |
+| `spend_cap_usd` | number above 0, or null | null | Per-run spend ceiling; the run takes the lower of this and the harness cap. |
+| `max_subagents` | 0 to `TRET_MAX_FANOUT`, or null | null | Most subagents per delegation call; 0 withholds delegation entirely. |
+
+**Operator settings (visible, not editable by members).** Code sandbox network
+isolation (`TRET_METHODS_NETWORK_ISOLATION`), pack integrity pinning, the
+unvetted analysis lane (`TRET_UNVETTED_ANALYSIS`, cohort edition only), the
+research allowlist (how many hosts), the degenerate-output guard, and the reply
+length limit (the chat harness's `max_output_tokens`).
+
+**Overhead.** Each repair request is an extra model turn. The run records its
+tokens in `runs.guardrails["overhead"]`
+(`repair_turns`, `repair_input_tokens`, `repair_output_tokens`), and the
+guardrails API sums the last 30 days per workspace, pro-rating each run's cost
+and energy by the share of its tokens spent on repairs, so the panel can show
+what the checks cost. Repair turns are not split between the number check and
+the HTML check; both items show the same combined figure.
+
 ## 8. Database and storage
 
 - Give tret its own Postgres role. Alembic owns the schema and tret brings the

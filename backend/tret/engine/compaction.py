@@ -107,6 +107,14 @@ ELIDABLE_TOOLS = frozenset(
 PROTECTED_TOOLS = frozenset(
     {
         "lookup_dataset",
+        # A working file the model keeps appending to: an elided result would
+        # lose its document id and current size.
+        "draft_file",
+        # Creates a project Dataset the run keeps querying; an elided load result
+        # loses its name and row count.
+        "import_table",
+        # Unvetted figures the reply must label: never elide their source.
+        "run_analysis",
         "run_method",
         "record_verdict",
         "record_finding",

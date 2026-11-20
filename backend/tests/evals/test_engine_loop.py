@@ -41,6 +41,12 @@ from tret.router_llm.prompts import ROUTING_PROMPT_VERSION
 from tret.router_llm.router import RoutingDecision
 
 
+def _legacy_grounding(grounding: dict) -> dict:
+    """ without the Learning-round additions (,
+    ), which test_learning_run_loop.py covers."""
+    return {k: v for k, v in grounding.items() if k not in ("unsupported_detail", "unvetted", "skipped_code_blocks")}
+
+
 def _lookup(dataset: str, **filters) -> ScriptedCall:
     return ScriptedCall("lookup_dataset", {"dataset": dataset, "filters": filters})
 
@@ -316,7 +322,7 @@ async def test_hitting_the_ceiling_with_nothing_recorded_still_fails(world):
     )
 
     assert result.run.status == "failed"
-    assert result.run.error == "max_iterations (3) reached without completion"
+    assert result.run.error == "Ran out of steps (3 of 3). Partial results kept."
     assert result.findings == []
     assert result.events_of("budget_warning") == []
 
@@ -413,7 +419,7 @@ async def test_a_different_call_in_between_starts_the_count_again(world):
 
     assert result.provider.turns_played == 6
     assert result.run.status == "failed"
-    assert result.run.error == "max_iterations (6) reached without completion"
+    assert result.run.error == "Ran out of steps (6 of 6). Partial results kept."
     assert "identical_failure_stop" not in (result.run.routing or {})
     assert all("the run stops here" not in e["result"] for e in result.tool_errors)
 
@@ -421,7 +427,7 @@ async def test_a_different_call_in_between_starts_the_count_again(world):
 @pytest.mark.parametrize(
     ("setting", "turns_played", "error"),
     [
-        (0, 5, "max_iterations (5) reached without completion"),
+        (0, 5, "Ran out of steps (5 of 5). Partial results kept."),
         (4, 4, "stopped: 4 identical failing calls to lookup_dataset"),
         (1, 2, "stopped: 2 identical failing calls to lookup_dataset"),  # minimum 2
     ],
@@ -1593,7 +1599,7 @@ async def test_a_fabricated_figure_gets_one_grounding_nudge_then_completes(world
     nudges = _grounding_nudges(result)
     assert len(nudges) == 1
     assert nudges[0]["meta"]["unsupported"] == ["58", "2021"]
-    assert result.run.grounding == {
+    assert _legacy_grounding(result.run.grounding) == {
         "checked": True,
         "status": "repaired",
         "attempts": 1,
@@ -1663,7 +1669,7 @@ async def test_a_reply_that_only_cites_retrieved_and_user_numbers_is_never_nudge
 
     assert result.run.status == "completed", result.run.error
     assert _grounding_nudges(result) == []
-    assert result.run.grounding == {
+    assert _legacy_grounding(result.run.grounding) == {
         "checked": True,
         "status": "clean",
         "attempts": 0,
@@ -1743,7 +1749,7 @@ async def test_a_repeated_fabricated_figure_is_never_self_evidence(world):
     nudges = _grounding_nudges(result)
     assert len(nudges) == 2
     assert all(m["meta"][ENGINE_NUDGE_KEY] == "grounding" for m in nudges)
-    assert result.run.grounding == {
+    assert _legacy_grounding(result.run.grounding) == {
         "checked": True,
         "status": "unresolved",
         "attempts": 3,
@@ -1780,7 +1786,7 @@ async def test_three_grounding_failures_in_a_row_exhaust_the_repair_budget(world
     assert result.run.status == "completed", result.run.error
     nudges = _grounding_nudges(result)
     assert len(nudges) == 2  # the 3rd failure exhausts the budget, kept rather than retried
-    assert result.run.grounding == {
+    assert _legacy_grounding(result.run.grounding) == {
         "checked": True,
         "status": "unresolved",
         "attempts": 3,
@@ -1821,7 +1827,7 @@ async def test_a_grounding_failure_on_the_last_iteration_is_not_nudged(world):
 
     assert result.run.status == "completed", result.run.error
     assert result.run.error is None
-    assert result.run.grounding == {
+    assert _legacy_grounding(result.run.grounding) == {
         "checked": True,
         "status": "unresolved",
         "attempts": 1,
@@ -1852,7 +1858,7 @@ async def test_a_pure_knowledge_reply_is_never_checked_no_retrieval_to_contradic
 
     assert result.run.status == "completed", result.run.error
     assert _grounding_nudges(result) == []
-    assert result.run.grounding == {
+    assert _legacy_grounding(result.run.grounding) == {
         "checked": False,
         "status": "skipped",
         "attempts": 0,

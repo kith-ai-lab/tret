@@ -251,11 +251,36 @@ def _flatten_finding(f: Finding) -> dict:
 
 
 async def _materialize_inputs(
-    db: AsyncSession, project_id: uuid.UUID, input_specs: list[str]
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    input_specs: list[str],
+    input_map: dict[str, str] | None = None,
+    input_defaults: dict[str, str | None] | None = None,
+    input_hints: dict[str, str] | None = None,
 ) -> tuple[dict[str, list[dict]], dict]:
+    """Rows for each declared input, keyed by the manifest's own input name.
+
+    `input_map` ({manifest_input_name: dataset_name}) is the caller's choice of
+    which project dataset feeds a dataset-backed input (R08: a member's imported
+    table). Otherwise a declared `input_defaults` entry names the dataset, else the
+    input name IS the dataset name (every pre-existing method). `findings:` inputs
+    are never remappable. The summary records the dataset actually used, and the
+    source file's sha256/document id when the dataset was imported from a file.
+    """
     inputs: dict[str, list[dict]] = {}
     summary: dict = {}
+    input_map = input_map or {}
+    input_defaults = input_defaults or {}
+    input_hints = input_hints or {}
+    unknown = sorted(set(input_map) - set(input_specs))
+    if unknown:
+        raise MethodError(
+            f"inputs names {unknown}, which this method does not declare. "
+            f"Declared inputs: {list(input_specs)}"
+        )
     for spec in input_specs:
+        if spec.startswith("findings:") and spec in input_map:
+            raise MethodError(f"Input '{spec}' is recorded findings and cannot be remapped to a dataset")
         if spec.startswith("findings:"):
             schema_slug = spec.split(":", 1)[1]
             findings = (
@@ -277,15 +302,20 @@ async def _materialize_inputs(
             )
             rows = [_flatten_finding(f) for f in findings]
         else:
+            dataset_name = input_map.get(spec) or input_defaults.get(spec) or spec
             ds = (
                 await db.execute(
                     select(Dataset).where(
-                        Dataset.project_id == project_id, Dataset.name == spec
+                        Dataset.project_id == project_id, Dataset.name == dataset_name
                     )
                 )
-            ).scalar_one_or_none()
+            ).scalars().first()
             if ds is None:
-                raise MethodError(f"Required input dataset '{spec}' not found in project")
+                hint = input_hints.get(spec)
+                raise MethodError(
+                    f"Required input '{spec}': dataset '{dataset_name}' not found in project"
+                    + (f". {hint}" if hint else "")
+                )
             db_rows = (
                 (
                     await db.execute(
@@ -305,6 +335,13 @@ async def _materialize_inputs(
                 json.dumps(rows, sort_keys=True, default=str).encode()
             ).hexdigest()[:16],
         }
+        if not spec.startswith("findings:"):
+            summary[spec]["dataset"] = dataset_name
+            src = (ds.schema_json or {}).get("source") or {}
+            if src.get("sha256"):
+                summary[spec]["source_sha256"] = src["sha256"]
+            if ds.document_id:
+                summary[spec]["document_id"] = str(ds.document_id)
     return inputs, summary
 
 
@@ -317,6 +354,7 @@ async def execute_method(
     method_spec: dict,  # entry from the stored pack manifest
     params: dict,
     run_id: uuid.UUID | None = None,
+    input_map: dict[str, str] | None = None,
 ) -> MethodRun:
     """Run one method under the deterministic contract and persist the manifest."""
     entrypoint = Path(pack_dir) / method_spec["entrypoint"]
@@ -325,7 +363,12 @@ async def execute_method(
     code_sha = hashlib.sha256(entrypoint.read_bytes()).hexdigest()
 
     inputs, input_summary = await _materialize_inputs(
-        db, project_id, method_spec.get("inputs", [])
+        db,
+        project_id,
+        method_spec.get("inputs", []),
+        input_map,
+        method_spec.get("input_defaults"),
+        method_spec.get("input_hints"),
     )
     payload = json.dumps({"params": params, "inputs": inputs}, default=str).encode()
 

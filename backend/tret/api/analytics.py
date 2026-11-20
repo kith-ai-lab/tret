@@ -239,6 +239,61 @@ async def _validation_stats(
     return out, len(rows)
 
 
+async def _check_stats(db: AsyncSession, project_id: uuid.UUID | None, since, days: int | None) -> dict:
+    """What the run-loop checks found, over the same bounded scan as
+    `_validation_stats` (newest `RUN_SCAN_LIMIT` runs in the window).
+
+    Reads `runs.grounding` (number check status), `runs.stop_reason` and
+    `runs.guardrails` (html check, degenerate-output retries). Runs that
+    predate those columns simply count nowhere.
+    """
+    q = (
+        select(Run.grounding, Run.stop_reason, Run.guardrails)
+        .order_by(Run.created_at.desc())
+        .limit(RUN_SCAN_LIMIT)
+    )
+    if project_id is not None:
+        q = q.where(Run.project_id == project_id)
+    if since is not None:
+        q = q.where(Run.created_at >= since)
+    out = {
+        "window_days": days,
+        "runs_checked": 0,
+        "clean": 0,
+        "repaired": 0,
+        "unresolved": 0,
+        "skipped": 0,
+        "off": 0,
+        "unvetted": 0,
+        "html_issues": 0,
+        "html_repaired": 0,
+        "truncated": 0,
+        "out_of_steps": 0,
+        "degenerate": 0,
+    }
+    for grounding, stop_reason, guard in (await db.execute(q)).all():
+        guard = guard if isinstance(guard, dict) else {}
+        if isinstance(grounding, dict):
+            out["runs_checked"] += 1
+            status = grounding.get("status")
+            if status in ("clean", "repaired", "unresolved", "skipped", "off"):
+                out[status] += 1
+            if grounding.get("unvetted"):
+                out["unvetted"] += 1
+        html = guard.get("html_check")
+        if isinstance(html, dict) and html.get("status") == "issues":
+            out["html_issues"] += 1
+            if html.get("repaired"):
+                out["html_repaired"] += 1
+        if stop_reason == "max_tokens" or guard.get("truncated"):
+            out["truncated"] += 1
+        if stop_reason == "out_of_steps":
+            out["out_of_steps"] += 1
+        if stop_reason == "degenerate_output" or guard.get("degenerate"):
+            out["degenerate"] += 1
+    return out
+
+
 async def _energy_stats(
     db: AsyncSession, project_id: uuid.UUID | None, since
 ) -> tuple[list[dict], Decimal, int]:
@@ -381,6 +436,7 @@ async def _guardrails_response(
     harnesses, runs_scanned = await _validation_stats(db, project_id, since)
     energy, total_wh, energy_runs = await _energy_stats(db, project_id, since)
     egress = await _egress_stats(db, project_id, since)
+    checks = await _check_stats(db, project_id, since, days)
     method_runs = sum(m["runs"] for m in methods)
     method_failures = sum(m["failed"] for m in methods)
     grid = get_settings().grid_co2e_g_per_kwh
@@ -403,6 +459,7 @@ async def _guardrails_response(
             "co2e_g": float(round(co2e_grams(total_wh), 6)),
         },
         "methods": methods,
+        "checks": checks,
         "recent_method_errors": await _recent_method_errors(db, project_id, since),
         "egress": {
             **egress,

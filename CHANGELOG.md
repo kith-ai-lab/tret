@@ -10,6 +10,61 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Tret Learning testing round (R01–R28, 2026-11-20).** Fixes and additions from Ben's
+  test of the cohort edition. Request IDs are stable.
+  - *Long replies (R01).* The seeded chat harness may write 16,384 output tokens (was 4,096;
+    subagents 8,192). Each call is capped at the model's own limit when the catalog knows it. A
+    reply that still hits the limit is recorded (`runs.stop_reason = "max_tokens"`, SSE
+    `reply_truncated`), and the chat shows "This reply was cut off" with a Continue button. A new
+    `draft_file` tool builds a long file in pieces.
+  - *Saving deliverables (R02, R19, R24).* In the cohort edition every folder attached to a
+    session is a write target. Files go to its `tret/` subfolder, are never overwritten, and have
+    the sha256 of the uploaded bytes recorded. Each saved file gets a `<name>.audit.json` next to
+    it covering files read, runs, models, method and analysis runs (vetted or not), grounding,
+    guardrail settings, cost, energy, CO2e and producer. HTML blocks in replies get Preview, Open
+    in new tab, Download and Save to folder. The preview is served by
+    `GET /api/chat/{id}/preview` under a sandbox CSP, so a deck's scripts run in an opaque
+    origin. New `GET /api/chat/{id}/write-targets` and `POST /api/chat/{id}/files`.
+  - *Reading files (R03, R05, R06).* Connected and uploaded `.html`/`.htm` read as visible text
+    and `.svg`/`.xml`/`.css` as source (`raw=true` returns HTML source). An empty or failed
+    extraction is now an error naming the file and the reason, not "chars 0-0 of 0". Failed reads
+    no longer use the per-run read budget. `.zip` files list their members and
+    `read_connected_file(member=...)` reads one.
+  - *Step limit (R04).* Subagents get 30 steps (was 12). A run that hits its cap records
+    `stop_reason = "out_of_steps"`, and its parent receives the partial results rather than a
+    bare error.
+  - *Numbers (R07, R08).* A cohort-only pack `kith-cohort` adds the vetted `facility_inventory`
+    method (Scope 1 + location-based Scope 2 per facility and portfolio company, from the Northwood
+    carbon template and a factor dataset). `import_table` loads a member's CSV/XLSX as a dataset,
+    `run_method` accepts an `inputs` mapping, and `tret.services.dataset_import` imports
+    normalised factor tables with provenance on every row. Behind `TRET_UNVETTED_ANALYSIS` (cohort
+    only, default off), `run_analysis` runs model-written Python in a locked-down sandbox and
+    records each run in the new `analysis_runs` table. Its figures are labelled unvetted and can
+    never satisfy a verdict's cited values. See docs/trust-doctrine.md §6 and
+    docs/learning-edition.md.
+  - *Checks (R10–R13).* A degenerate-output guard stops runs of padding or repeated tokens,
+    retries once on another model, and otherwise fails the run (`stop_reason =
+    "degenerate_output"`). The prose number check skips code and CSS, reads only the visible
+    text of HTML, records where each unverified figure sits, and now checks small numbers that
+    carry a unit or currency ("3 yr", "$5"). Arithmetic support needs operands in the same
+    paragraph or table row. Generated HTML is checked for unclosed tags, truncation and stray
+    table cells, with one repair attempt.
+  - *Sessions and runs (R15–R18, R20–R23).* A send lock stops double-sends from creating two
+    sessions. The composer accepts the next message while Tret works and sends it when the run
+    ends. Auto-scroll follows only when you are at the bottom. The delegated-work card counts
+    done, failed and running separately, shows elapsed time, total cost and why a subagent
+    failed. Sessions can be grouped (editable titles; a new session in a group starts with the
+    group's folders), renamed and archived (archive keeps runs, emissions and the audit trail).
+    The Runs page filters and groups by session (`GET /api/runs?conversation_id=`).
+  - *Guardrails (R25–R28).* New `GET/PUT /api/guardrails` and a Settings panel list every
+    guardrail by tier: locked, member-adjustable (number check, repair attempts 0–3, HTML check,
+    web research, per-run spend cap, subagents per call) and operator-only. Each shows its
+    measured 30-day overhead. Every run records the settings in force (`runs.guardrails`). Replies
+    show one badge per check. The cohort new-session screen has a plain Priority control
+    (Balanced, Lower climate impact, Lower cost, Best quality). Cohort Analytics replaces the
+    method sections with a Guardrails summary (`checks` on `GET /api/analytics/guardrails`).
+  - Migration `f4c1a8e93d27` adds `conversation_groups`, `conversations.group_id` and
+    `archived_at`, `runs.stop_reason` and `guardrails`, and `analysis_runs`.
 - **OneDrive and SharePoint folders on a chat.** The composer's paperclip is now a "+" menu:
   "Upload files" as before, and "Add OneDrive folder", which opens a folder picker over the
   workspace's Microsoft 365 connection (or "Connect OneDrive…" when there is none). A

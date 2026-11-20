@@ -50,6 +50,14 @@ class PackMethod(BaseModel):
     # Inputs the runner materializes and passes in: dataset names, or
     # "findings:<schema_slug>" for recorded findings flattened to rows.
     inputs: list[str] = Field(default_factory=list)
+    # Dataset-backed inputs whose dataset is NOT shipped by the pack (a member's
+    # imported table, a factor table loaded by an operator). Keys are input names
+    # (they must also appear in `inputs`); a value is the default dataset name,
+    # or null when the caller must name one via run_method's `inputs` mapping.
+    input_defaults: dict[str, str | None] = Field(default_factory=dict)
+    # Text appended to the "dataset not found" error for an input, e.g. where to
+    # load the data from.
+    input_hints: dict[str, str] = Field(default_factory=dict)
     timeout_seconds: float = 60.0
 
 
@@ -125,3 +133,7 @@ class PackManifest(BaseModel):
     datasets: list[PackDataset] = Field(default_factory=list)
     methods: list[PackMethod] = Field(default_factory=list)
     harnesses: list[HarnessPreset] = Field(default_factory=list)
+    # Restrict automatic installation to workspaces of this edition (e.g.
+    # "cohort"); None installs everywhere. `loader.install_pack` raises
+    # PackEditionSkipped for a workspace of another edition.
+    edition: str | None = None

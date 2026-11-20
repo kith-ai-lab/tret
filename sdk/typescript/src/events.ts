@@ -40,6 +40,7 @@ export const RUN_EVENT_TYPES = [
   'delegation_finished',
   'delegation_progress',
   'lesson_proposed',
+  'reply_truncated',
   'done',
   'error',
 ] as const
@@ -207,6 +208,11 @@ export interface RunEventDataMap {
     /** The child's final status, or `unknown` when it could not be read. */
     status: string
     cost_usd?: number
+    /** Why the child failed, when it did (null otherwise). */
+    error?: string | null
+    /** `max_tokens` | `out_of_steps` | `degenerate_output`, or null. */
+    stop_reason?: string | null
+    duration_ms?: number | null
   }
   delegation_progress: {
     child_run_id: string
@@ -216,6 +222,8 @@ export interface RunEventDataMap {
     model: string | null
   }
   lesson_proposed: { lesson_id: string; text: string }
+  /** The final reply hit the model's output-token limit and is cut off. */
+  reply_truncated: { max_output_tokens: number }
   done: DoneEventData
   /** `status` is absent when the run failed before it started (a refused
    *  gate, an unknown task type, no route). */

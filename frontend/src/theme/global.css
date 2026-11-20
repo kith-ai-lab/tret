@@ -2195,3 +2195,72 @@ summary:focus-visible {
 .stat-tile .stat-sub { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .chip-flag { color: var(--amber); border-color: var(--amber-border); background: var(--amber-dim); }
 .chip-check { color: var(--blue); border-color: var(--blue-border); background: var(--blue-dim); }
+
+/* --- Learning round: E1 (session rail: groups, row menu, archived) --- */
+.session-group { display: flex; flex-direction: column; margin-bottom: 4px; }
+.session-group-head { display: flex; align-items: center; gap: 2px; padding: 2px 0; }
+.session-group-toggle,
+.session-mini-btn,
+.session-row-menu-btn {
+  background: none; border: none; color: var(--text-muted); cursor: pointer;
+  border-radius: 5px; padding: 2px 6px; font-size: 13px; line-height: 1;
+}
+.session-group-toggle:hover,
+.session-mini-btn:hover,
+.session-row-menu-btn:hover { color: var(--text); background: var(--bg-hover); }
+.session-chevron { display: inline-block; font-size: 10px; transition: transform 0.12s ease; }
+.session-chevron.open { transform: rotate(90deg); }
+.session-group-title {
+  flex: 1; min-width: 0; text-align: left; background: none; border: none; cursor: text;
+  color: var(--text); font-family: var(--mono); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.04em; padding: 3px 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.session-group-count { font-family: var(--mono); font-size: 10px; color: var(--text-muted); }
+.session-group-body { padding-left: 10px; display: flex; flex-direction: column; gap: 1px; }
+.session-section-label {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted); padding: 8px 4px 2px;
+}
+.session-empty { font-size: 11px; color: var(--text-muted); padding: 4px 9px; }
+.session-row { position: relative; display: flex; align-items: center; }
+.session-row .chat-rail-item { flex: 1; min-width: 0; }
+.session-row-menu-btn { opacity: 0; position: absolute; right: 2px; top: 50%; transform: translateY(-50%); background: var(--bg-hover); }
+.session-row:hover .session-row-menu-btn,
+.session-row:focus-within .session-row-menu-btn,
+.session-row-menu-btn[aria-expanded="true"] { opacity: 1; }
+.session-row:hover .chat-rail-time,
+.session-row:focus-within .chat-rail-time { visibility: hidden; }
+.session-menu {
+  position: absolute; right: 0; top: 100%; z-index: 20; min-width: 160px; display: flex; flex-direction: column;
+  background: var(--bg, #fff); border: 1px solid var(--border); border-radius: 8px; padding: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+}
+.session-menu button {
+  text-align: left; background: none; border: none; color: var(--text); cursor: pointer;
+  font-size: 12.5px; padding: 6px 8px; border-radius: 5px;
+}
+.session-menu button:hover,
+.session-menu button:focus-visible { background: var(--bg-hover); outline: none; }
+.session-inline-input {
+  width: 100%; min-width: 0; font: inherit; font-size: 12.5px; color: var(--text); background: var(--bg, #fff);
+  border: 1px solid var(--accent); border-radius: 5px; padding: 4px 6px;
+}
+.session-note {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--text-muted);
+  padding: 6px 4px;
+}
+.session-note-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-link-btn {
+  background: none; border: none; color: var(--accent); cursor: pointer; font-size: 11px; padding: 0 2px;
+  text-decoration: underline;
+}
+.session-link-btn.danger { color: var(--red, #c0392b); }
+.session-rail-foot { border-top: 1px solid var(--border-subtle); padding-top: 6px; margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
+.session-foot-btn {
+  text-align: left; background: none; border: none; cursor: pointer; color: var(--text-muted);
+  font-family: var(--mono); font-size: 11px; padding: 5px 6px; border-radius: 5px;
+}
+.session-foot-btn:hover { color: var(--text); background: var(--bg-hover); }
+.session-archived-list { max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+.session-archived-row { display: flex; align-items: center; gap: 4px; }
+.session-archived-row .chat-rail-item { flex: 1; min-width: 0; }

@@ -32,6 +32,8 @@
  */
 import { type ReactNode, useMemo } from 'react'
 
+import { HtmlPreview, isFullHtmlDocument, previewUrl } from '../chat/HtmlPreview'
+
 // Ordered alternation, and the order is the precedence: a code span wins over
 // everything inside it, a link wins over emphasis in its label, and `**bold**`
 // must be tried before `*italic*` or the latter would eat the first asterisk.
@@ -119,7 +121,24 @@ interface ListState {
 }
 
 /** Parse the document into blocks. One pass, no backtracking. */
-function render(source: string): ReactNode[] {
+/** Chat-only context for HTML deliverables (R19); absent everywhere else. */
+export interface HtmlContext {
+  conversationId?: string
+  runId?: string | null
+  /** 0-based index of this message in the conversation (server preview URL). */
+  messageIndex?: number
+}
+
+function serverUrlFor(ctx: HtmlContext, block: number): string | undefined {
+  return ctx.conversationId && ctx.messageIndex !== undefined
+    ? previewUrl(ctx.conversationId, ctx.messageIndex, block)
+    : undefined
+}
+
+function render(source: string, htmlCtx: HtmlContext = {}): ReactNode[] {
+  // 0-based count of ```html/```htm fences in document order: the `block`
+  // the server's preview endpoint addresses.
+  let htmlBlock = 0
   const lines = source.replace(/\r\n?/g, '\n').split('\n')
   const blocks: ReactNode[] = []
   let list: ListState | null = null
@@ -174,12 +193,32 @@ function render(source: string): ReactNode[] {
         body.push(lines[i])
         i++
       }
-      blocks.push(
+      const makePre = (key?: string) => (
         // Scrolls on its own axis so a wide line cannot widen the dialog.
-        <pre className="md-pre" key={nextKey()}>
+        <pre className="md-pre" key={key}>
           <code>{body.join('\n')}</code>
-        </pre>,
+        </pre>
       )
+      const lang = fence[1].toLowerCase()
+      if (lang === 'html' || lang === 'htm') {
+        // R19: an HTML deliverable gets Preview / new tab / download / save.
+        const n = htmlBlock++
+        blocks.push(
+          <HtmlPreview
+            key={nextKey()}
+            html={body.join('\n')}
+            conversationId={htmlCtx.conversationId}
+            runId={htmlCtx.runId}
+            messageIndex={htmlCtx.messageIndex}
+            block={n}
+            serverUrl={serverUrlFor(htmlCtx, n)}
+          >
+            {makePre()}
+          </HtmlPreview>,
+        )
+      } else {
+        blocks.push(makePre(nextKey()))
+      }
       continue
     }
 
@@ -314,7 +353,42 @@ function render(source: string): ReactNode[] {
 
 /** Renders markdown as escaped React elements. `className` defaults to the app's
  *  existing `.md` typography so this matches the doctrine viewer. */
-export function MarkdownDoc({ source, className = 'md' }: { source: string; className?: string }) {
-  const blocks = useMemo(() => render(source), [source])
+export function MarkdownDoc({
+  source,
+  className = 'md',
+  conversationId,
+  runId,
+  messageIndex,
+}: {
+  source: string
+  className?: string
+  /** Chat context, enabling "Save to folder" on HTML deliverables. */
+  conversationId?: string
+  runId?: string | null
+  /** Index of this message in the conversation; with `conversationId` it
+   *  addresses the server preview endpoint. */
+  messageIndex?: number
+}) {
+  const blocks = useMemo(() => {
+    // A reply that is itself a whole HTML document: one deliverable.
+    if (isFullHtmlDocument(source)) {
+      return [
+        <HtmlPreview
+          key="html-doc"
+          html={source.trim()}
+          conversationId={conversationId}
+          runId={runId}
+          messageIndex={messageIndex}
+          block={0}
+          serverUrl={serverUrlFor({ conversationId, messageIndex }, 0)}
+        >
+          <pre className="md-pre">
+            <code>{source.trim()}</code>
+          </pre>
+        </HtmlPreview>,
+      ]
+    }
+    return render(source, { conversationId, runId, messageIndex })
+  }, [source, conversationId, runId, messageIndex])
   return <div className={className}>{blocks}</div>
 }

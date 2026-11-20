@@ -67,6 +67,11 @@ services:
       TRET_LOGIN_MAX_ATTEMPTS: ${TRET_LOGIN_MAX_ATTEMPTS:-10}
       TRET_LOGIN_WINDOW_SECONDS: ${TRET_LOGIN_WINDOW_SECONDS:-300.0}
       TRET_METHODS_NETWORK_ISOLATION: ${TRET_METHODS_NETWORK_ISOLATION:-true}
+      # Learning edition only: let the model run its own labelled, UNVETTED calculations (run_analysis).
+      TRET_UNVETTED_ANALYSIS: ${TRET_UNVETTED_ANALYSIS:-false}
+      # The lane needs bubblewrap and refuses to run without it; this is a development-only opt-out.
+      TRET_UNVETTED_ANALYSIS_ALLOW_WEAK_SANDBOX: ${TRET_UNVETTED_ANALYSIS_ALLOW_WEAK_SANDBOX:-false}
+      TRET_UNVETTED_ANALYSIS_MAX_CONCURRENT: ${TRET_UNVETTED_ANALYSIS_MAX_CONCURRENT:-2}
       # ── outbound network (docs/hardening.md §9, tret/net/) ──────────────
       # Five switchable classes: provider, catalog, local, research, search.
       # TRET_EGRESS=off is the air-gapped deployment: no cloud provider, no

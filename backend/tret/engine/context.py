@@ -138,6 +138,55 @@ each figure with where it came from (which document, dataset row, or URL), \
 what you could not establish, and nothing beyond what the brief asked for. \
 The reader sees only that final message, never your tool calls."""
 
+# ── Learning edition guidance (R01, R02, R08, R09, R12, R14) ────────────────────
+# Cohort workspaces only. Kept short: it states the working agreement, not the
+# tool schemas (the model has those).
+COHORT_GUIDANCE = """\
+## Learning edition: how numbers, files and brand assets work here
+
+Numbers. Two lanes are vetted: lookup_dataset and run_method. For emissions \
+arithmetic use the facility_inventory method: import the member's carbon file with \
+import_table, then run_method with inputs mapping the method's "activity" input to \
+that dataset. If a method reports a factor dataset is missing, say so; never \
+estimate the number yourself.
+
+Illustrative figures. If you give an example or illustrative number, say in the same \
+sentence where it came from (a dataset row, a method result, an unvetted calculation, \
+or "my assumption") and mark assumptions as assumptions. Never present an invented \
+figure as data.
+
+Saving work. Deliver files with propose_connected_write into the session's attached \
+folder (it lands in a tret/ subfolder, create-only). Write long files in pieces with \
+draft_file (mode "append"), then save that document, instead of one huge message. \
+A later session in the same group sees what you saved: read it back with \
+read_connected_file instead of asking the member to paste it.
+
+Decks and brand. When the session folder contains a _brand folder, use it: read the \
+SVG wordmark with read_connected_file(..., raw=true) and inline it, and take colours \
+and fonts from any colour or brand file there rather than inventing a palette."""
+
+COHORT_UNVETTED_GUIDANCE = """\
+## Unvetted calculations (run_analysis)
+
+When no vetted method covers a calculation you may use run_analysis. Its results are \
+labelled UNVETTED and are recorded with your code. Rules: use it only when no vetted \
+method fits and say why in `purpose`; write "unvetted" next to every figure that \
+comes from it, in the reply and in any deliverable; never put an unvetted figure in a \
+verdict, a cited_values entry, or a number presented as vetted; state the calculation \
+in plain words so a reviewer can check it."""
+
+
+def cohort_guidance_blocks(cohort: bool, unvetted_analysis: bool) -> list["ContextBlock"]:
+    """The Learning-edition prompt blocks: none outside the cohort edition, and the
+    unvetted-lane block only when that lane is on."""
+    if not cohort:
+        return []
+    blocks = [block_for("cohort_guidance", "learning_edition", COHORT_GUIDANCE)]
+    if unvetted_analysis:
+        blocks.append(block_for("cohort_guidance", "unvetted_analysis", COHORT_UNVETTED_GUIDANCE))
+    return blocks
+
+
 # ── objective-aware guidance (2026-09-11) ───────────────────────────────────
 # The router's `token_conservation` objective already picks a small model and
 # caps its reasoning effort (`router_llm.objectives.default_effort`) — but
@@ -478,6 +527,8 @@ def assemble_context(
     lessons: list[str] | None = None,
     objective: str | None = None,
     harness_lessons: list[str] | None = None,
+    cohort: bool = False,
+    unvetted_analysis: bool = False,
 ) -> AssembledContext:
     """Build the system prompt and its per-component token accounting.
 
@@ -532,6 +583,8 @@ def assemble_context(
     if guidance_block:
         blocks.append(guidance_block)
 
+    blocks.extend(cohort_guidance_blocks(cohort, unvetted_analysis))
+
     if web_tools_enabled:
         # Placed after the doctrine, so a pack that has its own rules about
         # sourcing is read first and these qualify it rather than pre-empt it.
@@ -557,6 +610,8 @@ def assemble_system_prompt(
     lessons: list[str] | None = None,
     objective: str | None = None,
     harness_lessons: list[str] | None = None,
+    cohort: bool = False,
+    unvetted_analysis: bool = False,
 ) -> str:
     """The system prompt alone (harness preview endpoint, and back-compat).
 
@@ -577,6 +632,8 @@ def assemble_system_prompt(
         lessons=lessons,
         objective=objective,
         harness_lessons=harness_lessons,
+        cohort=cohort,
+        unvetted_analysis=unvetted_analysis,
     ).system
 
 

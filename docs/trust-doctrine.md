@@ -40,25 +40,43 @@ delivery of everything else it got right.
 
 **What is exempt, honestly.** The check is number-level pattern matching, not
 a grader of reasoning, and it is deliberately lenient about the ways a number
-can honestly restate evidence rather than invent it: a small bare count under
-10 ("we checked 3 datasets") and a markdown list ordinal ("1. ", "2) ") are
-never treated as claimed figures at all; a reply may round a retrieved value
-("58" for a retrieved 58.37), state the equivalent percent or fraction of one
-("71%" for a retrieved 0.71, or the reverse), or do arithmetic — sum,
-difference, or mean — over two *other* numbers in the same reply that are
-themselves grounded, within half a unit of its own last decimal place, so
-"the combined score is 80" clears when the reply also states the two
-retrieved figures that sum to it. None of these chain: an arithmetic result
-cannot itself support a further arithmetic claim, so a run cannot bootstrap a
-tower of "derived" figures from one retrieved seed. An ISO-format date
-(`2026-09-11`) is not a claimed figure either — it is a timestamp, not three
-cited numbers — though a real figure elsewhere in the same reply is
-unaffected. And a run that never called a tool and never retrieved anything
-is not checked at all: a pure-knowledge chat answer has nothing retrieved to
-contradict, so `run.grounding` records `status: "skipped"` (`checked: False`)
-rather than either silently passing or flagging ordinary prose that was never
-meant to be grounded — distinct from `"clean"`, which means the check ran and
-found nothing wrong.
+can honestly restate evidence rather than invent it. A bare count under 10
+("we checked 3 datasets") and a markdown list ordinal ("1. ", "2) ") are not
+treated as claimed figures — but only while nothing marks the small number as
+a measurement: "3 yr", "2 months", "4x", "5 MW", "5%" and "$5" are checked like
+any other figure, because a payback period or a price is exactly the kind of
+number a reader will act on. A reply may round a retrieved value ("58" for a
+retrieved 58.37), state the equivalent percent or fraction of one ("71%" for a
+retrieved 0.71, or the reverse), or do arithmetic — sum, difference, or mean —
+over two *other* numbers that are themselves grounded, within half a unit of
+its own last decimal place, so "the combined score is 80" clears when the same
+paragraph states the two retrieved figures that sum to it. The operands must
+sit in the same paragraph, list item or table row as the claimed figure; the
+one exception is a table's totals row (first cell "total", "subtotal", "sum",
+"overall", "all companies" or "portfolio"), which the other rows of its table
+may support: numbers from unrelated sections of a long reply do not vouch for each other.
+None of these chain: an arithmetic result cannot itself support a further
+arithmetic claim, so a run cannot bootstrap a tower of "derived" figures from
+one retrieved seed. An ISO-format date (`2026-09-11`) is not a claimed figure
+either — it is a timestamp, not three cited numbers.
+
+Code is not prose. Fenced css, js/ts, python, shell and sql blocks and inline
+`code` spans are skipped (a stylesheet's `padding: 5%` is not a cited figure);
+for an html (or svg/xml) block, or a reply that is itself an HTML document, only
+the visible text is checked — tags, attributes, `<style>` and `<script>` are
+dropped. json, csv, text and unlabelled blocks are checked like prose, since a
+table of numbers in a code fence is still a table of claims. The number of
+skipped code blocks is recorded with the result, and each unverified figure is
+reported with where it sits (prose, table, list or html), its line and the
+text around it. Evidence is extracted leniently — every number the run saw,
+small ones and numbers inside code included — because evidence is what the run
+actually had, not what a reader must be shown. And a run that never called a
+tool and never retrieved anything is not checked at all: a pure-knowledge chat
+answer has nothing retrieved to contradict, so `run.grounding` records
+`status: "skipped"` (`checked: False`) rather than either silently passing or
+flagging ordinary prose that was never meant to be grounded — distinct from
+`"clean"`, which means the check ran and found nothing wrong, and from `"off"`,
+which means a workspace admin turned the check off (Settings → Guardrails).
 
 **What this guarantees, precisely.** Method code is pinned two ways: each
 execution records the entrypoint's `code_sha`, and the pack's whole content
@@ -135,3 +153,51 @@ robustness rules in the doctrine, not fluency. When required data is missing
 the model files a **data request** — a first-class record an operator can
 fulfill — and completes the assessment with what exists, stating the gap's
 effect on confidence.
+
+## 6. The Learning edition's labelled third lane
+
+Sections 1-5 describe the standard edition and remain true of it. In the Learning
+(cohort) edition, when the operator sets `TRET_UNVETTED_ANALYSIS=on`, the model
+gets a third way to produce a number, kept visibly apart from the two vetted ones.
+
+**What changes.** A cohort workspace may call `run_analysis`: the model writes a
+short Python calculation over project datasets or attached tables, and it runs in
+a stricter sandbox than a pack method. The boundary is bubblewrap: a brand-new root
+with no host filesystem, no network, no host `/proc`, capabilities dropped, and the
+process killed with its parent. The lane refuses to run when bubblewrap is not usable
+(a development-only setting can override that, and the run is then recorded as
+`weak`). A language allow-list (no imports beyond a small arithmetic and parsing set,
+no `match`, no underscore names) and OS resource limits sit on top as defence in
+depth, not as the boundary; see `docs/learning-edition.md` for the limits. It exists so a member is not stuck when
+no vetted method fits the question. The rule "the AI never writes code" is
+therefore relaxed in exactly this one lane, and only there.
+
+**What does not change.**
+
+- `lookup_dataset` and `run_method` remain the only doors for *vetted* numbers.
+  Pack methods are still operator-reviewed code; `run_analysis` is not a method
+  and never runs from a pack.
+- Verdict cited-values still refuse unvetted values. An analysis result is
+  appended to `RunContext.unvetted_values`, never to `retrieved_values`, so the
+  cross-check in `engine/validation.py` cannot match it and `record_verdict`
+  rejects a figure that came from one.
+- Web and connected documents still can never put a number into a verdict.
+- Outputs are still drafts awaiting a named human reviewer.
+
+**How it is labelled and recorded.**
+
+- The tool result begins `UNVETTED CALCULATION (analysis/<id>) - not a vetted
+  method; label these figures as unvetted.` and rows carry `analysis/<id>:<row>`
+  references. The cohort prompt requires the model to write "unvetted" beside each
+  such figure in replies and deliverables and to state the calculation in plain
+  words.
+- Every call writes an `analysis_runs` row, success or failure: the full code, its
+  SHA-256, each input's name, source and hash, the output, the output hash,
+  duration, and which sandbox isolation applied (`bwrap`, `weak` or `unavailable`). The code is stored verbatim so a reviewer can read exactly what ran.
+- The grounding check reports reply figures that rest only on an unvetted
+  calculation as unvetted, distinct from unsupported ones, and the run's
+  "Unvetted calculation (n)" badge links to the analysis rows. The deliverable
+  audit file lists analysis runs with `vetted: false`.
+
+The lane is off by default, absent from the standard edition even when the setting
+is on, and withheld from workspaces whose edition is not `cohort`.

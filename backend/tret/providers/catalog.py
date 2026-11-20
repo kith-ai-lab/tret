@@ -285,6 +285,11 @@ class ModelInfo:
     # (`/api/v1/endpoints/zdr`)? True/False once that list was fetched, None when
     # the fetch failed or never ran. None never excludes a model from routing.
     zdr_tools_endpoint: bool | None = None
+    # The model's own completion-token ceiling when the catalog knows it
+    # (OpenRouter's `top_provider.max_completion_tokens`). None = unknown. The
+    # harness clamps its per-call `max_tokens` to this so a raised output limit
+    # (R01) never asks a model for more than it can emit.
+    max_output_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if self.energy_class not in ENERGY_CLASS_WH_PER_MTOK:
@@ -1062,6 +1067,13 @@ class ModelCatalog:
                 except Exception:  # noqa: BLE001 - enrichment only, never fatal
                     pass
             context_window = int(m.get("context_length") or 0)
+            max_output: int | None = None
+            try:
+                raw_max = ((m.get("top_provider") or {}).get("max_completion_tokens"))
+                if raw_max is not None and int(raw_max) > 0:
+                    max_output = int(raw_max)
+            except (TypeError, ValueError, AttributeError):
+                max_output = None
             reasoning_default_enabled, reasoning_default_effort = parse_reasoning_default(
                 m.get("reasoning")
             )
@@ -1088,6 +1100,7 @@ class ModelCatalog:
                 open_weights=bool(hf_id),
                 hf_id=hf_id,
                 zdr_tools_endpoint=(wire_id in zdr_ids) if zdr_ids is not None else None,
+                max_output_tokens=max_output,
                 # Nobody has classified these by hand: estimate from the price
                 # tier (economy→M, standard→L, premium→XL).
                 energy_class=energy_class_for_tier(_tier_from_price(out_price)),

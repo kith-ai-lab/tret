@@ -494,6 +494,8 @@ async def _upload_connected_write(
     payload = dict(finding.payload)
     source = payload.get("source") or {}
     status_, item_id, web_url, uploaded_at, error = "failed", None, None, None, None
+    saved_path = uploaded_sha = uploaded_bytes = None
+    audit: dict | None = None
     try:
         data, content_type = await _render_write_bytes(db, finding.project_id, payload, source)
         # Inline content was hashed at proposal time (`content_sha256`); a
@@ -512,7 +514,14 @@ async def _upload_connected_write(
         # files, so a taken name fails (UploadConflictError, recorded below)
         # instead of landing as "siemens 1.pdf" next to a manifest saying
         # "siemens.pdf". Inline and deliverable writes keep the rename default.
-        extra = {"conflict": "fail"} if source.get("kind") == "document" else {}
+        # Cohort proposals are create-only for every source kind (`payload["conflict"]`,
+        # R02); a session-folder target travels in the payload because it exists only
+        # in its conversation, not in the workspace's output-folder list.
+        extra: dict = {}
+        if source.get("kind") == "document" or payload.get("conflict") == "fail":
+            extra["conflict"] = "fail"
+        if isinstance(payload.get("target_resolved"), dict):
+            extra["target"] = connections_service.write_target_from_dict(payload["target_resolved"])
         result = await connections_service.upload_connected_file(
             db,
             workspace_id=workspace_id,
@@ -527,6 +536,15 @@ async def _upload_connected_write(
         status_ = "uploaded"
         item_id, web_url = result.item_id, result.web_url
         uploaded_at = datetime.now(timezone.utc).isoformat()
+        # R02: the hash of the bytes that actually went up, for every source kind
+        # (inline and document carry one from proposal time; a deliverable is
+        # rendered only now).
+        saved_path, uploaded_bytes = result.path, len(data)
+        uploaded_sha = hashlib.sha256(data).hexdigest()
+        audit = await _upload_audit_sidecar(
+            db, finding, result, data_sha=uploaded_sha, data_len=len(data),
+            workspace_id=workspace_id, actor_user_id=actor_user_id, target=extra.get("target"),
+        )
     except (
         connections_service.ConnectionWriteError,
         connections_service.ConnectionUnavailable,
@@ -542,9 +560,74 @@ async def _upload_connected_write(
         "uploaded_at": uploaded_at,
         "error": error,
         "approver_id": str(actor_user_id),
+        "path": saved_path,
+        "sha256": uploaded_sha,
+        "bytes": uploaded_bytes,
     }
+    if audit is not None:
+        payload["audit"] = audit
+    if uploaded_sha and not payload.get("content_sha256"):
+        payload["content_sha256"] = uploaded_sha
     finding.payload = payload  # a new dict, so SQLAlchemy sees the JSONB change
     await db.commit()
+
+
+async def _upload_audit_sidecar(
+    db: AsyncSession,
+    finding: Finding,
+    result,
+    *,
+    data_sha: str,
+    data_len: int,
+    workspace_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    target,
+) -> dict:
+    """Upload `<saved file>.audit.json` next to the file `result` describes (R24),
+    create-only, into the same target. Never raises: the saved file already
+    counts as uploaded, so a failure here is recorded as `{"error": ...}` on the
+    finding's `payload["audit"]` and nothing else."""
+    from tret.services import deliverable_audit
+
+    # Relative to the target's tret/ folder, like the main file: same sub-folder,
+    # and the name Graph actually gave the file (a rename can differ from the ask).
+    relative_dir = connections_service.split_upload_path((finding.payload or {}).get("filename") or "")[0]
+    name = deliverable_audit.audit_filename(f"{relative_dir}/{result.name}" if relative_dir else result.name)
+    record: dict = {"filename": name, "sha256": None, "web_url": None, "path": None, "error": None}
+    try:
+        audit = await deliverable_audit.build_audit(
+            db,
+            finding=finding,
+            saved_path=result.path,
+            filename=result.name,
+            sha256=data_sha,
+            byte_size=data_len,
+            actor_user_id=actor_user_id,
+        )
+        body = deliverable_audit.audit_bytes(audit)
+        extra = {"target": target} if target is not None else {}
+        side = await connections_service.upload_connected_file(
+            db,
+            workspace_id=workspace_id,
+            target_slug=(finding.payload or {}).get("target_slug"),
+            filename=name,
+            data=body,
+            content_type="application/json",
+            actor_user_id=actor_user_id,
+            actor_run_id=finding.run_id,
+            conflict="fail",
+            **extra,
+        )
+        record.update(sha256=hashlib.sha256(body).hexdigest(), web_url=side.web_url, path=side.path)
+    except (
+        connections_service.ConnectionWriteError,
+        connections_service.ConnectionUnavailable,
+        ValueError,
+    ) as e:
+        record["error"] = getattr(e, "reason", None) or str(e)
+    except Exception as e:  # noqa: BLE001 - the sidecar must never undo a saved file
+        record["error"] = f"Unexpected error: {type(e).__name__}: {e}"
+    return record
 
 
 def _package_running(*, queued: bool = False) -> dict:
