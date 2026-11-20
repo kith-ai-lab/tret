@@ -1,0 +1,47 @@
+pack: kith-cohort
+version: 0.1.0
+display_name: Kith Learning cohort
+description: >
+  Vetted emissions arithmetic for the Learning edition: a Scope 1 + Scope 2
+  (location-based) facility inventory over the Northwood carbon template, per
+  facility and per portfolio company. Ships NO emission factors: they come from
+  a factor dataset an operator loads from published sources (EPA GHG Emission
+  Factors Hub, eGRID, GHG Protocol) with `python -m tret.services.dataset_import`.
+  See docs/learning-edition.md, "Loading Ben's EPA spreadsheets".
+frameworks: [GHG-Protocol]
+
+# Installed only into cohort-edition workspaces (loader.install_pack raises
+# PackEditionSkipped elsewhere).
+edition: cohort
+
+methods:
+  - slug: facility_inventory
+    display_name: Facility inventory (Scope 1 & 2, per facility and portfolio company)
+    description: >
+      Scope 1 (stationary and mobile fuel, refrigerant) and Scope 2
+      location-based emissions for each facility row of a carbon-data table in
+      the Northwood template, rolled up per portfolio company and for the
+      portfolio. Factors are taken from the factor dataset by lookup; a
+      non-empty activity cell with no matching factor is reported as a skipped
+      row with its reason and is never estimated. Run it on a member's file by
+      importing it with import_table and passing inputs={"activity": "<dataset>"}.
+      Emissions figures must come from this method, never from estimation.
+    entrypoint: methods/facility_inventory.py
+    params_schema:
+      subregion_map: { type: object, description: "Optional {facility_id: eGRID subregion code}; facilities without an entry use the state rate" }
+      reporting_year: { type: string, description: "Optional exact-match filter, e.g. '2024'" }
+      portco_slug: { type: string, description: "Optional portfolio company filter" }
+      facility_id: { type: string, description: "Optional single-facility filter" }
+    inputs: [activity, factors]
+    input_defaults:
+      activity: null
+      factors: epa_ghg_factors_2025
+    input_hints:
+      activity: >-
+        Import the member's carbon-data file with import_table, then call run_method
+        with inputs={"activity": "<the dataset name you imported>"}.
+      factors: >-
+        The emission-factor dataset has not been loaded in this project. An operator
+        loads it from the published EPA/eGRID spreadsheets: see docs/learning-edition.md,
+        "Loading Ben's EPA spreadsheets" (python -m tret.services.dataset_import).
+        Until then no figure can be produced; do not estimate one.

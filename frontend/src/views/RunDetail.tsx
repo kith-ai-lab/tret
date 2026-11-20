@@ -31,6 +31,7 @@ import { ProvenanceCard } from '../components/shared/ProvenanceCard'
 import { RoutingBadge } from '../components/shared/RoutingBadge'
 import { StatusBadge } from '../components/shared/StatusBadge'
 import { DelegationPanel } from '../components/runs/DelegationPanel'
+import { RunGuardrailsBlock } from '../components/settings/GuardrailsPanel'
 import { useCanOpen } from '../edition'
 
 const LIVE_STATUSES = ['queued', 'running']
@@ -304,6 +305,8 @@ export function RunDetailView() {
       {run.overhead && run.overhead.calls.length > 0 && (
         <OverheadPanel overhead={run.overhead} />
       )}
+
+      <RunGuardrailsBlock guardrails={run.guardrails} stopReason={run.stop_reason} />
 
       {/* Delegation lineage — renders nothing for a run with no parent, no
           children and no tree. */}

@@ -335,6 +335,29 @@ async def test_create_run_strips_caller_supplied_delegation_keys(client, seed, s
     assert run.parent_run_id is None
 
 
+async def test_create_run_strips_caller_supplied_session_folders(client, seed, session_factory):
+    """`_session_folders` becomes a cohort write target; only a conversation's own
+    validated folders may set it, never a client body."""
+    team, project, user, harness = await _setup_workspace(seed, workspace_name="Co", email="a@example.com")
+
+    await login(client, user.email)
+    response = await client.post(
+        "/api/runs",
+        json={
+            "harness_id": str(harness.id),
+            "task_input": {
+                "message": "hi",
+                "_session_folders": [{"drive_id": "evil", "item_id": "x", "name": "n", "path": "p"}],
+            },
+        },
+    )
+    assert response.status_code in (200, 201), response.text
+
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(response.json()["run_id"]))
+    assert run.task_input == {"message": "hi"}
+
+
 async def test_create_run_strips_caller_supplied_label(client, seed, session_factory):
     """A hand-set `_label` would let a caller forge a delegation label onto a
     run nothing actually delegated to — only the engine (`_prepare_child`)

@@ -42,7 +42,8 @@ import tret.engine.batch_tools  # noqa: F401 - registers start_batch, batch_stat
 from tret.engine.batch_tools import BATCH_COMPARE_SEEDED_KEY, BATCH_TOOLS, BATCH_TOOLS_SEEDED_KEY
 from tret.net.policy import CLASS_RESEARCH, MODE_OFF, effective_mode
 from tret.packs.links import link_all_workspace_packs
-from tret.packs.loader import PackValidationError, install_pack
+from tret.services.analysis import cohort_tool_names
+from tret.packs.loader import PackEditionSkipped, PackValidationError, install_pack
 from tret.services.budgets import BudgetSettings
 
 log = logging.getLogger("tret.workspace")
@@ -223,6 +224,9 @@ async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) 
                     pack.version,
                     (pack.content_hash or "unpinned")[:16],
                 )
+            except PackEditionSkipped:
+                # An edition-specific pack (kith-cohort) in a workspace of another edition.
+                continue
             except PackValidationError as e:
                 log.error("pack %s failed validation and was NOT installed:", pack_dir.name)
                 for error in e.errors:
@@ -233,6 +237,42 @@ async def _install_configured_packs(db: AsyncSession, workspace_id, project_id) 
                     "without it",
                     pack_dir.name,
                 )
+
+
+# R01/R04 (Learning round): the seeded output limits and the subagent step cap
+# were too low for real deliverables (a 3,000-word HTML file hit 4096 tokens;
+# a subagent reading a folder ran out of its 12 steps). Boot upgrades an
+# existing harness row ONLY where a value still equals the old seeded default,
+# so an admin-edited row is never touched.
+CHAT_HARNESS_LOOP_CONFIG = {"max_iterations": 16, "max_output_tokens": 16384, "temperature": 0.3}
+CHAT_HARNESS_LOOP_UPGRADES = {"max_output_tokens": (4096, 16384)}
+SUBAGENT_HARNESS_LOOP_CONFIG = {
+    "max_iterations": 30,
+    "max_output_tokens": 8192,
+    "temperature": 0.2,
+    "max_cost_usd": 1.0,
+}
+SUBAGENT_HARNESS_LOOP_UPGRADES = {
+    "max_iterations": (12, 30),
+    "max_output_tokens": (4096, 8192),
+}
+
+
+def upgrade_seeded_loop_config(
+    loop_config: dict | None, upgrades: dict[str, tuple[int, int]]
+) -> dict | None:
+    """`loop_config` with each key in `upgrades` moved from its old seeded value
+    to the new one, only where it still equals the old value. Returns the new
+    dict, or None when nothing changed (callers assign only on a change so the
+    JSONB column is not rewritten at every boot)."""
+    current = dict(loop_config or {})
+    changed = False
+    for key, (old, new) in upgrades.items():
+        value = current.get(key)
+        if value == old and not isinstance(value, bool):
+            current[key] = new
+            changed = True
+    return current if changed else None
 
 
 async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
@@ -274,6 +314,16 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
     # workspaces the same defaults a fresh one gets rather than only new
     # workspaces going forward.
     if chat_harness is not None:
+        upgraded = upgrade_seeded_loop_config(chat_harness.loop_config, CHAT_HARNESS_LOOP_UPGRADES)
+        if upgraded is not None:
+            chat_harness.loop_config = upgraded
+        # Learning round: new tools are appended (never removed) to an existing
+        # chat harness, the cohort ones only in a cohort workspace.
+        ws_for_tools = await db.get(Workspace, workspace_id)
+        wanted = ["draft_file", *cohort_tool_names(ws_for_tools.settings if ws_for_tools else None)]
+        missing_new = [n for n in wanted if n not in (chat_harness.tool_names or [])]
+        if missing_new:
+            chat_harness.tool_names = [*(chat_harness.tool_names or []), *missing_new]
         if "run_method" not in (chat_harness.tool_names or []):
             chat_harness.tool_names = [*chat_harness.tool_names, "run_method"]
         # `delegate_parallel` rides along with `run_harness_task`, never on its
@@ -337,6 +387,7 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
             await link_all_workspace_packs(db, chat_harness)
             chat_harness.packs_linked_at = datetime.now(timezone.utc)
         return
+    new_ws = await db.get(Workspace, workspace_id)
     new_chat_harness = Harness(
         workspace_id=workspace_id,
         name="Chat Assistant",
@@ -358,8 +409,10 @@ async def seed_chat_harness(db: AsyncSession, workspace_id) -> None:
             "lookup_dataset",
             "list_prior_findings",
             "file_data_request",
+            "draft_file",
+            *cohort_tool_names(new_ws.settings if new_ws is not None else None),
         ],
-        loop_config={"max_iterations": 16, "max_output_tokens": 4096, "temperature": 0.3},
+        loop_config=dict(CHAT_HARNESS_LOOP_CONFIG),
     )
     db.add(new_chat_harness)
     await db.flush()  # populate new_chat_harness.id for the pack links below
@@ -689,6 +742,9 @@ async def seed_subagent_harness(db: AsyncSession, workspace_id) -> None:
         )
     ).scalars().first()
     if existing is not None:
+        upgraded = upgrade_seeded_loop_config(existing.loop_config, SUBAGENT_HARNESS_LOOP_UPGRADES)
+        if upgraded is not None:
+            existing.loop_config = upgraded
         return
     db.add(
         Harness(
@@ -699,12 +755,7 @@ async def seed_subagent_harness(db: AsyncSession, workspace_id) -> None:
             "writes or delegate.",
             task_profile=SUBAGENT_TASK_PROFILE,
             model_policy={"mode": "auto", "max_cost_tier": "standard"},
-            loop_config={
-                "max_iterations": 12,
-                "max_output_tokens": 4096,
-                "temperature": 0.2,
-                "max_cost_usd": 1.0,
-            },
+            loop_config=dict(SUBAGENT_HARNESS_LOOP_CONFIG),
             tool_names=sorted(SUBAGENT_ALLOWED_TOOLS),
         )
     )

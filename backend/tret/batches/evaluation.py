@@ -1128,7 +1128,7 @@ async def _after_evaluator_run(
                 and row.evaluated_run_id == target.run_id
             )
             first_try = not (run.task_input or {}).get(RETRY_KEY)
-            out_of_turns = run.status == "failed" and str(run.error or "").startswith("max_iterations")
+            out_of_turns = run.status == "failed" and str(run.error or "").startswith(("max_iterations", "Ran out of steps"))
             stuck = run.status == "failed" and is_repeated_failure_stop(run.error)
             if not current:
                 # The target moved on (a retry is under way): hand the row back to the

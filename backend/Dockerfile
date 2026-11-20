@@ -18,10 +18,13 @@ FROM python:3.12-slim
 # poppler-data: CJK and other non-Latin glyph maps for pdftotext; Recommends, so
 # --no-install-recommends would skip it and that text would extract as nothing.
 # tesseract-ocr(+eng): OCR supplement for scanned disclosure pages; English only by design.
+# bubblewrap: the security boundary of the Learning edition's unvetted analysis lane
+# (tret/services/analysis.py): model-written Python runs inside a bwrap sandbox with no
+# host filesystem, network or /proc. The lane refuses to run without it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 \
     libcairo2 libffi8 shared-mime-info fonts-dejavu-core poppler-utils poppler-data \
-    tesseract-ocr tesseract-ocr-eng \
+    tesseract-ocr tesseract-ocr-eng bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

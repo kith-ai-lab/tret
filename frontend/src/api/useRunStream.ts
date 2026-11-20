@@ -76,6 +76,13 @@ export interface DelegationItem {
   iteration?: number | null
   maxIterations?: number | null
   lastTool?: string | null
+  /** R18: epoch ms when this child was first seen running (client clock). */
+  startedAt?: number
+  /** R18: from `delegation_finished` — why a failed child failed. */
+  error?: string | null
+  /** R18: "out_of_steps" | "max_tokens" | "degenerate_output" | null. */
+  stopReason?: string | null
+  durationMs?: number | null
 }
 
 /** The engine crossed a run's soft output budget and told the model to finalize
@@ -165,6 +172,10 @@ export interface RunStreamState {
   error: string | null
   /** Connection health. Purely about the socket; read `error` for the run. */
   connection: StreamConnection
+  /** R01: the engine cut the reply off at the output limit (`reply_truncated`). */
+  truncated: boolean
+  /** `max_output_tokens` from the `reply_truncated` frame, when reported. */
+  truncatedMaxOutputTokens: number | null
 }
 
 const initialState: RunStreamState = {
@@ -181,6 +192,8 @@ const initialState: RunStreamState = {
   done: false,
   error: null,
   connection: 'connecting',
+  truncated: false,
+  truncatedMaxOutputTokens: null,
 }
 
 /** How many times in a row the transport may drop and reconnect without a single
@@ -347,6 +360,7 @@ export function useRunStream(runId: string | null): RunStreamState {
           label: typeof d.label === 'string' ? d.label : null,
           status: 'running',
           costUsd: null,
+          startedAt: Date.now(),
         }
         return { ...s, delegations: [...s.delegations, item] }
       }),
@@ -373,13 +387,32 @@ export function useRunStream(runId: string | null): RunStreamState {
             label: typeof d.label === 'string' ? d.label : null,
             status,
             costUsd,
+            startedAt: Date.now(),
+            error: typeof d.error === 'string' ? d.error : null,
+            stopReason: typeof d.stop_reason === 'string' ? d.stop_reason : null,
+            durationMs: numberOrNull(d.duration_ms),
           }
           return { ...s, delegations: [...s.delegations, item] }
         }
         const next = [...s.delegations]
-        next[idx] = { ...next[idx], status, costUsd }
+        next[idx] = {
+          ...next[idx],
+          status,
+          costUsd,
+          error: typeof d.error === 'string' ? d.error : null,
+          stopReason: typeof d.stop_reason === 'string' ? d.stop_reason : null,
+          durationMs: numberOrNull(d.duration_ms),
+        }
         return { ...s, delegations: next }
       }),
+    )
+    // R01: the final text turn hit the output limit. The run still completes.
+    on('reply_truncated', (d) =>
+      setState((s) => ({
+        ...s,
+        truncated: true,
+        truncatedMaxOutputTokens: numberOrNull(d?.max_output_tokens),
+      })),
     )
     on('delegation_progress', (d) =>
       setState((s) => {

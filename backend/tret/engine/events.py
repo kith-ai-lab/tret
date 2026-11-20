@@ -56,6 +56,14 @@ class RunEvent:
     # carries `status` ("unknown" if the child's row could not be read back)
     # and, when it could, the child's own `cost_usd`.
     #
+    # Learning round (R18): `delegation_finished` also carries `error` (the
+    # child's `run.error`, str or None), `stop_reason` (`Run.stop_reason`:
+    # "max_tokens" | "out_of_steps" | "degenerate_output" | None) and
+    # `duration_ms` (the child's started_at -> finished_at, int or None).
+    # `reply_truncated` (`{max_output_tokens}`, R01) is published once when a
+    # run's final reply stopped at the output limit; the run also records
+    # `stop_reason="max_tokens"`.
+    #
     # `delegation_progress` is also published on the *parent's* bus (from
     # `HarnessEngine._publish_delegation_progress` in engine/harness.py, called
     # from the iteration loop and from `_publish_tool_calls`) — never on a root
@@ -83,7 +91,7 @@ class RunEvent:
     #            tools_withheld|context_pressure|compaction|model_switch|
     #            switch_refused|effort_raised|provider_ignore_waived|
     #            delegation_started|delegation_finished|
-    #            delegation_progress|lesson_proposed|done|error
+    #            delegation_progress|reply_truncated|lesson_proposed|done|error
     data: dict = field(default_factory=dict)
     ts: float = field(default_factory=time.time)
 

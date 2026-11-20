@@ -371,6 +371,30 @@ class Conversation(Base):
     connected_folders: Mapped[list] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
     )
+    # Member-made session group (R21); null = ungrouped. Deleting the group
+    # ungroups its sessions (ON DELETE SET NULL), it never deletes them.
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversation_groups.id", ondelete="SET NULL"), index=True
+    )
+    # Archived sessions (R22) leave the main list; nothing else changes — their
+    # runs, emissions and audit trail stay exactly as they were.
+    archived_at: Mapped[datetime | None] = mapped_column()
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = created_at_col()
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ConversationGroup(Base):
+    """A member-made group of chat sessions with an editable title (R21).
+    New sessions created inside a group start with the folders of the group's
+    most recently active session (R20, api/chat.py)."""
+
+    __tablename__ = "conversation_groups"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False, default="New group", server_default="New group")
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = created_at_col()
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
@@ -672,6 +696,17 @@ class Run(Base):
     # chat/freeform run with no terminal tool (a terminal tool's numbers are
     # already held to engine/validation.py's cited-values cross-check).
     grounding: Mapped[dict | None] = mapped_column(JSONB)
+    # Why the loop ended, when that is worth telling apart from `status`:
+    # "max_tokens" (the final reply hit the output-token limit and is cut off),
+    # "out_of_steps" (iteration cap reached; partial results kept),
+    # "degenerate_output" (padding / repeated-token run detected and stopped).
+    # Null for an ordinary finish.
+    stop_reason: Mapped[str | None] = mapped_column(Text)
+    # Guardrail settings in force for this run and the measured overhead of the
+    # checks (services/guardrails.py::snapshot + engine/harness.py):
+    # {"settings": {...}, "overhead": {"repair_turns", "repair_input_tokens",
+    # "repair_output_tokens"}, "html_check": {...}}. Null on runs from before.
+    guardrails: Mapped[dict | None] = mapped_column(JSONB)
     iterations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
@@ -947,6 +982,33 @@ class MethodRun(Base):
     row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="completed")  # completed|failed
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+
+
+class AnalysisRun(Base):
+    """One execution of model-written code in the cohort-only UNVETTED lane
+    (R08, services/analysis.py). Kept apart from `method_runs` on purpose: a
+    method run is operator-vetted code, an analysis run is not. Values it
+    returns are labelled unvetted everywhere they surface and can never satisfy
+    a verdict's cited-values cross-check. Refs: `analysis/<id>:<row>`.
+    """
+
+    __tablename__ = "analysis_runs"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id"), index=True)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    code: Mapped[str] = mapped_column(Text, nullable=False)
+    code_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    # [{name, kind ("dataset"|"document"), ref, sha256, rows}]
+    inputs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    output: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    output_hash: Mapped[str | None] = mapped_column(Text)
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="completed", server_default="completed")
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = created_at_col()
 

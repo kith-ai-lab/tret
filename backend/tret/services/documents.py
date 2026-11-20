@@ -1,4 +1,4 @@
-"""Document text extraction (PDF/DOCX/XLSX/PPTX/CSV/MD/TXT) and the shared
+"""Document text extraction (PDF/DOCX/XLSX/PPTX/CSV/MD/TXT/HTML/zip listings) and the shared
 ingestion step — bounded extraction plus building the `Document` row — that
 both `api/documents.py`'s upload endpoint and the connections import endpoint
 (`POST /api/projects/{project_id}/documents/import`) call, so the two paths
@@ -101,8 +101,11 @@ MAX_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 MAX_PPTX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 
 
-def _refuse_zip_bombs(filename: str, data: bytes, max_uncompressed_bytes: int = MAX_ZIP_UNCOMPRESSED_BYTES) -> None:
+def _refuse_zip_bombs(filename: str, data: bytes, max_uncompressed_bytes: int | None = None) -> None:
     import zipfile
+
+    if max_uncompressed_bytes is None:
+        max_uncompressed_bytes = MAX_ZIP_UNCOMPRESSED_BYTES
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         total = sum(info.file_size for info in zf.infolist())
@@ -111,6 +114,175 @@ def _refuse_zip_bombs(filename: str, data: bytes, max_uncompressed_bytes: int = 
             f"{filename}: archive expands to {total} bytes, over the "
             f"{max_uncompressed_bytes} byte limit"
         )
+
+
+# Text-like formats read as plain text. `.html`/`.htm` are reduced to visible text
+# (`_extract_html`); `.svg`/`.xml`/`.css` are returned as raw source (R03).
+RAW_TEXT_EXTENSIONS = (".html", ".htm", ".svg", ".xml", ".css")
+# Every extension `extract_text` can read (a zip member is read through it by extension).
+EXTRACTABLE_EXTENSIONS = (
+    ".pdf", ".docx", ".xlsx", ".pptx", ".csv", ".tsv", ".md", ".txt", ".json", ".yaml", ".yml",
+    *RAW_TEXT_EXTENSIONS,
+)
+SUPPORTED_TYPES_LABEL = "pdf, docx, xlsx, pptx, csv, tsv, md, txt, json, yaml, html, htm, svg, xml, css, zip (listing)"
+
+# Zip listing and member reads (R06).
+MAX_ZIP_MEMBERS_LISTED = 2000
+MAX_ZIP_MEMBER_BYTES = 50 * 1024 * 1024
+
+
+def decode_text(data: bytes) -> str:
+    """UTF-8 (a BOM is dropped), else Windows-1252 — what a hand-saved HTML or CSV
+    file that is not UTF-8 almost always is."""
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return data.decode("cp1252", errors="replace")
+
+
+# Hostile or huge HTML is cut here before it is scanned (the scan is linear, so
+# this bounds time and memory); the cut is noted in the document's meta.
+MAX_HTML_EXTRACT_BYTES = 5 * 1024 * 1024
+
+
+def _extract_html(data: bytes) -> tuple[str, dict]:
+    from tret.engine.html_scan import visible_text
+
+    meta: dict = {}
+    if len(data) > MAX_HTML_EXTRACT_BYTES:
+        cut = MAX_HTML_EXTRACT_BYTES
+        while cut > 0 and (data[cut] & 0xC0) == 0x80:  # back to a UTF-8 character boundary
+            cut -= 1
+        meta = {"html_truncated": True, "html_bytes": len(data), "html_bytes_read": cut}
+        data = data[:cut]
+    return visible_text(decode_text(data)), meta
+
+
+def zip_member_infos(data: bytes) -> list[dict]:
+    """One dict per member of the zip: path, size (uncompressed), kind
+    (`file`/`folder`/`zip`/ext), readable (bool) and why not. Refuses a zip
+    bomb first (`_refuse_zip_bombs`). Nested zips are listed, never opened.
+    At most MAX_ZIP_MEMBERS_LISTED entries (the caller notes the cut)."""
+    import zipfile
+
+    _refuse_zip_bombs("archive", data)
+    out: list[dict] = []
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for info in zf.infolist():
+            if len(out) >= MAX_ZIP_MEMBERS_LISTED:
+                break
+            name = info.filename
+            lower = name.lower()
+            if info.is_dir():
+                continue
+            ext = Path(lower).suffix
+            reason = None
+            if info.flag_bits & 0x1:
+                reason = "encrypted"
+            elif lower.endswith(".zip"):
+                reason = "nested zip: not opened"
+            elif ext not in EXTRACTABLE_EXTENSIONS:
+                reason = f"unsupported type {ext or '(none)'}"
+            elif info.file_size > MAX_ZIP_MEMBER_BYTES:
+                reason = f"over the {MAX_ZIP_MEMBER_BYTES // (1024 * 1024)} MB member limit"
+            out.append(
+                {
+                    "path": name,
+                    "size": info.file_size,
+                    "kind": ext.lstrip(".") or "file",
+                    "readable": reason is None,
+                    "reason": reason,
+                }
+            )
+    return out
+
+
+def _zip_total_members(data: bytes) -> int:
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        return sum(1 for i in zf.infolist() if not i.is_dir())
+
+
+def _extract_zip_listing(filename: str, data: bytes) -> tuple[str, dict]:
+    infos = zip_member_infos(data)
+    total = _zip_total_members(data)
+    lines = [f"Zip archive {filename}: {total} file(s)."]
+    for m in infos:
+        state = "readable" if m["readable"] else f"not readable: {m['reason']}"
+        lines.append(f"- {m['path']} ({m['size']} bytes, {m['kind']}, {state})")
+    if total > len(infos):
+        lines.append(f"[Only the first {len(infos)} of {total} members are listed.]")
+    lines.append(
+        "To read one member, call read_connected_file again with member set to its path exactly "
+        "as listed above."
+    )
+    return "\n".join(lines), {"members": total}
+
+
+def read_zip_member(archive_name: str, data: bytes, member: str) -> tuple[str, dict]:
+    """Text of one member of a zip, read through `extract_text` by its own
+    extension. ValueError (message safe to show a model) when the member is
+    missing, encrypted, nested, too large or an unsupported type."""
+    import zipfile
+
+    _refuse_zip_bombs(archive_name, data)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        try:
+            info = zf.getinfo(member)
+        except KeyError:
+            raise ValueError(
+                f"{archive_name} has no member named {member!r}; use the path exactly as the listing shows it"
+            ) from None
+        if info.is_dir():
+            raise ValueError(f"{member!r} in {archive_name} is a folder, not a file")
+        if info.flag_bits & 0x1:
+            raise ValueError(f"{member!r} in {archive_name} is encrypted and cannot be read")
+        if member.lower().endswith(".zip"):
+            raise ValueError(f"{member!r} in {archive_name} is a nested zip; nested archives are listed but not opened")
+        if info.file_size > MAX_ZIP_MEMBER_BYTES:
+            raise ValueError(
+                f"{member!r} in {archive_name} is {info.file_size} bytes, over the "
+                f"{MAX_ZIP_MEMBER_BYTES // (1024 * 1024)} MB per-member limit"
+            )
+        with zf.open(info) as fh:
+            body = fh.read(MAX_ZIP_MEMBER_BYTES + 1)
+    if len(body) > MAX_ZIP_MEMBER_BYTES:
+        raise ValueError(f"{member!r} in {archive_name} expands past the per-member limit")
+    return extract_text(member, body)
+
+
+async def read_zip_member_bounded(
+    archive_name: str, data: bytes, member: str, *, budget_seconds: float | None = None
+) -> tuple[str, dict]:
+    """`read_zip_member` under the same wall-time budget and off-loop thread as
+    `extract_bounded`, so a hostile member cannot stall the run that reads it.
+    A timeout is a `ValueError` (the message is safe to show a model)."""
+    budget = EXTRACTION_TIMEOUT_SECONDS if budget_seconds is None else budget_seconds
+    try:
+        with pdf_budget(budget):
+            return await asyncio.wait_for(
+                asyncio.to_thread(read_zip_member, archive_name, data, member), budget
+            )
+    except (asyncio.TimeoutError, TimeoutError):
+        raise ValueError(f"reading it timed out after {budget:.0f}s") from None
+
+
+def extraction_problem(doc: Document) -> str | None:
+    """Why `doc` has no usable text, or None when it has some (R03/R05). The
+    reason is for a model: the file, its type, and what went wrong."""
+    text = doc.extracted_text
+    if text is not None and text.strip():
+        return None
+    ext = Path(doc.filename or "").suffix.lstrip(".").lower() or "unknown"
+    meta = doc.meta or {}
+    err = meta.get("error")
+    if doc.extraction_status in ("failed", "skipped") or err:
+        return f"could not extract text from {doc.filename} (type {ext}): {err or 'extraction failed'}"
+    return (
+        f"no text could be extracted from {doc.filename} (type {ext}): the file is empty, has no "
+        "visible text (for HTML, content that only appears via scripts), or is image-only"
+    )
 
 
 def extract_text(filename: str, data: bytes, *, budget_seconds: float | None = None) -> tuple[str, dict]:
@@ -136,9 +308,13 @@ def extract_text(filename: str, data: bytes, *, budget_seconds: float | None = N
         return rendered, {"rows": len(rows), "columns": rows[0] if rows else []}
     if lower.endswith((".md", ".txt", ".json", ".yaml", ".yml")):
         return data.decode("utf-8", errors="replace"), {}
-    raise ValueError(
-        f"Unsupported file type: {filename} (supported: pdf, docx, xlsx, pptx, csv, tsv, md, txt)"
-    )
+    if lower.endswith((".html", ".htm")):
+        return _extract_html(data)
+    if lower.endswith((".svg", ".xml", ".css")):
+        return decode_text(data), {}
+    if lower.endswith(".zip"):
+        return _extract_zip_listing(filename, data)
+    raise ValueError(f"Unsupported file type: {filename} (supported: {SUPPORTED_TYPES_LABEL})")
 
 
 def _page_blocks(pages: list[str]) -> str:

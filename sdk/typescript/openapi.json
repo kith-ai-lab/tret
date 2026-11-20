@@ -400,12 +400,31 @@
       "CreateConversationBody": {
         "properties": {
           "folders": {
-            "items": {
-              "$ref": "#/components/schemas/FolderRef"
-            },
-            "maxItems": 10,
-            "title": "Folders",
-            "type": "array"
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/FolderRef"
+                },
+                "maxItems": 10,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folders"
+          },
+          "group_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Id"
           },
           "harness_id": {
             "anyOf": [
@@ -493,6 +512,25 @@
           "batch"
         ],
         "title": "CreateExperimentBody",
+        "type": "object"
+      },
+      "CreateGroupBody": {
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "CreateGroupBody",
         "type": "object"
       },
       "CreateInviteBody": {
@@ -1615,6 +1653,37 @@
         "title": "PasswordChangeBody",
         "type": "object"
       },
+      "PatchConversationBody": {
+        "additionalProperties": false,
+        "properties": {
+          "group_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "PatchConversationBody",
+        "type": "object"
+      },
       "PatchDraftBody": {
         "properties": {
           "files": {
@@ -1643,6 +1712,36 @@
           }
         },
         "title": "PatchDraftBody",
+        "type": "object"
+      },
+      "PatchGroupBody": {
+        "additionalProperties": false,
+        "properties": {
+          "position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "PatchGroupBody",
         "type": "object"
       },
       "PendingInviteOut": {
@@ -2002,6 +2101,51 @@
           }
         },
         "title": "RoutingPreviewBody",
+        "type": "object"
+      },
+      "SaveFileBody": {
+        "additionalProperties": false,
+        "properties": {
+          "block": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Block"
+          },
+          "filename": {
+            "maxLength": 400,
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          },
+          "message": {
+            "minimum": 0.0,
+            "title": "Message",
+            "type": "integer"
+          },
+          "target_slug": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Slug"
+          }
+        },
+        "required": [
+          "filename",
+          "message"
+        ],
+        "title": "SaveFileBody",
         "type": "object"
       },
       "SendMessageBody": {
@@ -5146,6 +5290,18 @@
     "/api/chat": {
       "get": {
         "operationId": "list_conversations_api_chat_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "archived",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Archived",
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -5154,6 +5310,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Conversations",
@@ -5199,6 +5365,148 @@
         ]
       }
     },
+    "/api/chat/groups": {
+      "get": {
+        "operationId": "list_groups_api_chat_groups_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Groups",
+        "tags": [
+          "chat"
+        ]
+      },
+      "post": {
+        "operationId": "create_group_api_chat_groups_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGroupBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Group",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/groups/{group_id}": {
+      "delete": {
+        "description": "Delete the group only; its sessions become ungrouped (never deleted).",
+        "operationId": "delete_group_api_chat_groups__group_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Group Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Group",
+        "tags": [
+          "chat"
+        ]
+      },
+      "patch": {
+        "operationId": "patch_group_api_chat_groups__group_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Group Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchGroupBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Group",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
     "/api/chat/{conversation_id}": {
       "get": {
         "operationId": "get_conversation_api_chat__conversation_id__get",
@@ -5235,6 +5543,149 @@
           }
         },
         "summary": "Get Conversation",
+        "tags": [
+          "chat"
+        ]
+      },
+      "patch": {
+        "description": "Rename a session and/or move it between groups (R21). Omitted keys are\nleft alone; `group_id: null` ungroups.",
+        "operationId": "patch_conversation_api_chat__conversation_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchConversationBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Conversation",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/{conversation_id}/archive": {
+      "post": {
+        "description": "Archive only (R22): hidden from the default list, runs/emissions/audit\ntrail untouched, restorable. There is no delete.",
+        "operationId": "archive_conversation_api_chat__conversation_id__archive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive Conversation",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/{conversation_id}/files": {
+      "post": {
+        "operationId": "save_file_api_chat__conversation_id__files_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveFileBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save File",
         "tags": [
           "chat"
         ]
@@ -5338,6 +5789,150 @@
           }
         },
         "summary": "Send Message",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/{conversation_id}/preview": {
+      "get": {
+        "operationId": "preview_html_block_api_chat__conversation_id__preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "message",
+            "required": true,
+            "schema": {
+              "minimum": 0,
+              "title": "Message",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "block",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Block",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Html Block",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/{conversation_id}/unarchive": {
+      "post": {
+        "operationId": "unarchive_conversation_api_chat__conversation_id__unarchive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unarchive Conversation",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/chat/{conversation_id}/write-targets": {
+      "get": {
+        "operationId": "get_write_targets_api_chat__conversation_id__write_targets_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Write Targets",
         "tags": [
           "chat"
         ]
@@ -7851,6 +8446,62 @@
         ]
       }
     },
+    "/api/guardrails": {
+      "get": {
+        "operationId": "get_guardrails_api_guardrails_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Guardrails",
+        "tags": [
+          "guardrails"
+        ]
+      },
+      "put": {
+        "operationId": "put_guardrails_api_guardrails_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "title": "Body"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Guardrails",
+        "tags": [
+          "guardrails"
+        ]
+      }
+    },
     "/api/harnesses": {
       "get": {
         "operationId": "list_harnesses_api_harnesses_get",
@@ -9341,7 +9992,7 @@
     },
     "/api/runs": {
       "get": {
-        "description": "List this workspace's runs, newest first.\n\nPassing neither `limit` nor `cursor` returns the original bare list\n(capped at 50), byte-identical to every caller before paging existed.\nPassing either switches to `{\"items\": [...], \"next_cursor\": ...}`: keyset\npagination on (created_at desc, id desc) — an id tiebreak because\n`created_at` alone is not unique (bulk-seeded or same-second rows) —\nrather than an OFFSET, so a run created mid-page can never shift\nalready-seen rows into the next page or duplicate one across pages.\n`next_cursor` is omitted (null) once the last page is reached.\n`top_level_only=true` hides delegated runs (`parent_run_id IS NOT NULL`),\nleaving only runs a person, a schedule, or the API started directly;\nit defaults to false, which keeps today's behaviour unchanged.",
+        "description": "List this workspace's runs, newest first.\n\nPassing neither `limit` nor `cursor` returns the original bare list\n(capped at 50), byte-identical to every caller before paging existed.\nPassing either switches to `{\"items\": [...], \"next_cursor\": ...}`: keyset\npagination on (created_at desc, id desc) — an id tiebreak because\n`created_at` alone is not unique (bulk-seeded or same-second rows) —\nrather than an OFFSET, so a run created mid-page can never shift\nalready-seen rows into the next page or duplicate one across pages.\n`next_cursor` is omitted (null) once the last page is reached.\n`top_level_only=true` hides delegated runs (`parent_run_id IS NOT NULL`),\nleaving only runs a person, a schedule, or the API started directly;\nit defaults to false, which keeps today's behaviour unchanged.\n`conversation_id` restricts to one session's runs, delegated children\nincluded (they share the parent's conversation_id) (R23). Every summary\ncarries `conversation_title`, joined in the same query.",
         "operationId": "list_runs_api_runs_get",
         "parameters": [
           {
@@ -9386,6 +10037,23 @@
               "default": false,
               "title": "Top Level Only",
               "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "conversation_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Conversation Id"
             }
           }
         ],

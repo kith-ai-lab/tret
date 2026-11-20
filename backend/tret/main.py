@@ -18,6 +18,8 @@ from tret.api import (
     batches as batches_api,
     budgets as budgets_api,
     chat,
+    chat_files as chat_files_api,
+    chat_preview as chat_preview_api,
     connections as connections_api,
     database_connections as database_connections_api,
     docs,
@@ -25,6 +27,7 @@ from tret.api import (
     edition as edition_api,
     emissions_settings as emissions_settings_api,
     findings,
+    guardrails as guardrails_api,
     harnesses,
     lessons as lessons_api,
     pack_builder,
@@ -232,6 +235,9 @@ async def lifespan(app: FastAPI):
     # Collection runs launch targets from background tasks with no request in
     # hand; this is the app whose draining flag stops them (services/collections.py).
     collections_service.bind_app(app)
+    from tret.services.analysis import log_lane_status
+
+    await log_lane_status()  # unvetted analysis lane: log which sandbox it got (no-op when off)
     # Enforce the single-instance assumption the run event bus depends on,
     # before anything else touches the database: a deploy handover's brief
     # overlap is retried out (services/instance_lock.py), and only once that
@@ -449,6 +455,8 @@ def create_app() -> FastAPI:
         app.include_router(oidc_api.router)
     app.include_router(analytics.router)
     app.include_router(chat.router)
+    app.include_router(chat_files_api.router)
+    app.include_router(chat_preview_api.router)
     app.include_router(runs.router)
     # Dry-run routing preview (tret/api/routing.py) — reads the same router as
     # a real run but persists nothing; mounted alongside runs.router since it
@@ -484,6 +492,7 @@ def create_app() -> FastAPI:
     app.include_router(emissions_settings_api.router)
     app.include_router(edition_api.router)
     app.include_router(auto_approve_api.router)
+    app.include_router(guardrails_api.router)
     # Per-workspace period spend budget settings (tret/api/budgets.py) — same
     # "/api/workspace/settings/..." convention as emissions settings above.
     app.include_router(budgets_api.router)

@@ -236,6 +236,54 @@ m365 connection plus the `connections.use` gate.
   reconnecting, 422 not a folder / drive outside the allowed sources / more
   than 10 / malformed body, 502 Graph failed.
 
+## Reading files, and saving them (Learning round)
+
+**Reads are synchronous.** `read_connected_file` downloads the file and extracts its text in
+the same call; there is nothing to wait for and no "not extracted yet" state. Supported
+types: pdf, docx, xlsx, pptx, csv, tsv, md, txt, json, yaml, **html/htm** (visible text:
+script, style, template and noscript content dropped; headings, list items and table cells
+kept), **svg/xml/css** (returned as source), and **zip** (a listing; see below).
+
+- `raw=true` returns the source of an html/htm/svg/xml/css file instead of its visible text,
+  for example to read an SVG logo or a stylesheet to inline.
+- A `.zip` read returns a listing (path, size, type, readable or not and why). Pass
+  `member="<path>"` to read one member through the normal extractor. Guards: the archive's
+  total uncompressed size is checked first (200 MB), each member is capped at 50 MB, at most
+  2000 members are listed, encrypted members and nested zips are listed but not opened.
+- A file that cannot be read says why: `Could not extract text from X.html (type html): ...`,
+  `No text could be extracted from ...` (empty, script-only or image-only), `... outside this
+  session's folders`. It never returns "chars 0-0 of 0". `read_document` gives the same errors.
+- A failed read does not count against `TRET_CONNECTIONS_MAX_READS_PER_RUN`; only a read that
+  returns text does. Every model turn still counts as one step of the run's step limit,
+  whatever its tool result.
+
+**Saving (cohort edition).** Every folder attached to a session is a write target
+(`session-1`, `session-2`, ... in attachment order; `GET /api/chat/{id}/write-targets` lists
+them next to the workspace's output folders). Files go to `<folder>/tret/<filename>`,
+create-only (a taken name fails, nothing is overwritten). The write scopes and the
+`connections.write` plan gate still apply. With no session folder and no workspace output
+folder the write tool is withheld and the model is told: *No output folder set: ask the member
+to attach a folder to this session (+ -> Add OneDrive folder) or add an output folder in
+Settings -> Connections.* The standard edition is unchanged (workspace output folders only).
+
+Every save records a `connected_write` finding on the run (visible on the reply), with the
+sha256 of the bytes uploaded for every source kind (`payload.upload.sha256`). A long file is
+built across several calls with the `draft_file` tool (`mode` create or append; stored as a
+document with `source_kind` "generated") and saved with
+`propose_connected_write(document_id=...)`. The "Save to folder" button posts to
+`POST /api/chat/{id}/files`, which uses the same finding and upload pipeline; the member who
+clicks is the approver (recorded as an approval that is not a review, so saving a file is not
+quality evidence about the model). With nowhere to save it answers 409
+`{"code": "no_output_folder"}`.
+
+**Audit sidecar.** After every successful write, `<filename>.audit.json` is uploaded next to
+the file (create-only; schema `tret.deliverable_audit/v1`): who produced it, run and
+conversation ids, models used, files read (with hashes), datasets looked up, method runs and
+unvetted analysis runs (each marked vetted or not), the grounding status, the guardrails in
+force, and the run tree's tokens, cost, energy and CO2e estimates. It holds no credentials.
+If the sidecar upload fails the main file still counts as saved; the error is recorded in
+`payload.audit.error`.
+
 ## Write-back
 
 Beyond reading, an m365 connection can be upgraded to let runs write

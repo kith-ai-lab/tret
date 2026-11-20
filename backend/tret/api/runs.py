@@ -16,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.api.auth import current_user
 from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.db.engine import get_db
-from tret.db.models import Document, Harness, Project, Run, User
-from tret.engine.delegation import COST_CAP_KEY, DELEGATION_DEPTH_KEY, LABEL_KEY
+from tret.db.models import Conversation, Document, Harness, Project, Run, User
+from tret.engine.delegation import COST_CAP_KEY, DELEGATION_DEPTH_KEY, LABEL_KEY, SESSION_FOLDERS_KEY
 from tret.engine.evaluation_tools import ENGINE_STAMPED_KEYS
 from tret.engine.events import RunEvent, get_event_bus
 from tret.engine.extensions import get_extension_registry
@@ -49,7 +49,7 @@ class CreateRunBody(BaseModel):
     model_override: str | None = None
 
 
-def _run_summary(run: Run) -> dict:
+def _run_summary(run: Run, conversation_title: str | None = None) -> dict:
     return {
         "id": str(run.id),
         "project_id": str(run.project_id),
@@ -58,6 +58,12 @@ def _run_summary(run: Run) -> dict:
         # for a run that never began as a chat turn (workbench, a scheduled
         # task) — permanently, not a gap to be backfilled later.
         "conversation_id": str(run.conversation_id) if run.conversation_id else None,
+        # The session's title, joined in by `list_runs` (R23); null where the
+        # caller did not join it or the run has no session.
+        "conversation_title": conversation_title,
+        # Why the run stopped short ("max_tokens" | "out_of_steps" |
+        # "degenerate_output"), null for an ordinary finish (R01, R04, R10).
+        "stop_reason": run.stop_reason,
         # Delegation lineage (`run_harness_task`, engine/tools.py). All four
         # null for a run nothing delegated to and that delegated nothing.
         "parent_run_id": str(run.parent_run_id) if run.parent_run_id else None,
@@ -158,7 +164,7 @@ async def create_run(
     task_input = {
         k: v
         for k, v in body.task_input.items()
-        if k not in (DELEGATION_DEPTH_KEY, COST_CAP_KEY, LABEL_KEY, *ENGINE_STAMPED_KEYS)
+        if k not in (DELEGATION_DEPTH_KEY, COST_CAP_KEY, LABEL_KEY, SESSION_FOLDERS_KEY, *ENGINE_STAMPED_KEYS)
     }
     if body.model_override:
         task_input["_model_override"] = body.model_override
@@ -213,6 +219,7 @@ async def list_runs(
     limit: int | None = Query(default=None, ge=1, le=200),
     cursor: str | None = None,
     top_level_only: bool = False,
+    conversation_id: uuid.UUID | None = None,
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
@@ -230,6 +237,9 @@ async def list_runs(
     `top_level_only=true` hides delegated runs (`parent_run_id IS NOT NULL`),
     leaving only runs a person, a schedule, or the API started directly;
     it defaults to false, which keeps today's behaviour unchanged.
+    `conversation_id` restricts to one session's runs, delegated children
+    included (they share the parent's conversation_id) (R23). Every summary
+    carries `conversation_title`, joined in the same query.
     """
     paged = limit is not None or cursor is not None
     effective_limit = limit if limit is not None else 50
@@ -238,7 +248,13 @@ async def list_runs(
     if project is None:
         return {"items": [], "next_cursor": None} if paged else []
 
-    query = select(Run).where(Run.project_id == project.id)
+    query = (
+        select(Run, Conversation.title)
+        .outerjoin(Conversation, Run.conversation_id == Conversation.id)
+        .where(Run.project_id == project.id)
+    )
+    if conversation_id is not None:
+        query = query.where(Run.conversation_id == conversation_id)
     if top_level_only:
         query = query.where(Run.parent_run_id.is_(None))
     if cursor is not None:
@@ -252,15 +268,15 @@ async def list_runs(
     query = query.order_by(Run.created_at.desc(), Run.id.desc())
 
     if not paged:
-        runs = (await db.execute(query.limit(effective_limit))).scalars().all()
-        return [_run_summary(r) for r in runs]
+        pairs = (await db.execute(query.limit(effective_limit))).all()
+        return [_run_summary(r, title) for r, title in pairs]
 
     # Fetch one extra row to learn whether a next page exists without a
     # second round trip.
-    rows = (await db.execute(query.limit(effective_limit + 1))).scalars().all()
+    rows = (await db.execute(query.limit(effective_limit + 1))).all()
     page = rows[:effective_limit]
-    next_cursor = _encode_run_cursor(page[-1]) if len(rows) > effective_limit and page else None
-    return {"items": [_run_summary(r) for r in page], "next_cursor": next_cursor}
+    next_cursor = _encode_run_cursor(page[-1][0]) if len(rows) > effective_limit and page else None
+    return {"items": [_run_summary(r, title) for r, title in page], "next_cursor": next_cursor}
 
 
 async def _run_tree(db: AsyncSession, run: Run) -> dict | None:
@@ -335,7 +351,10 @@ async def get_run(
     run = await db.get(Run, run_id)
     if run is None or await project_in_workspace(db, run.project_id, ctx.id) is None:
         raise HTTPException(404, "Run not found")
-    return {**_run_summary(run), "task_input": run.task_input, "messages": run.messages,
+    conversation_title = (
+        await db.execute(select(Conversation.title).where(Conversation.id == run.conversation_id))
+    ).scalar_one_or_none() if run.conversation_id else None
+    return {**_run_summary(run, conversation_title), "task_input": run.task_input, "messages": run.messages,
             # Aggregate totals over this run's whole delegation tree (root plus
             # every descendant), or None when this run is a root with none.
             # See `_run_tree` for why these are computed on read rather than
@@ -376,7 +395,10 @@ async def get_run(
             # The prose grounding check's verdict (engine/grounding.py):
             # {checked, status, attempts, unsupported, first_unsupported}.
             # Null for any run the check does not apply to.
-            "grounding": run.grounding}
+            "grounding": run.grounding,
+            # What the run's guardrails were and what they did (R25):
+            # {settings, overhead, html_check?, degenerate?, truncated?}.
+            "guardrails": run.guardrails}
 
 
 @router.get("/{run_id}/children")

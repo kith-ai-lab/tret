@@ -90,7 +90,7 @@ def failure_category(cls: str, error: Any) -> str:
         return "timed out"
     if text.startswith("cost_cap_exceeded") or text.startswith("output_budget_exceeded"):
         return "reached its cost limit"
-    if text.startswith("max_iterations"):
+    if text.startswith("max_iterations") or text.startswith("ran out of steps"):
         return "reached its iteration limit"
     if text.startswith("[") or "no endpoints found" in text or "no candidate models" in text or "cost ceiling" in text:
         return "model provider error"

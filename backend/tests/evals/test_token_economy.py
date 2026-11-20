@@ -213,7 +213,7 @@ async def test_iteration_cap_ends_a_loop_that_never_finishes(world):
     )
 
     assert result.run.status == "failed"
-    assert result.run.error == "max_iterations (2) reached without completion"
+    assert result.run.error == "Ran out of steps (2 of 2). Partial results kept."
     assert result.run.iterations == 2
     assert provider.turns_played == 2
     assert result.findings == []
@@ -231,7 +231,7 @@ async def test_the_engine_ceiling_overrides_a_harness_asking_for_more(world, mon
     )
 
     assert result.run.status == "failed"
-    assert result.run.error == "max_iterations (2) reached without completion"
+    assert result.run.error == "Ran out of steps (2 of 2). Partial results kept."
 
 
 async def test_output_budget_asks_for_a_finish_then_stops_the_run(world):

@@ -51,6 +51,12 @@ if TYPE_CHECKING:
 log = logging.getLogger("tret.packs.loader")
 
 
+class PackEditionSkipped(Exception):
+    """The pack is restricted to an edition this workspace is not (manifest
+    `edition:`). Not an error: callers that install every pack in a directory
+    should skip it quietly."""
+
+
 class PackValidationError(Exception):
     def __init__(self, errors: list[str], *, pack_root: Path | None = None):
         self.errors = errors
@@ -230,10 +236,14 @@ def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[s
             for violation in scan_method_file(entrypoint, label=m.entrypoint):
                 errors.append(f"method '{m.slug}': {violation}")
         for spec in m.inputs:
-            if not spec.startswith("findings:") and spec not in dataset_names:
+            if (
+                not spec.startswith("findings:")
+                and spec not in dataset_names
+                and spec not in m.input_defaults
+            ):
                 errors.append(
                     f"method '{m.slug}': input '{spec}' is neither a pack dataset "
-                    "nor a findings:<schema_slug> reference"
+                    "nor a findings:<schema_slug> reference, nor declared in input_defaults"
                 )
 
     return manifest, schemas, errors
@@ -262,6 +272,19 @@ async def install_pack(
     manifest, schemas, errors = validate_pack(pack_dir)
     if errors:
         raise PackValidationError(errors, pack_root=pack_dir)
+
+    if manifest.edition:
+        from tret.config import get_settings
+        from tret.db.models import Workspace
+        from tret.services.edition import resolve_edition
+
+        workspace = await db.get(Workspace, workspace_id)
+        if resolve_edition(
+            workspace.settings if workspace else None, get_settings().edition
+        ) != manifest.edition:
+            raise PackEditionSkipped(
+                f"pack '{manifest.pack}' is only installed in {manifest.edition}-edition workspaces"
+            )
 
     stored_manifest = manifest.model_dump()
     stored_manifest["schemas"] = schemas

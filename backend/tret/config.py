@@ -738,6 +738,20 @@ class Settings(BaseSettings):
     # Logged-and-ignored elsewhere (e.g. macOS dev machines).
     methods_network_isolation: bool = True
 
+    # Learning edition: the labelled, unvetted analysis lane (tret/services/analysis.py,
+    # the `run_analysis` tool). Off by default; even when on it only exists in
+    # workspaces whose edition resolves to "cohort". Model-written Python runs in a
+    # stricter sandbox than a pack method and its figures can never back a verdict
+    # (docs/trust-doctrine.md, "The Learning edition's labelled third lane").
+    unvetted_analysis: bool = False
+    # The lane's boundary is bubblewrap and it FAILS CLOSED without it. This is the
+    # one explicit opt-out, for local development and tests only: the child then runs
+    # as a plain process with no filesystem or network isolation. Never set it on a
+    # server that holds other people's data.
+    unvetted_analysis_allow_weak_sandbox: bool = False
+    # Analyses running at once (each child may use 512 MB); callers wait up to 60 s.
+    unvetted_analysis_max_concurrent: int = 2
+
     # Login rate limit. `login_max_attempts` is the per-(source, account) limit;
     # a second, account-wide bucket is allowed ACCOUNT_BURST_MULTIPLE times that,
     # so the limit survives a reverse proxy collapsing every peer into one

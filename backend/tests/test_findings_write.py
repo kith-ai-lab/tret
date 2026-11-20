@@ -62,6 +62,17 @@ class FakeResult:
         return self._rows[0] if self._rows else None
 
 
+@pytest.fixture(autouse=True)
+def _no_audit_sidecar(monkeypatch):
+    """These tests count the main upload; the audit sidecar (R24) that follows every
+    successful write is covered in test_learning_files.py."""
+
+    async def _none(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(findings_api, "_upload_audit_sidecar", _none)
+
+
 def _criteria(stmt) -> list[tuple[str, object]]:
     where = stmt.whereclause
     if where is None:

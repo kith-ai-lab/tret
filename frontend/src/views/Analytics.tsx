@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 
 import {
   api,
+  type GuardrailChecks,
   type GuardrailEgressHost,
   type GuardrailEgressStats,
   type GuardrailEnergyStat,
@@ -24,6 +25,7 @@ import {
 import { type Column, MonoTable } from '../components/shared/MonoTable'
 import { RoutingHistoryPanel } from '../components/shared/RoutingHistory'
 import { StatusBadge } from '../components/shared/StatusBadge'
+import { useEdition } from '../edition'
 
 const WINDOWS = [7, 30, 90, 365]
 
@@ -31,6 +33,9 @@ const WINDOWS = [7, 30, 90, 365]
  *  Method reliability (the deterministic lane) plus validation pressure (how
  *  hard structured-output validation is pushing back), per harness. */
 export function Analytics() {
+  // R28: the cohort edition drops the method lane panels and shows the reply
+  // checks instead. Standard is unchanged.
+  const cohort = useEdition() === 'cohort'
   const [days, setDays] = useState(30)
   const guardrailsQuery = useQuery({
     queryKey: ['guardrails', days],
@@ -58,8 +63,9 @@ export function Analytics() {
       <div>
         <h1 className="view-title">Analytics</h1>
         <div className="view-sub">
-          Guardrails for code execution: how often the deterministic method lane fails, how hard
-          structured-output validation is pushing back, and what the window drew in compute.
+          {cohort
+            ? 'Whether the checks on Tret’s replies are firing, and what the window drew in compute.'
+            : 'Guardrails for code execution: how often the deterministic method lane fails, how hard structured-output validation is pushing back, and what the window drew in compute.'}
         </div>
       </div>
 
@@ -85,6 +91,7 @@ export function Analytics() {
         <div className="error-text">{(guardrailsQuery.error as Error).message}</div>
       ) : !data ? null : (
         <>
+          {!cohort && (
           <div className="panel config-stats">
             <Stat label="Method runs" value={formatTokens(data.totals.method_runs)} />
             <Stat label="Method failures" value={formatTokens(data.totals.method_failures)} />
@@ -100,7 +107,11 @@ export function Analytics() {
               color={data.totals.unrecovered_validation_errors > 0 ? 'var(--red)' : undefined}
             />
           </div>
+          )}
 
+          {cohort && <ChecksSection checks={data.checks} />}
+
+          {!cohort && (
           <Section
             title="Method reliability"
             hint="Deterministic method runs grouped by slug — a rising failure rate means the code lane, not the model, is the problem."
@@ -112,7 +123,9 @@ export function Analytics() {
               empty="No method runs in this window."
             />
           </Section>
+          )}
 
+          {!cohort && (
           <Section
             title="Validation pressure"
             hint="How often structured-output validation rejected a model payload, per harness. Unrecovered errors exhausted the repair budget."
@@ -124,6 +137,7 @@ export function Analytics() {
               empty="No runs scanned in this window."
             />
           </Section>
+          )}
 
           <Section title="Recent method errors" hint="Most recent failures in the deterministic lane, verbatim.">
             <MonoTable
@@ -548,6 +562,54 @@ function rateColor(pct: number): string | undefined {
   if (pct >= 25) return 'var(--red)'
   if (pct > 0) return 'var(--amber)'
   return undefined
+}
+
+/** R28: plain-language counts of what the reply checks did this window. */
+function ChecksSection({ checks }: { checks: GuardrailChecks | undefined }) {
+  const rows: { label: string; value: number | undefined; explain: string; warn?: boolean }[] = [
+    { label: 'Replies checked', value: checks?.runs_checked, explain: 'Replies whose numbers were compared against retrieved sources.' },
+    { label: 'Clean', value: checks?.clean, explain: 'Every figure traced back to a source on the first try.' },
+    { label: 'Rewritten', value: checks?.repaired, explain: 'Tret found figures it could not trace, rewrote the reply once, and the rewrite passed.' },
+    { label: 'Unverified', value: checks?.unresolved, explain: 'Figures still could not be traced after the rewrite; the reply is flagged.', warn: true },
+    { label: 'Skipped', value: checks?.skipped, explain: 'Nothing was retrieved in the run, so there was nothing to check against.' },
+    { label: 'Check off', value: checks?.off, explain: 'The number check was switched off for the run.' },
+    { label: 'Unvetted calculations', value: checks?.unvetted, explain: 'Replies that used figures from a free-form calculation rather than a vetted method.' },
+    { label: 'HTML issues', value: checks?.html_issues, explain: 'Generated HTML with unclosed tags, stray table cells or a missing end.', warn: true },
+    { label: 'Cut-off replies', value: checks?.truncated, explain: 'Replies that hit the output limit before finishing.', warn: true },
+    { label: 'Ran out of steps', value: checks?.out_of_steps, explain: 'Delegated subagents that used all their steps before finishing.', warn: true },
+    { label: 'Degenerate output', value: checks?.degenerate, explain: 'A model started repeating itself; the turn was stopped and retried on another model.', warn: true },
+  ]
+  return (
+    <Section
+      title="Guardrails"
+      hint={
+        checks
+          ? `What the checks on Tret's replies did in the last ${checks.window_days} days.`
+          : 'Reply-check counts are not available from this server.'
+      }
+    >
+      {checks && (
+        <div className="panel stack" style={{ gap: 8 }}>
+          {rows.map((r) => (
+            <div key={r.label} className="row" style={{ gap: 12, alignItems: 'baseline' }}>
+              <span className="mono-body" style={{ minWidth: 190, fontWeight: 600 }}>
+                {r.label}
+              </span>
+              <span
+                className="mono-body"
+                style={{ minWidth: 40, color: r.warn && (r.value ?? 0) > 0 ? 'var(--amber)' : undefined }}
+              >
+                {formatTokens(r.value ?? 0)}
+              </span>
+              <span className="mono-body" style={{ color: 'var(--text-muted)' }}>
+                {r.explain}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
+  )
 }
 
 function Section({

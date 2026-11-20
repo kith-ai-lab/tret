@@ -25,7 +25,7 @@ TOOLS = ["read_document", "search_connected_files", "read_connected_file"]
 
 
 async def _run(world, monkeypatch, task_input, tools=TOOLS, withheld=None):
-    async def _usable(db, workspace_id, enabled_names):
+    async def _usable(db, workspace_id, enabled_names, **_kw):
         return (set(withheld or ()) & set(enabled_names), "down" if withheld else None)
 
     monkeypatch.setattr("tret.engine.harness.withheld_connector_tools", _usable)

@@ -1,7 +1,11 @@
 """UI edition resolution: which set of screens the web UI shows.
 
-Purely presentational. An edition hides navigation and routes in the SPA; it
-is not an access control and never gates an API call.
+Mostly presentational: an edition hides navigation and routes in the SPA and is
+not an access control. The cohort edition also changes two pieces of behaviour
+(Learning round): every folder attached to a session is a write target for
+saving files (create-only, into a `tret/` subfolder; `services/connections.py::
+session_write_targets`), and the unvetted-analysis lane may be switched on
+(`TRET_UNVETTED_ANALYSIS`). The standard edition is unchanged.
 """
 from __future__ import annotations
 

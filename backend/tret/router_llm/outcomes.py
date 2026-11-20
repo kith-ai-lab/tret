@@ -85,6 +85,7 @@ _ERROR_PREFIXES = (
     ("cost_cap_exceeded", "cost_cap_exceeded"),
     ("output_budget_exceeded", "output_budget_exceeded"),
     ("max_iterations", "max_iterations"),
+    ("Ran out of steps", "max_iterations"),  # R04: engine/harness.py step cap
     ("unknown_task_type", "unknown_task_type"),
     ("unknown_tool", "unknown_tool"),
 )

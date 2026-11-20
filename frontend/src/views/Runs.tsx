@@ -1,8 +1,8 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 
-import { api, type RunSummary } from '../api/client'
+import { api, type RunSummary, sessionApi, stopReasonLabel } from '../api/client'
 import {
   BAND_SHORT,
   COUNTERFACTUAL_SHORT,
@@ -58,12 +58,39 @@ function writeShowDelegated(value: boolean): void {
   }
 }
 
+const GROUP_BY_SESSION_KEY = 'tret.runs.groupBySession'
+
+function readGroupBySession(): boolean {
+  try {
+    return localStorage.getItem(GROUP_BY_SESSION_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
+function writeGroupBySession(value: boolean): void {
+  try {
+    localStorage.setItem(GROUP_BY_SESSION_KEY, value ? '1' : '0')
+  } catch {
+    // Best effort.
+  }
+}
+
 export function Runs() {
   const navigate = useNavigate()
   const [showDelegated, setShowDelegated] = useState(readShowDelegated)
+  const [groupBySession, setGroupBySession] = useState(readGroupBySession)
+  // R23: server-side session filter.
+  const [sessionFilter, setSessionFilter] = useState('')
+  const sessionsQuery = useQuery({ queryKey: ['runs-session-filter'], queryFn: api.listConversations })
+  const archivedQuery = useQuery({
+    queryKey: ['runs-session-filter-archived'],
+    queryFn: sessionApi.listArchivedConversations,
+  })
   const runsQuery = useInfiniteQuery({
-    queryKey: ['runs', { showDelegated }],
-    queryFn: ({ pageParam }) => api.listRuns(50, pageParam, !showDelegated),
+    queryKey: ['runs', { showDelegated, sessionFilter }],
+    queryFn: ({ pageParam }) =>
+      api.listRuns(50, pageParam, !showDelegated, sessionFilter || undefined),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     refetchInterval: (query) =>
@@ -99,7 +126,47 @@ export function Runs() {
     return out
   }, [loadedRuns, statusFilter, modelFilter])
 
-  const columns: Column<RunSummary>[] = [
+  // R23: loaded rows grouped by session, newest-first order preserved within
+  // and between groups (a group sits where its first row appears).
+  const runRowLabel = (r: RunSummary) =>
+    `Open run: ${harnessName.get(r.harness_id) ?? r.harness_id.slice(0, 8)} · ${r.task_type} · ${r.status}`
+
+  const sessionGroups = useMemo(() => {
+    const order: string[] = []
+    const map = new Map<string, { title: string; id: string | null; rows: RunSummary[] }>()
+    for (const r of rows) {
+      const key = r.conversation_id ?? '__none'
+      if (!map.has(key)) {
+        map.set(key, {
+          id: r.conversation_id ?? null,
+          title: r.conversation_title || (r.conversation_id ? 'Untitled session' : 'Not in a session'),
+          rows: [],
+        })
+        order.push(key)
+      }
+      map.get(key)!.rows.push(r)
+    }
+    return order.map((k) => map.get(k)!)
+  }, [rows])
+
+  const sessionColumn: Column<RunSummary> = {
+    key: 'session',
+    header: 'Session',
+    render: (r) =>
+      r.conversation_id ? (
+        <Link
+          to={`/?session=${r.conversation_id}`}
+          onClick={(e) => e.stopPropagation()}
+          title="Open this session"
+        >
+          {r.conversation_title || 'Untitled session'}
+        </Link>
+      ) : (
+        <span style={{ color: 'var(--text-muted)' }}>—</span>
+      ),
+  }
+
+  const columnsBase: Column<RunSummary>[] = [
     {
       key: 'time',
       header: 'Time',
@@ -129,7 +196,27 @@ export function Runs() {
       header: 'Model',
       render: (r) => <RoutingBadge routing={r.routing} />,
     },
-    { key: 'status', header: 'Status', render: (r) => <StatusBadge status={r.status} /> },
+    {
+      key: 'status',
+      header: 'Status',
+      render: (r) => {
+        const why = stopReasonLabel(r.stop_reason)
+        return (
+          <span>
+            <StatusBadge status={r.status} />
+            {why && (
+              <span
+                className="chip"
+                style={{ marginLeft: 6 }}
+                title={r.error ?? undefined}
+              >
+                {why}
+              </span>
+            )}
+          </span>
+        )
+      },
+    },
     {
       key: 'tokens',
       header: 'Tokens',
@@ -168,6 +255,10 @@ export function Runs() {
     },
     { key: 'duration', header: 'Duration', align: 'right', render: (r) => duration(r) },
   ]
+  // Grouped view drops the per-row Session column (the group header says it).
+  const columns: Column<RunSummary>[] = groupBySession
+    ? columnsBase
+    : [...columnsBase.slice(0, 2), sessionColumn, ...columnsBase.slice(2)]
 
   return (
     <div>
@@ -197,6 +288,39 @@ export function Runs() {
           onChange={(e) => setModelFilter(e.target.value)}
           style={{ width: 240 }}
         />
+        <select
+          value={sessionFilter}
+          onChange={(e) => setSessionFilter(e.target.value)}
+          style={{ width: 220 }}
+          aria-label="Filter by session"
+        >
+          <option value="">all sessions</option>
+          {(sessionsQuery.data ?? []).map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.title || 'Untitled session'}
+            </option>
+          ))}
+          {(archivedQuery.data ?? []).length > 0 && (
+            <optgroup label="Archived">
+              {(archivedQuery.data ?? []).map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.title || 'Untitled session'}
+                </option>
+              ))}
+            </optgroup>
+          )}
+        </select>
+        <label className="mono-label runs-delegated-toggle">
+          <input
+            type="checkbox"
+            checked={groupBySession}
+            onChange={(e) => {
+              setGroupBySession(e.target.checked)
+              writeGroupBySession(e.target.checked)
+            }}
+          />
+          group by session
+        </label>
         <label className="mono-label runs-delegated-toggle">
           <input
             type="checkbox"
@@ -215,14 +339,34 @@ export function Runs() {
         <div className="empty pulse">Loading runs…</div>
       ) : runsQuery.isError ? (
         <div className="error-text">{(runsQuery.error as Error).message}</div>
+      ) : groupBySession ? (
+        <div className="stack" style={{ gap: 18 }}>
+          {sessionGroups.length === 0 && (
+            <div className="empty">No runs yet — start one from the Workbench.</div>
+          )}
+          {sessionGroups.map((g) => (
+            <div key={g.id ?? 'none'}>
+              <div className="mono-label" style={{ marginBottom: 6 }}>
+                {g.id ? <Link to={`/?session=${g.id}`}>{g.title}</Link> : g.title} · {g.rows.length}{' '}
+                {g.rows.length === 1 ? 'run' : 'runs'}
+              </div>
+              <MonoTable
+                columns={columns}
+                rows={g.rows}
+                rowKey={(r) => r.id}
+                rowLabel={runRowLabel}
+                onRowClick={(r) => navigate(`/runs/${r.id}`)}
+                empty=""
+              />
+            </div>
+          ))}
+        </div>
       ) : (
         <MonoTable
           columns={columns}
           rows={rows}
           rowKey={(r) => r.id}
-          rowLabel={(r) =>
-            `Open run: ${harnessName.get(r.harness_id) ?? r.harness_id.slice(0, 8)} · ${r.task_type} · ${r.status}`
-          }
+          rowLabel={runRowLabel}
           onRowClick={(r) => navigate(`/runs/${r.id}`)}
           empty="No runs yet — start one from the Workbench."
         />

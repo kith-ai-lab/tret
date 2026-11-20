@@ -13,16 +13,29 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from tret.api.auth import current_user
 from tret.api.connections import USE_ACTION, require_connections_gate
 from tret.api.workspace import WorkspaceContext, current_project, current_workspace, project_in_workspace
 from tret.db.engine import get_db, get_session_factory
-from tret.db.models import Conversation, Dataset, Document, Harness, Pack, Project, Run, User
+from tret.db.models import (
+    AnalysisRun,
+    Conversation,
+    ConversationGroup,
+    Dataset,
+    Document,
+    Finding,
+    Harness,
+    Pack,
+    Project,
+    Run,
+    User,
+)
 from tret.engine.harness import get_harness_engine
 from tret.engine.tools import DELEGATION_TOOLS
 from tret.packs.links import pack_map_for_harnesses, packs_for_harness, resolve_pack_for_task
@@ -59,6 +72,10 @@ def _conversation_out(c: Conversation, full: bool = False) -> dict:
         "message_count": len(c.messages or []),
         "updated_at": c.updated_at.isoformat() if c.updated_at else None,
         "folders": c.connected_folders or [],
+        # R20-R22: the session's group (null = ungrouped) and when it was
+        # archived (null = live). Archive hides, never deletes.
+        "group_id": str(c.group_id) if c.group_id else None,
+        "archived_at": c.archived_at.isoformat() if c.archived_at else None,
     }
     if full:
         out["messages"] = c.messages
@@ -192,7 +209,11 @@ class CreateConversationBody(BaseModel):
     harness_id: uuid.UUID | None = None  # default: the seeded Chat Assistant
     # OneDrive/SharePoint folders this conversation's connected-file tools are
     # restricted to (max 10); empty leaves them workspace-wide.
-    folders: list[FolderRef] = Field(default_factory=list, max_length=MAX_SESSION_FOLDERS)
+    # None = not given: a session created in a group then inherits the group's
+    # folders (R20). An explicit [] means "no folders".
+    folders: list[FolderRef] | None = Field(default=None, max_length=MAX_SESSION_FOLDERS)
+    # Start the session inside this group (R20/R21); 404 if not in this project.
+    group_id: uuid.UUID | None = None
 
 
 class SetFoldersBody(BaseModel):
@@ -277,6 +298,7 @@ def _run_task_input(
 
 @router.get("")
 async def list_conversations(
+    archived: bool = False,
     user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(current_workspace),
     db: AsyncSession = Depends(get_db),
@@ -288,7 +310,12 @@ async def list_conversations(
         (
             await db.execute(
                 select(Conversation)
-                .where(Conversation.project_id == project.id)
+                .where(
+                    Conversation.project_id == project.id,
+                    Conversation.archived_at.is_not(None)
+                    if archived
+                    else Conversation.archived_at.is_(None),
+                )
                 .order_by(Conversation.updated_at.desc())
                 .limit(100)
             )
@@ -337,18 +364,399 @@ async def create_conversation(
     project = await current_project(db, ctx.id)
     if project is None:
         raise HTTPException(500, "No project exists")
+    group_id: uuid.UUID | None = None
+    if body.group_id is not None:
+        group_id = (await _group_in_project(db, body.group_id, project.id)).id
     # Validated before the row exists, so a rejected folder creates nothing.
-    folders = await _resolve_folders(db, ctx, body.folders) if body.folders else []
+    if body.folders is None and group_id is not None:
+        # R20: the stored entries were resolved server-side when first
+        # attached, so they are copied as-is; the harness re-checks the
+        # allowlist at run time.
+        folders = await _group_inherited_folders(db, group_id)
+    else:
+        folders = await _resolve_folders(db, ctx, body.folders) if body.folders else []
     conv = Conversation(
         project_id=project.id,
         harness_id=harness.id,
         created_by=user.id,
         messages=[],
         connected_folders=folders,
+        group_id=group_id,
     )
     db.add(conv)
     await db.commit()
     return _conversation_out(conv, full=True)
+
+
+# --- Learning round: sessions (R20-R22) ---
+#
+# Groups are registered BEFORE `/{conversation_id}` so "groups" is never read
+# as a conversation id.
+
+
+class CreateGroupBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, max_length=200)
+
+
+class PatchGroupBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, max_length=200)
+    position: int | None = None
+
+
+class PatchConversationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, max_length=200)
+    # Omitted = untouched; explicit null = ungroup.
+    group_id: uuid.UUID | None = None
+
+
+def _clean_title(raw: str | None) -> str:
+    title = (raw or "").strip()
+    if not title:
+        raise HTTPException(422, "Title must be 1-200 characters")
+    return title
+
+
+async def _group_in_project(db: AsyncSession, group_id: uuid.UUID, project_id: uuid.UUID) -> ConversationGroup:
+    group = await db.get(ConversationGroup, group_id)
+    if group is None or group.project_id != project_id:
+        raise HTTPException(404, "Group not found")
+    return group
+
+
+async def _group_inherited_folders(db: AsyncSession, group_id: uuid.UUID) -> list[dict]:
+    """The folders a new session in this group starts with: those of the most
+    recently updated non-archived session in the group that has any (R20)."""
+    rows = (
+        await db.execute(
+            select(Conversation.connected_folders)
+            .where(Conversation.group_id == group_id, Conversation.archived_at.is_(None))
+            .order_by(Conversation.updated_at.desc())
+        )
+    ).scalars().all()
+    for folders in rows:
+        if folders:
+            return list(folders)
+    return []
+
+
+def _group_out(g: ConversationGroup, session_count: int, folders: list[dict]) -> dict:
+    return {
+        "id": str(g.id),
+        "title": g.title,
+        "position": g.position,
+        "created_at": g.created_at.isoformat() if g.created_at else None,
+        "updated_at": g.updated_at.isoformat() if g.updated_at else None,
+        "session_count": session_count,
+        "folders": folders,
+    }
+
+
+async def _project_for_groups(db: AsyncSession, ctx: WorkspaceContext) -> Project:
+    project = await current_project(db, ctx.id)
+    if project is None:
+        raise HTTPException(500, "No project exists")
+    return project
+
+
+@router.get("/groups")
+async def list_groups(
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    project = await current_project(db, ctx.id)
+    if project is None:
+        return []
+    groups = (
+        await db.execute(
+            select(ConversationGroup)
+            .where(ConversationGroup.project_id == project.id)
+            .order_by(ConversationGroup.position, ConversationGroup.created_at)
+        )
+    ).scalars().all()
+    if not groups:
+        return []
+    # One query for every grouped, live session (columns only, no messages).
+    members = (
+        await db.execute(
+            select(Conversation.group_id, Conversation.connected_folders)
+            .where(
+                Conversation.project_id == project.id,
+                Conversation.group_id.in_([g.id for g in groups]),
+                Conversation.archived_at.is_(None),
+            )
+            .order_by(Conversation.updated_at.desc())
+        )
+    ).all()
+    counts: dict[uuid.UUID, int] = {}
+    inherited: dict[uuid.UUID, list[dict]] = {}
+    for gid, folders in members:
+        counts[gid] = counts.get(gid, 0) + 1
+        if folders and gid not in inherited:
+            inherited[gid] = list(folders)
+    return [_group_out(g, counts.get(g.id, 0), inherited.get(g.id, [])) for g in groups]
+
+
+@router.post("/groups")
+async def create_group(
+    body: CreateGroupBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    project = await _project_for_groups(db, ctx)
+    title = "New group"
+    if body.title is not None and body.title.strip():
+        title = body.title.strip()
+    existing = (
+        await db.execute(
+            select(ConversationGroup.position).where(ConversationGroup.project_id == project.id)
+        )
+    ).scalars().all()
+    group = ConversationGroup(
+        project_id=project.id,
+        title=title,
+        position=(max(existing) + 1) if existing else 0,
+        created_by=user.id,
+    )
+    db.add(group)
+    await db.commit()
+    return _group_out(group, 0, [])
+
+
+@router.patch("/groups/{group_id}")
+async def patch_group(
+    group_id: uuid.UUID,
+    body: PatchGroupBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    project = await _project_for_groups(db, ctx)
+    group = await _group_in_project(db, group_id, project.id)
+    if "title" in body.model_fields_set:
+        group.title = _clean_title(body.title)
+    if "position" in body.model_fields_set and body.position is not None:
+        group.position = body.position
+    await db.commit()
+    members = (
+        await db.execute(
+            select(Conversation.connected_folders)
+            .where(Conversation.group_id == group.id, Conversation.archived_at.is_(None))
+            .order_by(Conversation.updated_at.desc())
+        )
+    ).scalars().all()
+    folders = next((list(f) for f in members if f), [])
+    return _group_out(group, len(members), folders)
+
+
+@router.delete("/groups/{group_id}", status_code=204)
+async def delete_group(
+    group_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete the group only; its sessions become ungrouped (never deleted)."""
+    project = await _project_for_groups(db, ctx)
+    group = await _group_in_project(db, group_id, project.id)
+    members = (
+        await db.execute(select(Conversation).where(Conversation.group_id == group.id))
+    ).scalars().all()
+    for conv in members:
+        conv.group_id = None
+        _keep_updated_at(conv)
+    await db.flush()
+    await db.delete(group)
+    await db.commit()
+    return Response(status_code=204)
+
+
+def _keep_updated_at(conv: Conversation) -> None:
+    """Rail metadata edits (rename, move, archive, ungroup) are not activity:
+    setting `updated_at` explicitly to its current value stops the column's
+    `onupdate` from firing, so ordering and folder inheritance are untouched."""
+    flag_modified(conv, "updated_at")
+
+
+async def _enrich_messages(db: AsyncSession, conv: Conversation) -> list[dict]:
+    """The conversation's messages with each assistant turn's live run facts
+    (R01 stop_reason/truncated, R25 guardrails, R08 analysis_runs, R24
+    saved_files). Two lookups for the whole conversation, never per message:
+    one over its runs, one each for analysis runs and connected writes. A
+    delegated child's rows are attributed to the top-level run it hangs off.
+    Stored messages are copied, never mutated."""
+    messages = [dict(m) for m in (conv.messages or [])]
+    run_ids = {m["run_id"] for m in messages if m.get("role") == "assistant" and m.get("run_id")}
+    if not run_ids:
+        return messages
+
+    run_rows = (
+        await db.execute(
+            select(Run.id, Run.parent_run_id, Run.root_run_id, Run.stop_reason, Run.guardrails).where(
+                Run.conversation_id == conv.id
+            )
+        )
+    ).all()
+    parent_of = {str(r.id): (str(r.parent_run_id) if r.parent_run_id else None) for r in run_rows}
+    root_of: dict[str, str] = {}
+    for r in run_rows:
+        rid = str(r.id)
+        top = str(r.root_run_id) if r.root_run_id else None
+        if top is None:
+            top = rid
+            seen = {rid}
+            while parent_of.get(top) and parent_of[top] not in seen:
+                seen.add(top)
+                top = parent_of[top]
+        root_of[rid] = top
+    own = {str(r.id): r for r in run_rows}
+    all_ids = [r.id for r in run_rows]
+
+    analysis: dict[str, list[dict]] = {}
+    saved: dict[str, list[dict]] = {}
+    if all_ids:
+        for a in (
+            await db.execute(
+                select(AnalysisRun)
+                .where(AnalysisRun.run_id.in_(all_ids))
+                .order_by(AnalysisRun.created_at, AnalysisRun.id)
+            )
+        ).scalars():
+            top = root_of.get(str(a.run_id), str(a.run_id))
+            analysis.setdefault(top, []).append(
+                {
+                    "id": str(a.id),
+                    "purpose": a.purpose,
+                    "code_sha": a.code_sha,
+                    "row_count": a.row_count,
+                    "status": a.status,
+                }
+            )
+        for f in (
+            await db.execute(
+                select(Finding)
+                .where(Finding.run_id.in_(all_ids), Finding.schema_slug == "connected_write")
+                .order_by(Finding.created_at, Finding.id)
+            )
+        ).scalars():
+            top = root_of.get(str(f.run_id), str(f.run_id))
+            saved.setdefault(top, []).append(_saved_file(f))
+
+    for m in messages:
+        rid = m.get("run_id")
+        if m.get("role") != "assistant" or not rid:
+            continue
+        run = own.get(rid)
+        if run is not None:
+            m["stop_reason"] = run.stop_reason
+            m["guardrails"] = run.guardrails
+        else:
+            m.setdefault("stop_reason", None)
+            m.setdefault("guardrails", None)
+        m["truncated"] = m.get("stop_reason") == "max_tokens"
+        m["analysis_runs"] = analysis.get(rid, [])
+        m["saved_files"] = saved.get(rid, [])
+    return messages
+
+
+def _saved_file_status(f: Finding, upload: dict) -> str:
+    """uploaded | failed | pending_approval | rejected. `failed` only when an
+    upload was actually attempted and did not succeed."""
+    if upload.get("status"):
+        return "uploaded" if upload["status"] == "uploaded" else "failed"
+    if f.status == "rejected":
+        return "rejected"
+    return "pending_approval"
+
+
+def _saved_file(f: Finding) -> dict:
+    """One `connected_write` finding as the chat chip needs it. Read
+    defensively: `upload` is None until the write happens and the `audit`
+    block (C1) may be absent on older rows."""
+    payload = f.payload or {}
+    upload = payload.get("upload") or {}
+    audit = payload.get("audit") or {}
+    filename = payload.get("filename")
+    path = upload.get("path") or upload.get("target_path")
+    if not path and filename:
+        parts = [payload.get("target_path"), payload.get("relative_dir"), filename]
+        path = "/".join(str(p).strip("/") for p in parts if p)
+    return {
+        "finding_id": str(f.id),
+        "filename": filename,
+        "path": path,
+        "web_url": upload.get("web_url") or audit.get("web_url"),
+        "status": _saved_file_status(f, upload),
+        "sha256": payload.get("content_sha256") or audit.get("sha256"),
+        "audit_filename": audit.get("filename"),
+        "audit_web_url": audit.get("web_url"),
+    }
+
+
+@router.patch("/{conversation_id}")
+async def patch_conversation(
+    conversation_id: uuid.UUID,
+    body: PatchConversationBody,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """Rename a session and/or move it between groups (R21). Omitted keys are
+    left alone; `group_id: null` ungroups."""
+    conv = await db.get(Conversation, conversation_id)
+    if conv is None or await project_in_workspace(db, conv.project_id, ctx.id) is None:
+        raise HTTPException(404, "Conversation not found")
+    if "title" in body.model_fields_set:
+        conv.title = _clean_title(body.title)
+    if "group_id" in body.model_fields_set:
+        if body.group_id is None:
+            conv.group_id = None
+        else:
+            conv.group_id = (await _group_in_project(db, body.group_id, conv.project_id)).id
+    _keep_updated_at(conv)
+    await db.commit()
+    return _conversation_out(conv)
+
+
+async def _set_archived(
+    db: AsyncSession, ctx: WorkspaceContext, conversation_id: uuid.UUID, archived: bool
+) -> dict:
+    conv = await db.get(Conversation, conversation_id)
+    if conv is None or await project_in_workspace(db, conv.project_id, ctx.id) is None:
+        raise HTTPException(404, "Conversation not found")
+    conv.archived_at = datetime.now(timezone.utc) if archived else None
+    _keep_updated_at(conv)
+    await db.commit()
+    return _conversation_out(conv)
+
+
+@router.post("/{conversation_id}/archive")
+async def archive_conversation(
+    conversation_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """Archive only (R22): hidden from the default list, runs/emissions/audit
+    trail untouched, restorable. There is no delete."""
+    return await _set_archived(db, ctx, conversation_id, True)
+
+
+@router.post("/{conversation_id}/unarchive")
+async def unarchive_conversation(
+    conversation_id: uuid.UUID,
+    user: User = Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _set_archived(db, ctx, conversation_id, False)
 
 
 @router.get("/{conversation_id}")
@@ -362,6 +770,7 @@ async def get_conversation(
     if conv is None or await project_in_workspace(db, conv.project_id, ctx.id) is None:
         raise HTTPException(404, "Conversation not found")
     out = _conversation_out(conv, full=True)
+    out["messages"] = await _enrich_messages(db, conv)
     out["active_run_id"] = await _active_run_id(db, conv.id)
     return out
 
@@ -486,6 +895,8 @@ async def send_message(
             for d in attached_docs
         ]
     conv.messages = [*(conv.messages or []), user_message]
+    # A new message restores an archived session (R22).
+    conv.archived_at = None
     if len(conv.messages) == 1:
         conv.title = text[:60] + ("…" if len(text) > 60 else "")
     await db.commit()
@@ -639,6 +1050,11 @@ def _assistant_message(run: Run) -> dict:
         # The prose grounding check's verdict on this reply (engine/
         # grounding.py) — null for anything the check does not apply to.
         "grounding": run.grounding,
+        # R01/R25: why the run stopped short and what its guardrails did.
+        # Persisted here and refreshed from the run on every GET.
+        "stop_reason": run.stop_reason,
+        "truncated": run.stop_reason == "max_tokens",
+        "guardrails": run.guardrails,
     }
 
 

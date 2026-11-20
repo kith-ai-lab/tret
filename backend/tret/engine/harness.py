@@ -7,6 +7,7 @@ persists the transcript/cost after every iteration, and publishes RunEvents.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from tret.services.energy_meter import EnergyMeter, MeterReading
 
 from tret.db.engine import get_session_factory
-from tret.db.models import Document, Harness, Pack, Project, Run
+from tret.db.models import Document, Harness, Pack, Project, Run, Workspace
 from tret.adaptive import adaptive_of
 from tret.engine.compaction import (
     CompactionState,
@@ -55,6 +56,7 @@ from tret.engine.tools import (
     COST_CAP_KEY,
     DATABASE_TOOL_NAMES,
     DELEGATION_DEPTH_KEY,
+    DELEGATION_TOOLS,
     LESSON_TOOL_NAMES,
     SESSION_FOLDERS_KEY,
     SUBAGENT_ALLOWED_TOOLS,
@@ -95,6 +97,7 @@ from tret.router_llm.priors import OutcomePriors, PriorsProvider
 from tret.router_llm.router import ModelRouter, RoutingUnavailable
 from tret.engine.supervisor import (
     KIND_EFFORT,
+    KIND_SWITCH,
     Intervention,
     TurnState,
     assess,
@@ -129,13 +132,17 @@ from tret.services.transcript import (
     NUDGE_TERMINAL,
     REPEATED_CALL_KEY,
 )
+from tret.engine.degenerate import DegenerateDetector, strip_degenerate_tail
 from tret.engine.grounding import (
-    GROUNDING_MAX_REPAIRS,
     evidence_numbers,
     grounding_nudge_message,
     run_has_retrieval_evidence,
+    skipped_code_blocks,
+    unsupported_details,
     unsupported_numbers,
 )
+from tret.services.edition import resolve_edition
+from tret.services.guardrails import resolve_guardrails, snapshot as guardrails_snapshot
 
 log = logging.getLogger("tret.harness")
 
@@ -165,6 +172,16 @@ DEFAULT_MAX_COST_USD = Decimal("5.0")
 # every iteration re-sends the whole conversation, so runaway loops are the
 # most expensive failure mode there is.
 MAX_ITERATIONS_CEILING = 50
+# `TurnComplete.stop_reason` values that mean "the model hit its output limit":
+# Anthropic says `max_tokens`, OpenAI-compatible providers pass `length`.
+TRUNCATION_STOP_REASONS = frozenset({"max_tokens", "length"})
+# Run.stop_reason values this engine writes (R01/R04/R10).
+STOP_MAX_TOKENS = "max_tokens"
+STOP_OUT_OF_STEPS = "out_of_steps"
+STOP_DEGENERATE = "degenerate_output"
+# ENGINE_NUDGE_KEY value for the HTML repair nudge (R13), beside the ones in
+# services/transcript.py.
+NUDGE_HTML_REPAIR = "html_repair"
 # Optional per-run output-token budget, set as model_policy["max_run_output_tokens"].
 # Soft: crossing it asks the model to finalize now. Hard stop at this multiple of
 # it, so a model that ignores the instruction still cannot run away.
@@ -242,6 +259,147 @@ def _near_context_limit(est_tokens: int, context_limit: int) -> bool:
     to be near, and `over_budget` never fires against it either.
     """
     return bool(context_limit) and est_tokens >= EXACT_COUNT_THRESHOLD * context_limit
+
+
+async def _close_stream(stream_iter) -> None:
+    """Close a provider stream we stopped reading early (best effort)."""
+    aclose = getattr(stream_iter, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception:  # noqa: BLE001 - closing a stream we abandoned must never fail the run
+        log.debug("closing an abandoned provider stream failed", exc_info=True)
+
+
+# Largest share of a model's context window one reply may reserve for output
+# (H2): a raised harness limit (16,384) must never leave a small-window model
+# no room for input.
+_MAX_OUTPUT_WINDOW_SHARE = 0.25
+# Output cap for a local server whose window is not reported: nothing tells us
+# what it can hold, so assume a small one.
+_LOCAL_UNKNOWN_WINDOW_OUTPUT_CAP = 4096
+
+
+def _effective_max_output(requested: int, model_info) -> int:
+    """The ONE max-output figure used for a call on `model_info`: the harness
+    value, clamped to the model's own known completion ceiling
+    (`ModelInfo.max_output_tokens`, when the catalog has one), to no more than a
+    quarter of its context window when that is known, and (window unknown, a
+    local server) to 4,096. The same value feeds the provider call and the
+    compaction budget, so a 16,384 limit cannot 400 every call on a 16k model or
+    drive the input budget to zero (R01/H2)."""
+    out = max(1, int(requested))
+    ceiling = getattr(model_info, "max_output_tokens", None)
+    if isinstance(ceiling, int) and not isinstance(ceiling, bool) and ceiling > 0:
+        out = min(out, ceiling)
+    window = getattr(model_info, "context_window", None)
+    if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+        # A quarter of the window, but never less than min(4096, half the window),
+        # so a small window still leaves a usable answer.
+        out = min(out, max(int(window * _MAX_OUTPUT_WINDOW_SHARE), min(4096, window // 2), 1))
+    elif getattr(model_info, "provider", None) == "local" or getattr(model_info, "cost_tier", None) == "local":
+        out = min(out, _LOCAL_UNKNOWN_WINDOW_OUTPUT_CAP)
+    return max(1, out)
+
+
+# Kept for callers that predate the window rule.
+_clamp_output_tokens = _effective_max_output
+
+
+def _routing_min_window(input_tokens: int, requested_output: int, headroom: float) -> int:
+    """`required_context_window` for the router, before a model is chosen. The
+    output reserved on a model never exceeds a quarter of its window
+    (`_effective_max_output`), so the smallest window that fits is the smaller of
+    the answer for the full request and the one for a window-proportional
+    reservation; otherwise a 16,384 request would rule out every 16k model."""
+    needed = required_context_window(input_tokens, requested_output, headroom)
+    share_room = headroom - _MAX_OUTPUT_WINDOW_SHARE
+    if share_room > 0 and input_tokens > 0:
+        needed = min(needed, int(input_tokens / share_room) + 1)
+    return needed
+
+
+def _truncated_tool_call_error(tool: str, max_tokens: int) -> str:
+    """The tool result for a call whose arguments were cut off at the output
+    limit (R01). Nothing ran; the model is told how to write the long thing."""
+    return (
+        f"Your `{tool}` call was cut off at the output limit ({max_tokens} tokens) before its "
+        "arguments were complete, so nothing was run. Do not resend it whole. Write long files "
+        'in pieces: call `draft_file` with mode "append" for each section (a few thousand '
+        "words at a time), then save the finished file."
+    )
+
+
+def _is_truncated_call(tc: ToolCall) -> bool:
+    """A tool call whose argument JSON never parsed (providers keep the broken
+    text under `_raw`) — what a mid-argument cut-off looks like."""
+    args = tc.arguments
+    return isinstance(args, dict) and "_raw" in args
+
+
+async def _generated_document_ids(db, ctx) -> set[str]:
+    """Ids of this run's `source_kind="generated"` documents (what `draft_file`
+    writes): the model's own text, never evidence for a figure (M4)."""
+    ids = list(getattr(ctx, "document_ids", None) or [])
+    if not ids:
+        return set()
+    try:
+        rows = await db.execute(
+            select(Document.id).where(Document.id.in_(ids), Document.source_kind == "generated")
+        )
+        return {str(i) for i in rows.scalars().all()}
+    except Exception:  # noqa: BLE001 - grounding must not fail the run over a lookup
+        log.debug("generated-document lookup failed", exc_info=True)
+        return set()
+
+
+def _evidence_without_analysis(messages: list[Msg]) -> list[Msg]:
+    """`messages` minus the tool results of `run_analysis` calls: the evidence a
+    reply would have if the unvetted lane did not exist (R08/R25 `unvetted`)."""
+    analysis_ids = {
+        tc.id for m in messages if m.role == "assistant" for tc in m.tool_calls if tc.name == "run_analysis"
+    }
+    if not analysis_ids:
+        return messages
+    return [m for m in messages if not (m.role == "tool" and m.tool_call_id in analysis_ids)]
+
+
+def _unvetted_figures(
+    final_text: str,
+    *,
+    system: str,
+    messages: list[Msg],
+    task_input: dict,
+    retrieved: list[dict],
+    unsupported_all: list[str],
+    exclude_document_ids: set[str] | None = None,
+) -> list[str]:
+    """Reply figures supported ONLY by `run_analysis` results: unsupported when
+    those results are removed from the evidence, but supported with them.
+    `unsupported_all` is the unsupported list computed with everything in."""
+    without = _evidence_without_analysis(messages)
+    if without is messages:
+        return []
+    unsupported_without = unsupported_numbers(
+        final_text,
+        evidence_numbers(
+            system=system,
+            messages=without,
+            task_input=task_input,
+            retrieved=retrieved,
+            exclude_document_ids=exclude_document_ids,
+        ),
+    )
+    still_unsupported = set(unsupported_all)
+    return [n for n in unsupported_without if n not in still_unsupported]
+
+
+def _html_check_module():
+    """engine/html_check.py (R13). A function so tests can swap in a fake."""
+    from tret.engine import html_check
+
+    return html_check
 
 
 def _effective_max_iterations(harness_value: int, task_input: dict | None) -> int:
@@ -1785,6 +1943,69 @@ class HarnessEngine:
         # check in the first place.
         project = await db.get(Project, run.project_id)
         workspace_id = project.workspace_id if project else None
+        # R25: the member-tier guardrails for this run, read once from the
+        # workspace settings and clamped to what the operator allows.
+        workspace_row = await db.get(Workspace, workspace_id) if workspace_id else None
+        guard_cfg = resolve_guardrails(
+            get_settings(), workspace_row.settings if workspace_row is not None else None
+        )
+        if guard_cfg.spend_cap_usd is not None:
+            # Narrow only: never above the harness cap or a parent's carve-out.
+            max_cost = min(max_cost, Decimal(str(guard_cfg.spend_cap_usd)))
+        member_withheld: list[str] = []  # turned off in the workspace's guardrail settings
+        edition_withheld: list[str] = []  # not offered by this edition or instance
+        if not guard_cfg.web_research:
+            member_withheld += [n for n in enabled_names if n in WEB_TOOL_NAMES]
+        if guard_cfg.max_subagents == 0:
+            member_withheld += [n for n in enabled_names if n in DELEGATION_TOOLS]
+        # The numbers lane is cohort-only, and the unvetted lane also needs the
+        # operator switch: never offer a tool that would always refuse.
+        cohort = (
+            resolve_edition(
+                workspace_row.settings if workspace_row is not None else None,
+                get_settings().edition,
+            )
+            == "cohort"
+        )
+        if not (cohort and get_settings().unvetted_analysis):
+            edition_withheld += [n for n in enabled_names if n == "run_analysis"]
+        if not cohort:
+            edition_withheld += [n for n in enabled_names if n == "import_table"]
+        if member_withheld or edition_withheld:
+            enabled_names = [
+                n for n in enabled_names if n not in member_withheld and n not in edition_withheld
+            ]
+        if member_withheld:
+            await self.bus.publish(
+                run.id,
+                RunEvent(
+                    "tools_withheld",
+                    {
+                        "tools": sorted(set(member_withheld)),
+                        "reason": "guardrail_setting",
+                        "detail": (
+                            "This workspace's guardrail settings turn these tools off "
+                            "(Settings -> Guardrails). The run continues without them."
+                        ),
+                    },
+                ),
+            )
+        if edition_withheld:
+            await self.bus.publish(
+                run.id,
+                RunEvent(
+                    "tools_withheld",
+                    {
+                        "tools": sorted(set(edition_withheld)),
+                        "reason": "edition_or_operator",
+                        "detail": (
+                            "These tools are not available in this workspace's edition or on this "
+                            "instance (the operator has not enabled them). The run continues "
+                            "without them."
+                        ),
+                    },
+                ),
+            )
         # External-database tools (read-only Postgres/Supabase) are added to a run
         # whose harness lists a connector read tool, when the workspace has a
         # usable database connection; `[]` (the common case) changes nothing.
@@ -1796,7 +2017,7 @@ class HarnessEngine:
         )
         if set(enabled_names) & (CONNECTOR_TOOL_NAMES | WRITE_CONNECTOR_TOOL_NAMES | DATABASE_TOOL_NAMES):
             withheld_connector, connector_reason = await withheld_connector_tools(
-                db, workspace_id, enabled_names
+                db, workspace_id, enabled_names, session_folders=_session_folders(run.task_input)
             )
             if withheld_connector:
                 enabled_names = [n for n in enabled_names if n not in withheld_connector]
@@ -1911,6 +2132,8 @@ class HarnessEngine:
             ),
             objective=objective,
             harness_lessons=harness_lessons,
+            cohort=cohort,
+            unvetted_analysis=bool(cohort and get_settings().unvetted_analysis),
         )
         system = assembled.system
         user_message = build_user_message(run, pack, documents)
@@ -1957,7 +2180,7 @@ class HarnessEngine:
         else:
             context_fit_basis = "full_prompt"
             floor_input_tokens = est_input_tokens
-        min_context_window = required_context_window(
+        min_context_window = _routing_min_window(
             floor_input_tokens, max_output_tokens, adaptive.context_headroom
         )
         from tret.services.outcomes import task_family_for_run
@@ -2002,6 +2225,18 @@ class HarnessEngine:
         run.started_at = _utcnow()
         run.doctrine_sha = pack.doctrine_sha if pack else None
         run.context_composition = composition
+        # R25: what was on for this run, written at the start so a run that
+        # dies mid-loop still carries its settings. The loop keeps `guardrails_rec`
+        # up to date and rewrites the column once at the end.
+        guardrails_rec: dict = {
+            "settings": guardrails_snapshot(guard_cfg, get_settings()),
+            "overhead": {
+                "repair_turns": 0,
+                "repair_input_tokens": 0,
+                "repair_output_tokens": 0,
+            },
+        }
+        run.guardrails = _jsonb_safe(copy.deepcopy(guardrails_rec))
         await db.commit()
         await self.bus.publish(run.id, RunEvent("routing", decision.to_json()))
         await self.bus.publish(run.id, RunEvent("context_composition", composition))
@@ -2051,7 +2286,9 @@ class HarnessEngine:
         # routing call, so `min_context_window` could be computed before a
         # model was chosen.
         context_limit = context_budget(
-            model_info.context_window, max_output_tokens, adaptive.context_headroom
+            model_info.context_window,
+            _effective_max_output(max_output_tokens, model_info),
+            adaptive.context_headroom,
         )
         compaction = CompactionState()
         compaction_records: list[dict] = []
@@ -2130,6 +2367,15 @@ class HarnessEngine:
         total_usage = Usage()
         nudged = False
         budget_nudged = False
+        # R10/R13/R25 loop state. `repair_pending` is "grounding"/"html" from the
+        # moment a repair nudge is appended until the NEXT provider call has been
+        # booked, so that call's tokens land in guardrails["overhead"].
+        repair_pending: str | None = None
+        grounding_nudges_sent = 0
+        html_repair_sent = False
+        html_first_issues: list | None = None
+        degenerate_retries = 0
+        degenerate_models: list[str] = [model_info.id]
         # How many times a reply failed the grounding check (engine/
         # grounding.py), on a run where `grounding_applies`. Incremented
         # whenever the check finds unsupported numbers, whether or not a nudge
@@ -2401,13 +2647,17 @@ class HarnessEngine:
                 else None
             )
             call_started_at = _utcnow()
+            # R01: the per-call output limit, clamped to the model's own known
+            # ceiling. R10: watch the text as it streams for a degenerate loop.
+            call_max_tokens = _effective_max_output(max_output_tokens, model_info)
+            detector = DegenerateDetector()
             try:
-                async for event in provider.stream(
+                stream_iter = provider.stream(
                     model=model_info.wire_id,
                     system=system,
                     messages=wire,
                     tools=tool_specs,
-                    max_tokens=max_output_tokens,
+                    max_tokens=call_max_tokens,
                     temperature=temperature,
                     # Already gated by `supports_effort` when the segment was
                     # created (initially above, or in `_switch_model` on a
@@ -2432,14 +2682,19 @@ class HarnessEngine:
                     # this comparison is exactly "has this run switched away
                     # from its original routing decision yet".
                     provider_ignore=provider_ignore,
-                ):
+                )
+                async for event in stream_iter:
                     if isinstance(event, TextDelta):
                         assistant_text.append(event.text)
                         await self.bus.publish(run.id, RunEvent("text_delta", {"text": event.text}))
+                        if detector.feed(event.text) is not None:
+                            break  # degenerate output: stop paying for it
                     elif isinstance(event, ToolCallComplete):
                         tool_calls.append(event.tool_call)
                     elif isinstance(event, TurnComplete):
                         turn = event
+                if detector.hit is not None:
+                    await _close_stream(stream_iter)
             except ProviderError as e:
                 # A stale provider_ignore — this decision's own poor-endpoint
                 # evidence (`RoutingDecision.provider_ignore`) — can rule out
@@ -2497,27 +2752,33 @@ class HarnessEngine:
                     assistant_text = []
                     tool_calls = []
                     turn = None
+                    detector = DegenerateDetector()
                     try:
-                        async for event in provider.stream(
+                        stream_iter = provider.stream(
                             model=model_info.wire_id,
                             system=system,
                             messages=wire,
                             tools=tool_specs,
-                            max_tokens=max_output_tokens,
+                            max_tokens=call_max_tokens,
                             temperature=temperature,
                             effort=segment.effort,
                             session_id=str(run.id),
                             provider_ignore=None,
-                        ):
+                        )
+                        async for event in stream_iter:
                             if isinstance(event, TextDelta):
                                 assistant_text.append(event.text)
                                 await self.bus.publish(
                                     run.id, RunEvent("text_delta", {"text": event.text})
                                 )
+                                if detector.feed(event.text) is not None:
+                                    break
                             elif isinstance(event, ToolCallComplete):
                                 tool_calls.append(event.tool_call)
                             elif isinstance(event, TurnComplete):
                                 turn = event
+                        if detector.hit is not None:
+                            await _close_stream(stream_iter)
                     except ProviderError as retry_e:
                         e = retry_e
                     else:
@@ -2621,7 +2882,147 @@ class HarnessEngine:
                     run.error = str(e)
                     break
 
+            degenerate_hit = detector.hit or detector.finish()
+            if degenerate_hit is not None:
+                # R10: the turn is void. Book what it cost (estimated when the
+                # stream was cut before the usage frame), strip the tail, record
+                # it, and either retry once on another model or fail the run.
+                degenerate_text = "".join(assistant_text)
+                kept_text = strip_degenerate_tail(degenerate_text, degenerate_hit)
+                if turn is not None:
+                    d_usage, d_estimated = turn.usage, False
+                else:
+                    d_input = estimate_wire_tokens(system, wire, tool_specs)
+                    d_carry = min(segment.last_reported_cache_read_tokens or 0, d_input)
+                    d_usage = Usage(
+                        input_tokens=d_input - d_carry,
+                        output_tokens=estimate_message_tokens(
+                            Msg(role="assistant", content=degenerate_text or None)
+                        ),
+                        cache_read_tokens=d_carry,
+                    )
+                    d_estimated = True
+                self._book_usage(
+                    run=run,
+                    total_usage=total_usage,
+                    segment=segment,
+                    segments=segments,
+                    model_info=model_info,
+                    usage=d_usage,
+                    iteration=iteration,
+                    emissions=emissions,
+                    estimated=d_estimated,
+                    served_by=turn.served_by if turn is not None else None,
+                    inference_geo=turn.inference_geo if turn is not None else None,
+                    usage_status="reported" if turn is not None else "estimated",
+                    started_at=call_started_at,
+                    ended_at=_utcnow(),
+                )
+                if repair_pending is not None:
+                    # Still pending: the retry of this turn is a repair call too.
+                    self._add_repair_overhead(guardrails_rec, d_usage)
+                if degenerate_retries == 0:
+                    guardrails_rec["degenerate"] = {
+                        "pattern": degenerate_hit.pattern,
+                        "count": degenerate_hit.count,
+                        "model": model_info.id,
+                        "retried_on": None,
+                    }
+                retry_target = None
+                # M6: a retry needs a step left to run in; on the last iteration the
+                # `continue` would fall into the step-cap exit and mask the cause.
+                if (
+                    degenerate_retries == 0
+                    and not overridden
+                    and iteration < max_iterations
+                    and not self._is_cancelled(run.id)
+                ):
+                    retry_target = await self._degenerate_retry_model(
+                        model_policy=model_policy,
+                        task=task,
+                        est_tokens=est_tokens,
+                        tried=degenerate_models,
+                        needs_tools=bool(tool_specs),
+                    )
+                if retry_target is not None:
+                    degenerate_retries += 1
+                    degenerate_models.append(retry_target.id)
+                    guardrails_rec["degenerate"]["retried_on"] = retry_target.id
+                    await self._stop_meter(segment, emissions)
+                    model_info, provider, segment = self._switch_model(
+                        run=run,
+                        intervention=Intervention(
+                            kind=KIND_SWITCH,
+                            target=retry_target,
+                            reason="degenerate_output",
+                            detail=(
+                                f"{degenerate_models[-2]} produced a degenerate repeating reply "
+                                f"({degenerate_hit.pattern!r} x{degenerate_hit.count}); "
+                                "retrying this turn on another model."
+                            ),
+                            evidence={
+                                "pattern": degenerate_hit.pattern,
+                                "count": degenerate_hit.count,
+                            },
+                        ),
+                        segments=segments,
+                        iteration=iteration,
+                        emissions=emissions,
+                    )
+                    await self._start_meter(segment, settings, emissions)
+                    context_limit = context_budget(
+                        model_info.context_window,
+                        _effective_max_output(max_output_tokens, model_info),
+                        adaptive.context_headroom,
+                    )
+                    ctx.model_used = model_info.id
+                    messages = normalize_for_provider(messages, model_info.provider)
+                    compaction_exhausted = False
+                    compact_before_next_turn = True
+                    failure_streak.reset()
+                    await self.bus.publish(
+                        run.id, RunEvent("model_switch", run.routing["switches"][-1])
+                    )
+                    run.guardrails = _jsonb_safe(copy.deepcopy(guardrails_rec))
+                    await db.commit()
+                    continue
+                # Second degenerate reply, or nobody else to ask: end honestly.
+                # Never `completed` with a degenerate reply.
+                if degenerate_retries:
+                    guardrails_rec["degenerate"]["retry_degenerate"] = True
+                messages.append(
+                    Msg(
+                        role="assistant",
+                        content=kept_text or None,
+                        meta={
+                            "iteration": iteration,
+                            "partial": True,
+                            "degenerate": {
+                                "pattern": degenerate_hit.pattern,
+                                "count": degenerate_hit.count,
+                            },
+                        },
+                    )
+                )
+                run.status = "failed"
+                run.stop_reason = STOP_DEGENERATE
+                run.error = (
+                    f"degenerate_output: {model_info.id} produced a repeating reply "
+                    f"({degenerate_hit.pattern!r} x{degenerate_hit.count})"
+                    + (
+                        " again on a second model; the run was stopped rather than shipping it."
+                        if degenerate_retries
+                        else (
+                            " on its last step, so there was no step left to retry in."
+                            if iteration >= max_iterations
+                            else " and no other model was available to retry on."
+                        )
+                    )
+                )
+                break
+
             usage = turn.usage if turn else Usage()
+            turn_truncated = turn is not None and (turn.stop_reason or "") in TRUNCATION_STOP_REASONS
             if turn is not None and turn.served_by:
                 segment.served_by = turn.served_by
             self._book_usage(
@@ -2641,13 +3042,18 @@ class HarnessEngine:
                 wire_changed_by_compaction=compaction_changed_wire,
                 cache_voided_by_effort_raise=voided_by_effort_this_turn,
             )
+            if repair_pending is not None:
+                # R25: this call exists only because a repair nudge asked for it.
+                # Every call up to the next final reply counts (a repair turn may
+                # call tools first); the final-reply branch below clears it.
+                self._add_repair_overhead(guardrails_rec, usage)
 
             messages.append(
                 Msg(
                     role="assistant",
                     content="".join(assistant_text) or None,
                     tool_calls=tool_calls,
-                    meta={"iteration": iteration},
+                    meta={"iteration": iteration, **({"truncated": True} if turn_truncated else {})},
                     # Kept verbatim for replay on later requests of this run
                     # (see `Msg.reasoning`); None for providers that don't use it.
                     reasoning=turn.reasoning if turn is not None else None,
@@ -2680,6 +3086,7 @@ class HarnessEngine:
             )
 
             if not tool_calls:
+                repair_pending = None  # a final reply ends the repair chain (a new nudge re-arms it)
                 # Model believes it's done. If a terminal verdict is required and
                 # missing, nudge once; otherwise finish.
                 if ctx.terminal_tool and not ctx.terminal_recorded and not nudged:
@@ -2735,8 +3142,35 @@ class HarnessEngine:
                 # (or, worse, a stale unsupported list from an EARLIER failed
                 # attempt this same run, if one preceded the empty replies)
                 # over a turn that never said anything at all.
+                # R01: the reply stopped at the output limit. Recorded on the run
+                # (the chat shows a Continue button) and no repair nudge is spent
+                # on it: asking a cut-off reply to be rewritten just cuts off again.
+                reply_truncated = bool(final_text.strip()) and turn_truncated
+                if reply_truncated:
+                    run.stop_reason = STOP_MAX_TOKENS
+                    guardrails_rec["truncated"] = {
+                        "model": model_info.id,
+                        "max_output_tokens": call_max_tokens,
+                    }
+                    await self.bus.publish(
+                        run.id,
+                        RunEvent("reply_truncated", {"max_output_tokens": call_max_tokens}),
+                    )
+                can_repair = not reply_truncated and iteration < max_iterations
                 if grounding_applies and final_text.strip():
-                    if not run_has_retrieval_evidence(messages, ctx.retrieved_values):
+                    if not guard_cfg.number_check:
+                        # R25: the member turned the number check off. Recorded as
+                        # "off" (not "skipped") so the run says it was a choice.
+                        run.grounding = {
+                            "checked": False,
+                            "status": "off",
+                            "attempts": 0,
+                            "unsupported": [],
+                            "unsupported_detail": [],
+                            "unvetted": [],
+                            "first_unsupported": [],
+                        }
+                    elif not run_has_retrieval_evidence(messages, ctx.retrieved_values):
                         # No tool ever ran this run and nothing was retrieved
                         # — a pure-knowledge answer has no retrieved data to
                         # contradict, so the check does not run at all rather
@@ -2749,6 +3183,8 @@ class HarnessEngine:
                             "status": "skipped",
                             "attempts": 0,
                             "unsupported": [],
+                            "unsupported_detail": [],
+                            "unvetted": [],
                             "first_unsupported": [],
                         }
                     else:
@@ -2757,15 +3193,15 @@ class HarnessEngine:
                         # known to be empty) as its last entry — `evidence_
                         # numbers` excludes exactly that entry, so the reply
                         # is never checked against itself.
-                        unsupported = unsupported_numbers(
-                            final_text,
-                            evidence_numbers(
-                                system=system,
-                                messages=messages,
-                                task_input=run.task_input,
-                                retrieved=ctx.retrieved_values,
-                            ),
+                        generated_ids = await _generated_document_ids(db, ctx)
+                        evidence = evidence_numbers(
+                            system=system,
+                            messages=messages,
+                            task_input=run.task_input,
+                            retrieved=ctx.retrieved_values,
+                            exclude_document_ids=generated_ids,
                         )
+                        unsupported = unsupported_numbers(final_text, evidence)
                         if unsupported:
                             if grounding_first_unsupported is None:
                                 grounding_first_unsupported = unsupported
@@ -2779,10 +3215,11 @@ class HarnessEngine:
                             # this one — worse, not better, since that path
                             # ends the run `failed` over a repair it was never
                             # given room to make. Finish normally instead.
-                            if (
-                                grounding_failures < GROUNDING_MAX_REPAIRS
-                                and iteration < max_iterations
-                            ):
+                            # The budget is the member's `repair_attempts` (2 =
+                            # the historical behaviour, 0 = never rewrite).
+                            if grounding_nudges_sent < guard_cfg.repair_attempts and can_repair:
+                                grounding_nudges_sent += 1
+                                repair_pending = "grounding"
                                 messages.append(
                                     Msg(
                                         role="user",
@@ -2803,8 +3240,62 @@ class HarnessEngine:
                             ),
                             "attempts": grounding_failures,
                             "unsupported": unsupported,
+                            "unsupported_detail": (
+                                unsupported_details(final_text, evidence) if unsupported else []
+                            ),
+                            # Figures supported only by an unvetted `run_analysis`
+                            # result: not wrong, but not vetted either.
+                            "unvetted": _unvetted_figures(
+                                final_text,
+                                system=system,
+                                messages=messages,
+                                task_input=run.task_input,
+                                retrieved=ctx.retrieved_values,
+                                unsupported_all=unsupported,
+                                exclude_document_ids=generated_ids,
+                            ),
                             "first_unsupported": grounding_first_unsupported or [],
+                            "skipped_code_blocks": skipped_code_blocks(final_text),
                         }
+                # R13: a reply that carries HTML gets one structural check, and
+                # one repair nudge when it is broken (truncated files and stray
+                # table cells are what it exists for).
+                html_mod = (
+                    _html_check_module()
+                    if guard_cfg.html_check and not ctx.terminal_tool and final_text.strip()
+                    else None
+                )
+                if html_mod is not None:
+                    html_result = html_mod.check_reply_html(final_text)
+                    if html_result.get("status") == "issues":
+                        if (
+                            not html_repair_sent
+                            and guard_cfg.repair_attempts > 0
+                            and can_repair
+                            # M1: the rewrite may itself need a tool-free turn plus
+                            # a recheck; do not spend the second-to-last step on it.
+                            and iteration <= max_iterations - 2
+                        ):
+                            html_repair_sent = True
+                            html_first_issues = list(html_result.get("issues") or [])
+                            repair_pending = "html"
+                            messages.append(
+                                Msg(
+                                    role="user",
+                                    content=html_mod.html_repair_nudge(html_result),
+                                    meta={
+                                        ENGINE_NUDGE_KEY: NUDGE_HTML_REPAIR,
+                                        "issues": html_first_issues,
+                                    },
+                                )
+                            )
+                            continue
+                    if html_result.get("status") in ("ok", "issues"):
+                        html_rec = dict(html_result)
+                        html_rec["repaired"] = html_repair_sent and html_result.get("status") == "ok"
+                        if html_repair_sent:
+                            html_rec["first_issues"] = html_first_issues or []
+                        guardrails_rec["html_check"] = html_rec
                 run.status = self._final_status(ctx, final_text)
                 break
 
@@ -2857,6 +3348,10 @@ class HarnessEngine:
                 findings_before = len(ctx.findings_created)
                 if spec is None:
                     result_text, is_error = await _unknown_tool(tc.name)
+                elif turn_truncated and _is_truncated_call(tc):
+                    # R01: the arguments were cut off at the output limit. Running
+                    # the half-parsed call would just fail validation; say why.
+                    result_text, is_error = _truncated_tool_call_error(tc.name, call_max_tokens), True
                 else:
                     result_text, is_error = await execute_tool(ctx, spec, tc.arguments)
 
@@ -3103,7 +3598,9 @@ class HarnessEngine:
                 )
                 await self._start_meter(segment, settings, emissions)
                 context_limit = context_budget(
-                    model_info.context_window, max_output_tokens, adaptive.context_headroom
+                    model_info.context_window,
+                    _effective_max_output(max_output_tokens, model_info),
+                    adaptive.context_headroom,
                 )
                 ctx.model_used = model_info.id
                 messages = normalize_for_provider(messages, model_info.provider)
@@ -3181,7 +3678,12 @@ class HarnessEngine:
                 )
             else:
                 run.status = "failed"
-                run.error = f"max_iterations ({max_iterations}) reached without completion"
+                # R04: stays `failed` (honest for the router's evidence), but says
+                # what happened in words a person can act on. Whatever the run
+                # produced is kept in its transcript; a delegating parent is handed
+                # it as partial results (`engine/tools._partial_results_text`).
+                run.stop_reason = STOP_OUT_OF_STEPS
+                run.error = f"Ran out of steps ({max_iterations} of {max_iterations}). Partial results kept."
         # The CURRENT segment — `segment` is reassigned on every model
         # switch inside the loop, so this always stops whichever one was
         # live when the loop exited normally (an exception or cancellation
@@ -3226,6 +3728,8 @@ class HarnessEngine:
                 "status": "unresolved",
                 "attempts": grounding_failures,
                 "unsupported": grounding_last_unsupported or [],
+                "unsupported_detail": [],
+                "unvetted": [],
                 "first_unsupported": grounding_first_unsupported or [],
             }
 
@@ -3254,6 +3758,7 @@ class HarnessEngine:
             self._stash_retrieved_values(run.id, ctx.retrieved_values)
         run.messages = _jsonb_safe([m.to_json() for m in messages])
         run.overhead = overhead_block(overhead_calls)
+        run.guardrails = _jsonb_safe(copy.deepcopy(guardrails_rec))
         run.finished_at = _utcnow()
         # A healthy single-segment run never persisted its timeline mid-run
         # (see `_book_usage`), but `served_by` and `effort_history` both live
@@ -3579,6 +4084,47 @@ class HarnessEngine:
         routing["effort_changes"] = [*(routing.get("effort_changes") or []), record]
         run.routing = routing
         run.model_timeline = [seg.to_json() for seg in segments]
+
+    @staticmethod
+    def _add_repair_overhead(guardrails_rec: dict, usage: Usage) -> None:
+        """Count one provider call made in response to a repair nudge (R25)."""
+        overhead = guardrails_rec.setdefault("overhead", {})
+        overhead["repair_turns"] = int(overhead.get("repair_turns") or 0) + 1
+        overhead["repair_input_tokens"] = int(overhead.get("repair_input_tokens") or 0) + int(
+            usage.input_tokens or 0
+        )
+        overhead["repair_output_tokens"] = int(overhead.get("repair_output_tokens") or 0) + int(
+            usage.output_tokens or 0
+        )
+
+    async def _degenerate_retry_model(
+        self,
+        *,
+        model_policy: dict,
+        task: dict,
+        est_tokens: int,
+        tried: list[str],
+        needs_tools: bool,
+    ):
+        """The first model the harness policy permits that this run has not
+        already tried, for the one retry after a degenerate reply (R10). None
+        when nobody else is available (or the router cannot say)."""
+        try:
+            candidates, _priors = await self.router.candidates_for(
+                model_policy=model_policy,
+                task_shape=task.get("shape", "freeform"),
+                est_input_tokens=est_tokens,
+            )
+        except Exception:  # noqa: BLE001 - no candidate list means no retry, not a crash
+            log.exception("degenerate-output retry: candidate lookup failed")
+            return None
+        for candidate in candidates:
+            if candidate.id in tried:
+                continue
+            if needs_tools and not candidate.supports_tools:
+                continue
+            return candidate
+        return None
 
     def _switch_model(
         self,

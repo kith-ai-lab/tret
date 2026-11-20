@@ -534,13 +534,11 @@ async def test_read_connected_file_pages_like_read_document(ctx, materialize):
     assert "more characters" in result
 
 
-async def test_read_connected_file_spends_the_budget_even_when_materialize_raises(
+async def test_read_connected_file_does_not_spend_the_budget_when_materialize_raises(
     ctx, connection_ok, monkeypatch
 ):
-    """A failed materialize still made requests against the provider (a
-    metadata fetch, maybe a download) — the read counter is spent before the
-    call, not after, so a caller retrying a failing read does not get it for
-    free. A RuntimeError (a Graph 5xx, an egress denial) must become an
+    """A failed read does not count against the per-run read budget (R05: only a
+    read that returns text does). A RuntimeError (a Graph 5xx, an egress denial) must become an
     error-flagged tool result, not an exception that kills the run."""
 
     async def _boom(db_, *, workspace_id, project_id, item_ref, uploaded_by=None, actor_run_id=None):
@@ -554,7 +552,7 @@ async def test_read_connected_file_spends_the_budget_even_when_materialize_raise
     assert is_error is True
     assert "Connected-source read failed" in result
     assert "could not reach Microsoft Graph" in result
-    assert ctx.connected_reads == 1
+    assert ctx.connected_reads == 0
 
 
 async def test_read_connected_file_charges_the_declared_size_when_the_download_is_too_large(
@@ -576,7 +574,7 @@ async def test_read_connected_file_charges_the_declared_size_when_the_download_i
 
     assert is_error is True
     assert "too large" in result.lower()
-    assert ctx.connected_reads == 1
+    assert ctx.connected_reads == 0  # R05: a failed read is not counted
     assert ctx.connected_bytes == 42 * 1024 * 1024
 
 

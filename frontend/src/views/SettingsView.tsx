@@ -18,6 +18,7 @@ import {
 } from '../api/client'
 import { BillingSection } from '../components/shared/BillingSection'
 import { EmissionsFactorsPanel } from '../components/settings/EmissionsFactorsPanel'
+import { GuardrailsPanel } from '../components/settings/GuardrailsPanel'
 import { FootprintCard } from '../components/settings/FootprintCard'
 import { TelemetrySection } from '../components/settings/TelemetrySection'
 import { formatDateTime } from '../components/shared/format'
@@ -45,6 +46,7 @@ export function SettingsView() {
         <BillingSection />
         <FootprintCard />
         <EmissionsFactorsSection />
+        <GuardrailsPanel />
       </div>
     )
   }
@@ -66,6 +68,7 @@ export function SettingsView() {
       <AutoApproveSection />
       <FootprintCard />
       <EmissionsFactorsSection />
+      <GuardrailsPanel />
       <RouterInfo />
       <NetworkAccess />
       <TelemetrySection />

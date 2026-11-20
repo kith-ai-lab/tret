@@ -398,6 +398,11 @@ export interface RunSummary {
   co2e_g_high: number | null
   iterations: number
   error: string | null
+  /** Learning round (R04/R01/R10): "max_tokens" | "out_of_steps" | "degenerate_output" | null. */
+  stop_reason?: string | null
+  /** Learning round (R23): title of the session this run belongs to. */
+  conversation_title?: string | null
+  conversation_id?: string | null
   created_at: string | null
   started_at: string | null
   finished_at: string | null
@@ -1001,6 +1006,8 @@ export interface RunDetail extends RunSummary {
   overhead: RunOverhead | null
   /** Additive; null for runs that predate the v3 preview. */
   method_v3?: MethodV3 | null
+  /** Learning round (R25): guardrail settings, checks and overhead this run recorded. */
+  guardrails?: RunGuardrails | null
 }
 
 export interface CreateRunBody {
@@ -1676,11 +1683,65 @@ export interface ChatMessage {
   // (a divergence/verdict task, or a run predating the check).
   grounding?: {
     checked: boolean
-    status: 'clean' | 'repaired' | 'unresolved'
+    // 'off' = the member turned the number check off (R25).
+    status: 'clean' | 'repaired' | 'unresolved' | 'off' | 'skipped'
     attempts: number
     unsupported: string[]
     first_unsupported?: string[]
+    /** Learning round (R11/R26): where each unsupported figure sits. */
+    unsupported_detail?: GroundingDetail[]
+    /** Learning round (R08/R26): figures supported only by unvetted analysis. */
+    unvetted?: string[]
   } | null
+  /** Learning round (R13/R10/R01/R26): html check, degenerate and truncation records. */
+  guardrails?: ChatMessageGuardrails | null
+  /** Learning round (R01/R04): "max_tokens" | "out_of_steps" | "degenerate_output" | null. */
+  stop_reason?: string | null
+  /** Learning round (R01): the reply was cut off at the output limit. */
+  truncated?: boolean
+  /** Learning round (R08/R26): unvetted/vetted analysis calls behind this reply. */
+  analysis_runs?: ChatAnalysisRun[]
+  /** Learning round (R24): files this reply saved to a connected folder. */
+  saved_files?: ChatSavedFile[]
+}
+
+export interface GroundingDetail {
+  value: string
+  where: 'prose' | 'table' | 'list' | 'html'
+  line: number
+  context: string
+}
+
+export interface ChatMessageGuardrails {
+  html_check?: {
+    status: 'ok' | 'issues' | 'skipped'
+    blocks?: number
+    issues?: { block: number; kind: string; detail: string; line: number }[]
+    repaired?: boolean
+  } | null
+  degenerate?: { pattern: string; count: number; model: string; retried_on: string | null } | null
+  truncated?: { model: string; max_output_tokens: number } | null
+  [key: string]: unknown
+}
+
+export interface ChatAnalysisRun {
+  id: string
+  purpose: string
+  code_sha: string
+  row_count: number
+  status: string
+}
+
+export interface ChatSavedFile {
+  /** Link to the audit file next to the saved one. */
+  audit_web_url?: string | null
+  finding_id: string
+  filename: string
+  path: string | null
+  web_url: string | null
+  status: string
+  sha256: string | null
+  audit_filename: string | null
 }
 
 /** A OneDrive/SharePoint folder attached to a conversation (Tret Learning
@@ -1710,6 +1771,10 @@ export interface ConversationSummary {
   updated_at: string | null
   /** Attached folders. Absent on a server predating the feature: read as []. */
   folders?: SessionFolder[]
+  /** Session group (R21); null/absent = ungrouped. */
+  group_id?: string | null
+  /** Set when archived (R22); null/absent = active. */
+  archived_at?: string | null
 }
 
 export interface ConversationDetail extends ConversationSummary {
@@ -1847,6 +1912,8 @@ export interface GuardrailAnalytics {
   energy: GuardrailEnergyStat[]
   energy_basis: GuardrailEnergyBasis
   egress: GuardrailEgressStats
+  /** Learning round (R28): reply-check counts. Absent on an older backend. */
+  checks?: GuardrailChecks
 }
 
 // ── Routing track record ─────────────────────────────────────────────────
@@ -4311,11 +4378,11 @@ export const api = {
   createRun: (body: CreateRunBody) =>
     request<{ run_id: string }>('/runs', { method: 'POST', body }),
   /** `topLevelOnly` hides delegated runs (those with a `parent_run_id`). */
-  listRuns: (limit = 50, cursor?: string, topLevelOnly = false) =>
+  listRuns: (limit = 50, cursor?: string, topLevelOnly = false, conversationId?: string) =>
     request<RunsPage>(
       `/runs?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}${
         topLevelOnly ? '&top_level_only=true' : ''
-      }`,
+      }${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ''}`,
     ),
   getRun: (id: string) => request<RunDetail>(`/runs/${id}`),
   /** Direct children only (runs this one delegated to), oldest first. */
@@ -5045,4 +5112,215 @@ export const autoApproveApi = {
       method: 'PUT',
       body: { categories },
     }),
+}
+
+// --- Learning round: E1 ---
+// Session groups, rename and archive (R20-R22). Kept outside the `api` object
+// so this block is self-contained; paths follow the "Sessions" contract.
+
+export interface SessionGroup {
+  id: string
+  title: string
+  position: number
+  created_at: string | null
+  updated_at: string | null
+  session_count: number
+  /** Folders a new session in this group would inherit. */
+  folders: SessionFolder[]
+}
+
+// Like `request`, but tolerates an empty body (DELETE answers 204).
+async function sessionRequest<T>(path: string, method: string, body?: unknown): Promise<T> {
+  const res = await fetch(`/api${path}`, {
+    method,
+    credentials: 'include',
+    ...(body !== undefined
+      ? { body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } }
+      : {}),
+  })
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`
+    let detail: unknown
+    try {
+      const data: unknown = await res.json()
+      if (data && typeof data === 'object' && 'detail' in data) {
+        detail = (data as { detail: unknown }).detail
+        message = typeof detail === 'string' ? detail : JSON.stringify(detail)
+      }
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(res.status, message, detail)
+  }
+  if (res.status === 204) return undefined as T
+  const text = await res.text()
+  return (text ? JSON.parse(text) : undefined) as T
+}
+
+export const sessionApi = {
+  listArchivedConversations: () => sessionRequest<ConversationSummary[]>('/chat?archived=true', 'GET'),
+  listGroups: () => sessionRequest<SessionGroup[]>('/chat/groups', 'GET'),
+  createGroup: (title?: string) =>
+    sessionRequest<SessionGroup>('/chat/groups', 'POST', title ? { title } : {}),
+  renameGroup: (id: string, title: string) =>
+    sessionRequest<SessionGroup>(`/chat/groups/${id}`, 'PATCH', { title }),
+  deleteGroup: (id: string) => sessionRequest<void>(`/chat/groups/${id}`, 'DELETE'),
+  // Folders are inherited from the group server-side (omit `folders`).
+  createConversationInGroup: (groupId: string, harnessId?: string) =>
+    sessionRequest<ConversationDetail>('/chat', 'POST', {
+      harness_id: harnessId ?? null,
+      group_id: groupId,
+    }),
+  renameConversation: (id: string, title: string) =>
+    sessionRequest<ConversationSummary>(`/chat/${id}`, 'PATCH', { title }),
+  // null ungroups.
+  moveConversation: (id: string, groupId: string | null) =>
+    sessionRequest<ConversationSummary>(`/chat/${id}`, 'PATCH', { group_id: groupId }),
+  archiveConversation: (id: string) =>
+    sessionRequest<ConversationSummary>(`/chat/${id}/archive`, 'POST'),
+  unarchiveConversation: (id: string) =>
+    sessionRequest<ConversationSummary>(`/chat/${id}/unarchive`, 'POST'),
+}
+
+// --- Learning round: E2 ---
+// Run guardrail record, the Guardrails settings panel (R25) and the reply-check
+// analytics counts (R28). Contract: "Guardrails (D)" and "Run record written by B".
+
+export interface GuardrailChecks {
+  window_days: number
+  runs_checked: number
+  clean: number
+  repaired: number
+  unresolved: number
+  skipped: number
+  off: number
+  unvetted: number
+  html_issues: number
+  truncated: number
+  out_of_steps: number
+  degenerate: number
+}
+
+export interface RunGuardrails {
+  settings?: Record<string, unknown> | null
+  overhead?: {
+    repair_turns?: number
+    repair_input_tokens?: number
+    repair_output_tokens?: number
+  } | null
+  html_check?: {
+    status?: string
+    blocks?: number
+    issues?: { block: number; kind: string; detail: string; line: number }[]
+    repaired?: boolean
+  } | null
+  degenerate?: { pattern: string; count: number; model: string; retried_on: string | null } | null
+  truncated?: { model: string; max_output_tokens: number } | null
+}
+
+export interface GuardrailTier {
+  id: 'locked' | 'member' | 'operator'
+  title: string
+  description: string
+}
+
+export interface GuardrailOverhead {
+  window_days: number
+  runs: number
+  repair_turns: number
+  input_tokens: number
+  output_tokens: number
+  cost_usd: number
+  energy_wh: number
+}
+
+export interface GuardrailItem {
+  id: string
+  tier: 'locked' | 'member' | 'operator'
+  title: string
+  description: string
+  adjustable: boolean
+  value: unknown
+  state: string
+  bounds: { min?: number; max?: number; options?: unknown[] } | null
+  overhead: GuardrailOverhead | null
+}
+
+export interface GuardrailsResponse {
+  tiers: GuardrailTier[]
+  items: GuardrailItem[]
+  member: Record<string, unknown>
+}
+
+export const guardrailsApi = {
+  get: () => request<GuardrailsResponse>('/guardrails'),
+  /** Partial member settings; workspace admins only (403 otherwise). */
+  set: (patch: Record<string, unknown>) =>
+    request<GuardrailsResponse>('/guardrails', { method: 'PUT', body: patch }),
+}
+
+// --- Learning round: E3 ---
+// Saving a deliverable to a session/workspace folder (R19/R02/R24). Contract:
+// "Files (C1)". Kept outside the `api` object so this block is self-contained.
+
+export interface ChatWriteTarget {
+  slug: string
+  label: string
+  path: string
+  kind: 'session' | 'workspace'
+}
+
+export interface ChatWriteTargets {
+  targets: ChatWriteTarget[]
+  reason_if_none: string | null
+}
+
+export interface SaveFileResult {
+  finding_id: string
+  status: 'uploaded' | 'failed'
+  filename: string
+  path: string | null
+  web_url: string | null
+  sha256: string | null
+  audit_filename: string | null
+  error: string | null
+}
+
+/** The text of a refusal's `detail`: a plain string, or `{code, message}` (the
+ *  409 `no_output_folder` shape). Falls back to the error's own message. */
+export function refusalMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const d = error.detail
+    if (d && typeof d === 'object' && typeof (d as { message?: unknown }).message === 'string') {
+      return (d as { message: string }).message
+    }
+  }
+  return error instanceof Error ? error.message : 'Request failed'
+}
+
+export const chatFilesApi = {
+  writeTargets: (conversationId: string) =>
+    request<ChatWriteTargets>(`/chat/${encodeURIComponent(conversationId)}/write-targets`),
+  saveFile: (
+    conversationId: string,
+    body: { filename: string; message: number; block: number | null; target_slug?: string },
+  ) =>
+    request<SaveFileResult>(`/chat/${encodeURIComponent(conversationId)}/files`, {
+      method: 'POST',
+      body,
+    }),
+}
+
+/** Plain label for `run.stop_reason` (R01/R04/R10); null when there is nothing to say. */
+export function stopReasonLabel(reason: string | null | undefined): string | null {
+  switch (reason) {
+    case 'max_tokens':
+      return 'cut off'
+    case 'out_of_steps':
+      return 'ran out of steps'
+    case 'degenerate_output':
+      return 'degenerate output'
+    default:
+      return null
+  }
 }
