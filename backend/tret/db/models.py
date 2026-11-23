@@ -434,6 +434,51 @@ class Document(Base):
     created_at: Mapped[datetime] = created_at_col()
 
 
+class DisclosureReport(Base):
+    """The Stage 1 normalised form of one captured report (`tret/services/normalise.py`):
+    one Markdown file with real tables, kept in the blob store under `markdown_key`
+    (never in Postgres), plus its quality `metrics` and a quarantine status.
+
+    `status`: pending | normalised | quarantined | failed. A quarantined report still
+    has whatever Markdown was produced; `quarantine_reason` says why it should not be
+    trusted (`empty`, `no_text_layer`, `garbled`). `source_kind`: pdf | esef_paged |
+    esef_reflow | html | other. One row per (document, normaliser_version), so a rerun
+    at the same version is a no-op and a new version sits beside the old one.
+    `is_primary` marks the target's main report (most text) when a run fetched several.
+    """
+
+    __tablename__ = "disclosure_reports"
+    __table_args__ = (
+        UniqueConstraint("document_id", "normaliser_version"),
+        Index("ix_disclosure_reports_batch_target_id", "batch_target_id"),
+        Index("ix_disclosure_reports_project_id", "project_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    batch_target_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collection_targets.id", ondelete="SET NULL")
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    source_kind: Mapped[str] = mapped_column(Text, nullable=False, default="pdf")
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    quarantine_reason: Mapped[str | None] = mapped_column(Text)
+    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    markdown_key: Mapped[str | None] = mapped_column(Text)
+    markdown_sha256: Mapped[str | None] = mapped_column(Text)
+    markdown_chars: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    normaliser_version: Mapped[str] = mapped_column(Text, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class DocumentChunk(Base):
     """One structure-aware retrieval unit sliced out of `Document.extracted_text`
     by `tret.services.retrieval` — the chunked, ranked replacement for scanning

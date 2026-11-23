@@ -675,6 +675,9 @@ def main() -> None:
     from tret import cli_batch  # argparse only; httpx is imported when a command runs
 
     cli_batch.register(sub)
+    from tret import cli_disclosure
+
+    cli_disclosure.register(sub)
 
     run_cmd = sub.add_parser(
         "run", help="Route a task, run it (optionally over local files), print a receipt"
@@ -768,6 +771,11 @@ def main() -> None:
         return
     if args.command == "batch":
         code = cli_batch.run(args)
+        if code:
+            sys.exit(code)
+        return
+    if args.command == "disclosure":
+        code = cli_disclosure.run(args)
         if code:
             sys.exit(code)
         return

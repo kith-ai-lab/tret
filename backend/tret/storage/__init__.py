@@ -29,6 +29,7 @@ __all__ = [
     "document_local_path",
     "get_store",
     "key_for_document",
+    "normalised_key",
     "package_key",
     "reset_store",
     "validate_key",
@@ -157,6 +158,12 @@ def document_key(sha256: str, filename: str) -> str:
 
 def package_key(finding_id: object, name: str) -> str:
     return validate_key(f"packages/{finding_id}/{name}")
+
+
+def normalised_key(document_id: object, version: str) -> str:
+    """Where a report's normalised Markdown lives (`tret/services/normalise.py`):
+    `normalised/<document id or sha256>/<normaliser version>.md`."""
+    return validate_key(f"normalised/{document_id}/{version}.md")
 
 
 def batch_record_key(batch_id: object, name: str) -> str:

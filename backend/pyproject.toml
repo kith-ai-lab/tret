@@ -47,6 +47,13 @@ server = [
 s3 = [
     "boto3>=1.34",
 ]
+# Stage 1 normaliser (TRET_DISCLOSURE_NORMALISER, docs/disclosure-collection.md):
+# docling converts table pages to Markdown tables. Optional and heavy (torch, ~1.4 GB
+# installed, ~0.5 GB of models on first use); every import is lazy and the normaliser
+# falls back to pdftotext text without it. Not in the server extra or the images.
+normalise = [
+    "docling>=2",
+]
 dev = [
     "tret[server]",
     "tret[s3]",

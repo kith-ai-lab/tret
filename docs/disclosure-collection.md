@@ -673,6 +673,79 @@ the briefing's sample shape (the warnings tell you when it drifts), a first batc
 checked before the rest are released. Finalize each
 collection when its targets have settled.
 
+## Stage 1 normaliser (experimental, off by default)
+
+`Document.extracted_text` is a poor input for evaluating a report: `pdftotext -layout`
+flattens tables, and the text stops at 2,000,000 characters, which is often before the
+sustainability statement of a long report. The normaliser turns each captured report into
+one Markdown file with real Markdown tables, plus quality metrics and a quarantine status.
+The Markdown lives in the blob store (`normalised/<document id>/<version>.md`, see
+[storage.md](storage.md)), never in Postgres; the `disclosure_reports` table holds the key,
+the SHA-256, the metrics and the status, one row per document and normaliser version.
+
+It is behind `TRET_DISCLOSURE_NORMALISER` (`off` by default). Nothing runs it automatically:
+an operator runs it per batch.
+
+```bash
+TRET_DISCLOSURE_NORMALISER=on tret disclosure normalise --batch <batch id> \
+    [--limit N] [--target <slug>] [--only-status review] [--force]
+tret disclosure normalise-file report.pdf --out ./out     # no database, no setting needed
+```
+
+`normalise` handles every PDF and ESEF package a target's run fetched
+(`Document.meta.fetched_by_run`) and marks the one with the most Markdown as `is_primary`;
+rerunning at the same version changes nothing unless `--force` (a forced rerun that fails
+keeps the previous good report and notes `metrics.last_error`). The documents of a target are
+those it fetched plus those in its run's `document_ids` (a reused capture); a document two
+targets share stays linked to the first, the others listed in `metrics.also_linked_targets`. `normalise-file` writes
+`<stem>.md` and `<stem>.metrics.json` for a manual check. Read-only routes serve the results:
+`GET /api/disclosure-reports?batch_id=`, `/{id}` and `/{id}/markdown` (404 while the setting
+is off).
+
+**PDF, two passes.** Pass 1 is `pdftotext -layout` over every page, uncapped. Pass 2 sends
+only the table pages to [docling](https://github.com/docling-project/docling) (OCR off, CPU,
+2 threads), `TRET_NORMALISER_CHUNK_PAGES` pages at a time, each chunk in its own child process
+(`python -I -m tret.services.normalise_worker`) with a wall-clock timeout and a resident-memory
+guard. Docling needs 9 to 12 GB for a whole document, which is why it never sees one; measured
+with three-page chunks (OCR off) its child peaked at 2.1 GB on a 192-page report and 2.4 GB
+on a 408-page one (five-page chunks: 3.0 and 3.3 GB, about 40% faster). A chunk that fails, times out or is
+killed leaves its pages as pass-1 text, noted in the metrics (`table_pages_fallback`,
+`chunks[].error`). A page docling returns empty (image markers only) or with under 60% of
+the page's numbers also keeps its pdftotext text (`table_pages_rejected`). The page count
+comes from `pdfinfo`, and the pypdf fallback runs in the same guarded child, never in the
+server process. A page is a table page when it has at least 25 numeric tokens and at least
+four lines with two or more purely numeric cells separated by runs of two or more spaces (two
+lines when the page names emissions); at most `TRET_NORMALISER_MAX_TABLE_PAGES` pages are
+converted, emissions pages first, and `capped` records a cut. Output pages are `## Page N`
+with physical page numbers, the same as `extracted_text`, so existing page maps line up;
+docling's own headings are pushed down to level 4 and below so the page marker stays the only
+level-2 heading.
+
+**ESEF filings** (provenance `esef_filing`) are read with the filing parser in a child
+process, uncapped; consecutive table rows become a Markdown table and the unit markers are
+`## Page N` or `## Section N: heading` as in the filing extract. Rendering a paged ESEF
+filing to PDF is not done.
+
+**Quarantine.** A report is `quarantined` (its Markdown is still stored) when it has no pages
+or no text (`empty`), a median under 200 characters per page (`no_text_layer`: scanned, needs
+OCR, which this stage does not do), or more than 1% U+FFFD characters (`garbled`). The
+median rule is not applied to an ESEF filing read as sections. `metrics` holds page counts,
+the empty-page count, median characters per page, the replacement-character rate, the table
+pages selected, converted and fallen back, `tables_found`, `capped`, converter versions,
+seconds in total and in docling, and the peak resident size of the children.
+
+**Settings** (all in `.env.example`): `TRET_DISCLOSURE_NORMALISER`, `TRET_NORMALISER_DOCLING`
+(`auto` uses docling when importable, otherwise tables are left as layout text and marked
+unstructured; `off`), `TRET_NORMALISER_MAX_RSS_MB` (3200, also the limit for the pypdf and ESEF children),
+`TRET_NORMALISER_CHUNK_PAGES` (3),
+`TRET_NORMALISER_CHUNK_TIMEOUT_SECONDS` (300), `TRET_NORMALISER_MAX_TABLE_PAGES` (150).
+
+**Installing docling.** It is the optional `normalise` extra (`pip install "tret[normalise]"`):
+torch and models make it about 1.4 GB plus roughly 0.5 GB of models downloaded on first use.
+It is not in the server extra and not in the shipped images. Plan a machine of at least 4 GB
+for the conversion; a 2 GB machine is not safe. A separate 4 GB worker machine for Tret
+Cloud is a later change to tret-cloud, not part of this one.
+
 ## Acceptance dimensions, and where each one lives
 
 | Dimension | What a reviewer asks | Where tret keeps it |
