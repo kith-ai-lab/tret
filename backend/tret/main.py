@@ -22,6 +22,7 @@ from tret.api import (
     chat_preview as chat_preview_api,
     connections as connections_api,
     database_connections as database_connections_api,
+    disclosure_reports as disclosure_reports_api,
     docs,
     documents,
     edition as edition_api,
@@ -465,6 +466,7 @@ def create_app() -> FastAPI:
     app.include_router(routing.router)
     app.include_router(harnesses.router)
     app.include_router(documents.router)
+    app.include_router(disclosure_reports_api.router)
     # Reference documentation, read straight out of `docs/` so the methodology the
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)

@@ -267,6 +267,14 @@ services:
       TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS: ${TRET_COLLECTIONS_RUN_TIMEOUT_SECONDS:-1200}
       # Wall-clock limit for one tool call (0 disables); delegating tools and capture_filing are exempt.
       TRET_TOOL_CALL_TIMEOUT_SECONDS: ${TRET_TOOL_CALL_TIMEOUT_SECONDS:-600}
+      # Stage 1 normaliser (off by default; docs/disclosure-collection.md). docling is an
+      # optional extra the backend image does not install, so `auto` keeps pdftotext text.
+      TRET_DISCLOSURE_NORMALISER: ${TRET_DISCLOSURE_NORMALISER:-off}
+      TRET_NORMALISER_DOCLING: ${TRET_NORMALISER_DOCLING:-auto}
+      TRET_NORMALISER_MAX_RSS_MB: ${TRET_NORMALISER_MAX_RSS_MB:-3200}
+      TRET_NORMALISER_CHUNK_PAGES: ${TRET_NORMALISER_CHUNK_PAGES:-3}
+      TRET_NORMALISER_CHUNK_TIMEOUT_SECONDS: ${TRET_NORMALISER_CHUNK_TIMEOUT_SECONDS:-300}
+      TRET_NORMALISER_MAX_TABLE_PAGES: ${TRET_NORMALISER_MAX_TABLE_PAGES:-150}
       TRET_DB_POOL_SIZE: ${TRET_DB_POOL_SIZE:-10}
       TRET_DB_MAX_OVERFLOW: ${TRET_DB_MAX_OVERFLOW:-10}
       # Single sign-on (generic OIDC, tret/api/oidc.py). password is every

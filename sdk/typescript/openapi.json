@@ -7997,6 +7997,136 @@
         ]
       }
     },
+    "/api/disclosure-reports": {
+      "get": {
+        "operationId": "list_disclosure_reports_api_disclosure_reports_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "batch_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Disclosure Reports",
+        "tags": [
+          "disclosure-reports"
+        ]
+      }
+    },
+    "/api/disclosure-reports/{report_id}": {
+      "get": {
+        "operationId": "get_disclosure_report_api_disclosure_reports__report_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Report Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Disclosure Report",
+        "tags": [
+          "disclosure-reports"
+        ]
+      }
+    },
+    "/api/disclosure-reports/{report_id}/markdown": {
+      "get": {
+        "operationId": "get_disclosure_report_markdown_api_disclosure_reports__report_id__markdown_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Report Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Disclosure Report Markdown",
+        "tags": [
+          "disclosure-reports"
+        ]
+      }
+    },
     "/api/docs/{slug}": {
       "get": {
         "description": "One registered document, as markdown, read from disk on every request.\n\nRead fresh rather than cached at import: editing the file in a bind-mounted\ndevelopment checkout should be visible on reload, and a stale in-memory copy\nof a methodology document is precisely the failure this endpoint exists to\nprevent.",

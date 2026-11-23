@@ -10,6 +10,18 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Stage 1 normaliser (experimental, off by default).** `TRET_DISCLOSURE_NORMALISER=on` enables
+  `tret disclosure normalise --batch <id>`, which turns each PDF and ESEF package a collection run
+  fetched into one Markdown file with real tables (`pdftotext -layout` over every page, uncapped,
+  then docling on the table pages only, in guarded child processes), with quality metrics and a
+  quarantine status (`empty`, `no_text_layer`, `garbled`). Markdown is stored in the blob store;
+  `disclosure_reports` (new migration) records it, one row per document and normaliser version.
+  `tret disclosure normalise-file` runs the converter on a local file with no database, and
+  read-only `GET /api/disclosure-reports` routes serve the results. docling is the optional
+  `normalise` extra and is not installed in the images. New settings `TRET_NORMALISER_DOCLING`,
+  `TRET_NORMALISER_MAX_RSS_MB`, `TRET_NORMALISER_CHUNK_PAGES`,
+  `TRET_NORMALISER_CHUNK_TIMEOUT_SECONDS` and `TRET_NORMALISER_MAX_TABLE_PAGES`. See
+  [docs/disclosure-collection.md](docs/disclosure-collection.md).
 - **Tret Learning testing round (R01–R28, 2026-11-20).** Fixes and additions from Ben's
   test of the cohort edition. Request IDs are stable.
   - *Long replies (R01).* The seeded chat harness may write 16,384 output tokens (was 4,096;

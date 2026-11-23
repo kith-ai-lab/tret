@@ -320,6 +320,30 @@ class Settings(BaseSettings):
     # cut-off rows. A batch an operator paused stays paused either way.
     batches_auto_resume: bool = True
 
+    # ── Stage 1 normaliser (tret/services/normalise.py) ───────────────────────
+    # Turns a captured report into one clean Markdown file with real Markdown
+    # tables, stored in the blob store. `off` (default) disables the service, the
+    # CLI and the /api/disclosure-reports routes (404).
+    disclosure_normaliser: Literal["off", "on"] = "off"
+    # Table pages are converted with docling (the optional `normalise` extra) in
+    # short-lived child processes. `auto` uses it when importable and otherwise
+    # keeps the pdftotext text with the tables marked unstructured; `off` never
+    # starts it.
+    normaliser_docling: Literal["auto", "off"] = "auto"
+    # A child (docling, pypdf, the ESEF reader) above this resident size (MB) is killed and
+    # its pages fall back to the pdftotext text. Measured with 3-page chunks, OCR off, on a
+    # 192- and a 408-page report: peak 2.1 and 2.4 GB (5-page chunks: 3.0 and 3.3 GB). 3200
+    # leaves room for the server on a 4 GB machine without swap.
+    normaliser_max_rss_mb: int = 3200
+    # Table pages per docling child process (3: peak child RSS about 2.4 GB; 5 is about 40%
+    # faster but peaks near 3.3 GB).
+    normaliser_chunk_pages: int = 3
+    # Wall-clock limit (seconds) for one docling chunk.
+    normaliser_chunk_timeout_seconds: int = 300
+    # At most this many table pages of one report go to docling; the rest keep the
+    # pdftotext text and the cut is recorded in the metrics.
+    normaliser_max_table_pages: int = 150
+
     # ── batch evaluator (tret/batches/evaluation.py) ──────────────────────────
     # The judge model a batch's evaluation pass uses unless the request names one,
     # as an ordered, comma-separated preference list: the first model in the catalog
