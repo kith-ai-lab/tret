@@ -87,14 +87,24 @@ class FakeEngine:
                 while run_id not in self.cancelled:
                     await asyncio.sleep(0.02)
                 mode = "map"
-            failing = mode in ("fail", "fail_with_map", "fail_leaky")
+            failing = mode in (
+                "fail", "fail_with_map", "fail_leaky", "fail_credit", "fail_credit_free",
+                "fail_credit_with_map", "fail_workspace",
+            )
             run.status = "failed" if failing else "completed"
             run.error = LEAKY_ERROR if mode == "fail_leaky" else ("provider exploded" if failing else None)
+            if mode in ("fail_credit", "fail_credit_free", "fail_credit_with_map"):
+                run.error = "[openrouter] Insufficient credits. Add more using https://openrouter.ai/settings/credits"
+            if mode == "fail_workspace":
+                run.error = "insufficient_credits: This workspace's credit balance is $0.00"
             run.model_used = "test/model"
             run.iterations = 7
             run.cost_usd = Decimal("0.0100")
             run.delegated_cost_usd = Decimal("0.0025")
-            if mode in ("map", "two_maps", "fail_with_map"):
+            if mode in ("fail_credit_free", "fail_workspace"):
+                run.cost_usd = Decimal("0")
+                run.delegated_cost_usd = Decimal("0")
+            if mode in ("map", "two_maps", "fail_with_map", "fail_credit_with_map"):
                 for stem in [target.slug] + ([f"{target.slug}-assurance"] if mode == "two_maps" else []):
                     db.add(_map_finding(run, stem))
                 target.outcome = {"status": "captured", "summary": "found it"}
@@ -478,6 +488,189 @@ def test_pause_stops_new_launches_and_resume_continues(client, world):
 
 
 # ── run outcomes ──────────────────────────────────────────────────────────────
+def test_provider_credit_classifier():
+    from tret.providers.base import ProviderError, provider_out_of_credit
+
+    assert provider_out_of_credit(
+        "[openrouter] Insufficient credits. Add more using https://openrouter.ai/settings/credits"
+    ) == "openrouter"
+    assert provider_out_of_credit(
+        "[openrouter] This request requires more credits, or fewer max_tokens. You requested up to "
+        "4096 tokens, but can only afford 2264."
+    ) == "openrouter"
+    assert provider_out_of_credit(ProviderError("openrouter", "payment required", 402)) == "openrouter"
+    assert provider_out_of_credit("payment required", status=402) == "provider"
+    # The cloud pre-run veto for a workspace at zero Tret balance.
+    assert provider_out_of_credit(
+        "insufficient_credits: This workspace's credit balance is $0.00"
+    ) == "workspace"
+    for text, status in [
+        ("[openrouter] Rate limit exceeded", 429),
+        ("[openrouter] Internal server error", 500),
+        ("[openrouter] Provider returned error", None),
+        ("provider exploded", None),
+        ("insufficient storage on the capture store", None),
+        ("insufficient_data: the assessment could not be completed", None),
+        ("workspace_suspended: insufficient_credits_check skipped", None),
+        ("The report discusses insufficient credit ratings", None),
+        ("", None),
+        (None, None),
+    ]:
+        assert provider_out_of_credit(text, status) is None
+    assert provider_out_of_credit(ProviderError("openrouter", "Provider returned error", 502)) is None
+
+
+def _add_running_batch(client, world, workspace_id, run_slug):
+    """A `running` collection (no targets launched) in `workspace_id`."""
+    cid = uuid.uuid4()
+
+    async def go(db):
+        db.add(
+            Collection(
+                id=cid, workspace_id=workspace_id, project_id=world.project.id, name=run_slug,
+                run_slug=run_slug, status="running", settings={},
+            )
+        )
+        await db.commit()
+
+    run_db(client, world, go)
+    return str(cid)
+
+
+def _make_running_twin(client, world):
+    """A second collection of the SAME workspace, already `running`."""
+    other = create(client, name="Batch 2", run_slug="2026-11-05-batch2").json()["id"]
+
+    async def go(db):
+        c = await db.get(Collection, uuid.UUID(other))
+        c.status = "running"
+        await db.commit()
+
+    run_db(client, world, go)
+    return other
+
+
+def _status_of(client, world, cid):
+    async def go(db):
+        c = await db.get(Collection, uuid.UUID(cid))
+        await db.refresh(c)
+        return c.status, (c.settings or {}).get("last_error")
+
+    return run_db(client, world, go)
+
+
+def test_a_provider_out_of_credit_pauses_the_workspaces_running_collections_and_resume_continues(
+    client, world, caplog
+):
+    import logging
+
+    world.engine.behaviour["allianz"] = "fail_credit"
+    cid = create(client, concurrency=1).json()["id"]
+    twin = _make_running_twin(client, world)
+    foreign = _add_running_batch(client, world, world.other_ws.id, "foreign-batch")
+    with caplog.at_level(logging.WARNING, logger="tret.collections"):
+        client.post(f"/api/collections/{cid}/start")
+        settle(client)
+    d = detail(client, cid)
+    t = by_slug(d)["allianz"]
+    # Back to pending, the attempt not counted, the spend kept; no other row launched.
+    assert d["status"] == "paused"
+    assert "out of credit (openrouter)" in d["last_error"]
+    assert t["status"] == "pending" and t["attempts"] == 0 and t["error"] is None
+    assert t["cost_usd"] == pytest.approx(0.0125)
+    assert all(x["status"] == "pending" for x in d["targets"])
+    assert len(world.engine.executed) == 1
+    # The history entry says why the attempt ended.
+    async def hist(db):
+        return (await db.get(CollectionTarget, uuid.UUID(t["id"]))).history
+
+    h = run_db(client, world, hist)
+    assert len(h) == 1 and h[0]["status"] == "failed" and "Insufficient credits" in h[0]["error"]
+    # Keys are per workspace: a sibling in this workspace pauses, another workspace's does not.
+    st, err = _status_of(client, world, twin)
+    assert st == "paused" and "out of credit (openrouter)" in err
+    assert _status_of(client, world, foreign) == ("running", None)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "credit exhausted" in r.getMessage()]
+    assert len(warnings) == 1 and cid in warnings[0].getMessage() and "openrouter" in warnings[0].getMessage()
+
+    # Resume: the pending rows run normally and the reason is cleared.
+    world.engine.behaviour.clear()
+    r = client.post(f"/api/collections/{cid}/resume")
+    assert r.status_code == 200, r.text
+    settle(client)
+    d = detail(client, cid)
+    assert d["status"] == "review" and not d["last_error"]
+    assert all(x["status"] == "review" for x in d["targets"])
+    assert by_slug(d)["allianz"]["attempts"] == 1
+    assert len(world.engine.executed) == 6
+
+
+def test_a_zero_cost_credit_failure_is_requeued_cleanly(client, world):
+    world.engine.behaviour["allianz"] = "fail_credit_free"
+    cid = create(client, concurrency=1).json()["id"]
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+    d = detail(client, cid)
+    t = by_slug(d)["allianz"]
+    assert d["status"] == "paused"
+    assert t["status"] == "pending" and t["attempts"] == 0 and t["run_id"] is None
+    assert t["cost_usd"] == 0
+
+
+def test_several_targets_failing_at_once_all_go_back_and_the_batch_pauses_once(client, world):
+    for slug in ("allianz", "shell", "apple"):
+        world.engine.behaviour[slug] = "fail_credit"
+    cid = create(client, concurrency=3).json()["id"]
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+    d = detail(client, cid)
+    assert d["status"] == "paused" and "out of credit" in d["last_error"]
+    assert all(x["status"] == "pending" and x["attempts"] == 0 for x in d["targets"])
+    assert len(world.engine.executed) == 3
+
+
+def test_resuming_while_the_key_is_still_empty_pauses_again_within_one_round(client, world):
+    for slug in ("allianz", "shell", "apple", "siemens", "hsbc-holdings"):
+        world.engine.behaviour[slug] = "fail_credit"
+    cid = create(client, concurrency=2).json()["id"]
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+    assert detail(client, cid)["status"] == "paused"
+    first = len(world.engine.executed)
+    assert first <= 2
+    assert client.post(f"/api/collections/{cid}/resume").status_code == 200
+    settle(client)
+    d = detail(client, cid)
+    assert d["status"] == "paused"
+    assert len(world.engine.executed) - first <= 2  # one round of `concurrency`, no more
+    assert all(x["status"] == "pending" for x in d["targets"])
+
+
+def test_a_credit_failure_after_a_map_was_proposed_keeps_the_work_and_still_pauses(client, world):
+    world.engine.behaviour["allianz"] = "fail_credit_with_map"
+    cid = create(client, concurrency=1).json()["id"]
+    twin = _make_running_twin(client, world)
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+    d = detail(client, cid)
+    t = by_slug(d)["allianz"]
+    assert t["status"] == "review" and t["attempts"] == 1
+    assert "Insufficient credits" in (t["error"] or "")
+    assert t["packages"] and d["status"] == "paused"
+    assert _status_of(client, world, twin)[0] == "paused"
+    assert len(world.engine.executed) == 1
+
+
+def test_a_workspace_out_of_credit_pauses_its_batches_the_same_way(client, world):
+    world.engine.behaviour["allianz"] = "fail_workspace"
+    cid = create(client, concurrency=1).json()["id"]
+    client.post(f"/api/collections/{cid}/start")
+    settle(client)
+    d = detail(client, cid)
+    assert d["status"] == "paused" and d["last_error"] == "This workspace is out of credit; top it up, then resume."
+    assert by_slug(d)["allianz"]["status"] == "pending"
+
+
 def test_failed_and_gap_runs_and_retry(client, world):
     world.engine.behaviour.update({"allianz": "fail", "shell": "gap", "apple": "gap", "siemens": "gap",
                                    "hsbc-holdings": "gap"})

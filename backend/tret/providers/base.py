@@ -263,6 +263,42 @@ class ProviderError(Exception):
         super().__init__(f"[{provider}] {message}")
 
 
+_OUT_OF_CREDIT_RE = re.compile(
+    r"insufficient credits\b|requires more credits|can only afford|out of credits\b",
+    re.IGNORECASE,
+)
+# The pre-run veto an extension raises when the workspace's Tret balance is
+# empty (`engine/harness.py` fails the run with "<reason>: <detail>").
+_WORKSPACE_CREDIT_RE = re.compile(r"(?:^|\s)insufficient_credits:", re.IGNORECASE)
+_PROVIDER_TAG_RE = re.compile(r"\[([a-z0-9_.-]+)\]", re.IGNORECASE)
+
+
+def provider_out_of_credit(error: "str | BaseException | None", status: int | None = None) -> str | None:
+    """The provider's name when `error` says the provider account is out of
+    credit, "workspace" when it is the workspace's Tret balance (the pre-run
+    `insufficient_credits:` veto), else None. Matches HTTP 402 (`status`, or taken
+    from a `ProviderError`) and the wording OpenRouter uses ("Insufficient
+    credits", "This request requires more credits ... can only afford N").
+    A 429, a 5xx and "Provider returned error" are not credit problems. The name
+    comes from the `[provider]` prefix `ProviderError` puts on its message."""
+    if error is None:
+        return None
+    if isinstance(error, ProviderError):
+        status = error.status if status is None else status
+        name = error.provider
+    else:
+        name = None
+    text = str(error)
+    if name is None and _WORKSPACE_CREDIT_RE.search(text):
+        return "workspace"
+    if status != 402 and not _OUT_OF_CREDIT_RE.search(text):
+        return None
+    if name is None:
+        m = _PROVIDER_TAG_RE.search(text)
+        name = m.group(1).lower() if m else "provider"
+    return name
+
+
 # ── transient upstream retry (2026-09-11) ──────────────────────────────────────
 # Over ~330 cloud runs, three Google AI Studio 503s relayed verbatim through
 # OpenRouter, and one OpenRouter HTML error page (a Cloudflare template, stored
