@@ -67,6 +67,7 @@ from tret.engine.collection_tools import COLLECTION_ID_KEY, COLLECTION_TARGET_KE
 from tret.engine.delegation import COST_CAP_KEY
 from tret.net import policy as egress_policy
 from tret.packs.links import packs_for_harness, resolve_pack_for_task
+from tret.providers.base import provider_out_of_credit
 from tret.services import connections as connections_service
 from tret.services import lifecycle
 from tret.storage import batch_record_key, get_store
@@ -838,6 +839,15 @@ async def _run_target(collection_id: uuid.UUID, target_id: uuid.UUID, run_id: uu
             t = await db.get(BatchTarget, target_id)
             if c is None or t is None or t.run_id != run_id:
                 return
+            run = await db.get(Run, run_id)
+            provider = (
+                provider_out_of_credit(run.error) if run is not None and run.status == "failed" else None
+            )
+            if provider is not None:
+                maps = (await load_review_findings(db, profile_for(c), [t], c)).get(run_id, [])
+                await _pause_for_provider_credit(db, c, t, run, provider, requeue=not maps)
+                if not maps:
+                    return
             status = await _settle_target(db, c, t)
             if timed_out and status in ("failed", "running"):
                 # A run that finished within the cancel grace settled normally
@@ -868,6 +878,76 @@ async def _run_target(collection_id: uuid.UUID, target_id: uuid.UUID, run_id: uu
                 await _advance(collection_id)
             except Exception:  # noqa: BLE001
                 log.exception("collection %s could not advance", collection_id)
+
+
+def provider_credit_message(provider: str) -> str:
+    if provider == "workspace":
+        return "This workspace is out of credit; top it up, then resume."
+    return f"The model provider is out of credit ({provider}); top it up, then resume."
+
+
+async def _pause_for_provider_credit(
+    db: AsyncSession, c: Batch, t: BatchTarget, run: Run | None, provider: str, *, requeue: bool
+) -> None:
+    """A run died because the credit behind it ran out: the workspace's own
+    provider key (keys are per workspace) or its Tret balance. That is not a
+    finding about the target. Pause every `running` collection of THIS workspace
+    (other workspaces have their own keys and balances) and, when `requeue`,
+    put the target back to `pending` without counting the attempt, all in one
+    commit so a sibling `_advance` cannot relaunch it in between. What the run
+    spent stays in `history`, so cost is kept. A target whose run already
+    proposed maps is not requeued (`requeue=False`): it settles normally and
+    keeps the delivered work. Resume launches the pending rows like any other
+    pause."""
+    async with _target_lock(t.id):
+        await db.refresh(t)
+        if t.run_id is None or t.run_id != (run.id if run else None):
+            return
+        paused = await _pause_running_for_provider_credit(db, c.workspace_id, provider)
+        if requeue:
+            if run_cost(run) > 0:
+                t.status = "failed"
+                t.error = summarise_run_error(run.error)
+                _archive_attempt(t, run)
+            else:
+                t.run_id = None
+                t.outcome = None
+                t.error = None
+                t.finding_ids = []
+                t.started_at = None
+                t.finished_at = None
+            t.status = "pending"
+            t.attempts = max(0, (t.attempts or 1) - 1)
+        await db.commit()
+    if paused:
+        log.warning(
+            "credit exhausted (%s): paused %d running collection(s) of workspace %s, triggered by collection %s",
+            provider,
+            len(paused),
+            c.workspace_id,
+            c.id,
+        )
+
+
+async def _pause_running_for_provider_credit(
+    db: AsyncSession, workspace_id: uuid.UUID, provider: str
+) -> list[uuid.UUID]:
+    """Mark every `running` collection of `workspace_id` paused with the credit
+    reason (the caller commits); returns their ids. Rows are locked in id order
+    and reloaded, so the settings are built from current values."""
+    rows = (
+        await db.execute(
+            select(Batch)
+            .where(Batch.status == "running", Batch.workspace_id == workspace_id)
+            .order_by(Batch.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    for other in rows:
+        other.status = "paused"
+        other.settings = {**(other.settings or {}), "last_error": provider_credit_message(provider)}
+    return [r.id for r in rows]
 
 
 async def _settle_target(
