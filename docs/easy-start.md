@@ -74,13 +74,15 @@ out but nothing looks wrong, just wait another minute or two and open
 Your browser opens at <http://localhost:5180>. Sign in with:
 
 - **Email:** `admin@example.com`
-- **Password:** `tret-admin`
+- **Password:** the random one the start script printed in its window. It is
+  also saved as the `TRET_ADMIN_PASSWORD` line in the `.env` file in the tret
+  folder (open it with any text editor).
 
-This is fine for playing on your own computer. If other people can reach
-this machine, change the email and password in the `.env` file that the
-start script created in the tret folder (open it with any text editor, edit
-the `TRET_ADMIN_EMAIL` and `TRET_ADMIN_PASSWORD` lines, then stop and
-start tret again).
+The first start generates a fresh secret key and admin password just for your
+computer, and tret only answers on your own computer (`localhost`), not on
+your network. The admin account is created once, on the very first start, so
+editing `.env` later does not change an existing password — change it inside
+the app instead.
 
 ## Step 5 — Add an AI provider key
 

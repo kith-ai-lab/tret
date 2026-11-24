@@ -48,6 +48,13 @@ PROVENANCE_COLUMNS = ["source", "edition", "table", "retrieved_on", "url"]
 REQUIRED_PER_ROW = ["category", "fuel_or_subregion", "unit"]
 NUMERIC_COLUMNS = ["co2_kg_per_unit", "ch4_g_per_unit", "n2o_g_per_unit", "co2e_kg_per_unit"]
 MAX_ROWS = 50_000
+# An .xlsx row is read at most this wide. openpyxl pads each row to its last
+# cell's column (or the sheet's declared width), so one cell in column XFD
+# would otherwise make every row 16,384 slots: a 16 KB upload holding gigabytes.
+# A header wider than this is refused rather than cut.
+MAX_COLUMNS = 500
+# Non-empty cells kept across a whole sheet (50,000 rows of 40 columns).
+MAX_CELLS = 2_000_000
 MAX_BYTES = 50 * 1024 * 1024
 
 
@@ -124,8 +131,23 @@ def _decode(data: bytes) -> str:
 
 
 def _xlsx_rows(filename: str, data: bytes, sheet: str | None) -> list[list]:
+    import zipfile
+
     import openpyxl
 
+    from tret.services.documents import MAX_ZIP_UNCOMPRESSED_BYTES, _refuse_zip_bombs
+
+    # Bounded before openpyxl opens it: the declared total, and every member
+    # inflated in bounded chunks against its own declared size (openpyxl reads
+    # the workbook and shared strings with an unbounded `ZipFile.read`). The
+    # sheet itself streams (`read_only`), so the xlsx extractor's ceiling
+    # applies; the rows kept are bounded below.
+    try:
+        _refuse_zip_bombs(filename, data, MAX_ZIP_UNCOMPRESSED_BYTES)
+    except ValueError as e:
+        raise DatasetImportError(str(e)) from e
+    except zipfile.BadZipFile as e:
+        raise DatasetImportError(f"Could not open {filename} as a workbook: {e}") from e
     try:
         wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except Exception as e:  # noqa: BLE001 - openpyxl raises many types for a bad file
@@ -137,7 +159,33 @@ def _xlsx_rows(filename: str, data: bytes, sheet: str | None) -> list[list]:
             ws = wb[sheet]
         else:
             ws = wb[wb.sheetnames[0]]
-        return [list(r) for r in ws.iter_rows(values_only=True)]
+        # The sheet's declared `<dimension>` is ignored (it pads every row,
+        # gap rows included, to its width) and rows are read at most
+        # MAX_COLUMNS + 1 wide: a value in that extra column means the sheet
+        # is wider than the limit. Empty rows are dropped here rather than
+        # after the fact (parse_table drops them anyway), trailing empty cells
+        # are trimmed, and the import is refused as soon as it passes the row
+        # or cell limit, so nothing near those sizes is ever held whole.
+        ws.reset_dimensions()
+        rows: list[list] = []
+        cells = 0
+        for r in ws.iter_rows(values_only=True, max_col=MAX_COLUMNS + 1):
+            if r.count(None) == len(r) or not any(_cell(c) for c in r):
+                continue
+            if len(r) > MAX_COLUMNS and _cell(r[MAX_COLUMNS]):
+                raise DatasetImportError(
+                    f"{filename} has data past column {MAX_COLUMNS}; the limit is {MAX_COLUMNS} columns."
+                )
+            row = list(r[:MAX_COLUMNS])
+            while row and row[-1] is None:
+                row.pop()
+            rows.append(row)
+            cells += len(row) - row.count(None)
+            if len(rows) > MAX_ROWS + 1:  # + the header row
+                raise DatasetImportError(f"{filename} has more than {MAX_ROWS} rows; the limit is {MAX_ROWS}.")
+            if cells > MAX_CELLS:
+                raise DatasetImportError(f"{filename} has more than {MAX_CELLS} cells; the limit is {MAX_CELLS}.")
+        return rows
     finally:
         wb.close()
 
@@ -203,7 +251,8 @@ async def import_table(
     sheet: str | None = None,
     replace: bool = False,
 ) -> tuple[Dataset, bool]:
-    columns, rows = parse_table(filename, data, sheet=sheet)
+    # Off the event loop: the zip guard and the sheet read are CPU-bound.
+    columns, rows = await asyncio.to_thread(parse_table, filename, data, sheet=sheet)
     return await store_dataset(
         db, project_id=project_id, name=name, columns=columns, rows=rows, sha256=sha256_hex(data),
         source_filename=filename, document_id=document_id, replace=replace,
@@ -307,7 +356,8 @@ async def import_factor_table(
     document_id: uuid.UUID | None = None,
     replace: bool = False,
 ) -> tuple[Dataset, bool]:
-    columns, rows = parse_table(filename, data, sheet=sheet)
+    # Off the event loop: the zip guard and the sheet read are CPU-bound.
+    columns, rows = await asyncio.to_thread(parse_table, filename, data, sheet=sheet)
     factors = normalise_factor_rows(
         columns, rows, source=source, edition=edition, table=table, retrieved_on=retrieved_on,
         url=url, gwp=gwp, gwp_basis=gwp_basis,

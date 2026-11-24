@@ -240,6 +240,36 @@ def test_review_off_completes_with_the_answer_as_outcome(client, world, engine):
     )
 
 
+
+def test_the_batch_list_and_detail_never_read_run_transcripts(client, world, engine):
+    """Both are polled every 5 s while a batch is live, and `Run.messages` is
+    each run's whole transcript: neither endpoint may select it."""
+    from sqlalchemy import event
+
+    bid = post(client, world).json()["id"]
+    run_batch(client, bid)
+    statements: list[str] = []
+
+    def capture(conn, cursor, statement, params, context, executemany):
+        statements.append(statement)
+
+    sync_engine = world.factory.kw["bind"].sync_engine
+    event.listen(sync_engine, "before_cursor_execute", capture)
+    try:
+        listed = client.get("/api/batches").json()["batches"]
+        d = detail(client, bid)
+        scorecard = client.get(f"/api/batches/{bid}/scorecard")
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", capture)
+
+    assert [b["id"] for b in listed] == [bid]
+    assert d["targets"][0]["model_used"] == "test/model" and d["targets"][0]["iterations"] == 3
+    assert listed[0]["cost_usd"] == d["cost_usd"]
+    assert scorecard.status_code == 200, scorecard.text
+    run_reads = [st for st in statements if "FROM runs" in st]
+    assert run_reads, "expected the endpoints to read run summaries"
+    assert not [st for st in run_reads if "runs.messages" in st]
+
 def test_a_failed_run_is_a_failed_target_and_retry_works(client, world, engine):
     engine.behaviour["row-2"] = "fail"
     bid = post(client, world).json()["id"]

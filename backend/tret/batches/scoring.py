@@ -319,7 +319,7 @@ async def collect(db: AsyncSession, batch: Batch) -> BatchData:
     """Everything the scorecard and the comparison read, loaded once."""
     profile = profile_for(batch)
     targets = await core.load_targets(db, [batch.id])
-    runs = await core.load_runs(db, targets)
+    runs = await core.load_run_summaries(db, targets)
     findings = await core.load_review_findings(db, profile, targets, batch)
     approved_ids = [f.id for fs in findings.values() for f in fs if f.status == "approved"]
     packaging_ids = frozenset(

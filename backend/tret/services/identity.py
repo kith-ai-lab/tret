@@ -354,10 +354,11 @@ async def match_or_provision(
         return by_email, workspace_id
 
     # Neither matched: JIT-provision. Auth0 is configured to allow unverified
-    # login (founder decision), so this happens even for an unverified email
-    # — there is nothing to link or collide with yet, unlike the two branches
-    # above. It just gets no invite redemption below (email_verified gates
-    # that), same as it gets no auto-link.
+    # login (founder decision), so with no domain allowlist this happens even
+    # for an unverified email — there is nothing to link or collide with yet,
+    # unlike the two branches above. It just gets no invite redemption below
+    # (email_verified gates that), same as it gets no auto-link. Under an
+    # allowlist an unverified email is refused (gate 1 below).
     #
     # Two independent gates before a brand-new account is created — neither
     # applies to the sub/email-match branches above, so an existing linked
@@ -365,7 +366,8 @@ async def match_or_provision(
     #
     # 1. A configured domain allowlist (`oidc_allowed_email_domains`) is
     #    absolute: any IdP-authenticated stranger at an unlisted domain is
-    #    refused, in every deployment mode.
+    #    refused, in every deployment mode, and so is an unverified email at
+    #    a listed one.
     # 2. With no allowlist configured, self-host (`multi_tenant=False`) falls
     #    back to requiring an invitation — the sole-workspace deployment used
     #    to JIT-provision *any* IdP-authenticated stranger into its one
@@ -378,6 +380,17 @@ async def match_or_provision(
         if domain not in settings.oidc_allowed_email_domains:
             raise HTTPException(
                 403, "Your email domain is not permitted to sign in to this deployment."
+            )
+        # The allowlist admits people *at* a domain, and only a verified claim
+        # shows that. An unverified email is just a string the IdP user typed:
+        # an IdP that allows unverified sign-up (Auth0's default database
+        # connection does) would otherwise let a stranger register
+        # `anyone@corp.com` and be JIT-provisioned into the deployment.
+        if not email_verified:
+            raise HTTPException(
+                403,
+                "Verify your email address with your identity provider before signing "
+                "in to this deployment.",
             )
     elif not settings.multi_tenant and not (
         email_verified and await _has_pending_invite(db, email)

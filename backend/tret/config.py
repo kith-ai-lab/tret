@@ -448,7 +448,9 @@ class Settings(BaseSettings):
     # self-host one) that wants to say "anyone at these domains", instead.
     # Checked before every JIT-provision, never before matching an sub/email
     # already on file — an existing linked account must keep signing in even
-    # if this list changes later.
+    # if this list changes later. Only a verified email counts: an IdP that
+    # omits `email_verified` (Microsoft Entra ID tokens do) gets no
+    # JIT-provisioning under an allowlist.
     oidc_allowed_email_domains: list[str] | None = None
 
     # ── OIDC bearer tokens (api/oidc_bearer.py) ───────────────────────────────

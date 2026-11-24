@@ -20,6 +20,90 @@ open_in_browser() {
   fi
 }
 
+# ── First-run settings helpers ──────────────────────────────────────────────
+# .env.example ships a placeholder secret key and admin password. A fresh .env
+# must never keep them: tret is reachable by anyone who can reach this machine.
+rand_token() {  # rand_token <bytes> — URL-safe, no padding, no newline
+  local out=""
+  if command -v openssl >/dev/null 2>&1; then
+    out=$(openssl rand -base64 "$1" 2>/dev/null | tr '+/' '-_' | tr -d '=\n') || out=""
+  fi
+  if [ -z "$out" ]; then
+    out=$(head -c "$1" /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n') || out=""
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+env_value() {  # env_value <NAME> — last assignment wins; one pair of quotes stripped
+  sed -n "s/^$1=//p" .env | tail -n 1 | tr -d '\r' \
+    | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+}
+
+env_default() {  # env_default <NAME> <fallback> — compose's :- also covers empty
+  local v
+  v=$(env_value "$1")
+  printf '%s' "${v:-$2}"
+}
+
+# Is there a tret database volume from an earlier install? Compose names it
+# <project>_pgdata; the project defaults to this folder's name, lowercased,
+# with characters outside [a-z0-9_-] and leading _ or - dropped. Best effort: silent if docker
+# isn't answering yet.
+existing_db_volume() {
+  local proj
+  proj="${COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-' | sed 's/^[_-]*//')}"
+  [ -n "$proj" ] || return 1
+  docker volume inspect "${proj}_pgdata" >/dev/null 2>&1
+}
+
+create_env_file() {
+  local key pw
+  EXISTING_DB=""
+  if existing_db_volume; then EXISTING_DB=1; fi
+  if ! { key=$(rand_token 32) && pw=$(rand_token 15); }; then
+    say "Couldn't generate random credentials (need openssl, or base64 and /dev/urandom)."
+    read -r -p "Press Enter to close this window... " _ 2>/dev/null || true
+    exit 1
+  fi
+  if ! (umask 077; awk -v key="$key" -v pw="$pw" '
+    /^TRET_SECRET_KEY=/     { print "TRET_SECRET_KEY=" key; next }
+    /^TRET_ADMIN_PASSWORD=/ { print "TRET_ADMIN_PASSWORD=" pw; next }
+    { print }
+  ' .env.example > .env.tmp) || ! mv .env.tmp .env; then
+    say "Couldn't write the .env file."
+    read -r -p "Press Enter to close this window... " _ 2>/dev/null || true
+    exit 1
+  fi
+}
+
+warn_if_default_secrets() {
+  local weak="" sk pw
+  sk=$(env_value TRET_SECRET_KEY); pw=$(env_value TRET_ADMIN_PASSWORD)
+  if [ -z "$sk" ]; then
+    weak="secret key (TRET_SECRET_KEY is not set, so compose falls back to the default)"
+  elif [ "$sk" = "dev-secret-change-me" ]; then weak="secret key"; fi
+  if [ -z "$pw" ] || [ "$pw" = "tret-admin" ]; then weak="${weak:+$weak and }admin password"; fi
+  [ -n "$weak" ] || return 0
+  say ""
+  say "!! The .env file here still has the published default $weak."
+  say "   Anyone who can reach this computer can sign in as admin. Fix it:"
+  say "     1. In .env set TRET_SECRET_KEY and TRET_ADMIN_PASSWORD to new random values."
+  say "        (Changing the secret key makes AI provider keys saved in the app"
+  say "        unreadable; re-enter them afterwards.)"
+  say "     2. The admin account exists already, so also change its password in the"
+  say "        app, then stop and start tret again."
+}
+
+warn_existing_db() {
+  [ -n "${EXISTING_DB:-}" ] || return 0
+  say ""
+  say "!! An existing tret database was found from an earlier install."
+  say "   It keeps its existing admin password (tret-admin if never changed), not the"
+  say "   new one in .env. AI provider keys saved earlier were encrypted with the old"
+  say "   secret key and must be re-entered in the app."
+}
+
 # ── 1. Is Docker installed? ──────────────────────────────────────────────────
 if ! command -v docker >/dev/null 2>&1; then
   say ""
@@ -71,11 +155,15 @@ fi
 
 # ── 3. First run: create .env from the example. ─────────────────────────────
 if [ ! -f .env ]; then
-  cp .env.example .env
+  create_env_file
   say ""
-  say "Created a settings file (.env) from the example that ships with tret."
+  say "Created a settings file (.env) from the example that ships with tret,"
+  say "with a freshly generated secret key and admin password."
   say "You don't need to edit it — AI provider keys are added later, inside"
   say "the app itself (Settings page), not in this file."
+  warn_existing_db
+else
+  warn_if_default_secrets
 fi
 
 # ── 4. Start everything. ────────────────────────────────────────────────────
@@ -129,11 +217,20 @@ open_in_browser "$FRONTEND_URL"
 
 say ""
 say "────────────────────────────────────────────────────────────"
-say "  Log in with:   admin@example.com  /  tret-admin"
-say "  (unless you've changed them in the .env file — do change"
-say "  them if anyone else can reach this computer)."
+say "  Log in with:   $(env_default TRET_ADMIN_EMAIL admin@example.com)"
+if [ -n "${EXISTING_DB:-}" ]; then
+  say "  Password:      unchanged — your existing database keeps its admin password"
+  say "  (tret-admin if you never changed it). The new one in .env is not used."
+else
+  say "  Password:      $(env_default TRET_ADMIN_PASSWORD tret-admin)"
+  say "  (kept as TRET_ADMIN_PASSWORD in the .env file in this folder; it is used"
+  say "  when the admin account is first created — change it later in the app)."
+fi
+say "  tret is reachable from this computer only."
 say ""
 say "  Add your AI provider key inside the app: Settings page."
 say "  To stop tret later, double-click stop-tret."
 say "────────────────────────────────────────────────────────────"
+warn_existing_db
+warn_if_default_secrets
 say ""
