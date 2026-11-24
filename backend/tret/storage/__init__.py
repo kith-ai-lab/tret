@@ -167,12 +167,17 @@ def normalised_key(document_id: object, version: str) -> str:
     return validate_key(f"normalised/{document_id}/{version}.md")
 
 
-def module_text_key(report_id: object, extractor_version: str, module_set: str, module_slug: str) -> str:
+def module_text_key(
+    report_id: object, extractor_version: str, module_set: str, module_slug: str, sha256: str | None = None
+) -> str:
     """Where the verbatim text cut for one module of one report lives
-    (`tret/evaluation/extract.py`): `extractions/<report id>/<extractor version>/<module set>/<module>.md`.
+    (`tret/evaluation/extract.py`): `extractions/<report id>/<extractor version>/<module set>/<module>.md`,
+    or with `sha256` (the extractor always passes it) `<module>-<first 16 hex>.md`: content-addressed, so a
+    re-extraction writes a new blob and never overwrites the text an evaluation snapshot still points at.
     `module_set` is `slug@version`, sanitised, so two sets with the same module slug never share a blob."""
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(module_set)).lstrip(".") or "_"
-    return validate_key(f"extractions/{report_id}/{extractor_version}/{safe}/{module_slug}.md")
+    tail = f"-{sha256[:16]}" if sha256 else ""
+    return validate_key(f"extractions/{report_id}/{extractor_version}/{safe}/{module_slug}{tail}.md")
 
 
 def batch_record_key(batch_id: object, name: str) -> str:

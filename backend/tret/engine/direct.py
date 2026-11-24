@@ -227,11 +227,17 @@ def _max_cost(run, harness, workspace) -> Decimal:
 CANCEL_ERROR = "timeout: stopped by the collection run's time limit"
 
 
-async def execute_direct(run_id: uuid.UUID, profile: Any, session_factory: Any) -> None:
+async def execute_direct(
+    run_id: uuid.UUID, profile: Any, session_factory: Any, *, model_policy: dict | None = None
+) -> None:
     """Run one direct target's `Run` to a terminal state. Never raises except for cancellation
     (which is re-raised after the run is closed out and its hooks have run). Every path after the
     run row exists ends in `_close`, so the post-run hooks fire exactly once, except when the
-    pre-run gate itself refused (it placed no hold)."""
+    pre-run gate itself refused (it placed no hold).
+
+    A run that belongs to no batch (the evaluation tournament's juror calls) has no batch
+    settings to take its model policy from: it passes `model_policy`, which is used when the run
+    has no batch. A batch run is unchanged."""
     from tret.db.models import Batch, BatchTarget, Harness, Run, Workspace
 
     async with session_factory() as db:
@@ -277,7 +283,9 @@ async def execute_direct(run_id: uuid.UUID, profile: Any, session_factory: Any) 
                 batch=batch,
                 target=target,
                 workspace_id=workspace_id,
-                model_policy=dict(((batch.settings or {}) if batch else {}).get("model_policy") or {"mode": "auto"}),
+                model_policy=dict(
+                    ((batch.settings or {}) if batch else {}).get("model_policy") or model_policy or {"mode": "auto"}
+                ),
                 emissions=emissions,
                 services=services,
                 accounting=RunAccounting(run, emissions, services.catalog),

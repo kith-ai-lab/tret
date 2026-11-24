@@ -223,6 +223,129 @@ the first preview in a fresh process warms the model catalog, which may probe lo
 support (a call to your own server, no cost). The probe lives inside catalog discovery and is not
 skipped for previews.
 
+## Tournament (Engine 1)
+
+Engine 1 rates how well each company discloses one module (for example physical climate risk)
+against its industry peers, by pairwise judgement rather than a score on a scale. Off by default:
+`TRET_EVAL_TOURNAMENT=on` (and `TRET_EVAL_JURY=on`, because the jury is seated through the freeze
+above). `TRET_EVAL_TOURNAMENT_CONCURRENCY` (default 2, at most 4) is how many juror calls run at
+once; they wait on the network, so the small machine copes.
+
+**Pools.** `peer_pool_snapshots` records the corpus a tournament was built from: the extracted
+modules of one module slug (`present`, with text, from an `extracted` or `partial` extraction; the
+newest usable extraction per report), each company's effective NACE classification (manual, then
+SEC SIC, then extractor; unclassified modules are left out and counted). One module is kept per
+company and fiscal year (the best, newest extraction; the company key is the register's CIK, LEI,
+ticker or target) and none with identical text; what was dropped, and why, is in the snapshot's
+`corpus_filter.dropped`. A pool starts at the
+division. A division with fewer than `min_n` (15) modules goes up to its cluster, and a cluster
+still under `min_n` goes up to its section; a section under `min_n` stays and is flagged `small`
+(rated if it has at least two). A pool is split by regime (`csrd` from ESRS/CSRD in the frameworks
+cited, else `uk` or `us` from the country, else `other`) only if every part has `min_n`. The same
+input gives the same snapshot, and a snapshot is never edited: a rerun builds a new one.
+
+**History is immutable.** A pool member (`peer_pool_members`) is what a tournament judges: it copies
+the module's text location, sha256, word count and claim density, the strings to mask and the
+company label at snapshot time. Matches and ratings point at members, and the links back to the
+report rows are `ON DELETE SET NULL`, so re-extracting a report or deleting a report module never
+changes or removes a tournament. Module text is content-addressed in the blob store
+(`extractions/<report>/<version>/<set>/<module>-<sha256 prefix>.md`), so a re-extraction writes a new
+blob and leaves the old one. A juror reads the member's blob and verifies its hash; a changed or
+missing blob fails that match, with the reason, and it does not count. (Old blobs are not garbage
+collected.)
+
+**Show before spend.** `tret eval tournament create --workspace ID --module SLUG` (or
+`POST /api/eval/tournaments`) writes a `draft` and prints the preview: pools, N, rounds
+(`min(8, ceil(log2 n) + 2)`), the estimated matches (primary, plus 5% swaps and 10% doubles) and a
+cost range, and the jury the router would seat with the reason for each pick. A preview nobody started
+is deleted, with its snapshot, by `DELETE /api/eval/tournaments/{id}` or `tret eval tournament delete`.
+It calls no model and
+spends nothing. The cost estimate is words x 1.5 tokens for the two texts, plus 700 prompt tokens
+and 250 output tokens per match, priced at each previewed juror's catalog price (the jury rotates,
+so the range runs from the cheapest juror for every match to the dearest). It is an estimate, not
+a quote.
+
+**Start.** `tret eval tournament start ID --budget USD` (or `POST .../start {"budget_usd": ...}`,
+approver role) freezes the jury once (`eval_jury`, pass `tournament:<id>`, three models from distinct
+families, exploration off) and plays. Nothing is pinned; the policy given at create time constrains
+the router. Before each match the runner checks spend plus what in-flight matches are expected to
+cost against the budget (the larger of the catalog estimate and what matches have actually cost);
+when the next match would not fit, the tournament pauses with `pause_reason: budget`. `resume`
+continues, optionally with a larger budget. `cancel` stops scheduling (matches already in flight
+finish). The CLI plays in its own process until the tournament completes, pauses or is interrupted
+(Ctrl-C pauses it); the API runs it as a background task.
+
+**Rounds and matches.** Each round pairs each pool Swiss-style by wins (+0.5 per tie), avoiding
+rematches, with a seeded random generator (the tournament `seed` and the round), so a resumed
+tournament never re-pairs a round (scores count the primary and double matches, never swaps). Each
+pair is one primary match; the jurors rotate over the three families in a fixed order that depends
+only on the plan. After the primaries of a round, 5% are re-judged by the same juror in the opposite shown
+order (`swap`, the flip-rate sample) and 10% by a juror of another family (`double`). A juror sees
+the module's definition and two texts in a random, recorded order (`shown_a_first`), with the
+company name, short name, ticker, aliases, the classification's company name and the target's known
+domains masked as "the company" (the number of masked strings per text is kept on the match as
+`mask_count_a` / `mask_count_b`, to audit the masking); never the company, a rating or Engine 2
+output. The text delimiters cannot be forged from inside a text: `<<<` and `>>>` are replaced by
+look-alike characters in both texts. A failed match does not count.
+
+**Pauses, not failures.** A transient error while playing a match (the database, the blob store) puts
+the match back to `pending`, books what its run spent, and pauses the tournament with
+`pause_reason` `error: <message>`. A match whose snapshot text can never be used (missing or changed
+blob) is failed for good with `text_error:`; it does not count toward any failure rate, is never
+replayed, and its pair counts as played. A refusal by the pre-run gate (credits or a limit) pauses the tournament
+with `pause_reason` `credits`, and a frozen model that cannot be reached pauses it with
+`juror_unavailable`; the match goes back to `pending` and is replayed on resume. If more than 20% of the
+last 10 or more matches failed, it pauses with `juror_failures`; a round with more than 20% failures
+pauses with `match_failures`. Resuming replays the failed matches of the unfinished rounds. Only an
+internal error sets `failed`, and a failed tournament can be resumed too (its jury freeze is
+released on failure; the selection stays on record and is reused). Every pause can be resumed. The
+module definition (title, definition, include and exclude lists) is stored on the tournament at
+create time, so a change to the configured module set cannot alter a pass in progress.
+
+**Running safely.** Start and resume are conditional updates (a second one is a 409). A runner holds
+a lease (`lease_owner`, `lease_until`, renewed every 30 seconds, valid two minutes); each match is
+claimed (`pending` to `running`) before it is played, so two processes never play the same match.
+The claim, the result write and the completion are each one statement that also requires the
+caller to hold the running tournament's lease, so a runner that lost the lease cannot claim, record
+a result or finish. What a run cost is booked to the tournament's spend once per run id
+(`eval_match_runs`), whoever settles or recovers it, so a takeover never double-counts or loses a
+paid call. A runner replaced in the same process is cancelled; an interrupted one (Ctrl-C,
+shutdown) pauses the tournament with `interrupted`. A match whose run is still running (younger than
+15 minutes) is not replayed: the new runner waits for it. A
+`running` tournament whose lease has expired (`stalled` in the API) can be resumed. Juror calls share
+one process-wide limit (`TRET_EVAL_TOURNAMENT_CONCURRENCY`), no database session is held open during
+a call, and the text cache is bounded. A match left claimed by a dead runner is replayed; what its
+run spent is added to the tournament's spend first. The freeze is released when the tournament
+completes or is cancelled.
+
+**Runs.** Every match is a `Run` on the system "Disclosure Jury" harness, executed through
+`execute_direct` like an extraction target (pre-run gates, per-run cost cap, credits, energy), calling
+the frozen model with no fallback. The run is stamped as a juror run, so it never becomes router
+evidence or a `run_outcomes` row.
+
+**Result.** After the last round a Bradley-Terry model is fitted per pool over the primary and
+double matches (swaps are used only for the flip rate), giving each module a rating on an Elo scale
+(pool mean 1500), a 90% interval and a decile or quintile band, written once to `module_ratings`
+with the module's word count and claim density. The tournament `summary` holds per-pool counts, the
+flip rate per juror family, the correlation (Pearson and Spearman) of rating with word count and
+with claim density per pool and overall, and the jury. A length correlation above 0.6 or a flip
+rate above 0.15 is flagged in `summary.flags` (the run is not stopped). A rating belongs to one
+tournament and one snapshot; a rerun is a new tournament and never rewrites an old one.
+
+**Restarts.** All state is in the database. At boot a tournament left `running` whose lease has
+expired is marked `paused` (`restart`), never resumed on its own; one whose lease is still live is
+left alone (it may be running in another process) and becomes resumable when the lease ends.
+Ctrl-C of a CLI run pauses only that tournament.
+
+**Refit.** `POST .../{id}/refit` or `tret eval tournament refit ID` recomputes the ratings and summary
+of a completed or failed tournament from its stored matches, with no model call and no spend. The
+fits run in a worker thread, outside any open transaction.
+
+API (all 404 while off; creating and starting also need `TRET_EVAL_JURY`): `POST
+/api/eval/tournaments`, `GET /api/eval/tournaments[/{id}]`, `POST .../{id}/start|cancel|resume`
+(approver), `GET .../{id}/matches` (staff view, with each juror's model and rationale) and
+`GET .../{id}/ratings`; also `POST .../{id}/refit` and `DELETE .../{id}` (a draft only), both approver.
+
 ## The 30-report hand check
 
 1. Pick 30 reports across document types and sizes (include several multi-window ones).

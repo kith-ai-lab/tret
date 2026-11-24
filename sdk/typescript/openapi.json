@@ -2090,6 +2090,26 @@
         "title": "ResourcesBody",
         "type": "object"
       },
+      "ResumeIn": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          }
+        },
+        "title": "ResumeIn",
+        "type": "object"
+      },
       "ReviewBody": {
         "additionalProperties": false,
         "properties": {
@@ -2424,6 +2444,22 @@
         "title": "SetPasswordBody",
         "type": "object"
       },
+      "StartIn": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_usd": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 100000.0,
+            "title": "Budget Usd",
+            "type": "number"
+          }
+        },
+        "required": [
+          "budget_usd"
+        ],
+        "title": "StartIn",
+        "type": "object"
+      },
       "SwitchWorkspaceBody": {
         "properties": {
           "workspace_id": {
@@ -2606,6 +2642,71 @@
           "enabled"
         ],
         "title": "TelemetryToggle",
+        "type": "object"
+      },
+      "TournamentIn": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 200,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Ids"
+          },
+          "min_n": {
+            "default": 15,
+            "maximum": 1000.0,
+            "minimum": 2.0,
+            "title": "Min N",
+            "type": "integer"
+          },
+          "model_policy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An auto policy for the jury (objective, allowed, open_weights, max_cost_tier); never a pin",
+            "title": "Model Policy"
+          },
+          "module": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Module",
+            "type": "string"
+          },
+          "module_set": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "slug@version; default: the configured module set",
+            "title": "Module Set"
+          }
+        },
+        "required": [
+          "module"
+        ],
+        "title": "TournamentIn",
         "type": "object"
       },
       "UpdateMemberRoleBody": {
@@ -8915,6 +9016,513 @@
         "summary": "Preview",
         "tags": [
           "eval-jury"
+        ]
+      }
+    },
+    "/api/eval/tournaments": {
+      "get": {
+        "operationId": "list_tournaments_api_eval_tournaments_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Tournaments",
+        "tags": [
+          "eval-tournaments"
+        ]
+      },
+      "post": {
+        "operationId": "create_api_eval_tournaments_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TournamentIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
+    "/api/eval/tournaments/{tournament_id}": {
+      "delete": {
+        "operationId": "delete_api_eval_tournaments__tournament_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tournament Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete",
+        "tags": [
+          "eval-tournaments"
+        ]
+      },
+      "get": {
+        "operationId": "read_api_eval_tournaments__tournament_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tournament Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
+    "/api/eval/tournaments/{tournament_id}/cancel": {
+      "post": {
+        "operationId": "cancel_api_eval_tournaments__tournament_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tournament Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
+    "/api/eval/tournaments/{tournament_id}/matches": {
+      "get": {
+        "operationId": "matches_api_eval_tournaments__tournament_id__matches_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tournament Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^(pending|running|done|failed)$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^(primary|swap|double)$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pool",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pool"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Matches",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
+    "/api/eval/tournaments/{tournament_id}/ratings": {
+      "get": {
+        "operationId": "ratings_api_eval_tournaments__tournament_id__ratings_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tournament Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ratings",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
+    "/api/eval/tournaments/{tournament_id}/refit": {
+      "post": {
+        "operationId": "refit_api_eval_tournaments__tournament_id__refit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tournament Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refit",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
+    "/api/eval/tournaments/{tournament_id}/resume": {
+      "post": {
+        "operationId": "resume_api_eval_tournaments__tournament_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tournament Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ResumeIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
+    "/api/eval/tournaments/{tournament_id}/start": {
+      "post": {
+        "operationId": "start_api_eval_tournaments__tournament_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tournament Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start",
+        "tags": [
+          "eval-tournaments"
         ]
       }
     },
