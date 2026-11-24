@@ -22,8 +22,10 @@ resource in this codebase.
 **No methods authoring**: `PATCH`'s manifest replacement rejects any
 non-empty `manifest_json["methods"]` with 422 — methods packs (executable
 Python, only deterred, never sandboxed; see `packs/safety.py`) arrive only
-via `POST /api/packs/install/archive`, which keeps the marketplace review
-queue's elevated scrutiny over method-bearing packs meaningful. There is no
+via `POST /api/packs/install/archive`, where they need the instance admin, or
+from the marketplace after its review, which gives method-bearing packs
+elevated scrutiny. `test-install` checks the materialized manifest again
+(`manifest_declares_methods`). There is no
 server-side way around this for a draft; an author who needs methods builds
 the archive by hand (or exports a methods-free draft and adds them after).
 This check only ever inspects `PatchDraftBody.manifest_json` — it does
@@ -73,6 +75,7 @@ from tret.packs.loader import (
     PackValidationError,
     _swap_into_final_dir,
     install_pack,
+    manifest_declares_methods,
     validate_pack,
 )
 from tret.packs.storage import PackStorage
@@ -132,17 +135,19 @@ def _draft_size(files: dict) -> int:
     return sum(len(file_bytes(content)) for content in files.values())
 
 
+_METHODS_REFUSAL = (
+    "Drafts may not declare methods: methods packs (executable Python, only "
+    "deterred by a static scan, never sandboxed) are installed only by an "
+    "instance admin through POST /api/packs/install/archive, or from the "
+    "marketplace after its review. The builder has no methods editor, and this "
+    "is the server-side half of that."
+)
+
+
 def _reject_methods(manifest_json: dict) -> None:
     methods = manifest_json.get("methods") if isinstance(manifest_json, dict) else None
     if methods:
-        raise HTTPException(
-            422,
-            "Drafts may not declare methods: methods packs (executable Python, only "
-            "deterred by a static scan, never sandboxed) arrive only via "
-            "POST /api/packs/install/archive — the builder has no methods editor, "
-            "and this is the server-side half of that, so the marketplace review "
-            "queue's elevated scrutiny over method-bearing packs stays meaningful.",
-        )
+        raise HTTPException(422, _METHODS_REFUSAL)
 
 
 class CreateDraftBody(BaseModel):
@@ -372,6 +377,11 @@ async def test_install_draft(
     storage = PackStorage()
     pack_root = materialize_draft(draft, version_override=version, root=storage.staging_dir())
     try:
+        # Second layer under PATCH's `_reject_methods`: whatever a stored
+        # draft holds, a test-install never installs method code, which only
+        # the instance admin may deploy (`api/packs.py::install_archive`).
+        if manifest_declares_methods(pack_root):
+            raise HTTPException(422, _METHODS_REFUSAL)
         try:
             pack = await install_pack(db, pack_root, ctx.id, project.id)
         except PackValidationError as e:

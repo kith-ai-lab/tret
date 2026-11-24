@@ -868,3 +868,29 @@ async def test_exported_archive_installs_via_the_archive_endpoint(client, seed, 
 
     detail = await client.get(f"/api/packs/{body['id']}")
     assert detail.json()["doctrine_contents"]["doctrine.md"] == _DOCTRINE_TEXT
+
+
+async def test_test_install_refuses_methods_a_stored_draft_somehow_holds(
+    client, seed, storage, session_factory
+):
+    """PATCH's `_reject_methods` is the first layer. A draft row that holds
+    methods anyway (written before that check existed, or by any future
+    path) must still never install method code for a workspace admin."""
+    from tret.db.models import DraftPack
+
+    _, _, admin = await _admin_workspace(seed)
+    await login(client, admin.email)
+    draft_id = await _make_installable_draft(client)
+    async with session_factory() as db:
+        draft = await db.get(DraftPack, uuid.UUID(draft_id))
+        draft.manifest_json = {
+            **draft.manifest_json,
+            "methods": [{"slug": "noop", "display_name": "Noop", "entrypoint": "noop.py"}],
+        }
+        draft.files = {**draft.files, "noop.py": "print('{}')\n"}
+        await db.commit()
+
+    response = await client.post(f"/api/packs/drafts/{draft_id}/test-install")
+    assert response.status_code == 422, response.text
+    assert "instance admin" in response.json()["detail"]
+    assert (await client.get("/api/packs")).json() == []

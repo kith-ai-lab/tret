@@ -1197,3 +1197,211 @@ async def test_delete_of_a_path_installed_pack_leaves_its_original_directory_unt
         "pack: sample\nversion: 0.1.0\ndisplay_name: Sample\n"
         "description: operator's own copy\n"
     )
+
+
+# ── manifest path confinement and the methods-pack gate ─────────────────────
+#
+# Any user can be a workspace admin (their own team workspace, or the
+# personal workspace every multi-tenant sign-up owns), so the archive route
+# must neither let a manifest path read a file outside the pack nor let a
+# workspace admin deploy method code. See tret/packs/paths.py and
+# api/packs.py::install_archive.
+
+_OUTSIDE_SECRET = "TRET_SECRET_KEY=not-a-real-secret"
+
+_METHOD_SOURCE = (
+    "import json\nimport sys\n\n"
+    "json.load(sys.stdin)\n"
+    "json.dump({'rows': []}, sys.stdout)\n"
+)
+
+
+def _build_methods_pack(root: Path) -> Path:
+    (root / "methods").mkdir(parents=True, exist_ok=True)
+    (root / "methods" / "noop.py").write_text(_METHOD_SOURCE)
+    (root / "pack.yaml").write_text(
+        "pack: withmethods\nversion: 0.1.0\ndisplay_name: With methods\n"
+        "methods:\n"
+        "  - slug: noop\n    display_name: Noop\n    entrypoint: methods/noop.py\n"
+    )
+    return root
+
+
+async def _pack_rows(session_factory, workspace_id) -> list[Pack]:
+    async with session_factory() as db:
+        return (
+            await db.execute(select(Pack).where(Pack.workspace_id == workspace_id))
+        ).scalars().all()
+
+
+async def test_archive_install_refuses_methods_unless_allowed(
+    session_factory, seed, storage, tmp_path
+):
+    from tret.packs.loader import PackMethodsNotAllowed
+
+    workspace = make_workspace("Acme")
+    project = Project(id=uuid.uuid4(), workspace_id=workspace.id, name="P")
+    await seed(workspace, project)
+    archive = _archive_from_dir(_build_methods_pack(tmp_path / "m"))
+
+    async with session_factory() as db:
+        with pytest.raises(PackMethodsNotAllowed):
+            await install_pack_from_archive(db, workspace.id, project.id, archive)
+    assert await _pack_rows(session_factory, workspace.id) == []
+    packs_root = Path(get_settings().storage_dir).resolve() / "packs"
+    assert not (packs_root.exists() and list(packs_root.glob("*")))
+
+    async with session_factory() as db:
+        pack = await install_pack_from_archive(
+            db, workspace.id, project.id, archive, allow_methods=True
+        )
+    assert [m["slug"] for m in pack.manifest["methods"]] == ["noop"]
+
+
+async def test_workspace_admin_cannot_upload_a_methods_pack(client, seed, storage, tmp_path):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    owner = make_user("owner@example.com")  # global role analyst, workspace owner
+    await seed(team, project, owner, make_member(owner, team, role="owner"))
+    await login(client, owner.email)
+
+    archive = _archive_from_dir(_build_methods_pack(tmp_path / "m"))
+    response = await client.post(
+        "/api/packs/install/archive",
+        files={"file": ("pack.tar.gz", archive, "application/gzip")},
+    )
+    assert response.status_code == 403, response.text
+    assert "instance admin" in response.json()["detail"]
+    assert (await client.get("/api/packs")).json() == []
+
+
+async def test_instance_admin_can_upload_a_methods_pack(client, seed, storage, tmp_path):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com", global_role="admin")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+    await login(client, admin.email)
+
+    archive = _archive_from_dir(_build_methods_pack(tmp_path / "m"))
+    response = await client.post(
+        "/api/packs/install/archive",
+        files={"file": ("pack.tar.gz", archive, "application/gzip")},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["slug"] == "withmethods"
+
+
+@pytest.mark.parametrize(
+    "doctrine_entry", ["/etc/hosts", "/proc/self/environ", "/dev/zero", "../../../../etc/hosts"]
+)
+async def test_archive_with_an_escaping_doctrine_path_is_refused(
+    client, seed, storage, doctrine_entry
+):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+    await login(client, admin.email)
+
+    manifest = (
+        "pack: escape\nversion: 0.1.0\ndisplay_name: Escape\n"
+        f"doctrine:\n  - {doctrine_entry!r}\n"
+    ).encode()
+    archive = _archive_from_entries([_reg("pack.yaml", manifest)])
+    response = await client.post(
+        "/api/packs/install/archive",
+        files={"file": ("pack.tar.gz", archive, "application/gzip")},
+    )
+    assert response.status_code == 422, response.text
+    assert any("doctrine file rejected" in e for e in response.json()["detail"]["errors"])
+    assert (await client.get("/api/packs")).json() == []
+
+
+async def test_get_pack_never_serves_a_file_outside_a_stored_pack(
+    client, seed, storage, tmp_path
+):
+    """A pack row installed before install-time validation checked
+    containment: the doctrine viewer must read an escaping entry as
+    unavailable, not as the host file it names."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    member = make_user("analyst@example.com")
+    pack_dir = tmp_path / "legacy"
+    pack_dir.mkdir()
+    (pack_dir / "ok.md").write_text("inside")
+    secret = tmp_path / "outside-secret.txt"
+    secret.write_text(_OUTSIDE_SECRET)
+    legacy = Pack(
+        id=uuid.uuid4(),
+        workspace_id=team.id,
+        slug="legacy",
+        version="0.1.0",
+        doctrine_sha="x",
+        manifest={"doctrine": ["ok.md", str(secret), "../outside-secret.txt"]},
+        source_path=str(pack_dir),
+    )
+    await seed(team, project, member, make_member(member, team, role="analyst"), legacy)
+    await login(client, member.email)
+
+    response = await client.get(f"/api/packs/{legacy.id}")
+    assert response.status_code == 200, response.text
+    docs = response.json()["doctrine_contents"]
+    assert docs["ok.md"] == "inside"
+    assert docs[str(secret)] == "(file unavailable)"
+    assert docs["../outside-secret.txt"] == "(file unavailable)"
+    assert _OUTSIDE_SECRET not in response.text
+
+
+async def test_validate_endpoint_requires_the_instance_admin(client, seed, storage, tmp_path):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    owner = make_user("owner@example.com")
+    admin = make_user("admin@example.com", global_role="admin")
+    await seed(
+        team, project, owner, admin,
+        make_member(owner, team, role="owner"),
+        make_member(admin, team, role="admin"),
+    )
+    pack_dir = _build_minimal_pack(tmp_path / "p", description="x")
+
+    await login(client, owner.email)
+    response = await client.post("/api/packs/validate", json={"path": str(pack_dir)})
+    assert response.status_code == 403
+
+    await login(client, admin.email)
+    response = await client.post("/api/packs/validate", json={"path": str(pack_dir)})
+    assert response.status_code == 200, response.text
+    assert response.json()["valid"] is True
+
+
+async def test_a_wrapped_methods_archive_is_refused_too(session_factory, seed, storage, tmp_path):
+    """`tar czf pack.tar.gz mypack/`: the gate must read the unwrapped root."""
+    from tret.packs.loader import PackMethodsNotAllowed
+
+    workspace = make_workspace("Acme")
+    project = Project(id=uuid.uuid4(), workspace_id=workspace.id, name="P")
+    await seed(workspace, project)
+    archive = _archive_from_dir_wrapped(_build_methods_pack(tmp_path / "m"), "withmethods")
+
+    async with session_factory() as db:
+        with pytest.raises(PackMethodsNotAllowed):
+            await install_pack_from_archive(db, workspace.id, project.id, archive)
+    assert await _pack_rows(session_factory, workspace.id) == []
+
+
+async def test_an_overlong_doctrine_name_is_a_422_not_a_500(client, seed, storage):
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    admin = make_user("admin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+    await login(client, admin.email)
+
+    manifest = (
+        "pack: longname\nversion: 0.1.0\ndisplay_name: Long\n"
+        f"doctrine:\n  - {'d/' + 'x' * 400 + '.md'}\n"
+    ).encode()
+    response = await client.post(
+        "/api/packs/install/archive",
+        files={"file": ("pack.tar.gz", _archive_from_entries([_reg("pack.yaml", manifest)]), "application/gzip")},
+    )
+    assert response.status_code == 422, response.text

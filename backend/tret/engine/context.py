@@ -19,16 +19,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from tret.packs.paths import PackFileMissing, PackPathError, resolve_pack_file
 
 if TYPE_CHECKING:
     # Only for static analysis. `tret.packs.loader` imports this module's
     # doctrine-selector helpers (which never touch the ORM) and must stay
     # importable without SQLAlchemy in a core-only (`pip install tret`) install.
     from tret.db.models import Document, Harness, Pack, Run
+
+log = logging.getLogger("tret.engine.context")
 
 # chars/4 — deliberately dependency-free. Real usage is recorded per run from
 # provider-reported tokens; this is for composition accounting and routing size
@@ -347,7 +352,7 @@ def doctrine_sha(pack_dir: Path, doctrine_files: list[str]) -> str:
     """
     h = hashlib.sha256()
     for rel in doctrine_files:
-        h.update((pack_dir / rel).read_bytes())
+        h.update(resolve_pack_file(pack_dir, rel).read_bytes())
     return h.hexdigest()
 
 
@@ -472,7 +477,16 @@ def doctrine_blocks(pack: Pack, task: dict | None) -> list[ContextBlock]:
     )
     for rel, sections in selection:
         try:
-            text = (pack_dir / rel).read_text()
+            # Confined to the pack directory: a manifest path that escapes it
+            # (absolute, `..`, symlinked out) raises PackPathError, an OSError.
+            text = resolve_pack_file(pack_dir, rel).read_text()
+        except PackPathError as e:
+            if not isinstance(e, PackFileMissing):
+                log.warning(
+                    "pack %s@%s: doctrine %s refused and left out of the run: %s",
+                    getattr(pack, "slug", "?"), getattr(pack, "version", "?"), rel, e,
+                )
+            continue
         except OSError:
             continue
         loaded, matched, unresolved = select_doctrine_text(text, sections)

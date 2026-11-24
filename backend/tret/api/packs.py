@@ -13,7 +13,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tret.api.auth import current_user, require_admin
+from tret.api.auth import current_user, is_instance_admin, require_admin
 from tret.api.workspace import WorkspaceContext, current_project, current_workspace, require_workspace_admin
 from tret.config import get_settings
 from tret.db.engine import get_db
@@ -23,11 +23,13 @@ from tret.net.policy import ClassPolicy, MODE_OFF, MODE_ON, VERIFY_NONE, master_
 from tret.packs.archive import MAX_COMPRESSED_BYTES, PackArchiveError
 from tret.packs.loader import (
     PackInstallConflict,
+    PackMethodsNotAllowed,
     PackValidationError,
     install_pack,
     install_pack_from_archive,
     validate_pack,
 )
+from tret.packs.paths import resolve_pack_file
 from tret.packs.storage import PackStorage
 
 router = APIRouter(prefix="/api/packs", tags=["packs"])
@@ -160,8 +162,12 @@ async def get_pack(
     pack_dir = Path(p.source_path)
     for rel in p.manifest.get("doctrine", []):
         try:
-            docs[rel] = (pack_dir / rel).read_text()
-        except OSError:
+            # Confined to the pack directory (tret.packs.paths). This also
+            # covers a pack row stored before install-time validation checked
+            # containment: an escaping path reads as unavailable, never as
+            # whatever file on the host it names.
+            docs[rel] = resolve_pack_file(pack_dir, rel).read_text()
+        except (OSError, UnicodeDecodeError):
             docs[rel] = "(file unavailable)"
     out["doctrine_contents"] = docs
     return out
@@ -220,10 +226,20 @@ async def install(
     return _out(pack)
 
 
+# Methods packs need the instance admin (403 otherwise), even though the
+# endpoint itself is workspace-admin gated. Any user can be a workspace admin
+# (their own team workspace, or a multi-tenant sign-up's personal workspace),
+# and a method is Python that `services/methods.py` runs as the server's own
+# user with no filesystem isolation: installing one is deploying code, so only
+# the operator may do it. Methods-free packs stay workspace-admin; every path
+# their manifest names is confined to the pack directory (`tret.packs.paths`).
+# Kept out of the docstring below so the published API description (and the
+# generated SDK) is unchanged.
 @router.post("/install/archive")
 async def install_archive(
     request: Request,
     file: UploadFile,
+    user: User = Depends(current_user),
     ctx: WorkspaceContext = Depends(require_workspace_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -247,7 +263,12 @@ async def install_archive(
         raise HTTPException(500, "No project exists in this workspace")
 
     try:
-        pack = await install_pack_from_archive(db, ctx.id, project.id, archive_bytes)
+        pack = await install_pack_from_archive(
+            db, ctx.id, project.id, archive_bytes,
+            allow_methods=is_instance_admin(request, user),
+        )
+    except PackMethodsNotAllowed as e:
+        raise HTTPException(403, str(e))
     except PackArchiveError as e:
         raise HTTPException(422, str(e))
     except PackValidationError as e:
@@ -388,8 +409,11 @@ class ValidateBody(BaseModel):
     path: str
 
 
+# Instance-admin gated for the same reason as `/install`: `path` names a
+# directory on the server's own filesystem, so any other caller would get a
+# directory-existence oracle over the whole host.
 @router.post("/validate")
-async def validate(body: ValidateBody, user: User = Depends(current_user)):
+async def validate(body: ValidateBody, admin: User = Depends(require_admin)):
     pack_dir = Path(body.path)
     if not pack_dir.is_dir():
         raise HTTPException(422, f"'{body.path}' is not a directory")
@@ -658,6 +682,11 @@ async def registry_pack_summary(slug: str, user: User = Depends(current_user)):
     return await _registry_get(f"{base}/packs/{slug}", what=f"pack '{slug}'")
 
 
+# Registry version states that mean "approved by the marketplace's review":
+# only these let a workspace admin install a methods pack from the registry.
+_REGISTRY_REVIEWED_STATES = frozenset({"listed", "delisted"})
+
+
 class RegistryInstallBody(BaseModel):
     slug: str
     version: str
@@ -704,9 +733,19 @@ async def registry_install(
     )
 
     try:
+        # allow_methods: a version the registry reports as listed (or since
+        # delisted) has been approved through the marketplace's own review,
+        # which gives methods packs the elevated scrutiny, and its bytes are
+        # pinned to the registry's content_hash, so the operator who
+        # configured `pack_registry_url` has delegated that trust decision.
+        # A registry that does not report the state gets no such trust.
         pack = await install_pack_from_archive(
-            db, ctx.id, project.id, archive_bytes, expected_content_hash=content_hash
+            db, ctx.id, project.id, archive_bytes,
+            expected_content_hash=content_hash,
+            allow_methods=detail.get("state") in _REGISTRY_REVIEWED_STATES,
         )
+    except PackMethodsNotAllowed as e:
+        raise HTTPException(403, str(e))
     except PackArchiveError as e:
         message = str(e)
         # install_pack_from_archive's own hash-mismatch message (loader.py) —

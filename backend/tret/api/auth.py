@@ -268,9 +268,16 @@ async def require_admin(request: Request, user: User = Depends(current_user)) ->
     both intentionally keep requiring the real thing from a bearer caller —
     fails closed on purpose, not an oversight to "fix" into consistency.
     """
-    if user.role != "admin" and not getattr(request.state, "oidc_admin", False):
+    if not is_instance_admin(request, user):
         raise HTTPException(403, "Admin role required")
     return user
+
+
+def is_instance_admin(request: Request, user: User) -> bool:
+    """`require_admin`'s test as a plain predicate, for an endpoint that
+    stays open to other callers but grants the instance admin something more
+    (`api/packs.py::install_archive`'s methods packs)."""
+    return user.role == "admin" or bool(getattr(request.state, "oidc_admin", False))
 
 
 async def require_approver(user: User = Depends(current_user)) -> User:
