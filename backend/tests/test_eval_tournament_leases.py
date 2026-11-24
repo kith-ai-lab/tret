@@ -8,6 +8,7 @@ import contextlib
 import uuid
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select, update
 
 from tests.test_batches_core import world  # noqa: F401 - fixture
@@ -24,7 +25,17 @@ from tests.test_eval_tournament import (  # noqa: F401 - fixtures and helpers
 from tests.test_eval_tournament_hardening import start_only
 from tests.test_route_jury import no_router_call  # noqa: F401 - autouse fixture
 from tret.db.models import EvalMatch, EvalMatchRun, EvalTournament, RoutingFreeze, Run
+from tret.engine import direct
+from tret.engine.extensions import get_extension_registry
 from tret.evaluation import tournament as tn
+
+
+# The interruption tests cancel the runner once both matches in flight (`eval_tournament_concurrency`
+# is 2) are parked in their calls. A cancel that lands while a match is in the middle of a query can
+# leave the sqlite test database's connection inside its transaction (the aiosqlite adapter's own
+# rollback is cut short too), and that lock refuses the writes under test. Postgres rolls a cancelled
+# connection back; this is the test database, not the runner.
+IN_FLIGHT = 2
 
 
 def ledger(env, tid):
@@ -40,7 +51,8 @@ def test_cancelling_a_running_runner_task_pauses_the_tournament_and_resume_finis
         started = asyncio.Event()
 
         async def block(n):
-            started.set()
+            if n == IN_FLIGHT:
+                started.set()
             await asyncio.sleep(30)
 
         env.juror.on_call = block
@@ -59,6 +71,143 @@ def test_cancelling_a_running_runner_task_pauses_the_tournament_and_resume_finis
     t, matches, ratings = fetch(env.world, lambda db: everything(db, tid))
     assert t.status == "completed" and all(m.status == "done" for m in matches) and len(ratings) == 14
     assert len(ledger(env, tid)) == len(set(r.run_id for r in ledger(env, tid)))
+
+
+def test_a_pause_that_fails_on_interruption_still_propagates_the_cancellation(env, monkeypatch):
+    """The write that pauses an interrupted tournament fails (the database is locked or down): the
+    runner still ends cancelled. The tournament is not marked failed (its freeze kept); it stays
+    running without a lease, and the restart sweep pauses it for a resume."""
+    corpus(env.world)
+    tid, owner = start_only(env)
+    pause = tn._Runner._pause
+
+    async def failing_pause(self, reason):
+        if reason == "interrupted":
+            raise RuntimeError("database is locked")
+        return await pause(self, reason)
+
+    monkeypatch.setattr(tn._Runner, "_pause", failing_pause)
+
+    async def go():
+        started = asyncio.Event()
+
+        async def block(n):
+            if n == IN_FLIGHT:
+                started.set()
+            await asyncio.sleep(30)
+
+        env.juror.on_call = block
+        task = asyncio.create_task(tn.run_tournament(tid, owner))
+        await asyncio.wait_for(started.wait(), 20)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    t, _, _ = fetch(env.world, lambda db: everything(db, tid))
+    assert t.status == "running" and t.lease_owner is None and t.lease_until is None
+    assert asyncio.run(tn.recover_running(env.world.factory)) == 1
+    t, _, _ = fetch(env.world, lambda db: everything(db, tid))
+    assert (t.status, t.pause_reason) == ("paused", "restart")
+    env.juror.on_call = None
+    monkeypatch.setattr(tn._Runner, "_pause", pause)
+    asyncio.run(_resume_run(env, tid))
+    t, matches, ratings = fetch(env.world, lambda db: everything(db, tid))
+    assert t.status == "completed" and all(m.status == "done" for m in matches) and len(ratings) == 14
+
+
+def test_a_close_out_that_fails_after_a_cancellation_never_replaces_it(env, monkeypatch):
+    """`execute_direct` never raises except for cancellation: when closing out a cancelled run fails,
+    the failure is logged and the cancellation still propagates (raised, the error would reach the
+    caller as the match's own failure)."""
+    corpus(env.world)
+    tid, owner = start_only(env)
+    close = direct._close
+
+    async def failing_close(db, run_id, status, error, workspace_id):
+        if status == "cancelled":
+            raise RuntimeError("database is locked")
+        return await close(db, run_id, status, error, workspace_id)
+
+    monkeypatch.setattr(direct, "_close", failing_close)
+    outcomes: list = []
+    execute = direct.execute_direct
+
+    async def recording_execute(*a, **kw):
+        try:
+            return await execute(*a, **kw)
+        except BaseException as e:
+            outcomes.append(type(e))
+            raise
+
+    monkeypatch.setattr(direct, "execute_direct", recording_execute)
+
+    async def go():
+        started = asyncio.Event()
+
+        async def block(n):
+            if n == IN_FLIGHT:
+                started.set()
+            await asyncio.sleep(30)
+
+        env.juror.on_call = block
+        task = asyncio.create_task(tn.run_tournament(tid, owner))
+        await asyncio.wait_for(started.wait(), 20)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert outcomes and set(outcomes) == {asyncio.CancelledError}
+    t, _, _ = fetch(env.world, lambda db: everything(db, tid))
+    assert (t.status, t.pause_reason) == ("paused", "interrupted")
+
+
+def test_runs_cut_off_before_they_started_are_closed_out_and_a_resume_replays_them_at_once(env, monkeypatch):
+    """Interrupted after a juror run was created but before `execute_direct` started it: the run is
+    cancelled with its post-run hooks (as the restart sweep closes a run that never started), not
+    left `queued`, which a resume in this process would wait out as a call in flight."""
+    corpus(env.world)
+    tid, owner = start_only(env)
+    execute = direct.execute_direct
+    hooked: list = []
+
+    async def hook(db, run, workspace_id):
+        hooked.append((run.id, run.status))
+
+    registry = get_extension_registry()
+    registry.add_post_run_hook(hook)
+    try:
+        async def go():
+            started = asyncio.Event()
+
+            parked: list = []
+
+            async def not_started_yet(run_id, *a, **kw):
+                parked.append(run_id)
+                if len(parked) == IN_FLIGHT:
+                    started.set()
+                await asyncio.sleep(30)
+
+            monkeypatch.setattr(direct, "execute_direct", not_started_yet)
+            task = asyncio.create_task(tn.run_tournament(tid, owner))
+            await asyncio.wait_for(started.wait(), 20)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(go())
+        runs = fetch(env.world, lambda db: db.execute(
+            select(Run).join(EvalMatch, EvalMatch.run_id == Run.id).where(EvalMatch.tournament_id == tid))).scalars().all()
+        assert len(runs) == IN_FLIGHT and {r.status for r in runs} == {"cancelled"}
+        assert all(r.error == tn.INTERRUPTED_RUN_ERROR for r in runs)
+        assert sorted(hooked) == sorted((r.id, "cancelled") for r in runs)  # once each
+    finally:
+        registry._post_run_hooks.remove(hook)
+    monkeypatch.setattr(direct, "execute_direct", execute)
+    asyncio.run(_resume_run(env, tid))
+    t, matches, ratings = fetch(env.world, lambda db: everything(db, tid))
+    assert t.status == "completed" and all(m.status == "done" for m in matches) and len(ratings) == 14
 
 
 # ── F3: transient errors pause, never fail ───────────────────────────────────────────────────

@@ -71,6 +71,7 @@ from tret.db.models import (
     Run,
 )
 from tret.engine import direct
+from tret.engine.extensions import get_extension_registry
 from tret.engine.routed_call import CallServices, check_policy
 from tret.evaluation import jury, pools as pl
 from tret.evaluation.juror import (
@@ -89,6 +90,7 @@ from tret.services.workspace import ensure_jury_harness
 log = logging.getLogger("tret.tournament")
 
 PASS_PREFIX = "tournament:"
+INTERRUPTED_RUN_ERROR = "interrupted: the tournament was stopped before this call started"
 JURY_K = 3
 SWAP_RATE = 0.05
 DOUBLE_RATE = 0.10
@@ -878,8 +880,15 @@ class _Runner:
             await self._go()
         except asyncio.CancelledError:
             # interrupted (Ctrl-C, shutdown, a newer runner replacing this task): leave the
-            # tournament paused, not "running" with nobody playing it; only if the lease is still ours
-            await asyncio.shield(self._pause("interrupted"))
+            # tournament paused, not "running" with nobody playing it; only if the lease is still ours.
+            # If that write fails, the interruption still propagates: raising the error instead
+            # would make `run_tournament` mark the tournament failed and release its freeze. Left
+            # `running`, its lease lapses (it is released below) and the restart sweep or a resume
+            # takes it over.
+            try:
+                await asyncio.shield(self._pause("interrupted"))
+            except Exception:  # noqa: BLE001
+                log.warning("tournament %s could not be paused after its interruption", self.tid, exc_info=True)
             raise
         finally:
             beat.cancel()
@@ -1175,29 +1184,49 @@ class _Runner:
         ta, tb = defang(ta), defang(tb)
         t1, t2 = (ta, tb) if m.shown_a_first else (tb, ta)
         run_id = uuid.uuid4()
-        async with self.factory() as db:  # a short transaction: the session is closed before the call
-            db.add(Run(
-                id=run_id, project_id=self.project_id, harness_id=self.harness_id, task_type=direct.TASK_TYPE,
-                task_input={JUROR_KEY: True, STRUCTURED_CALL_KEY: True, EVAL_TOURNAMENT_KEY: str(self.tid), EVAL_MATCH_KEY: str(m.id)},
-                document_ids=[],
-            ))
-            await db.flush()
-            res = await db.execute(
-                update(EvalMatch)
-                .where(EvalMatch.id == m.id, EvalMatch.claimed_by == self.owner, EvalMatch.status == "running", self._lease_ok())
-                .values(run_id=run_id, mask_count_a=ca, mask_count_b=cb)
+        try:
+            async with self.factory() as db:  # a short transaction: the session is closed before the call
+                db.add(Run(
+                    id=run_id, project_id=self.project_id, harness_id=self.harness_id, task_type=direct.TASK_TYPE,
+                    task_input={JUROR_KEY: True, STRUCTURED_CALL_KEY: True, EVAL_TOURNAMENT_KEY: str(self.tid), EVAL_MATCH_KEY: str(m.id)},
+                    document_ids=[],
+                ))
+                await db.flush()
+                res = await db.execute(
+                    update(EvalMatch)
+                    .where(EvalMatch.id == m.id, EvalMatch.claimed_by == self.owner, EvalMatch.status == "running", self._lease_ok())
+                    .values(run_id=run_id, mask_count_a=ca, mask_count_b=cb)
+                )
+                if res.rowcount != 1:  # replaced meanwhile: spend nothing
+                    await db.rollback()
+                    self.stopped = True
+                    return
+                await db.commit()
+            profile = _Juror(
+                module=self.module, text_1=t1, text_2=t2, freeze=self.sel, freeze_id=self.freeze_id, pass_ref=self.pass_ref,
+                juror_index=m.juror_index, model=m.juror_model,
             )
-            if res.rowcount != 1:  # replaced meanwhile: spend nothing
-                await db.rollback()
-                self.stopped = True
-                return
-            await db.commit()
-        profile = _Juror(
-            module=self.module, text_1=t1, text_2=t2, freeze=self.sel, freeze_id=self.freeze_id, pass_ref=self.pass_ref,
-            juror_index=m.juror_index, model=m.juror_model,
-        )
-        await direct.execute_direct(run_id, profile, self.factory, model_policy=self.policy)
+            await direct.execute_direct(run_id, profile, self.factory, model_policy=self.policy)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._close_unstarted(run_id))
+            raise
         await self._settle(m.id, run_id, profile, None)
+
+    async def _close_unstarted(self, run_id: uuid.UUID) -> None:
+        """A juror run the interruption cut off before `execute_direct` started it (still `queued`;
+        a run it started, it closes out itself) is cancelled, with its post-run hooks, as the restart
+        sweep closes out a run that never started. Left `queued`, a resume in this process would take
+        it for a call in flight and wait out `RUN_STALE_SECONDS` before replaying its match."""
+        try:
+            async with self.factory() as db:
+                run = await db.get(Run, run_id)
+                if run is None or run.status != "queued":
+                    return
+                run.status, run.error, run.finished_at = "cancelled", INTERRUPTED_RUN_ERROR, _now()
+                await db.commit()
+                await get_extension_registry().run_post_run_hooks(db, run, self.workspace_id)
+        except Exception:  # noqa: BLE001 - the restart sweep, or the stale window, still closes it out
+            log.warning("tournament %s could not close out run %s after its interruption", self.tid, run_id, exc_info=True)
 
     async def _settle(self, match_id: uuid.UUID, run_id: uuid.UUID | None, profile: _Juror | None, error: str | None) -> None:
         """Record a match's result in ONE conditional statement (still claimed by this runner, lease

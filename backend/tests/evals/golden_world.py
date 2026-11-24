@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import patch
 
-from sqlalchemy import ARRAY, JSON, TypeDecorator, select
+from sqlalchemy import ARRAY, JSON, TypeDecorator, event, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
@@ -106,6 +106,21 @@ def install_sqlite_type_shims() -> None:
             if isinstance(column.type, ARRAY):
                 column.type = _JsonList()
     _shims_installed = True
+
+
+def use_sqlite_wal(engine) -> None:
+    """Open every connection of a sqlite test engine in WAL mode, where (as on Postgres) a reader
+    never blocks a writer. In sqlite's default rollback journal, a task cancelled in the middle of a
+    read can leave that read's statement open (the aiosqlite adapter closes its cursor only when the
+    read completes), and its lock then refuses every write on the database with "database is
+    locked" until the statement is freed. Tests that cancel a task mid-query (a tournament runner's
+    interruption, a batch time limit) hit that at random."""
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _wal(dbapi_connection, _record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.close()
 
 
 # ── results ───────────────────────────────────────────────────────────────────
