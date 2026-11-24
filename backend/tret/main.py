@@ -27,6 +27,7 @@ from tret.api import (
     documents,
     edition as edition_api,
     emissions_settings as emissions_settings_api,
+    eval_jury as eval_jury_api,
     findings,
     guardrails as guardrails_api,
     harnesses,
@@ -471,6 +472,7 @@ def create_app() -> FastAPI:
     app.include_router(disclosure_reports_api.router)
     app.include_router(peer_taxonomy_api.router)
     app.include_router(report_extractions_api.router)
+    app.include_router(eval_jury_api.router)
     # Reference documentation, read straight out of `docs/` so the methodology the
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)

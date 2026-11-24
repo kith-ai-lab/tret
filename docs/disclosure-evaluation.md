@@ -162,6 +162,67 @@ decided item is hidden unless `include_resolved` / `--all`. A NACE problem is fi
 `PUT /api/company-classifications/manual`, then marked `fixed`. The three NACE kinds are about the company, so each is listed once per company, on its most recent non-failed extraction. Status items have the keys `status:failed` and `status:partial`. Re-extracting a report (a result that replaces the stored one) deletes that extraction's decisions, so the new result gets a fresh review. The GET takes `limit` (default 500, max 5000) and `offset` and returns `total`. `batch_id` is the source collection
 batch or the extraction batch.
 
+## Jury selection and per-pass freeze
+
+Engine 1 judges pairs of report modules with a jury (one juror per match, rotated across model
+families, plus a 10% double-judged sample); Engine 2 makes one sealed call. Both must run on models
+chosen by the router, shown before any spend, and held fixed for the whole measurement pass.
+Switch: `TRET_EVAL_JURY=on` (the HTTP routes are a 404 while off; the CLI preview is not gated).
+
+**Why this is not a pin.** A model is never named: the policy (objective, `allowed`, cost ceiling,
+`open_weights`) constrains, a family is a label (`openai`, `google`, `meta`, ...; `router_llm/families.py`),
+and the router picks. Within one pass the pick is made once, recorded and frozen, so the instrument
+does not change under the measurement; exploration is off inside a pass. The next pass asks the
+router again and may pick differently. That is selection per pass.
+
+**How jurors are ranked.** `ModelRouter.route_jury` takes the models the policy permits (the same
+filters as normal routing: provider keys, `allowed`, cost ceiling and floor, open-weight preference,
+ZDR, context window; a model that cannot hold the prompt is never a best-effort juror), orders them
+with the router's evidence-led ordering (`candidate_sort_key` over the pooled priors, ties by model
+id), drops models in a provider-error cooldown, and takes the best-ranked model of each distinct
+family until k. It makes no model call of any kind, not even the router's own LLM step. Fewer than k
+distinct families is an error that says how many there were and why the rest were excluded; it never
+returns a short jury. `distinct_authors=false` allows several models of one family.
+
+**What is recorded** (the `JurySelection`, stored whole in `routing_freezes.selection`): per pick the
+model, family, rank, the evidence used (tier, runs, quality) and a plain-English `why`, plus the
+next-best models of the same family; the families that were eligible but not seated; the models
+excluded and why; the policy, k, objective, ranking version (`jury-v1`), router version, priors
+version and timestamp. `routed_json_call(..., freeze=selection, juror_index=i)` then calls the frozen
+model with no new routing decision (the decision is marked `frozen` with the freeze id); a retry stays
+on the same model, and if that model is gone the call fails rather than falling back. Runs made by a
+juror or the sealed call carry the `_eval_juror` / `_eval_sealed_call` task-input marker and never
+become `run_outcomes` rows or router evidence.
+
+**Policy still applies to a frozen call.** The frozen model skips routing, not the policy: the call's
+own policy (cost ceiling and floor, `allowed`, open weights, ZDR, provider key) is checked against it,
+and a model outside it fails the call with `frozen_outside_policy`; nothing else is tried. A
+frozen model that has left the catalog or lost its key fails with `unroutable`, likewise without a
+fallback. Local models are seated on a jury only when their context window is known and holds the
+requested `min_context_window` (normal routing exempts local models from that filter). Without a
+prompt size, ranking reads the priors of the size band of `min_context_window`.
+
+**Families** are the publisher's lab (`router_llm/families.py`), so a model derived from another
+lab's (nemotron on Llama, an R1 distill of Llama) counts as the publisher's family. A family
+key for `task_family` priors is scoped to the caller's workspace on the server; the HTTP API takes none.
+
+**Previewing.** No model is called and nothing is stored:
+
+```
+tret eval jury-preview --k 3 --policy-json '{"objective":"balanced","open_weights":"prefer"}' --min-context 60000
+POST /api/eval/jury/preview   {"model_policy": {...}, "k": 3, "min_context_window": 60000, "purpose": "eval_jury"}
+```
+
+Freeze with `POST /api/eval/jury/freezes {"pass_ref": "...", "purpose": "eval_jury" | "sealed_call", ...}`
+(workspace approver). Repeating a `pass_ref` (or a concurrent request for it) returns the stored selection and never re-picks; a
+`k=1` freeze is Engine 2's one model per pass. `GET /api/eval/jury/freezes/{id}` reads one and
+`POST .../release` ends the pass (the record stays; a released `pass_ref` is not reused).
+
+Note: on a self-hosted install with `TRET_LOCAL_PROBE_TOOLS` on and a local model server configured,
+the first preview in a fresh process warms the model catalog, which may probe local models for tool
+support (a call to your own server, no cost). The probe lives inside catalog discovery and is not
+skipped for previews.
+
 ## The 30-report hand check
 
 1. Pick 30 reports across document types and sizes (include several multi-window ones).

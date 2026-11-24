@@ -607,6 +607,35 @@ class ReportModule(Base):
     created_at: Mapped[datetime] = created_at_col()
 
 
+class RoutingFreeze(Base):
+    """A model selection frozen for one measurement pass (`tret/evaluation/jury.py`): the jury of
+    Engine 1 (k models from distinct families) or the one model of Engine 2's sealed call (k=1).
+    Picked once by the router at the start of the pass, recorded with the reason for every pick,
+    and reused for every call of the pass; between passes the router picks freely again, so this
+    is selection per pass, not a pin. `selection` is the full JurySelection. Workspace-scoped;
+    `pass_ref` is unique per (workspace, purpose)."""
+
+    __tablename__ = "routing_freezes"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "purpose", "pass_ref"),
+        Index("ix_routing_freezes_ws", "workspace_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    pass_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    model_policy: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    k: Mapped[int] = mapped_column(Integer, nullable=False)
+    selection: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(Text, default="active", nullable=False)  # active | released
+    created_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+    released_at: Mapped[datetime | None] = mapped_column()
+
+
 class ExtractionReview(Base):
     """A reviewer's decision on one computed review item of an extraction
     (`tret/evaluation/review.py`): `accepted` (looked at, fine as it is), `dismissed` (not worth

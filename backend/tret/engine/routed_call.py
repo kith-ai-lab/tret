@@ -13,6 +13,12 @@ first answer). A context overflow, a provider refusal or any other 4xx fails at 
 booked. Later stages (the jury, the sealed call) reuse this helper; `tret/engine/direct.py` turns
 the usage into `Run` cost, energy and billing.
 
+With `freeze` (a `JurySelection`, see `tret/evaluation/jury.py`) the call does not route: it
+uses the frozen model (`juror_index`, or `model` which must be in the freeze), because inside one
+measurement pass the instrument must not change. Everything else is the same (usage, one retry on
+the SAME model); if the frozen model is unavailable (`unroutable`) or outside this call's own
+policy (`frozen_outside_policy`) the call fails, never with another model. The decision is marked `frozen`.
+
 Tests replace `get_call_services` (or pass `services=`) with fakes; nothing here touches the network
 itself.
 """
@@ -48,6 +54,8 @@ KIND_INVALID = "invalid_json"
 KIND_PROVIDER = "provider"
 KIND_UNROUTABLE = "unroutable"
 KIND_PINNED = "pinned_policy"
+KIND_NOT_FROZEN = "not_in_freeze"
+KIND_OUTSIDE_POLICY = "frozen_outside_policy"
 
 
 class RoutedCallError(Exception):
@@ -116,6 +124,71 @@ def check_policy(model_policy: dict | None) -> dict:
     return policy
 
 
+def _frozen_decision(
+    freeze: Any, freeze_id, pass_ref, juror_index: int, model: str | None, policy: dict, svc: CallServices,
+    needed: int, purpose: str,
+) -> Any:
+    """The decision record of a call that uses a frozen selection: no routing happened, the pick
+    and its reason were recorded when the pass started. The frozen model must still satisfy THIS
+    call's policy (cost ceiling and floor, allowed list, open weights, ZDR, provider key); a model
+    outside it fails with `frozen_outside_policy` and nothing else is tried."""
+    from tret.router_llm.objectives import default_effort, objective_of
+    from tret.router_llm.router import (
+        ROUTING_PROMPT_VERSION, RoutingDecision, _fits_window, _max_cost_tier, _open_weights_policy,
+    )
+
+    picks = list(getattr(freeze, "picks", []) or [])
+    if model is not None:
+        idx = next((i for i, p in enumerate(picks) if p.model == model), None)
+        if idx is None:
+            raise RoutedCallError(KIND_NOT_FROZEN, f"model {model} is not in this pass's frozen selection ({', '.join(p.model for p in picks)})")
+    else:
+        idx = int(juror_index)
+        if not 0 <= idx < len(picks):
+            raise RoutedCallError(KIND_NOT_FROZEN, f"juror index {idx} is outside the frozen selection of {len(picks)}")
+    pick = picks[idx]
+    info = svc.catalog.get(pick.model)
+    if info is None:
+        raise RoutedCallError(
+            KIND_UNROUTABLE,
+            f"{purpose}: the frozen model {pick.model} is no longer in the catalog; no other model is substituted inside a pass",
+        )
+    reason = svc.router.frozen_exclusion(info, policy)
+    if reason is not None:
+        raise RoutedCallError(
+            KIND_OUTSIDE_POLICY,
+            f"{purpose}: the frozen model {pick.model} is outside this call's policy ({reason}); "
+            "no other model is substituted inside a pass",
+        )
+    objective = objective_of(policy)
+    fits = _fits_window(info, needed)
+    return RoutingDecision(
+        router_model=None,
+        routing_prompt_version=ROUTING_PROMPT_VERSION,
+        candidates=[p.model for p in picks],
+        chosen_model=pick.model,
+        reasoning=f"Frozen for this pass (juror {idx}): {pick.why} No routing call was made.",
+        objective=objective,
+        task_shape="extraction",
+        max_cost_tier=_max_cost_tier(policy),
+        open_weights=_open_weights_policy(policy),
+        context_fit={
+            "required": needed, "mode": "fit" if fits else "best_effort",
+            "excluded": [] if fits else [pick.model], "exempt": [pick.model] if info.cost_tier == "local" else [],
+        },
+        effort=default_effort(objective, "extraction", info.cost_tier),
+        frozen={
+            "freeze_id": str(freeze_id) if freeze_id else None,
+            "pass_ref": pass_ref,
+            "index": idx,
+            "family": pick.family,
+            "rank": pick.rank,
+            "why": pick.why,
+            "ranking_version": getattr(freeze, "ranking_version", None),
+        },
+    )
+
+
 def _estimated_usage(est_input_tokens: int) -> Usage:
     """What a call that died after being sent is booked at: the prompt's estimated tokens in, no
     output known."""
@@ -178,6 +251,11 @@ async def routed_json_call(
     project_id: uuid.UUID | None = None,
     task_description: str | None = None,
     record: dict | None = None,
+    freeze: Any = None,
+    freeze_id: uuid.UUID | str | None = None,
+    pass_ref: str | None = None,
+    juror_index: int = 0,
+    model: str | None = None,
 ) -> RoutedJsonResult:
     """Route, call, validate; see the module docstring. `est_input_tokens` is the whole prompt
     (system plus user); the router is asked for a window of at least `est_input_tokens +
@@ -189,6 +267,8 @@ async def routed_json_call(
     from tret.router_llm.router import RoutingUnavailable
 
     policy = check_policy(model_policy)
+    if freeze is None and model is not None:
+        raise RoutedCallError(KIND_NOT_FROZEN, "model= selects a juror of a freeze: pass freeze= too (a model is never named otherwise)")
     svc = services or await get_call_services(db, workspace_id)
     needed = int(est_input_tokens) + int(max_output_tokens)
     kwargs: dict[str, Any] = {}
@@ -200,21 +280,30 @@ async def routed_json_call(
         )
     if task_family:
         kwargs["task_family"] = task_family
-    try:
-        decision = await svc.router.route(
-            model_policy=policy,
-            task_type=TASK_TYPE,
-            task_shape="extraction",
-            task_description=task_description or purpose,
-            output_contract="JSON object matching the supplied schema",
-            n_documents=1,
-            est_input_tokens=int(est_input_tokens),
-            min_context_window=needed,
-            **kwargs,
-        )
-    except RoutingUnavailable as e:
-        raise RoutedCallError(KIND_UNROUTABLE, str(e)) from e
+    if freeze is not None:
+        decision = _frozen_decision(freeze, freeze_id, pass_ref, juror_index, model, policy, svc, needed, purpose)
+    else:
+        try:
+            decision = await svc.router.route(
+                model_policy=policy,
+                task_type=TASK_TYPE,
+                task_shape="extraction",
+                task_description=task_description or purpose,
+                output_contract="JSON object matching the supplied schema",
+                n_documents=1,
+                est_input_tokens=int(est_input_tokens),
+                min_context_window=needed,
+                **kwargs,
+            )
+        except RoutingUnavailable as e:
+            raise RoutedCallError(KIND_UNROUTABLE, str(e)) from e
     model = svc.catalog.get(decision.chosen_model)
+    if model is None:
+        raise RoutedCallError(
+            KIND_UNROUTABLE,
+            f"{purpose}: the chosen model {decision.chosen_model} is not in the catalog",
+            decision=decision,
+        )
     window = getattr(model, "context_window", None)
     out_tokens = _effective_output(max_output_tokens, model)
     if isinstance(window, int) and window > 0 and int(est_input_tokens) + out_tokens > window:
@@ -224,7 +313,15 @@ async def routed_json_call(
             f"(window {window}, output {out_tokens}); no model that fits was available under the policy",
             decision=decision,
         )
-    provider = svc.registry.get(model.provider)
+    try:
+        provider = svc.registry.get(model.provider)
+    except Exception as e:  # noqa: BLE001 - a missing key for the frozen model
+        if freeze is None:
+            raise
+        raise RoutedCallError(
+            KIND_UNROUTABLE, f"{purpose}: the frozen model {model.id} is unavailable ({e}); no other model is substituted",
+            decision=decision,
+        ) from e
 
     calls: list[CallRecord] = []
     if record is not None:

@@ -22,7 +22,10 @@ from datetime import datetime, timezone
 from tret.batches.rubrics import (
     EVALUATION_ID_KEY,
     PAIRWISE_ID_KEY,
+    JUROR_KEY,
     PAIRWISE_ORDER_KEY,
+    SEALED_CALL_KEY,
+    STRUCTURED_CALL_KEY,
     compute_quality,
     criterion_applies,
 )
@@ -45,6 +48,11 @@ ENGINE_STAMPED_KEYS = (
     PAIRWISE_ORDER_KEY,
     COLLECTION_ID_KEY,
     COLLECTION_TARGET_KEY,
+    # Run-kind markers that keep a run out of the router's evidence; a caller must not be able to
+    # hide a run from the priors by sending them.
+    JUROR_KEY,
+    SEALED_CALL_KEY,
+    STRUCTURED_CALL_KEY,
     # Never stamped any more (the family is derived from the batch, see
     # `services.outcomes.task_family_for_run`); stripped so a caller cannot even try.
     "_task_family",

@@ -57,6 +57,7 @@ from tret.router_llm.objectives import (
     within_cost_tier,
 )
 from tret.router_llm import scoring
+from tret.router_llm.jury_select import JURY_RANKING_VERSION, JuryPick, JurySelection
 from tret.router_llm.outcomes import size_band
 from tret.router_llm.priors_base import (
     MIN_EFFECTIVE_SAMPLES,
@@ -226,6 +227,7 @@ def _reserve_new_model_slots(
     *,
     seat_pool: list[ModelInfo] | None = None,
     open_weights: str | None = "any",
+    limit: int = CANDIDATE_LIMIT,
 ) -> list[ModelInfo]:
     """Reserve up to `settings.router_new_model_slots` of the candidate list's
     slots for recently-released uncurated models, so one becomes reachable
@@ -313,13 +315,13 @@ def _reserve_new_model_slots(
     # A reserved model already inside the natural top CANDIDATE_LIMIT needs no
     # help reaching the router — it keeps its position, and only spends its
     # slot in the reservation count, not in the "must be moved" list below.
-    natural_top_ids = {m.id for m in candidates[:CANDIDATE_LIMIT]}
+    natural_top_ids = {m.id for m in candidates[:limit]}
     to_pull_in = [m for m in reserved if m.id not in natural_top_ids]
     if not to_pull_in:
         return candidates
     pull_ids = {m.id for m in to_pull_in}
     base = [m for m in candidates if m.id not in pull_ids]
-    return base[: CANDIDATE_LIMIT - len(to_pull_in)] + to_pull_in
+    return base[: limit - len(to_pull_in)] + to_pull_in
 
 
 def _fits_window(m: ModelInfo, min_context_window: int) -> bool:
@@ -662,9 +664,15 @@ class RoutingDecision:
     # MADE this decision (`TRET_ROUTER_AGENT_SCORING=live` and the policy's
     # `adaptive.ranking: scored`). None, and left OUT of `to_json`, otherwise.
     scored: dict | None = None
+    # Present instead of a routing choice when the model came from a per-pass freeze
+    # (`tret/evaluation/jury.py`): `{"freeze_id", "pass_ref", "index", "family", "rank", "why"}`.
+    # None, and left OUT of `to_json`, on every other path.
+    frozen: dict | None = None
 
     def to_json(self) -> dict:
         data = asdict(self)
+        if self.frozen is None:
+            data.pop("frozen", None)
         if self.shadow is None:
             data.pop("shadow", None)
         if self.scored is None:
@@ -682,6 +690,11 @@ class RoutingUnavailable(Exception):
     when a harness cost ceiling excludes everything that is available. A capped
     harness that cannot run fails loudly rather than escalating past its cap.
     """
+
+
+class JuryUnavailable(RoutingUnavailable):
+    """`route_jury` could not seat k jurors (too few distinct families under the policy). The
+    message says how many there were and why the others were excluded; never a short jury."""
 
 
 class ModelRouter:
@@ -825,9 +838,13 @@ class ModelRouter:
         model_policy: dict,
         priors: dict[str, ModelPrior] | None = None,
         min_context_window: int | None = None,
+        *,
+        limit: int = CANDIDATE_LIMIT,
+        deterministic: bool = False,
     ) -> tuple[list[ModelInfo], dict]:
         """`_candidates()` plus the `context_fit` record the caller needs to
-        persist on the `RoutingDecision`. Split out because `_candidates()` is
+        persist on the `RoutingDecision`. `limit` caps the list (the jury asks for all of it) and
+        `deterministic` breaks ties by model id instead of catalog order. Split out because `_candidates()` is
         also called from `candidates_for()` (the supervisor's mid-run candidate
         list), which has no `min_context_window` of its own and no decision to
         record it on.
@@ -845,6 +862,8 @@ class ModelRouter:
                 is None
             ):
                 filtered.append(m)
+        if deterministic:
+            filtered.sort(key=lambda m: m.id)
         # Uncurated cloud models (hundreds, once the live catalog loads) enter the
         # general pool only with a non-poor record (or when the operator named
         # them in `allowed`); otherwise they can only arrive through the
@@ -884,16 +903,16 @@ class ModelRouter:
             # Nothing in the general pool fits. Best effort applies only if the
             # seats cannot offer a model that does.
             seated = _reserve_new_model_slots(
-                [], priors, objective, seat_pool=seat_pool, open_weights=open_weights
+                [], priors, objective, seat_pool=seat_pool, open_weights=open_weights, limit=limit
             )
             if seated:
                 context_fit = {**context_fit, "mode": "fit"}
-                return seated[:CANDIDATE_LIMIT], context_fit
-            return out[:CANDIDATE_LIMIT], context_fit
+                return seated[:limit], context_fit
+            return out[:limit], context_fit
         out = _reserve_new_model_slots(
-            out, priors, objective, seat_pool=seat_pool, open_weights=open_weights
+            out, priors, objective, seat_pool=seat_pool, open_weights=open_weights, limit=limit
         )
-        return out[:CANDIDATE_LIMIT], context_fit
+        return out[:limit], context_fit
 
     async def candidates_for(
         self,
@@ -994,6 +1013,213 @@ class ModelRouter:
         if not options:
             return None
         return min(options, key=lambda m: (m.prices_at()[1], m.id))
+
+    def frozen_exclusion(self, m: ModelInfo, model_policy: dict) -> str | None:
+        """Why a call's own policy refuses `m` (the filter normal routing applies), or None.
+        Used for a frozen model, which skips routing but not the policy."""
+        return self._exclusion_reason(
+            m, model_policy.get("allowed") or None, _max_cost_tier(model_policy),
+            _min_cost_tier(model_policy), _open_weights_policy(model_policy), _zdr_required(),
+        )
+
+    async def route_jury(
+        self,
+        model_policy: dict | None,
+        k: int,
+        *,
+        distinct_authors: bool = True,
+        min_context_window: int = 0,
+        purpose: str = "eval_jury",
+        task_shape: str = "extraction",
+        task_family: str | None = None,
+        est_input_tokens: int = 0,
+    ) -> JurySelection:
+        """Pick k jurors for one measurement pass, with no model call of any kind.
+
+        Uses the router's own policy filters and ordering (`_candidates_with_fit`: allowed list,
+        provider keys, cost ceiling and floor, open-weight preference, ZDR, context fit, the
+        evidence-led objective order from the pooled priors) then the circuit breaker's cooldown,
+        which here drops a model outright. Exploration is never used and the router's LLM step
+        (`_route`) is never reached, so previewing a jury costs nothing. Ties break by model id.
+        With `distinct_authors` the top-ranked model of each distinct family is taken until k;
+        otherwise the top k. Fewer than k eligible seats raises `JuryUnavailable`. A pinned policy
+        is refused (`RoutedCallError`, kind `pinned_policy`).
+        """
+        from tret.engine.routed_call import check_policy
+        from tret.router_llm.families import family_of
+
+        policy = check_policy(model_policy)
+        if not 1 <= int(k) <= 20:
+            raise ValueError("k must be between 1 and 20")
+        await self._catalog.warm_once()
+        objective = objective_of(policy)
+        open_weights = _open_weights_policy(policy)
+        priors: dict[str, ModelPrior] = {}
+        if adaptive_of(policy).learn_from_outcomes:
+            # The prompt size is unknown to a preview: the window the jurors must hold stands in for it.
+            key = dict(
+                task_shape=task_shape, objective=objective,
+                size_band=size_band(est_input_tokens or int(min_context_window or 0)),
+            )
+            family_fn = getattr(self._priors, "for_key_family", None) if task_family else None
+            if family_fn is not None:
+                priors, _ = await family_fn(task_family=task_family, **key)
+            else:
+                priors = await self._priors.for_key(**key)
+        candidates, context_fit = self._candidates_with_fit(
+            policy, priors, min_context_window or None, limit=10**6, deterministic=True
+        )
+        excluded_models: list[dict] = []
+        if context_fit.get("mode") == "best_effort":
+            # No eligible model holds the prompt: a juror that cannot read it is no juror.
+            excluded_models = [
+                {"model": m.id, "reason": f"context window below the {min_context_window} tokens needed"}
+                for m in candidates
+            ]
+            candidates = []
+        elif context_fit.get("excluded"):
+            excluded_models += [
+                {"model": mid, "reason": f"context window below the {min_context_window} tokens needed"}
+                for mid in context_fit["excluded"]
+            ]
+        if candidates and min_context_window:
+            # Normal routing exempts local models from the window filter (a local model is often
+            # chosen for confidentiality and compaction absorbs the overflow). A juror judges a
+            # fixed prompt, so a local model must be KNOWN to hold it.
+            small = [m for m in candidates if m.cost_tier == "local" and not (m.context_window and m.context_window >= min_context_window)]
+            if small:
+                excluded_models += [
+                    {
+                        "model": m.id,
+                        "reason": (
+                            f"local model with a context window of {m.context_window} below the {min_context_window} tokens needed"
+                            if m.context_window else
+                            f"local model with an unknown context window (the jury needs {min_context_window} tokens)"
+                        ),
+                    }
+                    for m in small
+                ]
+                gone = {m.id for m in small}
+                candidates = [m for m in candidates if m.id not in gone]
+        if candidates and get_settings().router_cooldown_minutes > 0:
+            cooling = {c["model"]: c for c in await self._cooldown_for([m.id for m in candidates])}
+            if cooling:
+                excluded_models += [
+                    {"model": mid, "reason": f"cooling down after repeated provider errors ({c.get('reason') or 'errors'})"}
+                    for mid, c in sorted(cooling.items())
+                ]
+                candidates = [m for m in candidates if m.id not in cooling]
+
+        by_family: dict[str, list[tuple[int, ModelInfo]]] = {}
+        for rank, m in enumerate(candidates, start=1):
+            by_family.setdefault(family_of(m), []).append((rank, m))
+        picks: list[JuryPick] = []
+        if distinct_authors:
+            # Families in the order of their best-ranked model.
+            order = sorted(by_family.items(), key=lambda kv: kv[1][0][0])
+            chosen = order[:k]
+            for fam, members in chosen:
+                rank, m = members[0]
+                picks.append(self._jury_pick(m, fam, rank, len(candidates), objective, open_weights, priors, members[1:], True))
+            skipped = [
+                {
+                    "family": fam,
+                    "best_model": members[0][1].id,
+                    "best_rank": members[0][0],
+                    "reason": f"not needed: the jury of {k} was full from higher-ranked families",
+                }
+                for fam, members in order[k:]
+            ]
+        else:
+            ranked = [(rank, m) for rank, m in enumerate(candidates, start=1)][:k]
+            for rank, m in ranked:
+                fam = family_of(m)
+                rest = [x for x in by_family[fam] if x[0] != rank]
+                picks.append(self._jury_pick(m, fam, rank, len(candidates), objective, open_weights, priors, rest, False))
+            skipped = []
+        if len(picks) < k:
+            n_fam = len(by_family)
+            if distinct_authors:
+                head = f"Only {n_fam} distinct model famil{'y' if n_fam == 1 else 'ies'} eligible under this policy, {k} needed"
+            else:
+                head = f"Only {len(candidates)} eligible model{'' if len(candidates) == 1 else 's'} under this policy, {k} needed"
+            if by_family:
+                head += " (" + ", ".join(f"{f}: {len(v)}" for f, v in sorted(by_family.items())) + ")"
+            raise JuryUnavailable(
+                head + ". Excluded: " + self._no_candidates_detail(policy)
+                + (
+                    " " + "; ".join(f"{e['model']}: {e['reason']}" for e in excluded_models[:10]) + "."
+                    if excluded_models else ""
+                )
+                + " Widen the policy (cost ceiling, allowed list, open_weights) or lower k."
+            )
+        return JurySelection(
+            purpose=purpose,
+            k=int(k),
+            distinct_authors=distinct_authors,
+            policy=policy,
+            objective=objective,
+            open_weights=open_weights,
+            min_context_window=int(min_context_window or 0),
+            task_shape=task_shape,
+            task_family=task_family,
+            ranking_version=JURY_RANKING_VERSION,
+            router_version=ROUTING_PROMPT_VERSION,
+            priors_version=PRIORS_VERSION,
+            exploration="off",
+            llm_call=False,
+            eligible=len(candidates),
+            families_eligible=len(by_family),
+            picks=picks,
+            skipped_families=skipped,
+            excluded_models=excluded_models,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    @staticmethod
+    def _jury_pick(
+        m: ModelInfo,
+        family: str,
+        rank: int,
+        eligible: int,
+        objective: str,
+        open_weights: str,
+        priors: dict[str, ModelPrior],
+        rest: list[tuple[int, ModelInfo]],
+        distinct: bool,
+    ) -> JuryPick:
+        prior = priors.get(m.id)
+        tier = evidence_tier(prior)
+        if prior is None:
+            evidence = {"tier": tier, "runs": 0}
+            ev_text = "no recorded runs on this task shape, so it is ordered by the objective alone"
+        else:
+            evidence = {
+                "tier": tier, "runs": prior.runs, "quality_mean": round(prior.quality_mean, 3),
+                "quality_ci_low": round(prior.quality_ci_low, 3), "failure_rate": round(prior.failure_rate, 3),
+            }
+            ev_text = (
+                f"evidence tier {tier} from {prior.runs} recorded run(s) "
+                f"(quality {prior.quality_mean:.2f}, lower bound {prior.quality_ci_low:.2f})"
+            )
+        out_price = float(m.prices_at()[1])
+        bits = [
+            f"Ranked {rank} of {eligible} eligible models under the '{objective}' objective",
+            ("the best-ranked model of the '" + family + "' family" if distinct else f"a '{family}' model"),
+            ev_text,
+            "open weights" if m.open_weights is True else "closed weights",
+            f"{m.cost_tier} tier, ${out_price:.2f} per million output tokens",
+        ]
+        if favours_open_weights(open_weights):
+            bits.append("the policy prefers open weights" if open_weights == "prefer" else "the policy requires open weights")
+        return JuryPick(
+            model=m.id,
+            family=family,
+            rank=rank,
+            evidence=evidence,
+            why="; ".join(bits) + ".",
+            alternatives=[{"model": a.id, "rank": r} for r, a in rest[:3]],
+        )
 
     def _untried_exploration_candidates(
         self,

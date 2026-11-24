@@ -2464,6 +2464,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/eval/jury/freezes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Freeze */
+        post: operations["create_freeze_api_eval_jury_freezes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/jury/freezes/{freeze_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Freeze */
+        get: operations["read_freeze_api_eval_jury_freezes__freeze_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/jury/freezes/{freeze_id}/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Release */
+        post: operations["release_api_eval_jury_freezes__freeze_id__release_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/jury/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview */
+        post: operations["preview_api_eval_jury_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/findings": {
         parameters: {
             query?: never;
@@ -4430,6 +4498,38 @@ export interface components {
             /** Item Id */
             item_id: string;
         };
+        /** FreezeIn */
+        FreezeIn: {
+            /**
+             * Distinct Authors
+             * @default true
+             */
+            distinct_authors: boolean;
+            /**
+             * K
+             * @default 3
+             */
+            k: number;
+            /**
+             * Min Context Window
+             * @default 0
+             */
+            min_context_window: number;
+            /**
+             * Model Policy
+             * @description An auto policy (objective, allowed, open_weights, max_cost_tier); never a pin
+             */
+            model_policy?: {
+                [key: string]: unknown;
+            } | null;
+            /** Pass Ref */
+            pass_ref: string;
+            /**
+             * Purpose
+             * @default eval_jury
+             */
+            purpose: string;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -4537,6 +4637,36 @@ export interface components {
             role: string;
             /** Status */
             status: string;
+        };
+        /** JuryIn */
+        JuryIn: {
+            /**
+             * Distinct Authors
+             * @default true
+             */
+            distinct_authors: boolean;
+            /**
+             * K
+             * @default 3
+             */
+            k: number;
+            /**
+             * Min Context Window
+             * @default 0
+             */
+            min_context_window: number;
+            /**
+             * Model Policy
+             * @description An auto policy (objective, allowed, open_weights, max_cost_tier); never a pin
+             */
+            model_policy?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Purpose
+             * @default eval_jury
+             */
+            purpose: string;
         };
         /** LessonReviewBody */
         LessonReviewBody: {
@@ -9020,6 +9150,134 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_freeze_api_eval_jury_freezes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FreezeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_freeze_api_eval_jury_freezes__freeze_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                freeze_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    release_api_eval_jury_freezes__freeze_id__release_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                freeze_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_api_eval_jury_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JuryIn"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
