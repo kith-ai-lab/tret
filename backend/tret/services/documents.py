@@ -16,12 +16,14 @@ import logging
 import os
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
 import uuid
+import zlib
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from tret.db.models import Document
 
@@ -96,24 +98,95 @@ def pdf_budget(seconds: float) -> Iterator[None]:
 # `python-pptx`'s `Presentation()` parses the whole package eagerly into
 # memory before extraction ever gets to bound anything — so a pptx gets a
 # lower allowance instead of trusting the same 200MB ceiling to be safe for
-# a parser that cannot stream.
+# a parser that cannot stream. `_extract_docx` shares that lower allowance for
+# the same reason: `python-docx`'s `Document()` is just as eager.
 MAX_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 MAX_PPTX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 
 
-def _refuse_zip_bombs(filename: str, data: bytes, max_uncompressed_bytes: int | None = None) -> None:
+def _refuse_zip_bombs(
+    filename: str,
+    data: bytes,
+    max_uncompressed_bytes: int | None = None,
+    *,
+    verify_members: bool = True,
+) -> None:
+    """Refuse a zip whose members expand past `max_uncompressed_bytes`.
+
+    The declared sizes in the central directory are summed first (cheap, no
+    inflation). That alone is not enough for a file a library will parse:
+    `file_size` is the writer's claim, and `zipfile.ZipFile.read()` (what
+    python-docx, python-pptx and openpyxl call) inflates a whole deflate
+    member before trimming it to that claim, so a ~1 MB member that declares
+    4 KB can still expand to gigabytes in memory. With `verify_members`, every
+    member is also inflated here in bounded chunks and refused the moment it
+    produces more than it declared, so the parser that runs next can only
+    ever see the declared, already-capped sizes.
+
+    `verify_members=False` is for callers that never hand a member to an
+    unbounded reader (the zip listing reads only the central directory, and
+    `read_zip_member` reads one member with a bounded `read(n)`).
+    """
     import zipfile
 
     if max_uncompressed_bytes is None:
         max_uncompressed_bytes = MAX_ZIP_UNCOMPRESSED_BYTES
 
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        total = sum(info.file_size for info in zf.infolist())
+        infos = zf.infolist()
+    total = sum(info.file_size for info in infos)
     if total > max_uncompressed_bytes:
         raise ValueError(
             f"{filename}: archive expands to {total} bytes, over the "
             f"{max_uncompressed_bytes} byte limit"
         )
+    if verify_members:
+        for info in infos:
+            _refuse_member_past_declared_size(filename, data, info)
+
+
+_ZIP_LOCAL_HEADER = struct.Struct("<4s2B4HL2L2H")  # zipfile's structFileHeader (30 bytes)
+_ZIP_INFLATE_CHUNK = 1024 * 1024
+
+
+def _refuse_member_past_declared_size(filename: str, data: bytes, info: Any) -> None:
+    """Inflate one member in `_ZIP_INFLATE_CHUNK` steps, never holding more
+    than one chunk, and raise ValueError if it produces more than its
+    declared `file_size`. Reads the same compressed bytes `zipfile` would
+    (local header at `header_offset`, then `compress_size` bytes)."""
+    import zipfile
+
+    if info.flag_bits & 0x1:
+        raise ValueError(f"{filename}: member {info.filename!r} is encrypted")
+    if info.compress_type == zipfile.ZIP_STORED:
+        return  # stored bytes are not inflated: zipfile reads at most compress_size of them
+    if info.compress_type != zipfile.ZIP_DEFLATED:
+        # bzip2/lzma members inflate through the same unbounded read; Office
+        # files never use them, so refusing costs nothing legitimate.
+        raise ValueError(f"{filename}: member {info.filename!r} uses an unsupported compression method")
+    start = info.header_offset
+    header = data[start : start + _ZIP_LOCAL_HEADER.size]
+    if len(header) != _ZIP_LOCAL_HEADER.size or header[:4] != b"PK\x03\x04":
+        raise ValueError(f"{filename}: member {info.filename!r} has a corrupt local header")
+    fields = _ZIP_LOCAL_HEADER.unpack(header)
+    body = start + _ZIP_LOCAL_HEADER.size + fields[10] + fields[11]  # + name and extra lengths
+    pending = memoryview(data)[body : body + info.compress_size]
+    inflater = zlib.decompressobj(-zlib.MAX_WBITS)
+    produced = 0
+    try:
+        while not inflater.eof:
+            out = inflater.decompress(pending, _ZIP_INFLATE_CHUNK)
+            produced += len(out)
+            if produced > info.file_size:
+                raise ValueError(
+                    f"{filename}: member {info.filename!r} expands past its declared "
+                    f"{info.file_size} bytes"
+                )
+            pending = inflater.unconsumed_tail
+            if not out and not pending:
+                break  # truncated stream: the parser reports that itself
+    except zlib.error as e:
+        raise ValueError(f"{filename}: member {info.filename!r} is corrupt ({e})") from None
 
 
 # Text-like formats read as plain text. `.html`/`.htm` are reduced to visible text
@@ -165,7 +238,7 @@ def zip_member_infos(data: bytes) -> list[dict]:
     At most MAX_ZIP_MEMBERS_LISTED entries (the caller notes the cut)."""
     import zipfile
 
-    _refuse_zip_bombs("archive", data)
+    _refuse_zip_bombs("archive", data, verify_members=False)
     out: list[dict] = []
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for info in zf.infolist():
@@ -226,7 +299,7 @@ def read_zip_member(archive_name: str, data: bytes, member: str) -> tuple[str, d
     missing, encrypted, nested, too large or an unsupported type."""
     import zipfile
 
-    _refuse_zip_bombs(archive_name, data)
+    _refuse_zip_bombs(archive_name, data, verify_members=False)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         try:
             info = zf.getinfo(member)
@@ -295,7 +368,7 @@ def extract_text(filename: str, data: bytes, *, budget_seconds: float | None = N
     if lower.endswith(".pdf"):
         return _extract_pdf(data, budget_seconds)
     if lower.endswith(".docx"):
-        return _extract_docx(data)
+        return _extract_docx(filename, data)
     if lower.endswith(".xlsx"):
         return _extract_xlsx(filename, data)
     if lower.endswith(".pptx"):
@@ -437,7 +510,7 @@ def _docx_heading_level(style_name: str) -> int:
     return min(6, int(m.group(1))) if m else 0
 
 
-def _extract_docx(data: bytes) -> tuple[str, dict]:
+def _extract_docx(filename: str, data: bytes) -> tuple[str, dict]:
     """Paragraphs and tables, in document order, with headings and tables
     marked inline (`# heading text` / `## Table N`) rather than dumped as flat
     text and every table appended after every paragraph the way python-docx's
@@ -463,6 +536,10 @@ def _extract_docx(data: bytes) -> tuple[str, dict]:
     from docx.table import Table
     from docx.text.paragraph import Paragraph
 
+    # Summed from the central directory before python-docx inflates anything;
+    # without it one small upload can expand to gigabytes in the shared
+    # process (the extraction timeout abandons the thread but cannot stop it).
+    _refuse_zip_bombs(filename, data, MAX_PPTX_UNCOMPRESSED_BYTES)
     document = docx.Document(io.BytesIO(data))
     blocks: list[str] = []
     table_count = 0
@@ -505,8 +582,13 @@ def _extract_xlsx(filename: str, data: bytes) -> tuple[str, dict]:
             heading = f"## Sheet: {sheet.title}"
             parts.append(heading)
             chars += len(heading) + 1
+            # The declared `<dimension>` pads every row, gap rows included, to
+            # its width: a sheet claiming A1:XFD1048576 with two real rows
+            # would yield a million 16,384-wide empty rows. Without it, a gap
+            # row is empty and a row is as wide as its own last cell.
+            sheet.reset_dimensions()
             for row in sheet.iter_rows(values_only=True):
-                if row is None or all(value is None for value in row):
+                if not row or row.count(None) == len(row):
                     continue
                 line = "\t".join("" if value is None else str(value) for value in row)
                 parts.append(line)

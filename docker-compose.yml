@@ -366,15 +366,20 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Loopback only: Docker-published ports bypass host firewalls (ufw etc.), so
+    # "8000:8000" would expose this machine's tret to the whole network. To serve
+    # a LAN or server deliberately, change 127.0.0.1 to 0.0.0.0 -- only with real
+    # credentials and TLS in front (docs/hardening.md).
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
   frontend:
     build: ./frontend
     depends_on:
       - backend
+    # Loopback only, same reason as the backend above.
     ports:
-      - "5180:80"
+      - "127.0.0.1:5180:80"
 
   # ── bundled local model server (opt-in) ────────────────────────────────────
   # `docker compose --profile local up` adds an Ollama server and pulls one

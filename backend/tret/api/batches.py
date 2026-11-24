@@ -94,7 +94,7 @@ async def _collection_detail(db: AsyncSession, c: Batch) -> dict:
     old name."""
     await db.refresh(c)
     targets = await service.load_targets(db, [c.id])
-    runs = await service.load_runs(db, targets)
+    runs = await service.load_run_summaries(db, targets)
     profile = service.profile_for(c)
     maps = await service.load_review_findings(db, profile, targets, c)
     overview = await evaluation.evaluation_overview(db, [c.id])
@@ -120,7 +120,7 @@ async def _collection_detail(db: AsyncSession, c: Batch) -> dict:
 
 async def _target_detail(db: AsyncSession, t: BatchTarget) -> dict:
     await db.refresh(t)
-    runs = await service.load_runs(db, [t])
+    runs = await service.load_run_summaries(db, [t])
     c = await db.get(Batch, t.collection_id)
     profile = service.profile_for(c)
     maps = await service.load_review_findings(db, profile, [t], c)
@@ -162,7 +162,7 @@ async def _list_rows(db: AsyncSession, ctx: WorkspaceContext) -> list[dict]:
         ).scalars()
     )
     targets = await service.load_targets(db, [c.id for c in batches])
-    runs = await service.load_runs(db, targets)
+    runs = await service.load_run_summaries(db, targets, costs_only=True)
     by_batch: dict[uuid.UUID, list[BatchTarget]] = {}
     for t in targets:
         by_batch.setdefault(t.collection_id, []).append(t)

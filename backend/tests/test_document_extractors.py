@@ -149,6 +149,24 @@ def make_zip_bomb_bytes_at(uncompressed_size: int) -> bytes:
     return buf.getvalue()
 
 
+
+def make_under_declared_zip_bytes(actual: int, *, declared: int = 4096, name: str = "word/document.xml") -> bytes:
+    """A member that really inflates to `actual` bytes but whose local and
+    central-directory headers both claim `declared`. `zipfile.ZipFile.read()`
+    inflates the whole member before trimming it to the claim, so a parser
+    that trusts the claim still pays for `actual`."""
+    import struct
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(name, b"\x00" * actual)
+    raw = bytearray(buf.getvalue())
+    assert raw[:4] == b"PK\x03\x04"
+    struct.pack_into("<L", raw, 22, declared)  # local header: uncompressed size
+    cd = raw.find(b"PK\x01\x02")
+    struct.pack_into("<L", raw, cd + 24, declared)  # central directory: uncompressed size
+    return bytes(raw)
+
 # ── .xlsx ──────────────────────────────────────────────────────────────────
 def test_xlsx_renders_sheet_headings_tab_separated_rows_and_skips_empty_rows():
     text, meta = extract_text("book.xlsx", make_xlsx_bytes())
@@ -165,6 +183,25 @@ def test_xlsx_renders_sheet_headings_tab_separated_rows_and_skips_empty_rows():
     # Sheet2: two non-empty rows.
     assert meta["rows"] == 5
     assert "truncated" not in meta
+
+
+def test_xlsx_extraction_ignores_a_sheet_dimension_padding_a_million_gap_rows():
+    """A value at XFD1048576 declares a sheet of a million 16,384-wide rows.
+    Every gap row used to be padded to that width and scanned cell by cell
+    (about 1.6e10 steps in a thread the timeout cannot stop)."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "first"
+    ws.cell(row=1048576, column=16384, value="last")
+    out = io.BytesIO()
+    wb.save(out)
+    started = time.monotonic()
+    text, meta = extract_text("sparse.xlsx", out.getvalue())
+    assert "first" in text and text.rstrip().endswith("last")
+    assert meta["rows"] == 2
+    assert time.monotonic() - started < 30
 
 
 def test_xlsx_stops_at_the_char_cap_and_records_truncation():
@@ -489,7 +526,7 @@ async def test_extract_bounded_still_truncates_pdf_text(monkeypatch):
 
 
 # ── zip-bomb guard ───────────────────────────────────────────────────────────
-@pytest.mark.parametrize("filename", ["bomb.xlsx", "bomb.pptx"])
+@pytest.mark.parametrize("filename", ["bomb.xlsx", "bomb.pptx", "bomb.docx"])
 def test_a_zip_bomb_is_refused_before_either_library_parses_it(filename):
     data = make_zip_bomb_bytes()
     with pytest.raises(ValueError, match="archive expands to"):
@@ -503,6 +540,39 @@ async def test_the_zip_bomb_refusal_reaches_the_ordinary_failure_path():
     assert text == ""
     assert "archive expands to" in meta["error"]
 
+
+
+
+@pytest.mark.parametrize("filename", ["memo.docx", "book.xlsx", "deck.pptx"])
+def test_a_member_that_inflates_past_its_declared_size_is_refused(filename):
+    """The declared-size sum alone is bypassed by under-declaring: the guard
+    must inflate each member itself, in bounded chunks, before the parser's
+    unbounded read ever runs."""
+    data = make_under_declared_zip_bytes(8 * 1024 * 1024)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        assert sum(i.file_size for i in zf.infolist()) == 4096  # the claim passes the old check
+    with pytest.raises(ValueError, match="expands past its declared"):
+        extract_text(filename, data)
+
+
+def test_the_zip_listing_does_not_inflate_members(monkeypatch):
+    """Listing reads only the central directory, so it keeps the cheap check."""
+    called = []
+    monkeypatch.setattr(documents_service, "_refuse_member_past_declared_size", lambda *a: called.append(a))
+    documents_service.zip_member_infos(make_under_declared_zip_bytes(1024, name="a.txt"))
+    assert called == []
+
+def test_docx_zip_guard_uses_the_non_streaming_ceiling():
+    """python-docx parses the whole package eagerly, like python-pptx, so a
+    .docx between the two ceilings is refused, before `docx.Document` runs."""
+    data = make_zip_bomb_bytes_at(MAX_PPTX_UNCOMPRESSED_BYTES + 1024 * 1024)
+    with pytest.raises(ValueError, match="archive expands to"):
+        extract_text("memo.docx", data)
+
+
+def test_a_docx_under_the_ceiling_still_extracts():
+    text, _meta = extract_text("memo.docx", make_docx_bytes())
+    assert text.strip()
 
 def test_pptx_zip_guard_uses_a_lower_ceiling_than_xlsx():
     """`_extract_pptx` cannot stream the way `_extract_xlsx` does —

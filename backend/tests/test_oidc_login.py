@@ -17,6 +17,7 @@ Project, Harness, Invite).
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import time
 import uuid
@@ -312,6 +313,22 @@ def client(db, monkeypatch):
     oidc._discovery_cache.clear()
     oidc._jwks_cache.clear()
     login_limiter.reset()
+
+
+@contextlib.contextmanager
+def _open_signup(monkeypatch):
+    """Multi-tenant with no domain allowlist: the one configuration that still
+    JIT-provisions an unverified email (Auth0 allows unverified login; the
+    allowlist refuses it, since only a verified claim proves the domain)."""
+    with monkeypatch.context() as m:
+        m.delenv("TRET_OIDC_ALLOWED_EMAIL_DOMAINS", raising=False)
+        m.setenv("TRET_MULTI_TENANT", "true")
+        get_settings.cache_clear()
+        try:
+            yield
+        finally:
+            get_settings.cache_clear()
+    get_settings.cache_clear()
 
 
 # ── round-trip helpers ───────────────────────────────────────────────────────
@@ -824,6 +841,47 @@ def test_a_domain_inside_the_allowlist_is_provisioned(client, db, monkeypatch):
         get_settings.cache_clear()
 
 
+
+@pytest.mark.parametrize("multi_tenant", [False, True])
+def test_an_unverified_email_inside_the_allowlist_is_refused(client, db, monkeypatch, multi_tenant):
+    """The allowlist admits people at a domain, and only a verified claim
+    shows that: an IdP that allows unverified sign-up would otherwise let a
+    stranger register `anyone@example.com` and be provisioned."""
+    db.add(_workspace("Default"))
+    monkeypatch.setenv("TRET_OIDC_ALLOWED_EMAIL_DOMAINS", "example.com")
+    if multi_tenant:
+        monkeypatch.setenv("TRET_MULTI_TENANT", "true")
+    get_settings.cache_clear()
+    try:
+        response = _round_trip(
+            client,
+            claims={"sub": "sub-stranger", "email": "stranger@example.com", "email_verified": False},
+        )
+        assert response.status_code == 403
+        assert "verify" in response.json()["detail"].lower()
+        assert not [u for u in db.store["User"] if u.email == "stranger@example.com"]
+        assert not [m for m in db.store.get("WorkspaceMember", [])]
+    finally:
+        monkeypatch.delenv("TRET_MULTI_TENANT", raising=False)
+        get_settings.cache_clear()
+
+
+def test_an_unverified_claim_still_signs_in_an_already_linked_account(client, db, monkeypatch):
+    """The verification requirement is a JIT-provisioning precondition like
+    the domain check itself: outcome 1 (sub already on file) never re-checks
+    it, and `User.email_verified` just follows the claim."""
+    sole = _workspace("Default")
+    existing = _password_user("rhea@example.com", "correct-horse-7", oidc_sub="sub-rhea")
+    db.add(sole)
+    db.add(existing)
+    db.add(WorkspaceMember(user_id=existing.id, workspace_id=sole.id, role="analyst"))
+    existing.email_verified = True
+    response = _round_trip(
+        client, claims={"sub": "sub-rhea", "email": "rhea@example.com", "email_verified": False}
+    )
+    assert response.status_code == 302
+    assert existing.email_verified is False  # follows the claim, as before
+
 def test_no_allowlist_and_no_multi_tenant_requires_an_invitation(client, db, monkeypatch):
     """No pending invite for this email, self-host, no domain allowlist —
     the tenancy hole this whole gate closes."""
@@ -923,7 +981,7 @@ def test_invite_redemption_lands_the_session_on_the_team_workspace(client, db):
     assert body["role"] == "approver"
 
 
-def test_unverified_login_does_not_redeem_and_a_later_verified_login_does(client, db):
+def test_unverified_login_does_not_redeem_and_a_later_verified_login_does(client, db, monkeypatch):
     """`User.email_verified` follows the IdP claim on every login: while it is
     false the account neither auto-redeems nor is shown redemption tokens."""
     sole = _workspace("Default", kind="team")
@@ -933,9 +991,10 @@ def test_unverified_login_does_not_redeem_and_a_later_verified_login_does(client
     db.add(team)
     db.add(invite)
 
-    _round_trip(
-        client, claims={"sub": "sub-lena", "email": "lena@example.com", "email_verified": False}
-    )
+    with _open_signup(monkeypatch):
+        _round_trip(
+            client, claims={"sub": "sub-lena", "email": "lena@example.com", "email_verified": False}
+        )
     (lena,) = [u for u in db.store["User"] if u.oidc_sub == "sub-lena"]
     assert lena.email_verified is False
     assert invite.status == "pending"
@@ -955,7 +1014,7 @@ def test_unverified_login_does_not_redeem_and_a_later_verified_login_does(client
     assert lena.email_verified is False
 
 
-def test_verified_claim_for_a_different_email_is_not_trusted_for_the_stored_one(client, db):
+def test_verified_claim_for_a_different_email_is_not_trusted_for_the_stored_one(client, db, monkeypatch):
     """Provision with someone else's address unverified, then change the IdP
     email to one the attacker owns and verifies (same `sub`): the verified
     claim vouches for the new address, not for `User.email`, so the victim's
@@ -967,9 +1026,10 @@ def test_verified_claim_for_a_different_email_is_not_trusted_for_the_stored_one(
     db.add(team)
     db.add(invite)
 
-    _round_trip(
-        client, claims={"sub": "sub-att", "email": "victim@example.com", "email_verified": False}
-    )
+    with _open_signup(monkeypatch):
+        _round_trip(
+            client, claims={"sub": "sub-att", "email": "victim@example.com", "email_verified": False}
+        )
     (att,) = [u for u in db.store["User"] if u.oidc_sub == "sub-att"]
     assert att.email == "victim@example.com"
     assert att.email_verified is False

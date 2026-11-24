@@ -88,9 +88,15 @@ anything and [deploy to Render with one click](docs/deploy-render.md).
 Already have a checkout, or want to drive it yourself:
 
 ```bash
-cp .env.example .env       # defaults are fine — provider keys are added in-app
+cp .env.example .env
+# The shipped secret key and admin password are public placeholders: replace them first.
+sed -i.bak "s|^TRET_SECRET_KEY=.*|TRET_SECRET_KEY=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')|; s|^TRET_ADMIN_PASSWORD=.*|TRET_ADMIN_PASSWORD=$(openssl rand -base64 15 | tr '+/' '-_' | tr -d '=\n')|" .env && rm .env.bak
 docker compose up --build
 ```
+
+(The two `sed` substitutions set `TRET_SECRET_KEY` and `TRET_ADMIN_PASSWORD` to fresh
+random values; read the password back with `grep TRET_ADMIN_PASSWORD .env`. Provider
+keys are added in-app.)
 
 On first login tret asks for a provider key (one OpenRouter key alone works;
 Anthropic and Moonshot too) and stores it encrypted — no config file editing.
@@ -98,8 +104,10 @@ Prefer no cloud at all? Set `TRET_LOCAL_BASE_URL` to your own inference server
 and tret runs with no cloud provider — from the compose stack that is
 `http://host.docker.internal:11434/v1` for a host Ollama, not `localhost`.
 
-Open http://localhost:5180, log in (`admin@example.com` / `tret-admin` by
-default — change in `.env`), and you're in a seeded demo:
+Open http://localhost:5180, log in (`admin@example.com` and the
+random password the installer printed — it lives as `TRET_ADMIN_PASSWORD` in
+`.env`; it applies when the admin account is first created, so change it in the
+app afterwards), and you're in a seeded demo:
 
 - a **Chat** front door — just ask ("*Is the vendor flood score for Alder
   Point still trustworthy?*") and the assistant recognizes the request,

@@ -85,7 +85,7 @@ from tret.services.emissions import (
     band_factors,
     deployment_for,
     embodied_g_for,
-    pue_for,
+    pue_for_profile,
     pue_profile_for,
     resolve_grid_factor,
 )
@@ -1411,7 +1411,11 @@ def _resolve_pue(
             disclosure=disclosure,
         )
 
-    raw = pue_for(deployment, settings)
+    # The figure must follow `profile` (which a workspace or harness
+    # `pue.local_profile` may have set), not re-derive it from env, or a
+    # workspace on an on-prem profile would apply the workstation figure
+    # while recording the on-prem source.
+    raw = pue_for_profile(profile, settings)
     field_name, env_name = _PUE_ENV_FIELD[profile]
     layer = LAYER_ENV if field_name in settings.model_fields_set else LAYER_GLOBAL_DEFAULT
     return Resolved(raw, layer, layer, None, None, None, env_name)

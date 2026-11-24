@@ -1,6 +1,6 @@
 # Demo Script (~10 minutes)
 
-Login: `admin@example.com` / `tret-admin` (or your `.env` values).
+Login: `admin@example.com` and the password from `TRET_ADMIN_PASSWORD` in your `.env` (the installer prints it; a plain `cp .env.example .env` gives the placeholder `tret-admin`).
 Everything below works on a fresh `docker compose up` with one OpenRouter key.
 
 ## The one-liner

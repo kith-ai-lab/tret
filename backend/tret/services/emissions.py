@@ -1074,7 +1074,19 @@ def pue_for(deployment: str, settings: Settings | None = None) -> Decimal:
       hyperscaler campus and must not borrow its number.
     """
     settings = settings or get_settings()
-    profile = pue_profile_for(deployment, settings)
+    return pue_for_profile(pue_profile_for(deployment, settings), settings)
+
+
+def pue_for_profile(profile: str, settings: Settings | None = None) -> Decimal:
+    """The configured PUE for an already-resolved facility profile.
+
+    Callers that resolve the profile from more than the environment (a
+    workspace or harness `pue.local_profile` override, in
+    `services/emission_factors.py`) must read the figure through this, not
+    `pue_for`, or the number would follow the env profile while the recorded
+    provenance follows the override.
+    """
+    settings = settings or get_settings()
     if profile == PUE_PROFILE_ONPREM:
         raw = settings.onprem_pue
     elif profile == PUE_PROFILE_WORKSTATION:

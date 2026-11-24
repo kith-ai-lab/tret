@@ -27,7 +27,7 @@
 #
 # What it does, in order: checks for Docker and git, clones (or updates)
 # github.com/kith-ai-lab/tret into ~/kith-tret, creates a .env from the
-# shipped example, builds and starts the containers, waits until tret answers,
+# shipped example (with a freshly generated secret key and admin password), builds and starts the containers, waits until tret answers,
 # and opens it in your browser. Nothing is installed outside that one folder and
 # Docker's own storage; `stop-tret.sh` in that folder shuts it all down again.
 #
@@ -73,6 +73,85 @@ compose() {
   if docker compose version >/dev/null 2>&1; then docker compose "$@"
   else docker-compose "$@"
   fi
+}
+
+# ── First-run settings helpers ───────────────────────────────────────────────
+# .env.example ships a placeholder secret key and admin password (the backend's
+# production check recognises them). A fresh .env must never keep them: the
+# stack is reachable by anyone who can reach this machine's ports.
+rand_token() {  # rand_token <bytes> — URL-safe, no padding, no newline
+  local out=""
+  if command -v openssl >/dev/null 2>&1; then
+    out=$(openssl rand -base64 "$1" 2>/dev/null | tr '+/' '-_' | tr -d '=\n') || out=""
+  fi
+  if [ -z "$out" ]; then
+    out=$(head -c "$1" /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n') || out=""
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+env_value() {  # env_value <NAME> — last assignment wins; one pair of quotes stripped
+  sed -n "s/^$1=//p" .env | tail -n 1 | tr -d '\r' \
+    | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+}
+
+env_default() {  # env_default <NAME> <fallback> — compose's :- also covers empty
+  local v
+  v=$(env_value "$1")
+  printf '%s' "${v:-$2}"
+}
+
+# Is there a tret database volume from an earlier install? Compose names it
+# <project>_pgdata; the project defaults to this folder's name, lowercased,
+# with characters outside [a-z0-9_-] and leading _ or - dropped. Best effort: silent if docker
+# isn't answering yet.
+existing_db_volume() {
+  local proj
+  proj="${COMPOSE_PROJECT_NAME:-$(basename "$PWD" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-' | sed 's/^[_-]*//')}"
+  [ -n "$proj" ] || return 1
+  docker volume inspect "${proj}_pgdata" >/dev/null 2>&1
+}
+
+create_env_file() {
+  local key pw
+  EXISTING_DB=""
+  if existing_db_volume; then EXISTING_DB=1; fi
+  key=$(rand_token 32) && pw=$(rand_token 15) \
+    || die "Couldn't generate random credentials (need openssl, or base64 and /dev/urandom)."
+  (umask 077; awk -v key="$key" -v pw="$pw" '
+    /^TRET_SECRET_KEY=/     { print "TRET_SECRET_KEY=" key; next }
+    /^TRET_ADMIN_PASSWORD=/ { print "TRET_ADMIN_PASSWORD=" pw; next }
+    { print }
+  ' .env.example > .env.tmp) && mv .env.tmp .env \
+    || die "Couldn't write .env."
+}
+
+warn_if_default_secrets() {
+  local weak="" sk pw
+  sk=$(env_value TRET_SECRET_KEY); pw=$(env_value TRET_ADMIN_PASSWORD)
+  if [ -z "$sk" ]; then
+    weak="secret key (TRET_SECRET_KEY is not set, so compose falls back to the default)"
+  elif [ "$sk" = "dev-secret-change-me" ]; then weak="secret key"; fi
+  if [ -z "$pw" ] || [ "$pw" = "tret-admin" ]; then weak="${weak:+$weak and }admin password"; fi
+  [ -n "$weak" ] || return 0
+  say ""
+  say "${RED}!! $INSTALL_DIR/.env still has the published default $weak.${RESET}"
+  say "   Anyone who can reach this machine can sign in as admin. Fix it:"
+  say "     1. In .env set TRET_SECRET_KEY and TRET_ADMIN_PASSWORD to new random values."
+  say "        (Changing the secret key makes AI provider keys saved in the app unreadable;"
+  say "        re-enter them afterwards.)"
+  say "     2. The admin account exists already, so also change its password in the app,"
+  say "        then restart:  cd $INSTALL_DIR && ./stop-tret.sh && ./start-tret.sh"
+}
+
+warn_existing_db() {
+  [ -n "${EXISTING_DB:-}" ] || return 0
+  say ""
+  say "${RED}!! An existing tret database was found from an earlier install.${RESET}"
+  say "   It keeps its existing admin password (tret-admin if never changed), not the"
+  say "   new one in .env. AI provider keys saved earlier were encrypted with the old"
+  say "   secret key and must be re-entered in the app."
 }
 
 say ""
@@ -149,8 +228,12 @@ fi
 
 # ── 3. First-run settings file ───────────────────────────────────────────────
 if [ ! -f .env ]; then
-  cp .env.example .env
-  ok "created .env (you don't need to edit it — AI keys are added in the app)"
+  create_env_file
+  ok "created .env with a freshly generated secret key and admin password"
+  note "AI keys are added in the app, not in this file"
+  warn_existing_db
+else
+  warn_if_default_secrets
 fi
 
 if [ -n "${TRET_NO_START:-}" ]; then
@@ -204,9 +287,18 @@ say ""
 say "${AMBER}────────────────────────────────────────────────────────────${RESET}"
 say "  ${BOLD}tret is running at $FRONTEND_URL${RESET}"
 say ""
-say "  Log in:      admin@example.com  /  tret-admin"
-say "               (change these in $INSTALL_DIR/.env if"
-say "               anyone else can reach this machine)"
+say "  Log in:      $(env_default TRET_ADMIN_EMAIL admin@example.com)"
+if [ -n "${EXISTING_DB:-}" ]; then
+  say "  Password:    unchanged — your existing database keeps its admin password"
+  say "               (tret-admin if you never changed it). The new one in .env is not used."
+else
+  say "  Password:    $(env_default TRET_ADMIN_PASSWORD tret-admin)"
+  say "               (kept as TRET_ADMIN_PASSWORD in $INSTALL_DIR/.env; it is used"
+  say "               when the admin account is first created — to change it later,"
+  say "               use the app)"
+fi
+say "  Reachable:   this computer only (localhost). Putting it on a network"
+say "               takes TLS and a hardening pass — see docs/hardening.md."
 say ""
 say "  Next:        add an AI provider key on the Settings page —"
 say "               one OpenRouter key is enough to try everything."
@@ -215,4 +307,6 @@ say "  Stop it:     cd $INSTALL_DIR && ./stop-tret.sh"
 say "  Start again: cd $INSTALL_DIR && ./start-tret.sh"
 say "  Update:      re-run this installer"
 say "${AMBER}────────────────────────────────────────────────────────────${RESET}"
+warn_existing_db
+warn_if_default_secrets
 say ""

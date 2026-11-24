@@ -653,3 +653,32 @@ def test_resolution_context_is_immutable_minimal_and_contains_no_settings_secret
     # The public context consists only of tuples/scalars: callers cannot mutate
     # nested documents and change a later counterfactual resolution.
     assert isinstance(factors.resolution_context.workspace_settings, tuple)
+
+
+@pytest.mark.parametrize(
+    ("workspace_profile", "env_profile", "expected_pue", "expected_source_env"),
+    [
+        # The audit case: env says workstation (the default), the workspace
+        # says on-prem. The run must apply on-prem's 1.56, not 1.05.
+        ("onprem_datacenter", None, Decimal("1.56"), "TRET_ONPREM_PUE"),
+        # And the reverse: env says on-prem, the workspace says workstation.
+        ("workstation", "onprem_datacenter", Decimal("1.05"), "TRET_LOCAL_PUE"),
+    ],
+)
+def test_a_workspace_local_profile_applies_its_own_pue(
+    workspace_profile, env_profile, expected_pue, expected_source_env
+):
+    """The figure and its provenance must describe the same facility: a
+    workspace `pue.local_profile` with no explicit value picks that profile's
+    configured PUE, not the env profile's."""
+    from tret.services.emissions import LOCAL_PROVIDER
+
+    settings = Settings(**({"local_deployment_profile": env_profile} if env_profile else {}))
+    factors = build_factor_set(
+        provider=LOCAL_PROVIDER,
+        settings=settings,
+        workspace_settings={"pue": {"local_profile": workspace_profile}},
+    )
+    assert factors.pue_profile == workspace_profile
+    assert factors.pue.value == expected_pue
+    assert expected_source_env in str(asdict(factors.pue))

@@ -572,7 +572,7 @@ async def _start_experiment(ctx: RunContext, run: Run, name: str, body: Any, exp
 async def batch_status(ctx: RunContext, batch_id: str) -> str:
     c = await _own_batch(ctx, batch_id)
     targets = await core.load_targets(ctx.db, [c.id])
-    runs = await core.load_runs(ctx.db, targets)
+    runs = await core.load_run_summaries(ctx.db, targets, costs_only=True)
     profile = core.profile_for(c)
     found = await core.load_review_findings(ctx.db, profile, targets, c)
     pending = []
@@ -633,7 +633,7 @@ async def batch_results(
         targets = [t for t in targets if t.status == status]
     total = len(targets)
     page = targets[offset : offset + limit]
-    runs = await core.load_runs(ctx.db, page)
+    runs = await core.load_run_summaries(ctx.db, page, costs_only=True)
     rows = []
     for t in page:
         outcome = t.outcome or {}

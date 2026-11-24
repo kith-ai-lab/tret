@@ -3842,7 +3842,9 @@ async def run_analysis(ctx: RunContext, purpose: str, code: str, inputs: dict | 
                     not project_wide and doc.id not in allowed
                 ):
                     raise ToolError(f"Document {ref['document_id']} not found in this session's documents.")
-                _cols, rows = dataset_import.parse_table(doc.filename, await document_bytes(doc))
+                _cols, rows = await asyncio.to_thread(
+                    dataset_import.parse_table, doc.filename, await document_bytes(doc)
+                )
                 loaded[in_name] = (rows, {"kind": "document", "ref": str(doc.id), "document_id": str(doc.id)})
             else:
                 raise ToolError(f"Input '{in_name}' must be a dataset name or {{\"document_id\": ...}}")

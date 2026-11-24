@@ -342,3 +342,108 @@ async def test_import_table_is_cohort_only(db, project, tmp_path):
 def test_pack_has_no_factor_numbers_shipped():
     assert not list(PACK_DIR.glob("**/*.csv"))
     assert not list(PACK_DIR.glob("**/*.xlsx"))
+
+
+def test_an_xlsx_member_that_inflates_past_its_declared_size_is_refused():
+    """openpyxl reads the workbook parts with an unbounded `ZipFile.read`, so
+    a member that under-declares its size must be refused before it opens."""
+    import struct
+    import zipfile
+
+    from tret.services.dataset_import import DatasetImportError, parse_table
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("xl/sharedStrings.xml", b"\x00" * (8 * 1024 * 1024))
+    raw = bytearray(buf.getvalue())
+    struct.pack_into("<L", raw, 22, 4096)
+    struct.pack_into("<L", raw, raw.find(b"PK\x01\x02") + 24, 4096)
+    with pytest.raises(DatasetImportError, match="expands past its declared"):
+        parse_table("bomb.xlsx", bytes(raw))
+
+
+def test_an_xlsx_over_the_row_limit_is_refused_while_reading(monkeypatch):
+    import openpyxl
+
+    from tret.services import dataset_import
+    from tret.services.dataset_import import DatasetImportError, parse_table
+
+    monkeypatch.setattr(dataset_import, "MAX_ROWS", 3)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["name", "value"])
+    for i in range(10):
+        ws.append([f"row-{i}", i])
+        ws.append([None, None])  # blank rows never count toward the limit
+    out = io.BytesIO()
+    wb.save(out)
+    with pytest.raises(DatasetImportError, match="more than 3 rows"):
+        parse_table("big.xlsx", out.getvalue())
+
+    monkeypatch.setattr(dataset_import, "MAX_ROWS", 10)
+    columns, rows = parse_table("big.xlsx", out.getvalue())
+    assert columns == ["name", "value"] and len(rows) == 10
+
+
+def _xlsx_bytes(rows: list[list]) -> bytes:
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for r in rows:
+        ws.append(r)
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def test_a_cell_in_the_last_column_does_not_pad_every_row():
+    """openpyxl pads a row to the sheet's width: one value in column XFD per
+    row used to make each row 16,384 slots (a 16 KB file, gigabytes held).
+    Rows are now read at most MAX_COLUMNS + 1 wide; data past the header
+    width was always dropped, so the result is unchanged."""
+    import openpyxl
+
+    from tret.services.dataset_import import parse_table
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["name", "value"])
+    ws.append(["a", 1])
+    for i in range(3, 3003):
+        ws.cell(row=i, column=16384, value="x")
+    out = io.BytesIO()
+    wb.save(out)
+    columns, rows = parse_table("wide.xlsx", out.getvalue())
+    assert columns == ["name", "value"]
+    assert rows == [{"name": "a", "value": "1"}]
+
+
+def test_a_header_wider_than_the_column_limit_is_refused(monkeypatch):
+    from tret.services import dataset_import
+    from tret.services.dataset_import import DatasetImportError, parse_table
+
+    monkeypatch.setattr(dataset_import, "MAX_COLUMNS", 3)
+    data = _xlsx_bytes([["a", "b", "c", "d"], [1, 2, 3, 4]])
+    with pytest.raises(DatasetImportError, match="past column 3"):
+        parse_table("wide.xlsx", data)
+    monkeypatch.setattr(dataset_import, "MAX_COLUMNS", 4)
+    columns, rows = parse_table("wide.xlsx", data)
+    assert columns == ["a", "b", "c", "d"] and len(rows) == 1
+
+
+def test_an_xlsx_over_the_cell_limit_is_refused(monkeypatch):
+    from tret.services import dataset_import
+    from tret.services.dataset_import import DatasetImportError, parse_table
+
+    monkeypatch.setattr(dataset_import, "MAX_CELLS", 10)
+    data = _xlsx_bytes([["a", "b", "c"]] + [[i, i, i] for i in range(5)])
+    with pytest.raises(DatasetImportError, match="more than 10 cells"):
+        parse_table("cells.xlsx", data)
+
+
+def test_a_non_zip_xlsx_is_a_clean_import_error():
+    from tret.services.dataset_import import DatasetImportError, parse_table
+
+    with pytest.raises(DatasetImportError, match="Could not open"):
+        parse_table("broken.xlsx", b"not a zip at all")

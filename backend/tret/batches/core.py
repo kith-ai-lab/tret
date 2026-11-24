@@ -50,6 +50,7 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from pydantic import BaseModel
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -471,6 +472,49 @@ async def load_runs(db: AsyncSession, targets: list[BatchTarget]) -> dict[uuid.U
             select(Run).where(Run.id.in_(run_ids)).execution_options(populate_existing=True)
         )
     ).scalars()
+    return {r.id: r for r in rows}
+
+
+# `Run.messages` is the whole transcript (often hundreds of KB per run). The
+# batch list and detail are polled every few seconds while a batch is live,
+# and they, the scorecard, the cost roll-up and the agent's batch tools only
+# read a run's scalar fields (cost, status, model, timing, routing). Loading
+# a 48-row batch's transcripts on every poll is what this avoids.
+_RUN_SUMMARY_SKIPPED = frozenset({"messages"})
+
+
+def _run_summary_columns() -> list:
+    return [
+        getattr(Run, attr.key)
+        for attr in sa_inspect(Run).column_attrs
+        if attr.key not in _RUN_SUMMARY_SKIPPED
+    ]
+
+
+# What `target_cost` reads: enough for the batch list, the cost roll-up and
+# the agent's batch status, which show a run's spend and nothing else of it.
+_RUN_COST_COLUMNS = ("id", "cost_usd", "delegated_cost_usd")
+
+
+async def load_run_summaries(
+    db: AsyncSession, targets: list[BatchTarget], *, costs_only: bool = False
+) -> dict[uuid.UUID, Any]:
+    """`load_runs` without the transcript, for read-only paths. With
+    `costs_only`, just the columns `target_cost` reads.
+
+    Returns column rows rather than `Run` instances: every attribute but
+    `messages` reads the same, assigning to one raises, and nothing enters the
+    session's identity map. That last point is why this is a column select
+    rather than `defer(Run.messages)`: a deferred instance left in the
+    identity map would make a later `db.get(Run, id)` in the same session
+    return it without its transcript."""
+    run_ids = [t.run_id for t in targets if t.run_id]
+    if not run_ids:
+        return {}
+    columns = (
+        [getattr(Run, name) for name in _RUN_COST_COLUMNS] if costs_only else _run_summary_columns()
+    )
+    rows = (await db.execute(select(*columns).where(Run.id.in_(run_ids)))).all()
     return {r.id: r for r in rows}
 
 
@@ -1077,7 +1121,7 @@ async def rollup_parent_cost(db: AsyncSession, c: Batch) -> None:
         async with _launch_lock():
             await db.refresh(c)
             targets = await load_targets(db, [c.id])
-            runs = await load_runs(db, targets)
+            runs = await load_run_summaries(db, targets, costs_only=True)
             total = round(
                 sum(target_cost(t, runs.get(t.run_id) if t.run_id else None) for t in targets), 6
             )

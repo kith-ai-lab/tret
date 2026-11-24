@@ -30,6 +30,69 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## 2026-11-24 · security fixes
+
+Several defaults got stricter. Most installs need no action; check each item that
+applies to yours.
+
+**Pack files must stay inside the pack.** Every path in a `pack.yaml` must be a plain
+relative path that resolves, symlinks included, to a regular file inside the pack
+directory. This covers `doctrine:`, a task's `output_schema`, a dataset's `file` and a
+method's `entrypoint`. Absolute paths, `..`, and symlinks that point out of the pack are
+refused at install. A pack installed earlier with such a path is refused at read time:
+that doctrine is left out of runs and shows as unavailable, and that method no longer
+runs. Move the files into the pack and reinstall it.
+
+**Method packs from an archive need the instance admin.** `POST /api/packs/install/archive`
+with a pack that declares `methods:` now returns 403 unless the caller is the instance
+admin. Methods are Python that runs on the server. Workspace admins can still upload
+packs without methods, and can install a methods pack from the marketplace once the
+registry lists it as reviewed (listed or delisted). `POST /api/packs/validate`, which
+takes a server path, is now instance-admin only.
+
+**OIDC domain allowlist needs a verified email.** With `TRET_OIDC_ALLOWED_EMAIL_DOMAINS`
+set, a first sign-in is provisioned only when the IdP's `email_verified` claim is
+true. Before, an unverified `anyone@yourdomain` could be provisioned on an IdP that
+allows unverified sign-up. Some IdPs don't send the claim at all: Microsoft Entra ID
+tokens don't, and some Auth0 enterprise connections send false or omit it. If yours is
+one of them, new users are now refused under the allowlist. Turn on email verification
+at the IdP (in Auth0, mark users verified through the Management API or enable verification
+emails for the connection), or invite people instead. Accounts that already exist keep signing in. To review accounts
+provisioned unverified before this change:
+
+```sql
+SELECT email, created_at FROM users WHERE oidc_sub IS NOT NULL AND email_verified = false;
+```
+
+**The Docker install listens on this computer only.** `docker-compose.yml` now publishes
+ports 8000 and 5180 on `127.0.0.1`, because Docker's published ports bypass host
+firewalls such as ufw. If you reached tret from other machines, follow
+[docs/hardening.md](hardening.md): put TLS and real credentials in front, then change
+`127.0.0.1:` to `0.0.0.0:` (or a specific address) in your compose file.
+
+**The installers generate the secret key and admin password.** `install.sh`,
+`start-tret.sh` and `start-tret.bat` write a random `TRET_SECRET_KEY` and
+`TRET_ADMIN_PASSWORD` into a new `.env` and print the password. An existing `.env` is
+never changed. If it still holds the published defaults (`dev-secret-change-me`,
+`tret-admin`) the scripts warn on every run. To fix that, change the admin password in
+the app (the admin account already exists, so editing `.env` alone does not change it).
+Then set a new `TRET_SECRET_KEY`, and re-enter the AI provider keys you saved in the app,
+since they were encrypted with the old key.
+
+**Office files and workbooks are checked before parsing.** Every member of a
+`.docx`/`.xlsx`/`.pptx` is now inflated in bounded chunks and refused if it produces more
+than its declared size. Before, a member that under-declared its size could expand to
+gigabytes inside the shared process. A `.docx` that expands past 50 MB, embedded media
+included, is now refused, as a `.pptx` already was. Members using encryption or a
+compression method other than stored or deflate are refused (Office never writes them).
+Importing an `.xlsx` dataset is refused as soon as it passes the row limit, instead of
+after loading the whole sheet. Rows are read at most 500 columns wide, a header wider than
+that is refused, and an import keeps at most 2,000,000 non-empty cells. A sheet's declared
+size (`<dimension>`) is ignored, so a workbook can no longer pad every row to 16,384
+columns.
+
+No migration.
+
 ## 2026-11-12 · per-agent routing record
 
 New setting `TRET_ROUTER_AGENT_SCORING` (`off`, `shadow` or `live`; default `off`) and new

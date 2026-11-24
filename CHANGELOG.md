@@ -8,6 +8,33 @@ one that needs action on an existing install.
 
 ## [Unreleased]
 
+### Security
+
+- **Pack manifest paths are confined to the pack.** `doctrine`, `output_schema`, dataset `file`
+  and method `entrypoint` paths must resolve (symlinks included) to a regular file inside the
+  pack directory. They are checked at install and again by every reader, so a pack row stored
+  earlier cannot serve a file from outside it. Before, a pack could name `/proc/self/environ`
+  and the pack viewer returned its contents.
+- **Method packs uploaded as an archive need the instance admin** (403 otherwise). Marketplace
+  installs allow methods only for versions the registry reports as listed or delisted. The pack
+  builder's test install refuses methods, and `POST /api/packs/validate` is instance-admin only.
+- **OIDC domain allowlist requires `email_verified`.** With `TRET_OIDC_ALLOWED_EMAIL_DOMAINS`
+  set, an unverified email at an allowed domain is no longer JIT-provisioned.
+- **Docker install is loopback-only, with generated credentials.** `docker-compose.yml` publishes
+  8000 and 5180 on `127.0.0.1`. The installers write a random secret key and admin password into
+  a new `.env`, print the password, and warn when an existing `.env` still holds the published
+  defaults.
+- **Zip-bomb guard checks real sizes.** `.docx` extraction now has the guard `.xlsx` and `.pptx`
+  had, and every member is inflated in bounded chunks and refused if it produces more than its
+  declared size. Before, an under-declared member passed the check and expanded inside the
+  shared process. `.xlsx` dataset imports get the same guard, are refused as soon as they pass the row
+  limit, and read rows at most 500 columns wide (a header wider than that is refused). Both
+  `.xlsx` readers ignore a sheet's declared `<dimension>`, which used to pad every row to
+  16,384 columns.
+
+See [docs/upgrading.md](docs/upgrading.md#2026-11-24--security-fixes) for what to check on an
+existing install.
+
 ### Added
 
 - **Stage 2 module extractor (experimental, off by default).** `TRET_DISCLOSURE_EXTRACT=on` enables
@@ -403,6 +430,14 @@ one that needs action on an existing install.
 
 ### Fixed
 
+- **The batch list, batch detail, scorecard and cost roll-up no longer load run transcripts.**
+  The UI polls the list and detail every 5 s while a batch is live, and each poll read every
+  run's full `messages`. They now read run summaries without the transcript, and the list
+  reads only the cost columns.
+- **A workspace or harness `pue.local_profile` now applies that profile's PUE.** With
+  `{"pue": {"local_profile": "onprem_datacenter"}}` and no explicit value, runs used the
+  environment profile's figure (1.05 for a workstation) while recording the on-prem source
+  (1.56). The figure now follows the profile it reports. The reverse case is fixed too.
 - **`capture_filing` finds the package when its file name differs from the report directory.**
   The package URL was guessed from the report URL, which returned 404 for filings such as
   Iberdrola's. The tool now asks the filings.xbrl.org API for the filings of the report's LEI

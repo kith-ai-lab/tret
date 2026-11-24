@@ -32,6 +32,21 @@ Rotating `TRET_SECRET_KEY` invalidates every session **and** makes
 DB-stored provider keys undecryptable — re-enter them in the settings UI after
 a rotation.
 
+### Published ports are loopback-only
+
+`docker-compose.yml` publishes the backend (`8000`) and frontend (`5180`) as
+`127.0.0.1:8000:8000` and `127.0.0.1:5180:80`, so only the machine itself can
+reach them. This matters because Docker publishes ports by writing its own
+iptables rules, which bypass host firewalls such as ufw: a plain `"8000:8000"`
+is reachable from the whole network even when `ufw` says the port is closed.
+
+To expose tret deliberately (a LAN or a server), change the `127.0.0.1:` prefix
+to `0.0.0.0:` (or a specific interface address) in both `ports:` entries, and
+only do so with real credentials (a generated `TRET_SECRET_KEY` and admin
+password, `TRET_ENVIRONMENT=production`) and TLS in front, ideally a reverse
+proxy that terminates HTTPS and is the only thing publicly reachable. See the
+next section.
+
 ## 2. TLS and cookies
 
 - Terminate TLS in front of tret (reverse proxy, or the platform's edge).
