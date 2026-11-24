@@ -604,10 +604,11 @@ async def store_result(
     for slug, m in result.modules.items():
         key = sha = None
         if m.present and m.text:
-            key = module_text_key(report.id, EXTRACTOR_VERSION, module_set.ident, slug)
             data = m.text.encode("utf-8")
-            await store.put(key, data, content_type="text/markdown; charset=utf-8")
             sha = hashlib.sha256(data).hexdigest()
+            # content-addressed: a re-extraction never overwrites text a tournament snapshot points at
+            key = module_text_key(report.id, EXTRACTOR_VERSION, module_set.ident, slug, sha)
+            await store.put(key, data, content_type="text/markdown; charset=utf-8")
         mod = ReportModule(
             extraction_id=row.id, disclosure_report_id=report.id, module=slug, present=m.present,
             spans=m.spans, text_key=key, text_sha256=sha, word_count=m.word_count,

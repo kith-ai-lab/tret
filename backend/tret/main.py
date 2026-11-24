@@ -28,6 +28,7 @@ from tret.api import (
     edition as edition_api,
     emissions_settings as emissions_settings_api,
     eval_jury as eval_jury_api,
+    eval_tournaments as eval_tournaments_api,
     findings,
     guardrails as guardrails_api,
     harnesses,
@@ -353,6 +354,15 @@ async def lifespan(app: FastAPI):
     # for the sweeps: a second machine never launches rows the first is running.
     # Background tasks, never awaited; failing here must not break startup.
     if boot_swept:
+        # A tournament left running by the old process is paused, never resumed on its own:
+        # continuing it spends money, so it takes an explicit resume.
+        try:
+            from tret.evaluation.tournament import recover_running
+
+            if await recover_running():
+                log.warning("evaluation tournaments left running were paused (restart); resume them on purpose")
+        except Exception:  # noqa: BLE001
+            log.warning("tournament recovery skipped", exc_info=True)
         try:
             await collections_service.launch_auto_resumed()
         except Exception:  # noqa: BLE001
@@ -473,6 +483,7 @@ def create_app() -> FastAPI:
     app.include_router(peer_taxonomy_api.router)
     app.include_router(report_extractions_api.router)
     app.include_router(eval_jury_api.router)
+    app.include_router(eval_tournaments_api.router)
     # Reference documentation, read straight out of `docs/` so the methodology the
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)

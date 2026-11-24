@@ -330,7 +330,8 @@ def test_migration_chain_and_markers():
     from tret.db.migrate import REVISION_MARKERS, alembic_config
 
     script = ScriptDirectory.from_config(alembic_config())
-    assert script.get_heads() == ["a9d4e7c1f352"]  # routing_freezes (PR 5)
+    assert script.get_heads() == ["b3f8c2a6d914"]  # tournament tables (PR 6)
+    assert script.get_revision("b3f8c2a6d914").down_revision == "a9d4e7c1f352"
     assert script.get_revision("a9d4e7c1f352").down_revision == "e7a4c9d2b861"
     assert script.get_revision("e7a4c9d2b861").down_revision == "d8f3a1c5b7e2"
     assert script.get_revision("d8f3a1c5b7e2").down_revision == "c4a7e2b9d158"
@@ -369,7 +370,7 @@ def test_a_worse_result_never_overwrites_a_better_stored_one(on):
             await db.commit()
             assert not stored and row2.id == row.id and row2.status == ex.STATUS_EXTRACTED and row2.models == ["m1"]
         mods = (await db.execute(select(ReportModule))).scalars().all()
-        assert len(mods) == 1 and mods[0].present and mods[0].text_key == module_text_key(report.id, "1", ms.ident, "physical_climate_risk")
+        assert len(mods) == 1 and mods[0].present and mods[0].text_key == module_text_key(report.id, "1", ms.ident, "physical_climate_risk", mods[0].text_sha256)
         assert await get_store().get(mods[0].text_key) == b"kept text"
         attempts = [i for i in row2.issues if i["kind"] == "later_attempt_not_stored"]
         assert [a["status"] for a in attempts] == ["failed", "partial"] and attempts[0]["error"] == "boom"

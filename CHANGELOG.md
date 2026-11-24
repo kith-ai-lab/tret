@@ -37,6 +37,26 @@ existing install.
 
 ### Added
 
+- **Tournament, Engine 1 of the disclosure evaluation engine (experimental, `TRET_EVAL_TOURNAMENT`,
+  off by default; needs `TRET_EVAL_JURY`).** Report modules are compared in pairs, only against peers:
+  a peer-pool snapshot cuts pools on the NACE ladder (division, then cluster, then section when a
+  pool has fewer than 15 modules; split by regime only when every part still has 15) and the
+  tournament plays Swiss rounds of blind pairwise judgements by a frozen three-family jury, then fits
+  a Bradley-Terry rating with a 90% interval and a decile or quintile band per module. Creating a
+  tournament is a free preview (pools, rounds, estimated matches and cost range, the jury with its
+  reasons); starting it takes a USD budget and an approver, and spend stops at the budget (the
+  tournament pauses, resume with `--budget` to continue). Jurors see the module definition and two
+  texts with company names masked, in a recorded random order; 5% of matches are re-judged in the
+  other order (flip rate) and 10% by a second family. Each match is a `Run` on the system "Disclosure
+  Jury" harness, stamped as a juror run so it is never router evidence. New tables (migration
+  `b3f8c2a6d914`): `peer_pool_snapshots`, `peer_pool_members`, `eval_tournaments`, `eval_matches`,
+  `module_ratings`. Matches and ratings point at pool members that copy the module text hash and
+  location, and module text blobs are now content-addressed, so a re-extraction never changes or
+  removes a tournament. A credit or model outage pauses a tournament instead of failing it; a lease
+  and claimed matches keep two processes from playing the same one. `tret eval
+  tournament create|start|status|cancel|resume|ratings|refit|delete`, `/api/eval/tournaments`.
+  Tournaments whose runner is gone are paused, not resumed, at boot; an interrupted runner pauses its own tournament, and a failed tournament can be resumed. See
+  [docs/disclosure-evaluation.md](docs/disclosure-evaluation.md).
 - **Jury selection and per-pass freeze (experimental, `TRET_EVAL_JURY`, off by default).** The router
   can now seat a jury of k models from distinct model families (`ModelRouter.route_jury`) with no
   model call, recording each pick's family, rank, evidence and a plain-English reason; a pass freezes

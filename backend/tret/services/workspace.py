@@ -717,6 +717,38 @@ async def ensure_extractor_harness(db: AsyncSession, workspace_id) -> Harness:
     return harness
 
 
+JURY_HARNESS_NAME = "Disclosure Jury"
+
+
+async def ensure_jury_harness(db: AsyncSession, workspace_id) -> Harness:
+    """The system-managed harness the evaluation tournament's juror runs are filed under
+    (`tret/evaluation/tournament.py`): no tools, no agent loop. Like the extractor's, it keeps those
+    runs apart in analytics; the juror marker on each run keeps them out of router evidence.
+    Created on first use, per workspace, looked up by name (idempotent)."""
+    existing = (
+        await db.execute(
+            select(Harness)
+            .where(Harness.workspace_id == workspace_id, Harness.name == JURY_HARNESS_NAME)
+            .order_by(Harness.created_at)
+        )
+    ).scalars().first()
+    if existing is not None:
+        return existing
+    harness = Harness(
+        workspace_id=workspace_id,
+        name=JURY_HARNESS_NAME,
+        description="System-managed. Runs the evaluation tournament's pairwise juror calls as routed "
+        "structured model calls on a frozen jury; no tools and no agent loop. Not for chat or the Workbench.",
+        task_profile="freeform",
+        model_policy={"mode": "auto"},
+        tool_names=[],
+        loop_config={"max_iterations": 1, "max_output_tokens": 1024, "temperature": 0.0, "max_cost_usd": 5.0},
+    )
+    db.add(harness)
+    await db.flush()
+    return harness
+
+
 async def _seed_default_harnesses(db: AsyncSession, workspace_id) -> None:
     """The one pack-agnostic harness left here: General Assistant. The
     Climate Analyst harness that used to be seeded from here (gated on

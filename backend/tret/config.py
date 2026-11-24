@@ -360,6 +360,12 @@ class Settings(BaseSettings):
     # `off` (default): the /api/eval/jury routes are a 404 (jury preview and per-pass freeze,
     # docs/disclosure-evaluation.md). The operator CLI `tret eval jury-preview` is not gated.
     eval_jury: Literal["off", "on"] = "off"
+    # `off` (default): the /api/eval/tournaments routes are a 404 (Engine 1 pairwise tournament).
+    # A tournament also needs `eval_jury` on: it seats its jury through the same freeze.
+    # `eval_tournament_concurrency` is how many juror calls run at once (they wait on the
+    # network; the process is small, so keep it low).
+    eval_tournament: Literal["off", "on"] = "off"
+    eval_tournament_concurrency: int = Field(default=2, ge=1, le=4)
     # Path of a YAML module-set file (see tret/evaluation/modules.py). Empty (default):
     # the module set shipped in the package (modules-v0.1.yaml).
     disclosure_module_set: str = ""

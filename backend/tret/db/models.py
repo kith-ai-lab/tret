@@ -636,6 +636,220 @@ class RoutingFreeze(Base):
     released_at: Mapped[datetime | None] = mapped_column()
 
 
+class PeerPoolSnapshot(Base):
+    """The peer pools of one module as they stood when a tournament was created
+    (`tret/evaluation/pools.py`): which report modules compete with which, by what rule.
+    Immutable once written; a tournament's ratings belong to it. Workspace-scoped."""
+
+    __tablename__ = "peer_pool_snapshots"
+    __table_args__ = (Index("ix_peer_pool_snapshots_ws", "workspace_id"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    # The project the tournament's juror runs are filed under (the first member's extraction).
+    project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"))
+    taxonomy_version: Mapped[str] = mapped_column(Text, nullable=False)
+    min_n: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
+    rule: Mapped[str] = mapped_column(Text, nullable=False)
+    # {batch_ids, module_set, module, excluded_unclassified, dropped duplicates, ...}
+    corpus_filter: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+
+
+class PeerPoolMember(Base):
+    """One report module in one pool of a snapshot, and the immutable unit a tournament judges:
+    the module's text location, hash, word count and claim density are copied here at snapshot
+    time (the text blob is content-addressed), so a re-extraction or a deleted report module never
+    changes or removes tournament history. The `report_*` ids are for traceability only (SET NULL).
+    `company` is for staff display only: it is never sent to a juror. `mask_names` and
+    `mask_domains` are the identity strings to mask in the text (also copied at snapshot time)."""
+
+    __tablename__ = "peer_pool_members"
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "report_module_id"),
+        Index("ix_peer_pool_members_snapshot_pool", "snapshot_id", "pool_key"),
+        Index("ix_peer_pool_members_report_module", "report_module_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("peer_pool_snapshots.id", ondelete="CASCADE"), nullable=False
+    )
+    report_extraction_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("report_extractions.id", ondelete="SET NULL")
+    )
+    report_module_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("report_modules.id", ondelete="SET NULL")
+    )
+    disclosure_report_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("disclosure_reports.id", ondelete="SET NULL")
+    )
+    text_key: Mapped[str | None] = mapped_column(Text)
+    text_sha256: Mapped[str | None] = mapped_column(Text)
+    word_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    claim_density: Mapped[float | None] = mapped_column()
+    company: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    mask_names: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    mask_domains: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    pool_key: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_level: Mapped[str] = mapped_column(Text, nullable=False)  # division | cluster | section
+    regime: Mapped[str] = mapped_column(Text, nullable=False, default="other")
+    nace_division: Mapped[str | None] = mapped_column(Text)
+
+
+class EvalTournament(Base):
+    """One Engine 1 tournament: pairwise juror matches over the pools of a snapshot, run in Swiss
+    rounds, fitted to ratings at the end (`tret/evaluation/tournament.py`). `draft` = a free
+    preview (nothing spent); starting it needs a USD budget. The jury is frozen once
+    (`freeze_id`), so the instrument does not change under the measurement. A rating belongs to
+    this tournament and its snapshot; a rerun is a new tournament. `status`: draft | running |
+    paused | cancelled | completed | failed. `lease_owner` / `lease_until` are the runner's
+    lease (heartbeat while it plays): a `running` tournament whose lease has expired has no live
+    runner and can be resumed."""
+
+    __tablename__ = "eval_tournaments"
+    __table_args__ = (Index("ix_eval_tournaments_ws_created", "workspace_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    module: Mapped[str] = mapped_column(Text, nullable=False)
+    module_set: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("peer_pool_snapshots.id", ondelete="CASCADE"), nullable=False
+    )
+    judge_prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    # The module's title, definition, include and exclude lists as they were at create time: the
+    # instrument is fixed for the pass, whatever happens to the configured module set meanwhile.
+    module_def: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    freeze_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("routing_freezes.id", ondelete="SET NULL")
+    )
+    model_policy: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_round: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    spent_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    pause_reason: Mapped[str | None] = mapped_column(Text)
+    swap_rate: Mapped[float] = mapped_column(nullable=False, default=0.05)
+    double_rate: Mapped[float] = mapped_column(nullable=False, default=0.10)
+    seed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    estimates: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    lease_owner: Mapped[str | None] = mapped_column(Text)
+    lease_until: Mapped[datetime | None] = mapped_column()
+    created_by: Mapped[str | None] = mapped_column(Text)
+    started_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+    started_at: Mapped[datetime | None] = mapped_column()
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class EvalMatch(Base):
+    """One juror judgement of two pool members. `a` and `b` are the canonical sides;
+    `shown_a_first` is the order the juror saw them in. `kind`: primary | swap (same juror, the
+    other order, for the flip rate) | double (another family judges the same pair). Its `Run`
+    carries the juror marker, so it never becomes router evidence. `status`: pending | running (claimed by
+    one runner, `claimed_by`) | done | failed; a failed match does not count. `mask_count_a/b` = how many
+    identity strings were masked in each text, for auditing the masking."""
+
+    __tablename__ = "eval_matches"
+    __table_args__ = (
+        UniqueConstraint("tournament_id", "round", "a_member_id", "b_member_id", "kind", "juror_index"),
+        Index("ix_eval_matches_tournament_status", "tournament_id", "status"),
+        Index("ix_eval_matches_a_member", "a_member_id"),
+        Index("ix_eval_matches_b_member", "b_member_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    tournament_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("eval_tournaments.id", ondelete="CASCADE"), nullable=False
+    )
+    pool_key: Mapped[str] = mapped_column(Text, nullable=False)
+    round: Mapped[int] = mapped_column(Integer, nullable=False)
+    a_member_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("peer_pool_members.id", ondelete="CASCADE"), nullable=False
+    )
+    b_member_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("peer_pool_members.id", ondelete="CASCADE"), nullable=False
+    )
+    shown_a_first: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    juror_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    juror_family: Mapped[str | None] = mapped_column(Text)
+    juror_model: Mapped[str | None] = mapped_column(Text)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    verdict: Mapped[str | None] = mapped_column(Text)  # a | b | tie
+    strength: Mapped[str | None] = mapped_column(Text)
+    rationale: Mapped[str | None] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, default="primary")
+    swap_of: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("eval_matches.id", ondelete="SET NULL"))
+    double_of: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("eval_matches.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    claimed_by: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    mask_count_a: Mapped[int | None] = mapped_column(Integer)
+    mask_count_b: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = created_at_col()
+    judged_at: Mapped[datetime | None] = mapped_column()
+
+
+class EvalMatchRun(Base):
+    """The ledger of runs whose cost has been booked to a tournament, one row per run id (the primary
+    key), so a run's spend is added to `eval_tournaments.spent_usd` exactly once however many
+    runners, settlements or recoveries see it."""
+
+    __tablename__ = "eval_match_runs"
+    __table_args__ = (Index("ix_eval_match_runs_tournament", "tournament_id"),)
+
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tournament_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("eval_tournaments.id", ondelete="CASCADE"), nullable=False
+    )
+    match_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("eval_matches.id", ondelete="SET NULL"))
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    booked_at: Mapped[datetime] = created_at_col()
+
+
+class ModuleRating(Base):
+    """One pool member's rating in one tournament (Elo scale, pool mean 1500), with its 90%
+    interval and band. Written when the tournament completes (a refit replaces it for that same
+    tournament); never touched by another tournament."""
+
+    __tablename__ = "module_ratings"
+    __table_args__ = (
+        UniqueConstraint("tournament_id", "member_id"),
+        Index("ix_module_ratings_tournament_pool", "tournament_id", "pool_key"),
+        Index("ix_module_ratings_member", "member_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    tournament_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("eval_tournaments.id", ondelete="CASCADE"), nullable=False
+    )
+    pool_key: Mapped[str] = mapped_column(Text, nullable=False)
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("peer_pool_members.id", ondelete="CASCADE"), nullable=False
+    )
+    rating: Mapped[float] = mapped_column(nullable=False)
+    se: Mapped[float] = mapped_column(nullable=False)
+    lo90: Mapped[float] = mapped_column(nullable=False)
+    hi90: Mapped[float] = mapped_column(nullable=False)
+    matches: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    wins: Mapped[float] = mapped_column(nullable=False, default=0)
+    band_kind: Mapped[str | None] = mapped_column(Text)
+    band: Mapped[int | None] = mapped_column(Integer)
+    word_count: Mapped[int | None] = mapped_column(Integer)
+    claim_density: Mapped[float | None] = mapped_column()
+
+
 class ExtractionReview(Base):
     """A reviewer's decision on one computed review item of an extraction
     (`tret/evaluation/review.py`): `accepted` (looked at, fine as it is), `dismissed` (not worth
