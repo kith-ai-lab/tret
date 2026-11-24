@@ -93,7 +93,8 @@ client id/secret set, the feature is simply absent from the UI.
   Unconfigured providers show a hint to set the env vars above instead
   of a Connect button.
 - **Import**: on a project's Documents view, an "Import from…" menu
-  appears once at least one connection is active — Google Drive opens
+  appears once at least one connection is active — Google Drive (approver
+  role or higher, see [Security notes](#security-notes)) opens
   the Google Picker to select files, SharePoint/OneDrive opens a
   browser over the connected account's sites and drives. Selected
   files are downloaded server-side with the connection's token and fed
@@ -160,8 +161,10 @@ Microsoft than for Google).
 
 A workspace admin can narrow that from Settings → Connections: picking
 specific sites/drives sets an explicit read allowlist, and from then
-on live access only ever sees drives on that list — search and
-materialize refuse anything outside it, the same as a request for a
+on live access only ever sees drives on that list — and so does the
+import browser: it lists only those sites and drives, and a browse or
+import of any other drive is refused with 403 even when the request is
+forged. Search and materialize refuse anything outside it, the same as a request for a
 file Graph itself would resolve but this workspace was never allowed
 to read. Clearing the allowlist (an empty selection) goes back to
 "everything the account can see." The settings page shows which case
@@ -423,12 +426,15 @@ digging through server logs.
   Microsoft.**
   - Google: `drive.file`, which only grants access to files the user
     explicitly picks through the Picker UI at connect time and later
-    at import time — not blanket read access to their Drive. Any
-    workspace member can obtain a short-lived Google access token for
-    that Picker via `GET /api/connections/gdrive/token` (see
-    [Using it](#using-it)), but the token is scoped by `drive.file`
+    at import time — not blanket read access to their Drive. A
+    workspace **approver or higher** can obtain a short-lived Google
+    access token for that Picker via `GET /api/connections/gdrive/token`
+    (see [Using it](#using-it)). The token is scoped by `drive.file`
     the same way — it cannot read a file nobody has picked through the
-    Picker UI.
+    Picker UI — but it is a live token that can *modify or trash*
+    any file picked through the app, outside the approval-gated
+    write-back (gdrive has no write path of its own). That is why it
+    is approver-only: for analysts the "Google Drive" import item is shown disabled, with a note.
   - Microsoft: `Files.Read.All` and `Sites.Read.All` are **tenant-wide
     read scopes** — read-only (tret never writes to Drive, SharePoint,
     or OneDrive), but not narrowed to picked files the way Google's
@@ -446,7 +452,7 @@ digging through server logs.
   the connected account's access — there's no per-user delegation.
   Anyone who can invite themselves into (or already has a role in) the
   workspace can browse and pull in anything the connected account can
-  see, so treat connecting an account the way you'd treat sharing that
+  see (within the read allowlist, if one is set), so treat connecting an account the way you'd treat sharing that
   account's drive with the whole team. For m365, an admin can narrow
   what that "anything" actually covers with the [read
   allowlist](#read-allowlist) — worth setting up front for an account

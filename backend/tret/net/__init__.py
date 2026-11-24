@@ -10,6 +10,8 @@
 Read `policy.py` first: it explains why egress is five switchable classes
 rather than one boolean, and why every rule in this package narrows.
 """
+import logging
+
 from tret.net.client import build_client, open_client
 from tret.net.guard import check_url
 from tret.net.policy import (
@@ -50,3 +52,12 @@ __all__ = [
     "open_client",
     "policy_for",
 ]
+
+# httpx logs every request at INFO as "HTTP Request: GET <full URL> ...", query
+# string included, and the server's root logger runs at INFO (tret/main.py). A
+# research fetch's query is where an injected prompt hides exfiltrated data, a
+# search query is the model's own text, and some provider APIs take a key as a
+# query parameter: none of it may reach the application log. Warnings and errors
+# from httpx still come through. Set here because every process that makes an
+# outbound request imports this package.
+logging.getLogger("httpx").setLevel(logging.WARNING)

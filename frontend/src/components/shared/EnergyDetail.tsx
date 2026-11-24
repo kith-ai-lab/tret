@@ -119,9 +119,11 @@ export function EnergyDetail({ energy, live }: { energy: EnergyAccounting; live?
           // chose the factor. Never a guessed source on a run that recorded none.
           sub={
             energy.grid_co2e_label ??
-            (energy.grid_co2e_source ? gridSourceLabel(energy.grid_co2e_source) : undefined)
+            (energy.grid_co2e_source
+              ? gridSourceLabel(energy.grid_co2e_source, energy.grid_dataset_version)
+              : undefined)
           }
-          subTitle={`${gridSourceWhat(energy.grid_co2e_source)} ${GRID_NO_INFERENCE_NOTE}`}
+          subTitle={`${gridSourceWhat(energy.grid_co2e_source, energy.grid_dataset_version)} ${GRID_NO_INFERENCE_NOTE}`}
           title={`The factor applied to this run's electricity, as recorded when it ran — ${gridBasisLabel(
             energy.grid_co2e_basis,
           )} (${gridBasisWhat(energy.grid_co2e_basis)})`}

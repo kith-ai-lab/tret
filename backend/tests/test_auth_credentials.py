@@ -332,6 +332,23 @@ def test_the_current_password_check_is_rate_limited(client, people, monkeypatch)
     assert int(blocked.headers["retry-after"]) > 0
 
 
+
+def test_typos_in_the_new_password_never_lock_the_owner_out(client, people, monkeypatch):
+    """Attempts are recorded before the check, so a correct current password
+    must clear them even when the new one is then refused as too weak."""
+    monkeypatch.setattr(auth.get_settings(), "login_max_attempts", 3)
+    login(client, people["analyst"], USER_PASSWORD)
+    for _ in range(5):
+        response = client.post(
+            "/api/auth/password", json={"current_password": USER_PASSWORD, "new_password": "short"}
+        )
+        assert response.status_code == 422
+    ok = client.post(
+        "/api/auth/password",
+        json={"current_password": USER_PASSWORD, "new_password": "brand-new-password"},
+    )
+    assert ok.status_code == 200, ok.text
+
 # ── admin rotation ───────────────────────────────────────────────────────────
 def test_an_admin_can_rotate_another_users_password(client, db, people):
     analyst = people["analyst"]

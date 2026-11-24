@@ -47,9 +47,11 @@ anything internet-facing.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 import uuid
+from collections.abc import Sequence
 from urllib.parse import quote
 
 from argon2 import PasswordHasher
@@ -75,6 +77,20 @@ from tret.services.identity import (
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 _hasher = PasswordHasher()
+
+
+# argon2 is deliberately slow (tens of ms of CPU) and synchronous: called
+# directly from a handler it stalls every other request and SSE stream on the
+# event loop for its whole duration, which turns a burst of login guesses into
+# a denial of service. Handlers go through these two, which run it on a thread.
+async def hash_password(password: str) -> str:
+    return await asyncio.to_thread(_hasher.hash, password)
+
+
+async def verify_password(password_hash: str, password: str) -> None:
+    """Raises argon2's `VerifyMismatchError` (or `InvalidHashError` /
+    `VerificationError`) exactly as `PasswordHasher.verify` does."""
+    await asyncio.to_thread(_hasher.verify, password_hash, password)
 SESSION_COOKIE = "tret_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 14  # 14 days
 
@@ -113,6 +129,27 @@ class SlidingWindowLimiter:
     def record(self, key: str, *, now: float | None = None) -> None:
         now = time.monotonic() if now is None else now
         self._hits.setdefault(key, []).append(now)
+
+    def admit(
+        self, buckets: Sequence[tuple[str, int]], window: float, *, now: float | None = None
+    ) -> float:
+        """Check every `(key, limit)` bucket and, only if all have room, record
+        one hit in each — as one synchronous step.
+
+        Returns seconds to wait (0.0 = admitted and recorded). There is no
+        `await` between the check and the record, so on the event loop N
+        parallel attempts count as N; checking first and recording only after
+        a slow password verify let ~everything in flight pass the check. A
+        refused attempt records nothing, so hammering a locked account does
+        not extend its lockout.
+        """
+        now = time.monotonic() if now is None else now
+        wait = max((self.check(key, limit, window, now=now) for key, limit in buckets), default=0.0)
+        if wait > 0:
+            return wait
+        for key, _limit in buckets:
+            self.record(key, now=now)
+        return 0.0
 
     def reset(self, key: str | None = None) -> None:
         if key is None:
@@ -481,9 +518,11 @@ async def login(
     settings = get_settings()
     _reject_if_password_disabled(settings)
     buckets = _login_buckets(request, body.email, settings)
-    retry_after = max(
-        login_limiter.check(key, limit, settings.login_window_seconds) for key, limit in buckets
-    )
+    # Check-and-record in one step, *before* the (slow) password verify: the
+    # attempt is counted whether or not it later succeeds, so parallel guesses
+    # cannot all pass a check that none of them has been recorded against yet.
+    # A success clears the buckets again below.
+    retry_after = login_limiter.admit(buckets, settings.login_window_seconds)
     if retry_after > 0:
         raise HTTPException(
             429,
@@ -492,8 +531,6 @@ async def login(
         )
 
     def _reject() -> HTTPException:
-        for key, _limit in buckets:
-            login_limiter.record(key)
         return HTTPException(401, "Invalid credentials")
 
     user = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
@@ -505,7 +542,7 @@ async def login(
     if user is None or not user.password_hash or user.disabled:
         raise _reject()
     try:
-        _hasher.verify(user.password_hash, body.password)
+        await verify_password(user.password_hash, body.password)
     except VerifyMismatchError:
         raise _reject()
     for key, _limit in buckets:  # a success clears the window for this account
@@ -635,7 +672,7 @@ async def create_user(
     user = User(
         email=body.email,
         display_name=body.display_name,
-        password_hash=_hasher.hash(body.password),
+        password_hash=await hash_password(body.password),
         role=body.role,
         # The administrator vouches for the address (see
         # `services/identity.py::account_email_is_verified`).
@@ -679,8 +716,9 @@ async def change_password(
     settings = get_settings()
     _reject_if_password_disabled(settings)
     key = f"pwchange|{user.id}"
-    retry_after = login_limiter.check(
-        key, settings.login_max_attempts, settings.login_window_seconds
+    # Recorded up front, atomically, like `login`; cleared on success below.
+    retry_after = login_limiter.admit(
+        [(key, settings.login_max_attempts)], settings.login_window_seconds
     )
     if retry_after > 0:
         raise HTTPException(
@@ -689,16 +727,18 @@ async def change_password(
             headers={"Retry-After": str(int(retry_after) + 1)},
         )
     try:
-        _hasher.verify(user.password_hash or "", body.current_password)
+        await verify_password(user.password_hash or "", body.current_password)
     except (VerifyMismatchError, InvalidHashError, VerificationError):
-        login_limiter.record(key)
         raise HTTPException(403, "Current password is incorrect")
+    # Cleared as soon as the current password checks out: a too-weak or
+    # unchanged new password is the person's own typo, not a guess, and must
+    # not count toward locking them out.
+    login_limiter.reset(key)
     _check_password_strength(body.new_password)
     if body.new_password == body.current_password:
         raise HTTPException(422, "The new password must differ from the current one")
 
-    login_limiter.reset(key)
-    user.password_hash = _hasher.hash(body.new_password)
+    user.password_hash = await hash_password(body.new_password)
     await db.commit()
     # Cookies minted against the old hash no longer resolve (see
     # credential_version), which is the revocation. Re-issue this one so the
@@ -737,7 +777,7 @@ async def admin_set_password(
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(404, "User not found")
-    target.password_hash = _hasher.hash(body.new_password)
+    target.password_hash = await hash_password(body.new_password)
     target.disabled = False
     await db.commit()
     return await _user_out(target, db)
@@ -850,7 +890,7 @@ async def bootstrap_admin(db: AsyncSession) -> None:
             User(
                 email=settings.admin_email,
                 display_name="Admin",
-                password_hash=_hasher.hash(settings.admin_password),
+                password_hash=await hash_password(settings.admin_password),
                 role="admin",
                 email_verified=True,
             )

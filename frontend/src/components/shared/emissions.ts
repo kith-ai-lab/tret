@@ -26,6 +26,7 @@ import type {
 } from '../../api/client'
 import { WATER_METHODOLOGY_SLUG, type MethodV3, type WaterAccounting, type WaterFactorRecord } from '../../api/client'
 import { formatFactor, formatGrams } from './format'
+import { GRID_DATASET_META, gridDatasetOf } from './gridDataset'
 
 export const METHODOLOGY_DOC = 'docs/emissions-methodology.md'
 
@@ -482,26 +483,43 @@ export const GRID_SOURCE_META: Record<string, { label: string; what: string }> =
   },
   dataset: {
     label: 'published zone average',
-    what: 'The bundled Electricity Maps yearly average for the grid zone the workspace pinned this provider to. Reached only because an operator pinned the region — tret never infers one.',
+    what: 'A bundled yearly grid average for the region the workspace pinned this provider to (Ember country data, CC BY 4.0, or Electricity Maps zone data, ODbL — the run’s recorded source says which). Reached only because an operator pinned the region — tret never infers one.',
   },
 }
 
 /** "per-provider factor (anthropic)" / "global default" / em dash on a run
  *  recorded before the source key existed — never a guessed "global default". */
-export function gridSourceLabel(source: string | null | undefined): string {
+export function gridSourceLabel(
+  source: string | null | undefined,
+  datasetVersion?: string | null,
+): string {
   if (!source) return NO_COMPARISON
   const parts = source.split(':')
   const rule = parts[0]
   const name = parts.length > 1 ? parts[parts.length - 1] : undefined
   const meta = GRID_SOURCE_META[rule]
   if (!meta) return source
-  return name ? `${meta.label} (${name})` : meta.label
+  // A dataset-rung factor is named for the dataset the run recorded, not for
+  // whichever bundled dataset happened to be the only populated one when this
+  // label was written. Unknown stays neutral.
+  const dataset = rule === 'dataset' ? gridDatasetOf(source, datasetVersion) : null
+  const label = dataset ? GRID_DATASET_META[dataset].label : meta.label
+  return name ? `${label} (${name})` : label
 }
 
-export function gridSourceWhat(source: string | null | undefined): string {
+export function gridSourceWhat(
+  source: string | null | undefined,
+  datasetVersion?: string | null,
+): string {
   if (!source)
     return 'No factor source was recorded on this run — it predates per-provider grid factors. Which rule applied is unknown, which is not the same as the global default.'
-  return GRID_SOURCE_META[source.split(':')[0]]?.what ?? `Recorded source key: ${source}.`
+  const rule = source.split(':')[0]
+  if (rule === 'dataset') {
+    const dataset = gridDatasetOf(source, datasetVersion)
+    if (dataset)
+      return `A bundled yearly grid average for the region the workspace pinned this provider to. ${GRID_DATASET_META[dataset].attribution} Reached only because an operator pinned the region — tret never infers one.`
+  }
+  return GRID_SOURCE_META[rule]?.what ?? `Recorded source key: ${source}.`
 }
 
 /** Why tret asks the operator instead of looking the region up. The question a
@@ -589,9 +607,9 @@ export const LAYER_META: Record<string, LayerMeta> = {
     what: 'Set by an environment variable on this deployment.',
   },
   dataset: {
-    label: 'zone dataset',
+    label: 'grid dataset',
     badge: 'badge-gray',
-    what: 'A published yearly grid average for the zone this workspace pinned the provider to (bundled Electricity Maps data, ODbL). Ahead of only tret’s shipped global default — anything an operator actually set, in a document or an environment variable, still wins.',
+    what: 'A published yearly grid average for the region this workspace pinned the provider to (bundled Ember country data, CC BY 4.0, or Electricity Maps zone data, ODbL — the factor’s own source says which). Ahead of only tret’s shipped global default — anything an operator actually set, in a document or an environment variable, still wins.',
   },
   global_default: {
     label: 'global default',

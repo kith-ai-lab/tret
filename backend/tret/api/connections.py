@@ -64,7 +64,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
-from tret.api.workspace import ROLE_RANK, WorkspaceContext, current_workspace, require_workspace_admin
+from tret.api.workspace import ROLE_RANK, WorkspaceContext, current_workspace, require_workspace_admin, require_workspace_approver
 from tret.config import get_settings
 from tret.db.engine import get_db
 from tret.db.models import User, Workspace, WorkspaceConnection, WorkspaceMember
@@ -90,6 +90,7 @@ from tret.services.connections import (
     invalidate_connected_sources,
     list_connected_sources,
     list_write_targets,
+    restricted_read_sources,
     record_connection_activity,
     revoke_token,
 )
@@ -456,10 +457,14 @@ async def disconnect(
 @router.get("/{provider}/token")
 async def connection_token(
     provider: str,
-    ctx: WorkspaceContext = Depends(current_workspace),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
     db: AsyncSession = Depends(get_db),
 ):
     """A short-lived Google access token for the client-side Picker.
+
+    Approver or higher: the token is a live `drive.file` token, which can
+    modify or trash any file ever picked through this app's connected
+    account, outside the approval-gated write-back path (gdrive has none).
 
     The frontend loads `https://apis.google.com/js/api.js` on demand and
     calls Google's Picker API directly with this token (plus the developer
@@ -515,9 +520,24 @@ async def m365_browse(
     """
     await require_connections_gate(db, ctx.id, USE_ACTION)
     try:
+        # The admin's read allowlist binds the picker as well as runs: a
+        # drive outside it is neither listed nor browsable by id.
+        restrict_to = await restricted_read_sources(db, ctx.id)
         items = await browse_m365(
-            db, ctx.id, scope=scope, site_id=site_id, drive_id=drive_id, item_id=item_id
+            db,
+            ctx.id,
+            scope=scope,
+            site_id=site_id,
+            drive_id=drive_id,
+            item_id=item_id,
+            restrict_to=restrict_to,
         )
+    except ConnectionUnavailable as exc:
+        # Same status and wording `get_access_token` failing gave before the
+        # allowlist lookup ran first.
+        raise HTTPException(409, f"the m365 connection needs to be reconnected: {exc.reason}") from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
     except ConnectionAuthError as exc:
         raise HTTPException(409, f"the m365 connection needs to be reconnected: {exc}") from exc
     except ValueError as exc:

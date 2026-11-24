@@ -14,13 +14,12 @@ So for research:
     Checking the name would be checking the wrong thing — `evil.example.com`
     resolving to `127.0.0.1` is the whole trick.
 
-Honest limit: resolution here and connection in httpx are two separate lookups,
-so a DNS entry that changes between them (rebinding) is not closed by this code.
-Closing it means pinning the resolved address into the connection, which means a
-custom transport and hand-managed TLS SNI. tret does not claim that. The
-deployment-level control — egress restricted to a proxy, or a network policy
-that cannot see RFC1918 — is the boundary; this is the part that catches the
-other 99% and makes the intent legible. docs/hardening.md §9.
+Resolution here and the connection are one lookup, not two: `Target.addresses`
+is what the client connects to (`tret/net/pinning.py`), with TLS name checking
+still done against the hostname, so a DNS entry that changes between the check
+and the connect (rebinding) buys nothing. Behind `TRET_EGRESS_PROXY` the proxy
+resolves instead; it is then the boundary and must refuse private ranges itself.
+docs/hardening.md §9.
 """
 from __future__ import annotations
 
@@ -29,6 +28,8 @@ import ipaddress
 import socket
 from dataclasses import dataclass
 from urllib.parse import urlsplit
+
+import httpx
 
 from tret.net.policy import (
     MODE_OFF,
@@ -60,7 +61,7 @@ class Target:
     scheme: str
     host: str
     port: int
-    path: str  # query deliberately dropped: see audit.py
+    path: str  # query deliberately dropped; the audit row keeps its length and hash: see audit.py
     addresses: tuple[str, ...]
 
 
@@ -123,7 +124,13 @@ async def check_url(url: str, egress_class: str, policy: ClassPolicy | None = No
         raise EgressDenied(
             "credentials_in_url", url, egress_class, "URLs carrying credentials are refused"
         )
-    host = (parts.hostname or "").lower().rstrip(".")
+    try:
+        # The ASCII (punycode) form is what httpcore dials and what the pin is keyed
+        # by (`client.py`), so the name vetted here is the name connected to, with
+        # httpx's IDNA rules rather than a second opinion from the stdlib's.
+        host = httpx.URL(url).raw_host.decode("ascii").lower().rstrip(".")
+    except (httpx.InvalidURL, UnicodeError, ValueError):
+        host = ""
     if not host:
         raise EgressDenied("no_host", url, egress_class, "the URL names no host")
 

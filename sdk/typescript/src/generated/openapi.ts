@@ -2167,6 +2167,10 @@ export interface paths {
          * Connection Token
          * @description A short-lived Google access token for the client-side Picker.
          *
+         *     Approver or higher: the token is a live `drive.file` token, which can
+         *     modify or trash any file ever picked through this app's connected
+         *     account, outside the approval-gated write-back path (gdrive has none).
+         *
          *     The frontend loads `https://apis.google.com/js/api.js` on demand and
          *     calls Google's Picker API directly with this token (plus the developer
          *     key / app id from `GET /api/connections/providers`'s `picker` field) —

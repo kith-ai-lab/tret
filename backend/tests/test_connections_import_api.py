@@ -1273,3 +1273,86 @@ async def test_import_asks_the_gate_with_the_use_action(client, seed, session_fa
 
     assert response.status_code == 200, response.text
     assert asked_actions == ["connections.use"]
+
+
+# ── read allowlist binds browse and import ───────────────────────────────────
+def _restricted_m365(workspace):
+    conn = make_connection(workspace, provider="m365")
+    conn.selected_resources = {
+        "read": [{"drive_id": "drive-ok", "label": "Finance", "kind": "site_drive", "site_id": "site-ok"}]
+    }
+    return conn
+
+
+async def test_m365_browse_refuses_a_drive_outside_the_read_allowlist(client, seed):
+    workspace = make_workspace("Alpha")
+    user = make_user("browse-allow-drive@example.com")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), _restricted_m365(workspace))
+    await login(client, user.email)
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock_m365_refresh(mock)
+        graph = mock.get(url__startswith=f"{GRAPH}/drives/").mock(
+            return_value=httpx.Response(200, json={"value": []})
+        )
+        denied = await client.get(
+            "/api/connections/m365/browse", params={"scope": "drive_children", "drive_id": "drive-hr"}
+        )
+        assert graph.called is False
+        allowed = await client.get(
+            "/api/connections/m365/browse", params={"scope": "drive_children", "drive_id": "drive-ok"}
+        )
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+
+
+async def test_m365_browse_lists_only_allowlisted_sites_and_drives(client, seed):
+    workspace = make_workspace("Alpha")
+    user = make_user("browse-allow-list@example.com")
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), _restricted_m365(workspace))
+    await login(client, user.email)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock_m365_refresh(mock)
+        mock.get(f"{GRAPH}/sites", params={"search": "*"}).mock(
+            return_value=httpx.Response(
+                200,
+                json={"value": [{"id": "site-ok", "displayName": "Finance"}, {"id": "site-hr", "displayName": "HR"}]},
+            )
+        )
+        mock.get(f"{GRAPH}/me/drive").mock(
+            return_value=httpx.Response(200, json={"id": "drive-me", "name": "OneDrive"})
+        )
+        mock.get(f"{GRAPH}/sites/site-ok/drives").mock(
+            return_value=httpx.Response(
+                200, json={"value": [{"id": "drive-ok", "name": "Docs"}, {"id": "drive-hr", "name": "HR Docs"}]}
+            )
+        )
+        sites = await client.get("/api/connections/m365/browse")
+        drives = await client.get(
+            "/api/connections/m365/browse", params={"scope": "drive_children", "site_id": "site-ok"}
+        )
+    assert [i["id"] for i in sites.json()["items"]] == ["site-ok"]  # no HR site, no OneDrive
+    assert [i["id"] for i in drives.json()["items"]] == ["drive-ok"]
+
+
+async def test_import_m365_refuses_a_drive_outside_the_read_allowlist(client, seed, session_factory):
+    workspace = make_workspace("Alpha")
+    user = make_user("import-allow@example.com")
+    project = make_project(workspace)
+    await seed(workspace, user, make_member(user, workspace, role="analyst"), project, _restricted_m365(workspace))
+    await login(client, user.email)
+
+    with respx.mock(assert_all_called=False) as mock:
+        refresh = mock.post(M365_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "t", "expires_in": 3600})
+        )
+        graph = mock.get(url__startswith=f"{GRAPH}/drives/").mock(return_value=httpx.Response(200, json={}))
+        response = await client.post(
+            f"/api/projects/{project.id}/documents/import",
+            json={"provider": "m365", "items": [{"id": "item-1", "name": "salaries.csv", "drive_id": "drive-hr"}]},
+        )
+        assert refresh.called is False and graph.called is False  # nothing fetched
+    assert response.status_code == 403
+    async with session_factory() as db:
+        assert (await db.execute(select(Document).where(Document.project_id == project.id))).first() is None

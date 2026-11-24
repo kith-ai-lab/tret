@@ -1,4 +1,10 @@
 #!/bin/sh
+# Shared by the Fly image (Dockerfile.fly) and the docker-compose backend image
+# (backend/Dockerfile); both create the `tret` user (uid/gid 10001) and use this
+# as their ENTRYPOINT. In compose the same reasoning applies to the named
+# `storage` volume: it is created root-owned, and an install made before this
+# change has root-owned files on it.
+#
 # Fly attaches the `tret_storage` volume at /data (fly.toml `[mounts]`) after
 # the image is built, so its ownership cannot be fixed by a Dockerfile RUN —
 # there is nothing mounted there yet at build time, and a freshly attached Fly
@@ -12,6 +18,12 @@
 # Fly/Docker send to the container reach it directly, with nothing sitting
 # above it to relay or swallow them.
 set -e
+
+# Already unprivileged (e.g. compose `user:` override or `docker run --user`):
+# chown and setpriv would both fail, so just run the command.
+if [ "$(id -u)" != "0" ]; then
+    exec "$@"
+fi
 
 STORAGE_DIR="${TRET_STORAGE_DIR:-/data/storage}"
 mkdir -p "$STORAGE_DIR"

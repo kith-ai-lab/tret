@@ -430,7 +430,7 @@ class Settings(BaseSettings):
     oidc_client_id: str = ""
     oidc_client_secret: str = ""
     # The callback URL tret registers with the IdP, e.g.
-    # https://cloud.tret.kithailab.com/api/auth/oidc/callback. Preferred over
+    # https://tret.example.com/api/auth/oidc/callback. Preferred over
     # deriving one from the incoming request: tret does not trust
     # X-Forwarded-Proto any more than api/auth.py's login limiter trusts
     # X-Forwarded-For, so behind Fly's TLS-terminating proxy `request.url`

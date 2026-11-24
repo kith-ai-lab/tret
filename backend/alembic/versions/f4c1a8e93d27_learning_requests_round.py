@@ -1,4 +1,4 @@
-"""learning requests round (Ben's R01-R28, 2026-11-20)
+"""learning requests round (R01-R28, 2026-11-20)
 
 Revision ID: f4c1a8e93d27
 Revises: e5b8c2d7f013

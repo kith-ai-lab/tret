@@ -41,6 +41,7 @@ from tret.api.auth import login_limiter
 from tret.config import get_settings
 from tret.db.engine import get_db
 from tret.db.models import Invite, User, Workspace, WorkspaceMember
+from tret.services import identity
 
 # ── fixed test IdP ───────────────────────────────────────────────────────────
 ISSUER_HOST = "issuer.example.test"
@@ -1197,3 +1198,107 @@ def test_a_same_origin_next_path_is_preserved(client):
     state, _nonce = _login_redirect(client, next_path="/reports/42")
     unpacked = oidc._state_serializer().loads(state)
     assert unpacked["next"] == "/reports/42"
+
+
+# ── unverified sign-up cannot squat an email ─────────────────────────────────
+def _oidc_user(email: str, sub: str, *, verified: bool) -> User:
+    user = _password_user(email, "unused", oidc_sub=sub)
+    user.password_hash = None
+    user.email_verified = verified
+    return user
+
+
+def test_a_verified_owner_displaces_an_unverified_squatter(client, db, monkeypatch):
+    """Multi-tenant open signup JIT-provisions an unverified email, so anyone
+    can register `ceo@victim.com` bound to their own sub. The real owner's
+    verified claim must win instead of 409ing on every attempt."""
+    squatter = _oidc_user("ceo@victim.com", "sub-attacker", verified=False)
+    db.add(squatter)
+    squatter_id = squatter.id
+    with _open_signup(monkeypatch):
+        response = _round_trip(
+            client,
+            claims={"sub": "sub-owner", "email": "ceo@victim.com", "email_verified": True},
+        )
+        assert response.status_code == 302
+
+        me = client.get("/api/auth/me")
+        assert me.status_code == 200
+        assert me.json()["email"] == "ceo@victim.com"
+        assert me.json()["id"] != str(squatter_id)
+
+    # The squatter keeps its sub and account but no longer holds the address.
+    assert squatter.oidc_sub == "sub-attacker"
+    assert squatter.email != "ceo@victim.com"
+    assert squatter.email.endswith("@" + identity.RELEASED_EMAIL_DOMAIN)
+    assert squatter.password_hash is None
+    owner = next(u for u in db.store["User"] if u.oidc_sub == "sub-owner")
+    assert owner.email == "ceo@victim.com" and owner.email_verified is True
+    # Nothing of the squatter's is handed over.
+    assert not [m for m in db.store["WorkspaceMember"] if m.user_id == squatter.id]
+    assert [m for m in db.store["WorkspaceMember"] if m.user_id == owner.id]  # their own, fresh
+
+
+def test_a_released_squatter_still_signs_in_by_sub(client, db, monkeypatch):
+    squatter = _oidc_user("ceo@victim.com", "sub-attacker", verified=False)
+    db.add(squatter)
+    with _open_signup(monkeypatch):
+        _round_trip(
+            client, claims={"sub": "sub-owner", "email": "ceo@victim.com", "email_verified": True}
+        )
+        client.cookies.clear()
+        response = _round_trip(
+            client, claims={"sub": "sub-attacker", "email": "ceo@victim.com", "email_verified": False}
+        )
+        assert response.status_code == 302
+        assert client.get("/api/auth/me").json()["id"] == str(squatter.id)
+    assert squatter.email.endswith("@" + identity.RELEASED_EMAIL_DOMAIN)
+
+
+def test_an_unverified_newcomer_never_displaces_an_unverified_holder(client, db, monkeypatch):
+    first = _oidc_user("ceo@victim.com", "sub-first", verified=False)
+    db.add(first)
+    with _open_signup(monkeypatch):
+        response = _round_trip(
+            client, claims={"sub": "sub-second", "email": "ceo@victim.com", "email_verified": False}
+        )
+    assert response.status_code == 409
+    assert first.email == "ceo@victim.com"
+
+
+def test_a_refused_newcomer_does_not_release_the_squatter(client, db, monkeypatch):
+    """The release happens only once the newcomer has passed the provisioning
+    gates; a 403 must leave the holder exactly as it was."""
+    squatter = _oidc_user("ceo@victim.com", "sub-attacker", verified=False)
+    db.add(squatter)
+    monkeypatch.delenv("TRET_OIDC_ALLOWED_EMAIL_DOMAINS", raising=False)
+    get_settings.cache_clear()  # self-host, no allowlist, no invite: refused
+    response = _round_trip(
+        client, claims={"sub": "sub-owner", "email": "ceo@victim.com", "email_verified": True}
+    )
+    assert response.status_code == 403
+    assert squatter.email == "ceo@victim.com"
+
+
+def test_a_password_account_is_never_released(client, db, monkeypatch):
+    holder = _password_user("ceo@victim.com", "correct-horse-9", oidc_sub="sub-linked")
+    holder.email_verified = False  # even a legacy row without the flag
+    db.add(holder)
+    with _open_signup(monkeypatch):
+        response = _round_trip(
+            client, claims={"sub": "sub-other", "email": "ceo@victim.com", "email_verified": True}
+        )
+    assert response.status_code == 409
+    assert holder.email == "ceo@victim.com"
+    assert holder.password_hash is not None
+
+
+def test_a_verified_oidc_account_is_never_released(client, db, monkeypatch):
+    holder = _oidc_user("ceo@victim.com", "sub-real", verified=True)
+    db.add(holder)
+    with _open_signup(monkeypatch):
+        response = _round_trip(
+            client, claims={"sub": "sub-other", "email": "ceo@victim.com", "email_verified": True}
+        )
+    assert response.status_code == 409
+    assert holder.email == "ceo@victim.com"

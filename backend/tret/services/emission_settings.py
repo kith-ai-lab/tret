@@ -287,11 +287,11 @@ def shipped_defaults() -> dict[str, dict[str, Any]]:
         "pue_cloud": {
             "value": _field_default("datacenter_pue"),
             "label": (
-                "Hyperscaler cloud — conservative versus self-reported figures "
-                "(Google 1.09, AWS 1.14)"
+                "Hyperscaler cloud — tret's conservative ceiling above self-reported "
+                "figures (Google 1.09, AWS 1.15, Microsoft 1.16)"
             ),
-            "source": PUE_REFERENCE["google"]["source"],
-            "url": PUE_REFERENCE["google"]["url"],
+            "source": PUE_REFERENCE["tret_default_cloud"]["source"],
+            "url": PUE_REFERENCE["tret_default_cloud"]["url"],
         },
         "pue_local": {
             "value": _field_default("local_pue"),

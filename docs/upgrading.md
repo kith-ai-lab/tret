@@ -30,6 +30,48 @@ INFO  [tret.schema] schema state: stamped (alembic_version = f4c1d8ab26e7)
 INFO  [tret.schema] schema is at revision f4c1d8ab26e7
 ```
 
+## 2026-11-24 · access, sign-in and egress fixes
+
+One migration (two nullable columns on `egress_calls`), applied on boot. Check the items that
+apply to your install.
+
+**Analysts and approvals.**
+- `GET /api/connections/gdrive/token` now needs the approver role, so analysts can no longer
+  use the Google Drive picker (the item is shown disabled). The token is a `drive.file` token that can modify or trash files
+  picked through the connected account.
+- With auto-approve on, runs started by analysts now leave drafts for an approver, where before
+  they were approved in the analyst's own name. Make sure someone with the approver role
+  watches the review queue. The cohort edition hides the Approvals page and relies on
+  auto-approve, so in a cohort team workspace give members who produce outputs the approver
+  role (owners of personal workspaces are unaffected).
+
+**M365 read allowlist.** When a read allowlist is set, browsing and importing now follow it too,
+not only runs. Browsing lists only allowed sites and drives, and other drives return 403.
+
+**Sign-in.**
+- On a multi-tenant deployment, if an unverified, password-less account holds an email and
+  its owner signs in with a verified claim from another identity, the owner now gets their
+  own account. The old account keeps its data and its own sign-in, under the address
+  `released-<id>@released.invalid`.
+- One case looks surprising but is intended: a person who first signed up unverified and later
+  signs in verified through a different connection ends up with two accounts.
+
+**Research fetches.**
+- `TRET_EGRESS_RESEARCH_MAX_FETCHES_PER_RUN` now counts attempts, not successes, so runs that hit
+  many dead links reach it sooner.
+- Connections go to the IP the egress guard vetted. With `TRET_EGRESS_PROXY` (or an `HTTP(S)_PROXY`
+  variable) set, the proxy resolves names, so it must refuse private and link-local addresses
+  itself.
+
+**Docker install.**
+- The backend container now runs as uid 10001. On first start it fixes the ownership of the
+  `storage` volume, then drops root.
+- `docker compose exec backend …` still runs as root unless you pass `-u tret`.
+- A host `./packs` tree with files only root can read now needs them readable by others.
+
+**Telemetry ingest** (only if you run your own ingest Worker): `wrangler deploy` creates the new
+`REPORT_LIMITER` binding (3 reports a minute per sender: an IPv4 address, or an IPv6 /64). See [docs/telemetry.md](telemetry.md).
+
 ## 2026-11-24 · security fixes
 
 Several defaults got stricter. Most installs need no action; check each item that

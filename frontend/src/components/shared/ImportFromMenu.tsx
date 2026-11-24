@@ -23,6 +23,12 @@ export function ImportFromMenu({ projectId }: { projectId: string | null }) {
   const connectionsQuery = useQuery({ queryKey: ['connections'], queryFn: api.listConnections })
   const providersQuery = useQuery({ queryKey: ['connection-providers'], queryFn: api.connectionProviders })
 
+  // The Google Picker needs a live `drive.file` token, which the server hands
+  // only to an approver or above (it can modify files picked through the app,
+  // outside the approval-gated write-back). Revert by dropping this flag.
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: Infinity })
+  const canUseGooglePicker = ['owner', 'admin', 'approver'].includes(meQuery.data?.role ?? '')
+
   const [menuOpen, setMenuOpen] = useState(false)
   const [m365Open, setM365Open] = useState(false)
   const [pickerError, setPickerError] = useState<string | null>(null)
@@ -138,9 +144,22 @@ export function ImportFromMenu({ projectId }: { projectId: string | null }) {
           }}
         >
           {activeProviders.has('gdrive') && (
-            <button type="button" className="list-item" role="menuitem" onClick={() => void runGoogleDrivePicker()}>
-              {PROVIDER_MENU_LABELS.gdrive}
-            </button>
+            <>
+              <button
+                type="button"
+                className="list-item"
+                role="menuitem"
+                disabled={!canUseGooglePicker}
+                onClick={() => void runGoogleDrivePicker()}
+              >
+                {PROVIDER_MENU_LABELS.gdrive}
+              </button>
+              {!canUseGooglePicker && (
+                <div className="fine-print" style={{ padding: '0 8px 4px' }}>
+                  Google Drive import needs the approver role: the picker uses a token that can modify files you pick.
+                </div>
+              )}
+            </>
           )}
           {activeProviders.has('m365') && (
             <button type="button" className="list-item" role="menuitem" onClick={openM365Browser}>

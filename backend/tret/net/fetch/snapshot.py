@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.config import get_settings
 from tret.db.models import Document
+from tret.net.audit_base import redact_urls, strip_query
 from tret.net.fetch.extract import html_to_text
 from tret.net.fetch.fetch import FetchedPage
 from tret.services.documents import extract_text, extraction_budget_seconds, pdf_budget
@@ -104,7 +105,7 @@ async def _extract(page: FetchedPage, filename: str) -> tuple[str, dict, str]:
     except (asyncio.TimeoutError, TimeoutError):
         return "", {"error": f"text extraction timed out after {timeout:.0f}s"}, "failed"
     except Exception as e:  # a parser blowing up on hostile bytes is not a run failure
-        log.warning("web extraction failed for %r: %s", page.url, e)
+        log.warning("web extraction failed for %r: %s", strip_query(page.url), redact_urls(str(e)))
         return "", {"error": f"text extraction failed: {type(e).__name__}"}, "failed"
     # A recorded extractor error with no text (Poppler timed out) is a failure.
     return text, meta, "failed" if meta.get("error") and not text else "done"

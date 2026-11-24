@@ -45,11 +45,13 @@ One row per accepted report, in D1 (`migrations/0001_init.sql`):
 
 ## What is deliberately not stored
 
-- **No request metadata.** The `POST /v1/report` handler reads only
+- **No request metadata stored.** The `POST /v1/report` handler reads only
   `request.method`, the URL path, the `content-type` and `content-length`
-  headers, and the body — never `cf`, `CF-Connecting-IP`, `User-Agent`, or
-  any other header. The code never reads the requester's IP, country, or
-  client string. (`GET /v1/admin/instances` is the one exception: it's
+  headers, the body, and `CF-Connecting-IP`, which it hands to the Workers
+  Rate Limiting binding as the limiter's key (see Endpoints) and uses for
+  nothing else: it is never written to D1, a log or a response. It never
+  reads `cf`, `User-Agent`, or any other header, and never country or client
+  string. (`GET /v1/admin/instances` is the one exception: it's
   authenticated, and reads `Authorization`.)
 - **No timestamps on reports**, only a UTC calendar date
   (`received_day`), specifically so a report can never be correlated
@@ -78,7 +80,7 @@ codebase controls. It does **not** cover the Cloudflare zone in front of
 it: the zone's own edge analytics, Security Events, and any Logpush job or
 WAF/rate-limit rule configured in the dashboard operate independently of
 this Worker's code and are outside this repo's scope. In particular, the
-edge rate-limit rule recommended below (DEPLOY) is evaluated at the edge,
+optional edge rate-limit rule described below (DEPLOY) is evaluated at the edge,
 before a request ever reaches this Worker's `fetch()` handler, and a
 request it blocks shows up in Cloudflare Security Events *with an IP* —
 that visibility comes from the platform, not from anything this Worker
@@ -94,7 +96,10 @@ does.
   `415` missing/wrong `Content-Type` · `429` either a report for this
   `instance_id` was already accepted today (UTC), or the global daily
   accept cap (`DAILY_ACCEPT_CAP`, default 2000 reports/day across all
-  instances) has been reached · `405` any method but POST. Per-report
+  instances) has been reached, or this sender (connecting IP) is over its
+  rate limit (3 requests/minute, `REPORT_LIMITER` in `wrangler.jsonc`; the
+  response carries `Retry-After: 60`; no limit if the binding or the
+  `CF-Connecting-IP` header is absent) · `405` any method but POST. Per-report
   sanity caps on `tokens_in`/`tokens_out`/`energy_wh`/`co2e_g` scale with
   the reporting window (`days = max(1, window length)`): 2e9 tokens/day,
   1e6 Wh-or-g/day. Every non-2xx response carries
@@ -150,10 +155,14 @@ real report makes it 5 and the key becomes visible, you've confirmed one
 real instance uses it). The mitigations are the caps above (the
 `Content-Type` requirement, the global daily accept cap, the window-scaled
 per-report caps), the 7-day seasoning rule, the daily blended snapshot
-(every published change blends at least 5 reports), and a Cloudflare edge
-rate-limit rule on `/v1/report` (see DEPLOY) — evaluated at the edge,
-before this Worker's code ever runs, and independent of anything in this
-repo. None of this makes the figures authenticated: they remain
+(every published change blends at least 5 reports), and the per-IP rate
+limit on `/v1/report` (the `REPORT_LIMITER` binding, in this repo). That
+limiter only supports 10 s and 60 s windows, so it prevents a burst from
+exhausting the daily cap but does not bound what one patient sender or a
+many-IP sender can submit over a day. Capping distinct instance ids per IP
+per day would require storing a per-IP identifier, which this Worker
+deliberately does not do. A dashboard rule (see DEPLOY) can add a longer
+window at the edge. None of this makes the figures authenticated: they remain
 self-reported.
 
 ## Recomputing totals
@@ -231,14 +240,27 @@ file. `DAILY_ACCEPT_CAP` is a plain `vars` entry in `wrangler.jsonc`
 committed; adjust it there and redeploy if the default cap is wrong for
 your fleet size.
 
-Then, in the Cloudflare dashboard (not in this repo): create a rate
-limiting rule for `POST telemetry.kithailab.com/v1/report` — e.g. 5
-requests per hour per IP, action block. This is the edge mitigation
-referenced in "Known limitation: reports are unauthenticated" above: it's
-evaluated at the edge, before a request reaches this Worker's code, and a
-blocked request appears in Cloudflare Security Events (with the requesting
-IP) purely as a platform feature — this Worker's own code still never
-reads or stores that IP.
+The per-IP limiter ships in this repo as the `ratelimits` entry in
+`wrangler.jsonc` (binding `REPORT_LIMITER`, namespace `1001`, 3 requests per
+60 s). `wrangler deploy` creates it; there is nothing to set up in the
+dashboard for it. `namespace_id` only needs to be unique within the
+Cloudflare account, so change it if another Worker there already uses 1001.
+
+Operator checklist, none of which this repo does for you:
+
+1. Deploy from the right account (`wrangler whoami`), apply the D1
+   migrations, set `ADMIN_TOKEN`, and `wrangler deploy` (above).
+2. After deploying, confirm the binding exists (Workers & Pages, this
+   Worker, Settings, Bindings: `REPORT_LIMITER`) and send four reports in
+   a minute from one machine: the fourth should get `429`.
+3. Optional, recommended defense in depth: in the Cloudflare dashboard
+   (Security, WAF, Rate limiting rules) add a rule for `POST
+   telemetry.kithailab.com/v1/report` with a longer window than the Worker
+   binding allows, e.g. 5 requests per hour per IP, action block, if your
+   plan permits that window (free plans offer 10 seconds only). It is
+   evaluated before this Worker runs, and a blocked request appears in
+   Cloudflare Security Events with the requesting IP purely as a platform
+   feature; this Worker's own code still never stores that IP.
 
 ### Forks
 

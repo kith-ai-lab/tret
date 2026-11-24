@@ -495,11 +495,15 @@ production boot warns you that it is open.
 ### What is NOT isolated
 
 The same caveat as the pack safety scan (§5), for the same reason. This is an
-allowlist enforced by code running inside the process it constrains, and the
-resolve-then-connect gap means a DNS record that changes between the two lookups
-(rebinding) is not closed here. Both are honest limits, not oversights: closing
-them means pinning resolved addresses into the connection with a custom
-transport, which tret does not do and does not claim to.
+allowlist enforced by code running inside the process it constrains, so it is a
+guard rail, not a sandbox.
+
+DNS rebinding is closed for direct connections: the address `check_url` vetted is
+the address the client connects to (`tret/net/pinning.py`), on every redirect hop,
+with TLS SNI and certificate checking still done against the hostname. It is not
+closed behind a proxy (`TRET_EGRESS_PROXY` or a proxy in the environment): there
+the proxy resolves the name, so the proxy must refuse private and link-local
+ranges itself.
 
 The boundary is the network around the workload:
 

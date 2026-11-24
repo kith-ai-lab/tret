@@ -168,6 +168,7 @@ REVISION_MARKERS: tuple[tuple[str, tuple[Marker, ...]], ...] = (
         (("peer_pool_snapshots", None), ("peer_pool_members", None), ("eval_tournaments", None),
          ("eval_matches", None), ("eval_match_runs", None), ("module_ratings", None)),
     ),
+    ("c5e8a2d7b941", (("egress_calls", "query_sha256"),)),
 )
 
 # Every table any known revision creates. Used to tell "empty database" from

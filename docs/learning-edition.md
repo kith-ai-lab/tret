@@ -53,7 +53,7 @@ otherwise the state rate `electricity / state:<ST>`. Each facility row's
 
 If the factor dataset is absent the method fails with a message pointing here.
 
-## Loading Ben's EPA spreadsheets
+## Loading the EPA spreadsheets
 
 No emission factor is typed into tret. The method reads the dataset
 `epa_ghg_factors_2025` (default; override with `inputs={"factors": "<name>"}`), which an
@@ -158,3 +158,16 @@ namespace or privilege-escalation bug would defeat it; keep the host patched.
 Week 3's session saves into `<session folder>/tret/` (create-only). The Week 4 session
 is started from the same group, so it inherits the same folders and reads the earlier
 output with `read_connected_file`. Nothing is carried in chat history.
+
+## Roles and automatic approval
+
+The cohort edition hides the Approvals page. It relies on the deploy's
+`TRET_AUTO_APPROVE_DEFAULT` to approve agent output, including SharePoint and OneDrive
+write-back, as soon as it is created. Automatic approval only signs off in the name of
+someone who could approve by hand: a run started by an approver, admin or owner is approved
+automatically, and a run started by an analyst leaves a draft.
+
+Every member owns their personal workspace, so this changes nothing there. In a team
+workspace, invite the people who produce outputs as approvers. An analyst's drafts would
+otherwise wait on a page the edition does not show; switching the workspace's edition to
+`standard` brings the page back for whoever reviews them.
