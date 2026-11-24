@@ -3295,6 +3295,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/report-extractions/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Review List
+         * @description What a human should look at: computed from the stored extractions, minus the items with a
+         *     decision unless `include_resolved`. `batch_id` is the source collection batch or the
+         *     extraction batch; `kind` (repeatable) limits the item kinds; `limit` (default 500, max 5000) and
+         *     `offset` page through the list, `total` counts all of it.
+         */
+        get: operations["get_review_list_api_report_extractions_review_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/report-extractions/{extraction_id}": {
         parameters: {
             query?: never;
@@ -3322,6 +3345,23 @@ export interface paths {
         /** Get Module Text */
         get: operations["get_module_text_api_report_extractions__extraction_id__modules__module__text_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/report-extractions/{extraction_id}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Put Review Decision */
+        put: operations["put_review_decision_api_report_extractions__extraction_id__review_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -4698,6 +4738,21 @@ export interface components {
              * @enum {string}
              */
             verdict: "agree" | "disagree" | "adjust";
+        };
+        /** ReviewDecisionIn */
+        ReviewDecisionIn: {
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "accepted" | "dismissed" | "fixed";
+            /**
+             * Item Key
+             * @description `item_key` of a review item
+             */
+            item_key: string;
+            /** Note */
+            note?: string | null;
         };
         /** RoutingPreviewBody */
         RoutingPreviewBody: {
@@ -10297,6 +10352,41 @@ export interface operations {
             };
         };
     };
+    get_review_list_api_report_extractions_review_get: {
+        parameters: {
+            query?: {
+                batch_id?: string | null;
+                kind?: string[];
+                include_resolved?: boolean;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_report_extraction_api_report_extractions__extraction_id__get: {
         parameters: {
             query?: never;
@@ -10339,6 +10429,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_review_decision_api_report_extractions__extraction_id__review_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                extraction_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReviewDecisionIn"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

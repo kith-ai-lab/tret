@@ -10,6 +10,17 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Claim density and an extraction review list (experimental, with the Stage 2 extractor).** Each
+  extracted module now carries a deterministic claim density (`claim_count`, `claim_density` per 100
+  words, `claim_counts` by category: currency, date, unit, number, site; `density_version`
+  `claims-1`), a counter-signal to word count for length bias; `tret disclosure claim-density
+  --from-batch <id> [--force]` fills it for older rows. The new review list (`tret disclosure
+  review-list --from-batch <id>`, `GET /api/report-extractions/review`) computes what a human should
+  check: failed or partial extractions, low-confidence, truncated, empty or boilerplate-looking
+  modules, rejected spans and doubtful NACE classifications; `PUT /api/report-extractions/{id}/review`
+  stores a decision so a dismissed item does not come back. New migration (`report_modules` density
+  columns, `extraction_reviews`), settings `TRET_DISCLOSURE_REVIEW_MIN_CONFIDENCE` and
+  `TRET_DISCLOSURE_REVIEW_MIN_DENSITY`. See [docs/disclosure-evaluation.md](docs/disclosure-evaluation.md).
 - **Stage 2 module extractor (experimental, off by default).** `TRET_DISCLOSURE_EXTRACT=on` enables
   the `disclosure_extract` batch profile and `tret disclosure extract --from-batch <id> [--limit N]
   [--only-missing] [--policy ...] [--dry-run]`, which finds, in each normalised report, the passages

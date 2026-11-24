@@ -597,6 +597,41 @@ class ReportModule(Base):
         Boolean, nullable=False, default=False, server_default=false()
     )
     note: Mapped[str | None] = mapped_column(Text)
+    # Claim density of the module text (`tret/evaluation/density.py`); null for an absent
+    # module and until computed. `claim_density` is claims per 100 words, `claim_counts` the
+    # breakdown by category, `density_version` the rule set that produced them.
+    claim_count: Mapped[int | None] = mapped_column(Integer)
+    claim_density: Mapped[float | None] = mapped_column()
+    claim_counts: Mapped[dict | None] = mapped_column(JSONB)
+    density_version: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+
+
+class ExtractionReview(Base):
+    """A reviewer's decision on one computed review item of an extraction
+    (`tret/evaluation/review.py`): `accepted` (looked at, fine as it is), `dismissed` (not worth
+    fixing) or `fixed` (corrected elsewhere, for example a manual NACE classification). The items
+    themselves are computed, never stored; `item_key` is the stable key of one, so a decided item
+    does not come back. Workspace-scoped."""
+
+    __tablename__ = "extraction_reviews"
+    __table_args__ = (
+        UniqueConstraint("extraction_id", "item_key"),
+        Index("ix_extraction_reviews_ws", "workspace_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    extraction_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("report_extractions.id", ondelete="CASCADE"), nullable=False
+    )
+    item_key: Mapped[str] = mapped_column(Text, nullable=False)
+    decision: Mapped[str] = mapped_column(Text, nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    reviewed_by: Mapped[str | None] = mapped_column(Text)
+    reviewed_at: Mapped[datetime] = mapped_column(default=utcnow, nullable=False)
     created_at: Mapped[datetime] = created_at_col()
 
 

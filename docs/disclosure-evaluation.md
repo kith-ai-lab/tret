@@ -96,6 +96,71 @@ A result never replaces a better stored one: a `failed` extraction never overwri
 * `GET /api/disclosure-reports/{id}/extractions`
 * `GET /api/report-extractions/{id}`: with its modules
 * `GET /api/report-extractions/{id}/modules/{module}/text`: the verbatim text
+* `GET /api/report-extractions/review`, `PUT /api/report-extractions/{id}/review`: the review list (below)
+
+`report_modules` also carries the claim density (`claim_count`, `claim_density`, `claim_counts`,
+`density_version`, null for an absent module) and `extraction_reviews` the review decisions.
+
+## Claim density
+
+A word count rewards length: a module that says little in many words scores like one that commits to
+numbers, dates and named places. `tret/evaluation/density.py::claim_density(text)` counts the
+checkable specifics in a module's text, as a counter-signal to `word_count` for length bias when
+Engine 1 compares reports. It is a regex counter with no model call, so the same text always gives the
+same numbers. `claim_density` is claims per 100 words, over the same word count as
+`report_modules.word_count`; `claim_counts` is the breakdown.
+
+A token is counted once, in this order (a matched span is masked before the next category):
+
+1. **currency**: an amount with a symbol (`€ $ £ ¥`, `US$`) or ISO code before or after it, with an
+   optional scale word: `€12.5 million`, `USD 2.3bn`, `50 million euros`.
+2. **date**: full dates, day and month, month and year, `Q3 2024`, `H1 2025`, `FY2024`/`FY24`, and
+   stand-alone years 1900 to 2100 (a year followed by a unit, `2025 tCO2e`, is a quantity).
+3. **unit**: a number or range with `%`, percent, basis points, `tCO2e` and variants, tonnes, `kWh`
+   to `TWh`, `kW` to `GW`, `GJ`, `m³`, litres, `ha`, `km`, `°C`, `ppm`, with an optional scale word.
+4. **number**: any number left over (`14 suppliers`; `5-10` is one).
+5. **site**: one to four capitalised words before a site noun (`Rotterdam refinery`, `Port Hedland
+   terminal`), `Gigafactory Berlin`, `Port of Rotterdam`. Leading generic words (`The`, `Our`,
+   `Each`...) are dropped, so `Our refinery` is not a site.
+
+So `42% by 2030` is one unit and one date, and `1,234,567 tCO2e` is one unit. Ignored first: page and
+section markers, heading numbering (`1.2.3 Title`, `## 4.1 Targets`; a bare `2.5 Million tonnes` is a quantity), list markers (`1.`, `(a)`), footnote markers
+(`[12]`) and superscripts, URLs, and cross-references whose number names a place in a document
+(`Scope 3`, `Table 4`, `Article 8(1)`, `ISO 14001`, `ESRS E1`, `p. 12`; a year or a `3,400`-style number after one is the next claim, not part of the reference). Known limits: it counts
+tokens, not distinct facts (a figure repeated in a table counts every time), it does not read
+spelled-out numbers, and a sentence-initial capitalised word before a site noun counts as a site name.
+
+`DENSITY_VERSION` (`claims-1`) changes with any rule. The extractor fills the columns when it stores a
+module; `tret disclosure claim-density --from-batch <id> [--force]` fills or refreshes them for
+modules at another version (or all, with `--force`). A module whose text is missing from the blob
+store is skipped and counted.
+
+## Extraction review list
+
+`tret disclosure review-list --from-batch <id> [--kind K] [--all]` and
+`GET /api/report-extractions/review?batch_id=&kind=&include_resolved=` list what a human should look
+at, most severe first. The list is computed from the stored extractions on every call (a rule or
+threshold change applies at once); only the reviewer's decision is stored.
+
+| kind | when |
+|---|---|
+| `extraction_failed`, `extraction_partial` | the extraction's status (a failed one lists only this) |
+| `nace_low_confidence` | the company's effective classification is the extractor's own, below the confidence floor |
+| `nace_missing` | the company has no classification at all |
+| `gics_disagrees` | the effective classification is not manual and the register's GICS sector does not fit it |
+| `module_low_confidence` | present module below the confidence floor |
+| `module_present_no_text` | present but no text or zero words |
+| `module_truncated` | cut to the module's `max_words` |
+| `module_low_density` | 100+ words and fewer claims per 100 words than the floor: likely boilerplate |
+| `span_issues` | one per (issue kind, module) of `invalid_span`, `reversed_span`, `present_without_valid_span`, `invalid_block` |
+
+Floors: `TRET_DISCLOSURE_REVIEW_MIN_CONFIDENCE` (0.6) and `TRET_DISCLOSURE_REVIEW_MIN_DENSITY` (0.5).
+Each item has a stable `item_key` (`status`, `module:<slug>:low_confidence`, `nace:low_confidence`,
+`issue:invalid_span:<slug>`...). `PUT /api/report-extractions/{id}/review` with
+`{item_key, decision: accepted | dismissed | fixed, note}` (approver role) records a decision, and a
+decided item is hidden unless `include_resolved` / `--all`. A NACE problem is fixed with
+`PUT /api/company-classifications/manual`, then marked `fixed`. The three NACE kinds are about the company, so each is listed once per company, on its most recent non-failed extraction. Status items have the keys `status:failed` and `status:partial`. Re-extracting a report (a result that replaces the stored one) deletes that extraction's decisions, so the new result gets a fresh review. The GET takes `limit` (default 500, max 5000) and `offset` and returns `total`. `batch_id` is the source collection
+batch or the extraction batch.
 
 ## The 30-report hand check
 

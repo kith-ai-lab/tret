@@ -2037,6 +2037,44 @@
         "title": "ReviewBody",
         "type": "object"
       },
+      "ReviewDecisionIn": {
+        "properties": {
+          "decision": {
+            "enum": [
+              "accepted",
+              "dismissed",
+              "fixed"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "item_key": {
+            "description": "`item_key` of a review item",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Item Key",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "item_key",
+          "decision"
+        ],
+        "title": "ReviewDecisionIn",
+        "type": "object"
+      },
       "RoutingPreviewBody": {
         "properties": {
           "compare": {
@@ -10433,6 +10471,101 @@
         ]
       }
     },
+    "/api/report-extractions/review": {
+      "get": {
+        "description": "What a human should look at: computed from the stored extractions, minus the items with a\ndecision unless `include_resolved`. `batch_id` is the source collection batch or the\nextraction batch; `kind` (repeatable) limits the item kinds; `limit` (default 500, max 5000) and\n`offset` page through the list, `total` counts all of it.",
+        "operationId": "get_review_list_api_report_extractions_review_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "batch_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Batch Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Kind",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_resolved",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Resolved",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 5000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review List",
+        "tags": [
+          "report-extractions"
+        ]
+      }
+    },
     "/api/report-extractions/{extraction_id}": {
       "get": {
         "operationId": "get_report_extraction_api_report_extractions__extraction_id__get",
@@ -10519,6 +10652,57 @@
           }
         },
         "summary": "Get Module Text",
+        "tags": [
+          "report-extractions"
+        ]
+      }
+    },
+    "/api/report-extractions/{extraction_id}/review": {
+      "put": {
+        "operationId": "put_review_decision_api_report_extractions__extraction_id__review_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "extraction_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Extraction Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewDecisionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Review Decision",
         "tags": [
           "report-extractions"
         ]

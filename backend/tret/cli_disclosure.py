@@ -6,6 +6,9 @@
 * `classify-sec --batch <id>` fills the peer taxonomy from the SEC's SIC codes (needs
   `TRET_SEC_USER_AGENT`); `classifications --batch <id>` lists each target's effective
   classification. Both work whether or not `TRET_PEER_TAXONOMY` is on.
+* `extract`, `claim-density --from-batch <id>` and `review-list --from-batch <id>` are the
+  Stage 2 commands (docs/disclosure-evaluation.md): create an extraction batch, fill the stored
+  claim density, print what a human should check.
 * `normalise-file <path> --out <dir>` runs the converter on one local file with NO
   database and writes `<stem>.md` and `<stem>.metrics.json`; for manual checks. It does
   not need the setting on.
@@ -91,6 +94,32 @@ def register(sub: argparse._SubParsersAction) -> None:
     ext.add_argument("--dry-run", action="store_true", help="Count reports, estimate tokens and cost; create nothing")
     ext.add_argument("--json", action="store_true", help="Print raw JSON")
 
+    dens = dsub.add_parser(
+        "claim-density",
+        help="Compute (or recompute) the claim density of a batch's extracted modules",
+        description="Read the module texts of the extractions made from a collection batch (or an "
+        "extraction batch) from the blob store and store their claim density (claims per 100 words, "
+        "with the breakdown by category). Modules already at the current density version are "
+        "skipped unless --force; a module whose text is missing from storage is skipped and counted. "
+        "Works whether or not TRET_DISCLOSURE_EXTRACT is on.",
+    )
+    dens.add_argument("--from-batch", required=True, metavar="BATCH_ID", help="The collection batch (or extraction batch)")
+    dens.add_argument("--force", action="store_true", help="Recompute modules already at the current density version")
+    dens.add_argument("--json", action="store_true", help="Print raw JSON")
+
+    rvw = dsub.add_parser(
+        "review-list",
+        help="List what a human should check in a batch's extractions",
+        description="The computed extraction review list (failed or partial extractions, low-confidence "
+        "or truncated modules, boilerplate-looking modules, rejected spans, doubtful NACE "
+        "classifications), most severe first. Decisions are recorded with "
+        "PUT /api/report-extractions/<id>/review.",
+    )
+    rvw.add_argument("--from-batch", required=True, metavar="BATCH_ID", help="The collection batch (or extraction batch)")
+    rvw.add_argument("--kind", action="append", metavar="KIND", help="Only this item kind (repeatable)")
+    rvw.add_argument("--all", action="store_true", help="Include items that already have a decision")
+    rvw.add_argument("--json", action="store_true", help="Print raw JSON")
+
     one = dsub.add_parser(
         "normalise-file",
         help="Normalise one local PDF (or ESEF .zip/.xbri) with no database; writes <stem>.md and <stem>.metrics.json",
@@ -105,6 +134,10 @@ def run(args: argparse.Namespace) -> int:
         return _normalise_file(args)
     if args.disclosure_command == "extract":
         return _extract(args)
+    if args.disclosure_command == "claim-density":
+        return _claim_density(args)
+    if args.disclosure_command == "review-list":
+        return _review_list(args)
     if args.disclosure_command == "classify-sec":
         return _classify_sec(args)
     if args.disclosure_command == "classifications":
@@ -367,6 +400,88 @@ def _classifications(args: argparse.Namespace) -> int:
             )
     done = sum(1 for r in rows if r["source"])
     print(f"{len(rows)} target(s), {done} classified, {len(rows) - done} without a classification")
+    return 0
+
+
+def _claim_density(args: argparse.Namespace) -> int:
+    """`tret disclosure claim-density`: fill or refresh the stored claim density."""
+    import asyncio
+
+    batch_id = _batch_uuid(args.from_batch)
+    if batch_id is None:
+        return 2
+
+    from tret.db.engine import get_session_factory
+    from tret.db.models import Batch
+    from tret.evaluation import density
+
+    async def go():
+        async with get_session_factory()() as db:
+            batch = await db.get(Batch, batch_id)
+            if batch is None:
+                return None
+            stats = await density.recompute_claim_density(
+                db, workspace_id=batch.workspace_id, batch_id=batch_id, force=args.force
+            )
+            await db.commit()
+            return stats
+
+    stats = asyncio.run(go())
+    if stats is None:
+        print(f"error: batch {batch_id} not found", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({**stats, "density_version": density.DENSITY_VERSION}, indent=2))
+    else:
+        print(
+            f"density {density.DENSITY_VERSION}: {stats['considered']} module(s), {stats['updated']} updated, "
+            f"{stats['skipped_current']} already current, {stats['missing_text']} skipped (text missing from storage)"
+        )
+    return 0
+
+
+def _review_list(args: argparse.Namespace) -> int:
+    """`tret disclosure review-list`: the extraction review items of a batch."""
+    import asyncio
+
+    batch_id = _batch_uuid(args.from_batch)
+    if batch_id is None:
+        return 2
+
+    from tret.db.engine import get_session_factory
+    from tret.db.models import Batch
+    from tret.evaluation import review
+
+    async def go():
+        async with get_session_factory()() as db:
+            batch = await db.get(Batch, batch_id)
+            if batch is None:
+                return None
+            return await review.review_items(
+                db, workspace_id=batch.workspace_id, batch_id=batch_id, include_resolved=args.all, kinds=args.kind
+            )
+
+    try:
+        items = asyncio.run(go())
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if items is None:
+        print(f"error: batch {batch_id} not found", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps([i.as_dict() for i in items], indent=2))
+        return 0
+    rows = [
+        ((i.company or "?")[:28], i.kind, i.module or "", (i.decision or {}).get("decision", ""), i.detail)
+        for i in items
+    ]
+    head = ("COMPANY", "KIND", "MODULE", "DECISION", "DETAIL")
+    widths = [max(len(head[c]), *(len(r[c]) for r in rows)) if rows else len(head[c]) for c in range(4)]
+    print("  ".join(h.ljust(w) for h, w in zip(head, widths)) + "  " + head[4])
+    for r in rows:
+        print("  ".join(v.ljust(w) for v, w in zip(r, widths)) + "  " + r[4])
+    print(f"{len(items)} item(s) to review" + ("" if args.all else " (decided items hidden; --all shows them)"))
     return 0
 
 
