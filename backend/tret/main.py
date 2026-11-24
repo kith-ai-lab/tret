@@ -34,6 +34,7 @@ from tret.api import (
     pack_builder,
     packs,
     peer_taxonomy as peer_taxonomy_api,
+    report_extractions as report_extractions_api,
     routing,
     runs,
     settings as settings_api,
@@ -469,6 +470,7 @@ def create_app() -> FastAPI:
     app.include_router(documents.router)
     app.include_router(disclosure_reports_api.router)
     app.include_router(peer_taxonomy_api.router)
+    app.include_router(report_extractions_api.router)
     # Reference documentation, read straight out of `docs/` so the methodology the
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)

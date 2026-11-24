@@ -30,7 +30,7 @@ from collections.abc import Iterable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tret.batches.rubrics import is_evaluator_run
+from tret.batches.rubrics import is_evaluator_run, is_structured_call_run
 from tret.db.models import Approval, Batch, BatchTarget, Finding, Harness, Pack, Run, RunOutcome
 from tret.engine.context import task_config
 from tret.router_llm.objectives import DEFAULT_MAX_COST_TIER, DEFAULT_OBJECTIVE
@@ -266,7 +266,9 @@ async def build_outcomes(db: AsyncSession, run: Run) -> list[RunOutcome]:
     Not persisted here — `record_outcome` owns the write, and the backfill reuses
     this to build rows in bulk.
     """
-    if is_evaluator_run(run.task_input):
+    if is_evaluator_run(run.task_input) or is_structured_call_run(run.task_input):
+        # A direct structured call (`engine/direct.py`) is not an agent run and its quality is
+        # not scored yet; the same early return as the evaluator's, for the same reason.
         # A batch evaluator run (judging another run, `batches/evaluation.py`): the
         # judge's performance at judging says nothing about how it does the task
         # the router is learning, and its rows would skew those priors.

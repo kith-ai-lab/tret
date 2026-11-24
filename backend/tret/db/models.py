@@ -526,6 +526,80 @@ class CompanyClassification(Base):
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class ReportExtraction(Base):
+    """The Stage 2 extraction of one normalised report (`tret/evaluation/extract.py`): which
+    passages cover each module of a module set, plus the report's metadata (document type, year,
+    frameworks cited, assurance, a NACE proposal), all with block-id evidence. One row per
+    (report, extractor version, module set), so a new version or a tuned module set sits beside
+    the old results. `status`: extracted | partial (some windows failed) | failed. The text of
+    each module is in the blob store (`ReportModule.text_key`), never here. Workspace-scoped.
+    """
+
+    __tablename__ = "report_extractions"
+    __table_args__ = (
+        UniqueConstraint("disclosure_report_id", "extractor_version", "module_set"),
+        Index("ix_report_extractions_ws", "workspace_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    disclosure_report_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("disclosure_reports.id", ondelete="CASCADE"), nullable=False
+    )
+    batch_target_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collection_targets.id", ondelete="SET NULL")
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    extractor_version: Mapped[str] = mapped_column(Text, nullable=False)
+    module_set: Mapped[str] = mapped_column(Text, nullable=False)  # slug@version
+    model: Mapped[str | None] = mapped_column(Text)  # the model that answered last
+    # Every model that answered a window, in order of first use.
+    models: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="extracted")
+    # The column is called `metadata`; the attribute cannot be (SQLAlchemy reserves it).
+    metadata_json: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+    windows: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    issues: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = created_at_col()
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ReportModule(Base):
+    """One module of one extraction: whether the report covers it, where (`spans`:
+    `[{start, end, start_page, end_page}]`, block ids), and the verbatim text cut from the report
+    (`text_key` in the blob store, `text_sha256`, `word_count`). `truncated` = the module was cut
+    to its `max_words`. `present=false` is a valid answer."""
+
+    __tablename__ = "report_modules"
+    __table_args__ = (
+        UniqueConstraint("extraction_id", "module"),
+        Index("ix_report_modules_report_module", "disclosure_report_id", "module"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    extraction_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("report_extractions.id", ondelete="CASCADE"), nullable=False
+    )
+    disclosure_report_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("disclosure_reports.id", ondelete="CASCADE"), nullable=False
+    )
+    module: Mapped[str] = mapped_column(Text, nullable=False)
+    present: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    spans: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    text_key: Mapped[str | None] = mapped_column(Text)
+    text_sha256: Mapped[str | None] = mapped_column(Text)
+    word_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    confidence: Mapped[float | None] = mapped_column()
+    truncated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+
+
 class DocumentChunk(Base):
     """One structure-aware retrieval unit sliced out of `Document.extracted_text`
     by `tret.services.retrieval` — the chunked, ranked replacement for scanning

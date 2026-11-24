@@ -279,6 +279,9 @@ services:
       # only read by the operator command `tret disclosure classify-sec`.
       TRET_PEER_TAXONOMY: ${TRET_PEER_TAXONOMY:-off}
       TRET_SEC_USER_AGENT: ${TRET_SEC_USER_AGENT:-}
+      TRET_DISCLOSURE_EXTRACT: ${TRET_DISCLOSURE_EXTRACT:-off}
+      TRET_DISCLOSURE_MODULE_SET: ${TRET_DISCLOSURE_MODULE_SET:-}
+      TRET_EXTRACT_WINDOW_TOKENS: ${TRET_EXTRACT_WINDOW_TOKENS:-120000}
       TRET_DB_POOL_SIZE: ${TRET_DB_POOL_SIZE:-10}
       TRET_DB_MAX_OVERFLOW: ${TRET_DB_MAX_OVERFLOW:-10}
       # Single sign-on (generic OIDC, tret/api/oidc.py). password is every

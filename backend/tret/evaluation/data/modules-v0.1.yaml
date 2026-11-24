@@ -1,0 +1,83 @@
+# Default module set, v0.1: the four modules of the CTO briefing.
+# A private pack may supply a tuned set through TRET_DISCLOSURE_MODULE_SET.
+module_set: kith-climate
+version: "0.1"
+modules:
+  - slug: physical_climate_risk
+    title: Physical climate risk
+    definition: >-
+      The company's own account of how physical climate hazards, acute (storms, floods,
+      wildfire, heat waves) and chronic (sea-level rise, water stress, rising mean
+      temperature, changing precipitation), threaten its assets, operations, supply chain
+      or finances, and what it does about them.
+    include:
+      - Identification and assessment of physical climate hazards and the risk register or process behind it
+      - Asset- or site-specific exposure (named facilities, regions, countries, share of assets or revenue exposed)
+      - Quantified or described financial impact of physical risks (loss, cost, revenue at risk, insurance)
+      - Physical-risk scenario analysis (RCP/SSP pathways, temperature outcomes, time horizons, results)
+      - Adaptation and resilience measures (flood defences, site relocation, supply diversification, insurance, water management)
+      - Physical-risk tables and the TCFD/ISSB S2 risk and scenario disclosure, where they concern physical hazards
+    exclude:
+      - Transition risks (policy, carbon price, technology, market, reputation) unless the same passage also treats physical hazards
+      - Generic statements that climate change is a risk with no hazard, asset, region or measure named
+      - Emissions inventories and reduction targets
+      - Board oversight and remuneration, which belong to governance
+      - Health, safety and general business-continuity text with no climate link
+    max_words: 4000
+  - slug: targets_and_transition
+    title: Targets and transition plan
+    definition: >-
+      The company's emissions-reduction targets and the plan to reach them: what the targets
+      cover, how they are set and measured, interim milestones and the levers the company
+      says will deliver the reduction.
+    include:
+      - Emissions targets with scope coverage (Scope 1, 2, 3 or categories), base year, target year, absolute or intensity form
+      - Near-term and long-term or net-zero targets, and SBTi status (committed, validated, submitted, none)
+      - Interim milestones and progress against each target
+      - The transition plan, roadmap or pathway, including its governance and the assumptions it rests on
+      - Decarbonisation levers (energy efficiency, electrification, renewable energy, fuel switching, supplier engagement, product change) with any quantified contribution
+      - Use of offsets or removals in meeting a target, where stated
+    exclude:
+      - Reported emissions inventories with no target or plan attached
+      - Non-climate targets (waste, water, biodiversity, social) unless tied to a decarbonisation lever
+      - Governance and remuneration arrangements, which belong to governance and capex
+      - Capital expenditure figures, which belong to governance and capex, unless they appear inside the plan's own lever table
+      - Aspirations in the chairman's letter that name no target, scope or date
+    max_words: 4000
+  - slug: governance_and_capex
+    title: Governance and capital allocation
+    definition: >-
+      Who oversees and answers for climate at the company, how they are rewarded for it, and
+      how much money is actually committed to the transition and to adaptation.
+    include:
+      - Board and committee oversight of climate (which body, how often, what it reviews, expertise)
+      - Management responsibility (named roles, reporting lines, climate or sustainability committees)
+      - Incentive and remuneration links to climate metrics or targets (annual bonus, long-term incentive, weighting)
+      - Capital allocation to transition or adaptation, in absolute or percentage terms (CapEx, OpEx, R&D, green bonds proceeds used)
+      - EU Taxonomy alignment of turnover, CapEx and OpEx, and the tables that report it
+      - Internal carbon price where used in investment decisions
+    exclude:
+      - Corporate governance unrelated to climate (audit committee, shareholder rights, general board composition)
+      - General remuneration policy with no climate metric
+      - Total capital expenditure with no transition or adaptation split
+      - Targets and plan content, which belong to targets and transition
+      - Climate risk analysis, which belongs to physical climate risk
+    max_words: 4000
+  - slug: sensitive_framing
+    title: Sensitive framing
+    definition: >-
+      Passages where the report handles something awkward about its own climate disclosure:
+      a target missed, withdrawn or weakened, a baseline or earlier figure restated, or a
+      change in what the figures cover, together with the reasons it gives.
+    include:
+      - Missed, delayed, withdrawn, replaced or weakened targets, and how the report explains them
+      - Restatements and recalculations of base-year or prior-year emissions or other climate figures (methodology change, error correction, emission-factor update, structural change)
+      - Changes to the organisational or operational boundary (acquisitions, divestments, outsourcing, exclusions of sites, entities or categories) and the Scope 3 categories left out or newly included
+      - Changes of reporting methodology or standard that affect comparability
+      - Explicit statements that data are estimated, incomplete or not comparable with earlier years, where the report links this to a climate figure
+    exclude:
+      - Routine footnotes on units, rounding or sources that change nothing about comparability
+      - Financial-statement restatements unrelated to climate figures
+      - Forward-looking cautionary language and legal disclaimers
+      - Targets and results presented without any change, miss or restatement
+    max_words: 4000

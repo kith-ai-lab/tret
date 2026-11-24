@@ -353,6 +353,17 @@ class Settings(BaseSettings):
     # disclosure classify-sec` refuses to run.
     sec_user_agent: str = ""
 
+    # ── Stage 2 module extractor (tret/evaluation, docs/disclosure-evaluation.md) ─
+    # `off` (default): the `disclosure_extract` batch profile refuses to create or
+    # launch batches and the /api/report-extractions routes are a 404.
+    disclosure_extract: Literal["off", "on"] = "off"
+    # Path of a YAML module-set file (see tret/evaluation/modules.py). Empty (default):
+    # the module set shipped in the package (modules-v0.1.yaml).
+    disclosure_module_set: str = ""
+    # Target size, in estimated tokens (chars / 4), of one extraction window. A report
+    # larger than this is cut into page-aligned windows, one model call each.
+    extract_window_tokens: int = 120000
+
     # ── batch evaluator (tret/batches/evaluation.py) ──────────────────────────
     # The judge model a batch's evaluation pass uses unless the request names one,
     # as an ordered, comma-separated preference list: the first model in the catalog
