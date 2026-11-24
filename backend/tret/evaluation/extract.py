@@ -557,7 +557,8 @@ async def store_result(
     from sqlalchemy import delete
     from sqlalchemy.exc import IntegrityError
 
-    from tret.db.models import ReportExtraction, ReportModule
+    from tret.db.models import ExtractionReview, ReportExtraction, ReportModule
+    from tret.evaluation.density import claim_density, store_density
     from tret.storage import get_store, module_text_key
 
     store = store or get_store()
@@ -589,6 +590,8 @@ async def store_result(
         return row, False
     # `row` may be the fresh placeholder just inserted above, or an equal/lower-ranked old result
     await db.execute(delete(ReportModule).where(ReportModule.extraction_id == row.id))
+    # the contents are being replaced: decisions on the old result must not hide the new one's items
+    await db.execute(delete(ExtractionReview).where(ExtractionReview.extraction_id == row.id))
     row.batch_target_id = batch_target_id
     row.run_id = run_id
     row.model = models[-1] if models else None
@@ -605,13 +608,17 @@ async def store_result(
             data = m.text.encode("utf-8")
             await store.put(key, data, content_type="text/markdown; charset=utf-8")
             sha = hashlib.sha256(data).hexdigest()
-        db.add(
-            ReportModule(
-                extraction_id=row.id, disclosure_report_id=report.id, module=slug, present=m.present,
-                spans=m.spans, text_key=key, text_sha256=sha, word_count=m.word_count,
-                confidence=m.confidence, truncated=m.truncated, note=m.note,
-            )
+        mod = ReportModule(
+            extraction_id=row.id, disclosure_report_id=report.id, module=slug, present=m.present,
+            spans=m.spans, text_key=key, text_sha256=sha, word_count=m.word_count,
+            confidence=m.confidence, truncated=m.truncated, note=m.note,
         )
+        if key:  # claim density of the cut text; an absent module keeps it null
+            try:  # a derived metric never blocks saving a paid extraction
+                store_density(mod, claim_density(m.text))
+            except Exception:  # noqa: BLE001
+                log.exception("claim density failed for module %s of report %s; left null", slug, report.id)
+        db.add(mod)
     await db.flush()
     return row, True
 

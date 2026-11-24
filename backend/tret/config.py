@@ -363,6 +363,11 @@ class Settings(BaseSettings):
     # Target size, in estimated tokens (chars / 4), of one extraction window. A report
     # larger than this is cut into page-aligned windows, one model call each.
     extract_window_tokens: int = 120000
+    # Extraction review list (tret/evaluation/review.py): a present module or a NACE proposal
+    # below this confidence is listed for a human look; a present module of 100+ words with
+    # fewer claims per 100 words than the density floor is listed as likely boilerplate.
+    disclosure_review_min_confidence: float = 0.6
+    disclosure_review_min_density: float = 0.5
 
     # ── batch evaluator (tret/batches/evaluation.py) ──────────────────────────
     # The judge model a batch's evaluation pass uses unless the request names one,

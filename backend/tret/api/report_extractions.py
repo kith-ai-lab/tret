@@ -5,6 +5,11 @@
 * `GET /api/report-extractions/{id}/modules/{module}/text`: the module's verbatim text from
   the blob store, for the side-by-side hand check against
   `/api/disclosure-reports/{id}/markdown`.
+* `GET /api/report-extractions/review?batch_id=&kind=&include_resolved=&limit=&offset=`: the
+  computed review list (`tret/evaluation/review.py`), most severe first, paged, with a `total`.
+* `PUT /api/report-extractions/{id}/review`: an approver's decision (accepted | dismissed |
+  fixed) on one item, so it does not come back. NACE fixes go through
+  `PUT /api/company-classifications/manual`.
 
 Every route is a 404 while `TRET_DISCLOSURE_EXTRACT` is off. Rows are workspace-scoped; another
 workspace's id is a 404. Extractions are made by the `disclosure_extract` batch profile.
@@ -12,18 +17,20 @@ workspace's id is a 404. Extractions are made by the `disclosure_extract` batch 
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.api.auth import current_user
-from tret.api.workspace import WorkspaceContext, current_workspace
+from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_approver
 from tret.batches.profiles.disclosure_extract import extract_enabled
 from tret.config import get_settings
 from tret.db.engine import get_db
-from tret.db.models import ReportExtraction, ReportModule
+from tret.db.models import Batch, ReportExtraction, ReportModule
+from tret.evaluation import review as rv
 from tret.storage import get_store
 
 
@@ -65,6 +72,10 @@ def _mod_out(m: ReportModule) -> dict[str, Any]:
         "note": m.note,
         "text_sha256": m.text_sha256,
         "has_text": bool(m.text_key),
+        "claim_count": m.claim_count,
+        "claim_density": m.claim_density,
+        "claim_counts": m.claim_counts,
+        "density_version": m.density_version,
     }
 
 
@@ -73,6 +84,62 @@ async def _extraction(db: AsyncSession, extraction_id: uuid.UUID, ctx: Workspace
     if e is None or e.workspace_id != ctx.id:
         raise HTTPException(404, "Extraction not found")
     return e
+
+
+class ReviewDecisionIn(BaseModel):
+    item_key: str = Field(min_length=1, max_length=200, description="`item_key` of a review item")
+    decision: Literal["accepted", "dismissed", "fixed"]
+    note: str | None = Field(default=None, max_length=2000)
+
+
+@router.get("/report-extractions/review")
+async def get_review_list(
+    batch_id: uuid.UUID | None = None,
+    kind: list[str] = Query(default=[]),
+    include_resolved: bool = False,
+    limit: int = Query(rv.DEFAULT_LIMIT, ge=1, le=rv.MAX_LIMIT),
+    offset: int = Query(0, ge=0),
+    user=Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    """What a human should look at: computed from the stored extractions, minus the items with a
+    decision unless `include_resolved`. `batch_id` is the source collection batch or the
+    extraction batch; `kind` (repeatable) limits the item kinds; `limit` (default 500, max 5000) and
+    `offset` page through the list, `total` counts all of it."""
+    if batch_id is not None:
+        b = await db.get(Batch, batch_id)
+        if b is None or b.workspace_id != ctx.id:
+            raise HTTPException(404, "Batch not found")
+    try:
+        items, total = await rv.review_page(
+            db, workspace_id=ctx.id, batch_id=batch_id, include_resolved=include_resolved, kinds=kind or None,
+            limit=limit, offset=offset,
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+    return {"items": [i.as_dict() for i in items], "count": len(items), "total": total, "limit": limit, "offset": offset}
+
+
+@router.put("/report-extractions/{extraction_id}/review")
+async def put_review_decision(
+    extraction_id: uuid.UUID,
+    body: ReviewDecisionIn,
+    user=Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        decision = await rv.set_decision(
+            db, workspace_id=ctx.id, extraction_id=extraction_id, item_key=body.item_key,
+            decision=body.decision, note=body.note, reviewed_by=user.email,
+        )
+    except rv.ReviewNotFound as e:
+        raise HTTPException(404, str(e)) from None
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from None
+    await db.commit()
+    return {"extraction_id": str(extraction_id), "item_key": body.item_key, **decision}
 
 
 @router.get("/disclosure-reports/{report_id}/extractions")
