@@ -302,7 +302,14 @@ async def execute_direct(
             else:
                 status = "completed"
         except asyncio.CancelledError:
-            await _close(db, run_id, "cancelled", CANCEL_ERROR, workspace_id)
+            # The cancellation always propagates. A close-out that fails here (the database is
+            # unavailable or locked) is logged, never raised in its place: raised, it would reach
+            # the caller as the run's own error and the cancellation would be lost. The run is
+            # then left as it was (`queued` or `running`) for the caller or the boot sweep to close.
+            try:
+                await _close(db, run_id, "cancelled", CANCEL_ERROR, workspace_id)
+            except Exception:  # noqa: BLE001
+                log.warning("direct run %s could not be closed out after its cancellation", run_id, exc_info=True)
             raise
         except CostCapExceeded as e:
             error = str(e)

@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from tests.evals.golden_world import install_sqlite_type_shims
+from tests.evals.golden_world import install_sqlite_type_shims, use_sqlite_wal
 from tret.api import collections as collections_api
 from tret.api.auth import current_user
 from tret.api.workspace import WorkspaceContext, current_workspace
@@ -124,6 +124,7 @@ def world(tmp_path, monkeypatch):
 
     install_sqlite_type_shims()
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batches.db'}")
+    use_sqlite_wal(engine)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     ws = Workspace(id=uuid.uuid4(), name="Kith", kind="team")
     user = User(id=uuid.uuid4(), email="a@example.com", display_name="Rex", role="approver")
@@ -156,6 +157,37 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(connections_service, "upload_connected_file", fake_upload)
     yield SimpleNamespace(factory=factory, engine=fake, uploads=uploads, ws=ws, user=user)
     asyncio.run(engine.dispose())
+
+
+def test_a_read_cancelled_midway_never_blocks_the_next_write(world):
+    """The test database runs in WAL mode (`use_sqlite_wal`): a task cancelled in the middle of a
+    read leaves no lock behind that refuses the next write, as it does in sqlite's default journal."""
+    import asyncio
+    import contextlib
+    import random
+
+    pace = random.Random(0)
+
+    async def go():
+        async with world.factory() as db:
+            db.add_all([Workspace(id=uuid.uuid4(), name=f"w{i}", kind="team") for i in range(500)])
+            await db.commit()
+        for i in range(30):
+            async def reader():
+                while True:
+                    async with world.factory() as db:
+                        await db.execute(select(Workspace.id, Workspace.name))
+
+            task = asyncio.create_task(reader())
+            await asyncio.sleep(pace.uniform(0.001, 0.02))
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            async with world.factory() as db:  # "database is locked" here without WAL
+                (await db.get(Workspace, world.ws.id)).name = f"Kith {i}"
+                await db.commit()
+
+    asyncio.run(go())
 
 
 @pytest.fixture
