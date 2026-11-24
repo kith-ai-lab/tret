@@ -746,6 +746,86 @@ It is not in the server extra and not in the shipped images. Plan a machine of a
 for the conversion; a 2 GB machine is not safe. A separate 4 GB worker machine for Tret
 Cloud is a later change to tret-cloud, not part of this one.
 
+## Peer taxonomy (experimental, API off by default)
+
+Evaluating one company's disclosure against its peers needs a peer pool, and the pools are built
+on an open ladder rather than a licensed one: **NACE Rev. 2** (Eurostat) with Tret's own industry
+clusters on top. GICS is licensed and is never used to build a pool. The code is `tret/taxonomy/`
+(pure functions, no database), the data files ship in the package (`tret/taxonomy/data/`, with a
+README naming each source), and the version is `TAXONOMY_VERSION` (`nace2-tret-1`, stored on every
+classification).
+
+**The ladder.** group (272, e.g. `21.2`) -> division (88, `21`) -> cluster (29 Tret clusters such as
+`pharma_biotech`, `banks`, `utilities`) -> section (21, `C`). Each division maps to exactly one
+cluster, with group-level overrides where a division is mixed (`64.1` is `banks`, the rest of 64
+`diversified_financials`; `65` is `insurance`). `ladder("26.1")` accepts a division (`26`), a group
+(`26.1` or `261`) or a class (`26.11`, cut back to its group) and raises `ValueError` for anything
+that is not in NACE Rev. 2; `pool_key(level, ladder)` gives `division:21`, `cluster:banks` and so on.
+
+**Sources of a classification, in order of trust** (one row per source in `company_classifications`,
+workspace-scoped like the register; the effective one is the most trusted present):
+
+1. `manual`: a workspace admin's override (`PUT /api/company-classifications/manual`), with the
+   reviewer and time recorded.
+2. `sec_sic`: the SEC's SIC code for the company, through a curated SIC (1987) to NACE Rev. 2 table
+   (`tret/taxonomy/data/sic_nace.csv`). This is not an official concordance: it is division-accurate
+   by design, fills a group only where the SIC heading falls inside one, and grades every row
+   `exact`, `close` or `broad` (a `broad` row spans several NACE divisions, or is a catch-all such
+   as 7389, and wants a human look before a peer pool leans on it).
+3. `extractor`: proposed by a collection run. Not built yet (a later change).
+
+**GICS cross-check.** The register's `sector` field (a GICS sector name for the US rows) is mapped
+to the set of clusters it can reasonably contain. When the NACE cluster is outside that set the row
+gets `gics_disagrees = true`. It is a flag for a reader: nothing is auto-resolved.
+
+**Importing SIC codes.** An operator runs it per batch; it reads and writes the database directly
+(no server) and fetches `https://data.sec.gov/submissions/CIK##########.json` for each target with a
+CIK:
+
+```bash
+TRET_SEC_USER_AGENT="Your Organisation contact-address-or-url" \
+  tret disclosure classify-sec --batch <batch id> [--limit N] [--force] [--dry-run]
+tret disclosure classifications --batch <batch id> [--csv out.csv]   # effective classification per target
+```
+
+The SEC requires a descriptive User-Agent that says who is calling and how to reach them, so the
+command refuses to run (exit 2) while `TRET_SEC_USER_AGENT` is empty. The requests go through
+`tret/net` like every other outbound call, under the `research` egress class pinned to
+`data.sec.gov`: they need `TRET_EGRESS=on` and `TRET_EGRESS_RESEARCH=on` (the command refuses with
+exit 2 otherwise, or when `TRET_EGRESS_RESEARCH_ALLOW_HOSTS` is set and excludes the host),
+`TRET_EGRESS_PROXY` applies, and each request is in the egress audit log. Requests are paced at no
+more than 8 a second, with backoff on 429 and 5xx; a 403 (the SEC refusing the client) or a
+connection that cannot be made stops the run at once. Rows are written in short transactions every
+25 CIKs and at the end, so an interrupted run keeps what it finished and no transaction is held
+open while the SEC is slow. A target is skipped when it has no CIK or already has a `sec_sic` row
+(`--force` redoes it; two register spellings of one CIK, `320193` and `0000320193`, are the same
+company). The summary counts classified, unmapped SIC (the SEC's code is not in the concordance),
+unclassifiable SIC (a code with no industry: blank checks 6770, depositary receipts 8880, foreign
+governments 8888, non-operating establishments 9995; nothing is written), no SIC on record (the
+SEC returns an empty one for some filers), errors and skips. `classify-sec` and `classifications`
+are operator tools and work whether or not `TRET_PEER_TAXONOMY` is on.
+
+**Effective classification and keys.** A company is known by `cik`, `lei`, `ticker` or (for a
+register target) its slug. `tret disclosure classifications` and
+`GET /api/company-classifications/effective` use one resolver: across the rows under every key
+given, manual beats sec_sic beats extractor. A manual override keyed by ticker therefore applies to
+every target with that ticker in the workspace, and a classification keyed by CIK is not seen by a
+lookup that gives only the ticker. An override keeps the company's GICS sector (from its other rows
+or its register target), so the cross-check still runs after it.
+
+**Clusters and the division rung.** Group-level cluster overrides (26.6 medical devices, 64.1
+banks, 58.2 software) mean the division rung of the ladder can be broader than the cluster rung
+(division 64 holds banks and diversified financials; division 26 holds hardware and medical
+devices). Which rung a pool falls back to, and in what order, is decided in the pools change.
+
+**API.** `TRET_PEER_TAXONOMY=on` turns on `GET /api/company-classifications` (filters `source`,
+`cluster`, `division`, `disagreements_only`; paginated),
+`GET /api/company-classifications/effective?cik=&lei=&ticker=&target=` (at least one; the company's
+effective row with every source's row) and `PUT /api/company-classifications/manual` (workspace
+admin; body `company_key_type` = `lei`, `cik`, `ticker` or `target`, `company_key`, `company_name`,
+`nace_code` at group or division level, `note`; 422 for an unknown NACE code). All routes are a 404
+while the setting is off.
+
 ## Acceptance dimensions, and where each one lives
 
 | Dimension | What a reviewer asks | Where tret keeps it |

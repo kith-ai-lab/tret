@@ -453,6 +453,35 @@ def filing_host_permitted(settings=None) -> bool:
     return not allow or host_allowed(FILINGS_HOST, replace(policy_for(CLASS_RESEARCH, s), allow_hosts=allow))
 
 
+SEC_HOSTS = frozenset({"data.sec.gov"})
+SEC_MAX_BYTES = 8 * 1024 * 1024
+SEC_TIMEOUT_SECONDS = 30.0
+
+
+def sec_policy(settings=None) -> ClassPolicy:
+    """The policy `tret disclosure classify-sec` runs under: research, pinned to data.sec.gov.
+
+    Mode narrowing (master switch, class switch, runtime override, replay) is inherited from
+    research untouched, and so are https-only, standard ports and public-address
+    verification. What changes: the host allowlist is exactly `SEC_HOSTS` (the command never
+    takes a URL from anyone), the byte ceiling is `SEC_MAX_BYTES` and the timeout is 30 s.
+    Like `filing_policy`, it never widens what an operator allowed: see `sec_host_permitted`.
+    """
+    s = settings or get_settings()
+    base = policy_for(CLASS_RESEARCH, s)
+    return replace(
+        base, allow_hosts=SEC_HOSTS, max_bytes=SEC_MAX_BYTES, timeout_seconds=SEC_TIMEOUT_SECONDS
+    )
+
+
+def sec_host_permitted(settings=None) -> bool:
+    """Whether the operator's research allowlist lets `classify-sec` reach data.sec.gov
+    (an empty allowlist means any public host; a non-empty one must itself admit it)."""
+    s = settings or get_settings()
+    allow = research_allow_hosts(s)
+    return not allow or host_allowed("data.sec.gov", replace(policy_for(CLASS_RESEARCH, s), allow_hosts=allow))
+
+
 def host_allowed(host: str, policy: ClassPolicy) -> bool:
     """Exact host, or a subdomain of an allowlisted host. Empty list = any."""
     if not policy.allow_hosts:
