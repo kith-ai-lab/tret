@@ -1246,6 +1246,59 @@
         "title": "FolderRef",
         "type": "object"
       },
+      "FreezeIn": {
+        "additionalProperties": false,
+        "properties": {
+          "distinct_authors": {
+            "default": true,
+            "title": "Distinct Authors",
+            "type": "boolean"
+          },
+          "k": {
+            "default": 3,
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "K",
+            "type": "integer"
+          },
+          "min_context_window": {
+            "default": 0,
+            "maximum": 10000000.0,
+            "minimum": 0.0,
+            "title": "Min Context Window",
+            "type": "integer"
+          },
+          "model_policy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An auto policy (objective, allowed, open_weights, max_cost_tier); never a pin",
+            "title": "Model Policy"
+          },
+          "pass_ref": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Pass Ref",
+            "type": "string"
+          },
+          "purpose": {
+            "default": "eval_jury",
+            "title": "Purpose",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pass_ref"
+        ],
+        "title": "FreezeIn",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1495,6 +1548,50 @@
           "created_at"
         ],
         "title": "InviteOut",
+        "type": "object"
+      },
+      "JuryIn": {
+        "additionalProperties": false,
+        "properties": {
+          "distinct_authors": {
+            "default": true,
+            "title": "Distinct Authors",
+            "type": "boolean"
+          },
+          "k": {
+            "default": 3,
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "K",
+            "type": "integer"
+          },
+          "min_context_window": {
+            "default": 0,
+            "maximum": 10000000.0,
+            "minimum": 0.0,
+            "title": "Min Context Window",
+            "type": "integer"
+          },
+          "model_policy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An auto policy (objective, allowed, open_weights, max_cost_tier); never a pin",
+            "title": "Model Policy"
+          },
+          "purpose": {
+            "default": "eval_jury",
+            "title": "Purpose",
+            "type": "string"
+          }
+        },
+        "title": "JuryIn",
         "type": "object"
       },
       "LessonReviewBody": {
@@ -8658,6 +8755,166 @@
         "summary": "Get Document",
         "tags": [
           "documents"
+        ]
+      }
+    },
+    "/api/eval/jury/freezes": {
+      "post": {
+        "operationId": "create_freeze_api_eval_jury_freezes_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FreezeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Freeze",
+        "tags": [
+          "eval-jury"
+        ]
+      }
+    },
+    "/api/eval/jury/freezes/{freeze_id}": {
+      "get": {
+        "operationId": "read_freeze_api_eval_jury_freezes__freeze_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "freeze_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Freeze Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Freeze",
+        "tags": [
+          "eval-jury"
+        ]
+      }
+    },
+    "/api/eval/jury/freezes/{freeze_id}/release": {
+      "post": {
+        "operationId": "release_api_eval_jury_freezes__freeze_id__release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "freeze_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Freeze Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Release",
+        "tags": [
+          "eval-jury"
+        ]
+      }
+    },
+    "/api/eval/jury/preview": {
+      "post": {
+        "operationId": "preview_api_eval_jury_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JuryIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview",
+        "tags": [
+          "eval-jury"
         ]
       }
     },

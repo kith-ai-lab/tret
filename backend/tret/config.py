@@ -357,6 +357,9 @@ class Settings(BaseSettings):
     # `off` (default): the `disclosure_extract` batch profile refuses to create or
     # launch batches and the /api/report-extractions routes are a 404.
     disclosure_extract: Literal["off", "on"] = "off"
+    # `off` (default): the /api/eval/jury routes are a 404 (jury preview and per-pass freeze,
+    # docs/disclosure-evaluation.md). The operator CLI `tret eval jury-preview` is not gated.
+    eval_jury: Literal["off", "on"] = "off"
     # Path of a YAML module-set file (see tret/evaluation/modules.py). Empty (default):
     # the module set shipped in the package (modules-v0.1.yaml).
     disclosure_module_set: str = ""

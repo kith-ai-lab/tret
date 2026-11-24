@@ -678,6 +678,9 @@ def main() -> None:
     from tret import cli_disclosure
 
     cli_disclosure.register(sub)
+    from tret import cli_eval
+
+    cli_eval.register(sub)
 
     run_cmd = sub.add_parser(
         "run", help="Route a task, run it (optionally over local files), print a receipt"
@@ -776,6 +779,11 @@ def main() -> None:
         return
     if args.command == "disclosure":
         code = cli_disclosure.run(args)
+        if code:
+            sys.exit(code)
+        return
+    if args.command == "eval":
+        code = cli_eval.run(args)
         if code:
             sys.exit(code)
         return

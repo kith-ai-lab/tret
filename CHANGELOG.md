@@ -10,6 +10,14 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Jury selection and per-pass freeze (experimental, `TRET_EVAL_JURY`, off by default).** The router
+  can now seat a jury of k models from distinct model families (`ModelRouter.route_jury`) with no
+  model call, recording each pick's family, rank, evidence and a plain-English reason; a pass freezes
+  its selection once (`routing_freezes`, new migration) and `routed_json_call` can call the frozen
+  model without a new routing decision. Nothing is pinned: the policy constrains, the router picks,
+  and the next pass picks again. Juror and sealed-call runs are never router performance samples.
+  `tret eval jury-preview`, `POST /api/eval/jury/preview`, `/api/eval/jury/freezes`. See
+  [docs/disclosure-evaluation.md](docs/disclosure-evaluation.md).
 - **Claim density and an extraction review list (experimental, with the Stage 2 extractor).** Each
   extracted module now carries a deterministic claim density (`claim_count`, `claim_density` per 100
   words, `claim_counts` by category: currency, date, unit, number, site; `density_version`

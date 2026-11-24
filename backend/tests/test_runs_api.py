@@ -400,3 +400,25 @@ async def test_engine_stamped_batch_keys_are_stripped_from_a_callers_task_input(
     async with session_factory() as db:
         run = await db.get(Run, uuid.UUID(response.json()["run_id"]))
     assert run.task_input == {"message": "hi", "_max_iterations": 3}
+
+
+async def test_run_kind_markers_are_stripped_from_a_callers_task_input(client, seed, session_factory):
+    """`_eval_juror`, `_eval_sealed_call` and `_structured_call` keep a run out of the router's
+    evidence; a caller must not be able to hide a run from the priors with them."""
+    team = make_workspace("Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="P")
+    user = make_user("analyst3@example.com")
+    harness = Harness(
+        id=uuid.uuid4(), workspace_id=team.id, name="Free", task_profile="freeform",
+        model_policy={"mode": "auto"}, tool_names=[],
+    )
+    await seed(team, project, user, make_member(user, team, role="analyst"), harness)
+    await login(client, user.email)
+    forged = {"message": "hi", "_eval_juror": True, "_eval_sealed_call": True, "_structured_call": True}
+    response = await client.post(
+        "/api/runs", json={"harness_id": str(harness.id), "task_type": "freeform", "task_input": forged}
+    )
+    assert response.status_code == 200, response.text
+    async with session_factory() as db:
+        run = await db.get(Run, uuid.UUID(response.json()["run_id"]))
+    assert run.task_input == {"message": "hi"}

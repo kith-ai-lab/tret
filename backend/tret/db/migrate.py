@@ -162,6 +162,7 @@ REVISION_MARKERS: tuple[tuple[str, tuple[Marker, ...]], ...] = (
     ("c4a7e2b9d158", (("company_classifications", None),)),
     ("d8f3a1c5b7e2", (("report_extractions", None), ("report_modules", None))),
     ("e7a4c9d2b861", (("extraction_reviews", None), ("report_modules", "claim_count"))),
+    ("a9d4e7c1f352", (("routing_freezes", None),)),
 )
 
 # Every table any known revision creates. Used to tell "empty database" from

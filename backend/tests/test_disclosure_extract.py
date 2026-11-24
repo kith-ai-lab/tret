@@ -330,7 +330,8 @@ def test_migration_chain_and_markers():
     from tret.db.migrate import REVISION_MARKERS, alembic_config
 
     script = ScriptDirectory.from_config(alembic_config())
-    assert script.get_heads() == ["e7a4c9d2b861"]  # claim density + extraction_reviews (PR 4)
+    assert script.get_heads() == ["a9d4e7c1f352"]  # routing_freezes (PR 5)
+    assert script.get_revision("a9d4e7c1f352").down_revision == "e7a4c9d2b861"
     assert script.get_revision("e7a4c9d2b861").down_revision == "d8f3a1c5b7e2"
     assert script.get_revision("d8f3a1c5b7e2").down_revision == "c4a7e2b9d158"
     assert dict(REVISION_MARKERS)["d8f3a1c5b7e2"] == (("report_extractions", None), ("report_modules", None))

@@ -122,7 +122,7 @@ from tret.services.emissions_v3_wiring import (
 )
 from tret.services.energy_collector import collected_meter
 from tret.services.energy_meter import NvidiaSmiMeter, NvmlEnergyMeter, meter_for_settings
-from tret.batches.rubrics import is_evaluator_run
+from tret.batches.rubrics import is_evaluator_run, is_judge_run
 from tret.services.lessons import approved_harness_lessons, approved_lessons, lessons_enabled
 from tret.services.outcomes import record_outcome
 from tret.services.transcript import (
@@ -1953,6 +1953,7 @@ class HarnessEngine:
             lessons_enabled(loop_cfg)
             and workspace_id is not None
             and not is_evaluator_run(run.task_input)
+            and not is_judge_run(run.task_input)
         ):
             harness_lessons = await approved_harness_lessons(db, workspace_id, harness.id) or None
         if lessons_on:

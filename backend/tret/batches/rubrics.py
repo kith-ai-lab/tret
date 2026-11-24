@@ -28,6 +28,11 @@ PAIRWISE_ID_KEY = "_pairwise_judgment_id"
 # model call whose quality is not scored yet, so it is no evidence for the router.
 STRUCTURED_CALL_KEY = "_structured_call"
 PAIRWISE_ORDER_KEY = "_pairwise_order"
+# Stamped on a run made by one juror of an evaluation jury / by the one sealed call of a
+# measurement pass (`tret/evaluation/jury.py`). The instrument is not the thing measured, so such
+# a run is never a performance sample for the router.
+JUROR_KEY = "_eval_juror"
+SEALED_CALL_KEY = "_eval_sealed_call"
 DISCLOSURE_RUBRIC_KEY = "disclosure-v1"
 PROMPT_RUBRIC_KEY = "prompt-default-v1"
 DEFAULT_ACCEPTABLE_QUALITY = 60
@@ -316,7 +321,17 @@ def rubric_text(rubric: dict, row_class: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def is_judge_run(task_input: dict | None) -> bool:
+    """True for a juror or sealed-call run of the disclosure evaluation engine. Like the batch
+    evaluator's runs, never evidence for the router and never a `run_outcomes` row."""
+    ti = task_input or {}
+    return bool(ti.get(JUROR_KEY) or ti.get(SEALED_CALL_KEY))
+
+
 __all__ = [
+    "JUROR_KEY",
+    "SEALED_CALL_KEY",
+    "is_judge_run",
     "DISCLOSURE_RUBRIC_KEY",
     "PROMPT_RUBRIC_KEY",
     "EvaluationIn",

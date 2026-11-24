@@ -104,7 +104,7 @@ async def test_the_opt_out_withholds_the_harness_block(world):
 async def test_evaluator_and_pairwise_runs_get_no_harness_block(world):
     h = await world.create_harness(with_pack=False)
     await _lessons(world, h, texts=["Not for judges."])
-    for key in (EVALUATION_ID_KEY, PAIRWISE_ID_KEY):
+    for key in (EVALUATION_ID_KEY, PAIRWISE_ID_KEY, "_eval_juror", "_eval_sealed_call"):
         system = await _run(world, h, with_pack=False, task_input={"message": "judge", key: "x"})
         assert "Not for judges." not in system
     assert "Not for judges." in await _run(world, h, with_pack=False)
