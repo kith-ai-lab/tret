@@ -1529,6 +1529,59 @@
         "title": "LoginBody",
         "type": "object"
       },
+      "ManualClassificationIn": {
+        "properties": {
+          "company_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Company Key",
+            "type": "string"
+          },
+          "company_key_type": {
+            "description": "lei | cik | ticker | target",
+            "title": "Company Key Type",
+            "type": "string"
+          },
+          "company_name": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Company Name"
+          },
+          "nace_code": {
+            "description": "A NACE Rev. 2 division (\"21\") or group (\"21.2\" or \"212\")",
+            "maxLength": 10,
+            "minLength": 1,
+            "title": "Nace Code",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "company_key_type",
+          "company_key",
+          "nace_code"
+        ],
+        "title": "ManualClassificationIn",
+        "type": "object"
+      },
       "MemberOut": {
         "properties": {
           "display_name": {
@@ -7078,6 +7131,265 @@
         "summary": "Retry Target Write",
         "tags": [
           "batches"
+        ]
+      }
+    },
+    "/api/company-classifications": {
+      "get": {
+        "operationId": "list_company_classifications_api_company_classifications_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cluster",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cluster"
+            }
+          },
+          {
+            "in": "query",
+            "name": "division",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Division"
+            }
+          },
+          {
+            "in": "query",
+            "name": "disagreements_only",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Disagreements Only",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Company Classifications Api Company Classifications Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Company Classifications",
+        "tags": [
+          "peer-taxonomy"
+        ]
+      }
+    },
+    "/api/company-classifications/effective": {
+      "get": {
+        "description": "One company's effective classification, resolved exactly as `tret disclosure\nclassifications` does: across the rows of every key given (at least one of `cik`, `lei`,\n`ticker`, `target`), manual > sec_sic > extractor. A manual override keyed by ticker\ntherefore applies to every target with that ticker in the workspace.",
+        "operationId": "get_effective_classification_api_company_classifications_effective_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cik",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cik"
+            }
+          },
+          {
+            "in": "query",
+            "name": "lei",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Lei"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ticker",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ticker"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Effective Classification Api Company Classifications Effective Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Effective Classification",
+        "tags": [
+          "peer-taxonomy"
+        ]
+      }
+    },
+    "/api/company-classifications/manual": {
+      "put": {
+        "operationId": "put_manual_classification_api_company_classifications_manual_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManualClassificationIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Manual Classification Api Company Classifications Manual Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Manual Classification",
+        "tags": [
+          "peer-taxonomy"
         ]
       }
     },

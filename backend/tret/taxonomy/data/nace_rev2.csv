@@ -1,0 +1,382 @@
+level,code,parent,title
+section,A,,"Agriculture, forestry and fishing"
+division,01,A,"Crop and animal production, hunting and related service activities"
+group,01.1,01,Growing of non-perennial crops
+group,01.2,01,Growing of perennial crops
+group,01.3,01,Plant propagation
+group,01.4,01,Animal production
+group,01.5,01,Mixed farming
+group,01.6,01,Support activities to agriculture and post-harvest crop activities
+group,01.7,01,"Hunting, trapping and related service activities"
+division,02,A,Forestry and logging
+group,02.1,02,Silviculture and other forestry activities
+group,02.2,02,Logging
+group,02.3,02,Gathering of wild growing non-wood products
+group,02.4,02,Support services to forestry
+division,03,A,Fishing and aquaculture
+group,03.1,03,Fishing
+group,03.2,03,Aquaculture
+section,B,,Mining and quarrying
+division,05,B,Mining of coal and lignite
+group,05.1,05,Mining of hard coal
+group,05.2,05,Mining of lignite
+division,06,B,Extraction of crude petroleum and natural gas
+group,06.1,06,Extraction of crude petroleum
+group,06.2,06,Extraction of natural gas
+division,07,B,Mining of metal ores
+group,07.1,07,Mining of iron ores
+group,07.2,07,Mining of non-ferrous metal ores
+division,08,B,Other mining and quarrying
+group,08.1,08,"Quarrying of stone, sand and clay"
+group,08.9,08,Mining and quarrying n.e.c.
+division,09,B,Mining support service activities
+group,09.1,09,Support activities for petroleum and natural gas extraction
+group,09.9,09,Support activities for other mining and quarrying
+section,C,,Manufacturing
+division,10,C,Manufacture of food products
+group,10.1,10,Processing and preserving of meat and production of meat products
+group,10.2,10,"Processing and preserving of fish, crustaceans and molluscs"
+group,10.3,10,Processing and preserving of fruit and vegetables
+group,10.4,10,Manufacture of vegetable and animal oils and fats
+group,10.5,10,Manufacture of dairy products
+group,10.6,10,"Manufacture of grain mill products, starches and starch products"
+group,10.7,10,Manufacture of bakery and farinaceous products
+group,10.8,10,Manufacture of other food products
+group,10.9,10,Manufacture of prepared animal feeds
+division,11,C,Manufacture of beverages
+group,11.0,11,Manufacture of beverages
+division,12,C,Manufacture of tobacco products
+group,12.0,12,Manufacture of tobacco products
+division,13,C,Manufacture of textiles
+group,13.1,13,Preparation and spinning of textile fibres
+group,13.2,13,Weaving of textiles
+group,13.3,13,Finishing of textiles
+group,13.9,13,Manufacture of other textiles
+division,14,C,Manufacture of wearing apparel
+group,14.1,14,"Manufacture of wearing apparel, except fur apparel"
+group,14.2,14,Manufacture of articles of fur
+group,14.3,14,Manufacture of knitted and crocheted apparel
+division,15,C,Manufacture of leather and related products
+group,15.1,15,"Tanning and dressing of leather; manufacture of luggage, handbags, saddlery and harness; dressing and dyeing of fur"
+group,15.2,15,Manufacture of footwear
+division,16,C,"Manufacture of wood and of products of wood and cork, except furniture; manufacture of articles of straw and plaiting materials"
+group,16.1,16,Sawmilling and planing of wood
+group,16.2,16,"Manufacture of products of wood, cork, straw and plaiting materials"
+division,17,C,Manufacture of paper and paper products
+group,17.1,17,"Manufacture of pulp, paper and paperboard"
+group,17.2,17,Manufacture of articles of paper and paperboard
+division,18,C,Printing and reproduction of recorded media
+group,18.1,18,Printing and service activities related to printing
+group,18.2,18,Reproduction of recorded media
+division,19,C,Manufacture of coke and refined petroleum products
+group,19.1,19,Manufacture of coke oven products
+group,19.2,19,Manufacture of refined petroleum products
+division,20,C,Manufacture of chemicals and chemical products
+group,20.1,20,"Manufacture of basic chemicals, fertilisers and nitrogen compounds, plastics and synthetic rubber in primary forms"
+group,20.2,20,Manufacture of pesticides and other agrochemical products
+group,20.3,20,"Manufacture of paints, varnishes and similar coatings, printing ink and mastics"
+group,20.4,20,"Manufacture of soap and detergents, cleaning and polishing preparations, perfumes and toilet preparations"
+group,20.5,20,Manufacture of other chemical products
+group,20.6,20,Manufacture of man-made fibres
+division,21,C,Manufacture of basic pharmaceutical products and pharmaceutical preparations
+group,21.1,21,Manufacture of basic pharmaceutical products
+group,21.2,21,Manufacture of pharmaceutical preparations
+division,22,C,Manufacture of rubber and plastic products
+group,22.1,22,Manufacture of rubber products
+group,22.2,22,Manufacture of plastics products
+division,23,C,Manufacture of other non-metallic mineral products
+group,23.1,23,Manufacture of glass and glass products
+group,23.2,23,Manufacture of refractory products
+group,23.3,23,Manufacture of clay building materials
+group,23.4,23,Manufacture of other porcelain and ceramic products
+group,23.5,23,"Manufacture of cement, lime and plaster"
+group,23.6,23,"Manufacture of articles of concrete, cement and plaster"
+group,23.7,23,"Cutting, shaping and finishing of stone"
+group,23.9,23,Manufacture of abrasive products and non-metallic mineral products n.e.c.
+division,24,C,Manufacture of basic metals
+group,24.1,24,Manufacture of basic iron and steel and of ferro-alloys
+group,24.2,24,"Manufacture of tubes, pipes, hollow profiles and related fittings, of steel"
+group,24.3,24,Manufacture of other products of first processing of steel
+group,24.4,24,Manufacture of basic precious and other non-ferrous metals
+group,24.5,24,Casting of metals
+division,25,C,"Manufacture of fabricated metal products, except machinery and equipment"
+group,25.1,25,Manufacture of structural metal products
+group,25.2,25,"Manufacture of tanks, reservoirs and containers of metal"
+group,25.3,25,"Manufacture of steam generators, except central heating hot water boilers"
+group,25.4,25,Manufacture of weapons and ammunition
+group,25.5,25,"Forging, pressing, stamping and roll-forming of metal; powder metallurgy"
+group,25.6,25,Treatment and coating of metals; machining
+group,25.7,25,"Manufacture of cutlery, tools and general hardware"
+group,25.9,25,Manufacture of other fabricated metal products
+division,26,C,"Manufacture of computer, electronic and optical products"
+group,26.1,26,Manufacture of electronic components and boards
+group,26.2,26,Manufacture of computers and peripheral equipment
+group,26.3,26,Manufacture of communication equipment
+group,26.4,26,Manufacture of consumer electronics
+group,26.5,26,"Manufacture of instruments and appliances for measuring, testing and navigation; watches and clocks"
+group,26.6,26,"Manufacture of irradiation, electromedical and electrotherapeutic equipment"
+group,26.7,26,Manufacture of optical instruments and photographic equipment
+group,26.8,26,Manufacture of magnetic and optical media
+division,27,C,Manufacture of electrical equipment
+group,27.1,27,"Manufacture of electric motors, generators, transformers and electricity distribution and control apparatus"
+group,27.2,27,Manufacture of batteries and accumulators
+group,27.3,27,Manufacture of wiring and wiring devices
+group,27.4,27,Manufacture of electric lighting equipment
+group,27.5,27,Manufacture of domestic appliances
+group,27.9,27,Manufacture of other electrical equipment
+division,28,C,Manufacture of machinery and equipment n.e.c.
+group,28.1,28,Manufacture of general-purpose machinery
+group,28.2,28,Manufacture of other general-purpose machinery
+group,28.3,28,Manufacture of agricultural and forestry machinery
+group,28.4,28,Manufacture of metal forming machinery and machine tools
+group,28.9,28,Manufacture of other special-purpose machinery
+division,29,C,"Manufacture of motor vehicles, trailers and semi-trailers"
+group,29.1,29,Manufacture of motor vehicles
+group,29.2,29,Manufacture of bodies (coachwork) for motor vehicles; manufacture of trailers and semi-trailers
+group,29.3,29,Manufacture of parts and accessories for motor vehicles
+division,30,C,Manufacture of other transport equipment
+group,30.1,30,Building of ships and boats
+group,30.2,30,Manufacture of railway locomotives and rolling stock
+group,30.3,30,Manufacture of air and spacecraft and related machinery
+group,30.4,30,Manufacture of military fighting vehicles
+group,30.9,30,Manufacture of transport equipment n.e.c.
+division,31,C,Manufacture of furniture
+group,31.0,31,Manufacture of furniture
+division,32,C,Other manufacturing
+group,32.1,32,"Manufacture of jewellery, bijouterie and related articles"
+group,32.2,32,Manufacture of musical instruments
+group,32.3,32,Manufacture of sports goods
+group,32.4,32,Manufacture of games and toys
+group,32.5,32,Manufacture of medical and dental instruments and supplies
+group,32.9,32,Manufacturing n.e.c.
+division,33,C,Repair and installation of machinery and equipment
+group,33.1,33,"Repair of fabricated metal products, machinery and equipment"
+group,33.2,33,Installation of industrial machinery and equipment
+section,D,,"Electricity, gas, steam and air conditioning supply"
+division,35,D,"Electricity, gas, steam and air conditioning supply"
+group,35.1,35,"Electric power generation, transmission and distribution"
+group,35.2,35,Manufacture of gas; distribution of gaseous fuels through mains
+group,35.3,35,Steam and air conditioning supply
+section,E,,"Water supply; sewerage, waste management and remediation activities"
+division,36,E,"Water collection, treatment and supply"
+group,36.0,36,"Water collection, treatment and supply"
+division,37,E,Sewerage
+group,37.0,37,Sewerage
+division,38,E,"Waste collection, treatment and disposal activities; materials recovery"
+group,38.1,38,Waste collection
+group,38.2,38,Waste treatment and disposal
+group,38.3,38,Materials recovery
+division,39,E,Remediation activities and other waste management services
+group,39.0,39,Remediation activities and other waste management services
+section,F,,Construction
+division,41,F,Construction of buildings
+group,41.1,41,Development of building projects
+group,41.2,41,Construction of residential and non-residential buildings
+division,42,F,Civil engineering
+group,42.1,42,Construction of roads and railways
+group,42.2,42,Construction of utility projects
+group,42.9,42,Construction of other civil engineering projects
+division,43,F,Specialised construction activities
+group,43.1,43,Demolition and site preparation
+group,43.2,43,"Electrical, plumbing and other construction installation activities"
+group,43.3,43,Building completion and finishing
+group,43.9,43,Other specialised construction activities
+section,G,,Wholesale and retail trade; repair of motor vehicles and motorcycles
+division,45,G,Wholesale and retail trade and repair of motor vehicles and motorcycles
+group,45.1,45,Sale of motor vehicles
+group,45.2,45,Maintenance and repair of motor vehicles
+group,45.3,45,Sale of motor vehicle parts and accessories
+group,45.4,45,"Sale, maintenance and repair of motorcycles and related parts and accessories"
+division,46,G,"Wholesale trade, except of motor vehicles and motorcycles"
+group,46.1,46,Wholesale on a fee or contract basis
+group,46.2,46,Wholesale of agricultural raw materials and live animals
+group,46.3,46,"Wholesale of food, beverages and tobacco"
+group,46.4,46,Wholesale of household goods
+group,46.5,46,Wholesale of information and communication equipment
+group,46.6,46,"Wholesale of other machinery, equipment and supplies"
+group,46.7,46,Other specialised wholesale
+group,46.9,46,Non-specialised wholesale trade
+division,47,G,"Retail trade, except of motor vehicles and motorcycles"
+group,47.1,47,Retail sale in non-specialised stores
+group,47.2,47,"Retail sale of food, beverages and tobacco in specialised stores"
+group,47.3,47,Retail sale of automotive fuel in specialised stores
+group,47.4,47,Retail sale of information and communication equipment in specialised stores
+group,47.5,47,Retail sale of other household equipment in specialised stores
+group,47.6,47,Retail sale of cultural and recreation goods in specialised stores
+group,47.7,47,Retail sale of other goods in specialised stores
+group,47.8,47,Retail sale via stalls and markets
+group,47.9,47,"Retail trade not in stores, stalls or markets"
+section,H,,Transportation and storage
+division,49,H,Land transport and transport via pipelines
+group,49.1,49,"Passenger rail transport, interurban"
+group,49.2,49,Freight rail transport
+group,49.3,49,Other passenger land transport
+group,49.4,49,Freight transport by road and removal services
+group,49.5,49,Transport via pipeline
+division,50,H,Water transport
+group,50.1,50,Sea and coastal passenger water transport
+group,50.2,50,Sea and coastal freight water transport
+group,50.3,50,Inland passenger water transport
+group,50.4,50,Inland freight water transport
+division,51,H,Air transport
+group,51.1,51,Passenger air transport
+group,51.2,51,Freight air transport and space transport
+division,52,H,Warehousing and support activities for transportation
+group,52.1,52,Warehousing and storage
+group,52.2,52,Support activities for transportation
+division,53,H,Postal and courier activities
+group,53.1,53,Postal activities under universal service obligation
+group,53.2,53,Other postal and courier activities
+section,I,,Accommodation and food service activities
+division,55,I,Accommodation
+group,55.1,55,Hotels and similar accommodation
+group,55.2,55,Holiday and other short-stay accommodation
+group,55.3,55,"Camping grounds, recreational vehicle parks and trailer parks"
+group,55.9,55,Other accommodation
+division,56,I,Food and beverage service activities
+group,56.1,56,Restaurants and mobile food service activities
+group,56.2,56,Event catering and other food service activities
+group,56.3,56,Beverage serving activities
+section,J,,Information and communication
+division,58,J,Publishing activities
+group,58.1,58,"Publishing of books, periodicals and other publishing activities"
+group,58.2,58,Software publishing
+division,59,J,"Motion picture, video and television programme production, sound recording and music publishing activities"
+group,59.1,59,"Motion picture, video and television programme activities"
+group,59.2,59,Sound recording and music publishing activities
+division,60,J,Programming and broadcasting activities
+group,60.1,60,Radio broadcasting
+group,60.2,60,Television programming and broadcasting activities
+division,61,J,Telecommunications
+group,61.1,61,Wired telecommunications activities
+group,61.2,61,Wireless telecommunications activities
+group,61.3,61,Satellite telecommunications activities
+group,61.9,61,Other telecommunications activities
+division,62,J,"Computer programming, consultancy and related activities"
+group,62.0,62,"Computer programming, consultancy and related activities"
+division,63,J,Information service activities
+group,63.1,63,"Data processing, hosting and related activities; web portals"
+group,63.9,63,Other information service activities
+section,K,,Financial and insurance activities
+division,64,K,"Financial service activities, except insurance and pension funding"
+group,64.1,64,Monetary intermediation
+group,64.2,64,Activities of holding companies
+group,64.3,64,"Trusts, funds and similar financial entities"
+group,64.9,64,"Other financial service activities, except insurance and pension funding"
+division,65,K,"Insurance, reinsurance and pension funding, except compulsory social security"
+group,65.1,65,Insurance
+group,65.2,65,Reinsurance
+group,65.3,65,Pension funding
+division,66,K,Activities auxiliary to financial services and insurance activities
+group,66.1,66,"Activities auxiliary to financial services, except insurance and pension funding"
+group,66.2,66,Activities auxiliary to insurance and pension funding
+group,66.3,66,Fund management activities
+section,L,,Real estate activities
+division,68,L,Real estate activities
+group,68.1,68,Buying and selling of own real estate
+group,68.2,68,Rental and operating of own or leased real estate
+group,68.3,68,Real estate activities on a fee or contract basis
+section,M,,"Professional, scientific and technical activities"
+division,69,M,Legal and accounting activities
+group,69.1,69,Legal activities
+group,69.2,69,"Accounting, bookkeeping and auditing activities; tax consultancy"
+division,70,M,Activities of head offices; management consultancy activities
+group,70.1,70,Activities of head offices
+group,70.2,70,Management consultancy activities
+division,71,M,Architectural and engineering activities; technical testing and analysis
+group,71.1,71,Architectural and engineering activities and related technical consultancy
+group,71.2,71,Technical testing and analysis
+division,72,M,Scientific research and development
+group,72.1,72,Research and experimental development on natural sciences and engineering
+group,72.2,72,Research and experimental development on social sciences and humanities
+division,73,M,Advertising and market research
+group,73.1,73,Advertising
+group,73.2,73,Market research and public opinion polling
+division,74,M,"Other professional, scientific and technical activities"
+group,74.1,74,Specialised design activities
+group,74.2,74,Photographic activities
+group,74.3,74,Translation and interpretation activities
+group,74.9,74,"Other professional, scientific and technical activities n.e.c."
+division,75,M,Veterinary activities
+group,75.0,75,Veterinary activities
+section,N,,Administrative and support service activities
+division,77,N,Rental and leasing activities
+group,77.1,77,Renting and leasing of motor vehicles
+group,77.2,77,Renting and leasing of personal and household goods
+group,77.3,77,"Renting and leasing of other machinery, equipment and tangible goods"
+group,77.4,77,"Leasing of intellectual property and similar products, except copyrighted works"
+division,78,N,Employment activities
+group,78.1,78,Activities of employment placement agencies
+group,78.2,78,Temporary employment agency activities
+group,78.3,78,Other human resources provision
+division,79,N,"Travel agency, tour operator and other reservation service and related activities"
+group,79.1,79,Travel agency and tour operator activities
+group,79.9,79,Other reservation service and related activities
+division,80,N,Security and investigation activities
+group,80.1,80,Private security activities
+group,80.2,80,Security systems service activities
+group,80.3,80,Investigation activities
+division,81,N,Services to buildings and landscape activities
+group,81.1,81,Combined facilities support activities
+group,81.2,81,Cleaning activities
+group,81.3,81,Landscape service activities
+division,82,N,"Office administrative, office support and other business support activities"
+group,82.1,82,Office administrative and support activities
+group,82.2,82,Activities of call centres
+group,82.3,82,Organisation of conventions and trade shows
+group,82.9,82,Business support service activities n.e.c.
+section,O,,Public administration and defence; compulsory social security
+division,84,O,Public administration and defence; compulsory social security
+group,84.1,84,Administration of the State and the economic and social policy of the community
+group,84.2,84,Provision of services to the community as a whole
+group,84.3,84,Compulsory social security activities
+section,P,,Education
+division,85,P,Education
+group,85.1,85,Pre-primary education
+group,85.2,85,Primary education
+group,85.3,85,Secondary education
+group,85.4,85,Higher education
+group,85.5,85,Other education
+group,85.6,85,Educational support activities
+section,Q,,Human health and social work activities
+division,86,Q,Human health activities
+group,86.1,86,Hospital activities
+group,86.2,86,Medical and dental practice activities
+group,86.9,86,Other human health activities
+division,87,Q,Residential care activities
+group,87.1,87,Residential nursing care activities
+group,87.2,87,"Residential care activities for mental retardation, mental health and substance abuse"
+group,87.3,87,Residential care activities for the elderly and disabled
+group,87.9,87,Other residential care activities
+division,88,Q,Social work activities without accommodation
+group,88.1,88,Social work activities without accommodation for the elderly and disabled
+group,88.9,88,Other social work activities without accommodation
+section,R,,"Arts, entertainment and recreation"
+division,90,R,"Creative, arts and entertainment activities"
+group,90.0,90,"Creative, arts and entertainment activities"
+division,91,R,"Libraries, archives, museums and other cultural activities"
+group,91.0,91,"Libraries, archives, museums and other cultural activities"
+division,92,R,Gambling and betting activities
+group,92.0,92,Gambling and betting activities
+division,93,R,Sports activities and amusement and recreation activities
+group,93.1,93,Sports activities
+group,93.2,93,Amusement and recreation activities
+section,S,,Other service activities
+division,94,S,Activities of membership organisations
+group,94.1,94,"Activities of business, employers and professional membership organisations"
+group,94.2,94,Activities of trade unions
+group,94.9,94,Activities of other membership organisations
+division,95,S,Repair of computers and personal and household goods
+group,95.1,95,Repair of computers and communication equipment
+group,95.2,95,Repair of personal and household goods
+division,96,S,Other personal service activities
+group,96.0,96,Other personal service activities
+section,T,,Activities of households as employers; undifferentiated goods- and services-producing activities of households for own use
+division,97,T,Activities of households as employers of domestic personnel
+group,97.0,97,Activities of households as employers of domestic personnel
+division,98,T,Undifferentiated goods- and services-producing activities of private households for own use
+group,98.1,98,Undifferentiated goods-producing activities of private households for own use
+group,98.2,98,Undifferentiated service-producing activities of private households for own use
+section,U,,Activities of extraterritorial organisations and bodies
+division,99,U,Activities of extraterritorial organisations and bodies
+group,99.0,99,Activities of extraterritorial organisations and bodies

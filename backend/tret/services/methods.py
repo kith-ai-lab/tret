@@ -57,6 +57,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.config import get_settings
 from tret.db.models import Dataset, DatasetRow, Finding, MethodRun, Pack
 from tret.packs.integrity import PackIntegrityError, verify_pack_integrity
+from tret.packs.paths import PackFileMissing, PackPathError, resolve_pack_file
 
 log = logging.getLogger("tret.methods")
 
@@ -357,9 +358,17 @@ async def execute_method(
     input_map: dict[str, str] | None = None,
 ) -> MethodRun:
     """Run one method under the deterministic contract and persist the manifest."""
-    entrypoint = Path(pack_dir) / method_spec["entrypoint"]
-    if not entrypoint.is_file():
-        raise MethodError(f"Method entrypoint missing on disk: {entrypoint}")
+    try:
+        # Confined to the pack directory, like every other manifest path
+        # (tret.packs.paths): a stored manifest from before that check could
+        # still name an entrypoint outside the pack.
+        entrypoint = resolve_pack_file(pack_dir, method_spec["entrypoint"])
+    except PackFileMissing:
+        raise MethodError(
+            f"Method entrypoint missing on disk: {Path(pack_dir) / str(method_spec['entrypoint'])}"
+        )
+    except PackPathError as e:
+        raise MethodError(f"Method entrypoint refused: {e}")
     code_sha = hashlib.sha256(entrypoint.read_bytes()).hexdigest()
 
     inputs, input_summary = await _materialize_inputs(

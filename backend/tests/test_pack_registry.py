@@ -605,3 +605,72 @@ async def test_an_oversized_download_is_cut_at_the_cap(client, seed, storage, tm
         )
     assert response.status_code == 502, response.text
     assert "exceeded" in response.json()["detail"].lower()
+
+
+# ── methods packs from the registry ─────────────────────────────────────────
+#
+# A workspace admin may install a methods pack from the registry only when the
+# registry reports the version as reviewed (listed, or since delisted). See
+# api/packs.py::registry_install and api/packs.py::install_archive.
+
+
+def _build_methods_pack(root: Path) -> Path:
+    (root / "methods").mkdir(parents=True, exist_ok=True)
+    (root / "methods" / "noop.py").write_text(
+        "import json\nimport sys\n\njson.load(sys.stdin)\njson.dump({'rows': []}, sys.stdout)\n"
+    )
+    (root / "pack.yaml").write_text(
+        "pack: withmethods\nversion: 1.0.0\ndisplay_name: With methods\n"
+        "methods:\n"
+        "  - slug: noop\n    display_name: Noop\n    entrypoint: methods/noop.py\n"
+    )
+    return root
+
+
+async def _registry_install_methods_pack(client, seed, tmp_path, state):
+    team = make_workspace("Climate Co")
+    project = Project(id=uuid.uuid4(), workspace_id=team.id, name="Sample")
+    admin = make_user("wsadmin@example.com")
+    await seed(team, project, admin, make_member(admin, team, role="admin"))
+    await login(client, admin.email)
+
+    pack_dir = _build_methods_pack(tmp_path / "methods-pack")
+    archive_bytes = _tar_directory(pack_dir)
+    detail = _detail_json(
+        slug="withmethods",
+        version="1.0.0",
+        content_hash=pack_content_hash(pack_dir),
+        size_bytes=len(archive_bytes),
+    )
+    detail["has_methods"] = True
+    if state is not None:
+        detail["state"] = state
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(f"{REGISTRY_BASE}/packs/withmethods/1.0.0").mock(
+            return_value=httpx.Response(200, json=detail)
+        )
+        mock.get(f"{REGISTRY_BASE}/packs/withmethods/1.0.0/download").mock(
+            return_value=httpx.Response(200, content=archive_bytes)
+        )
+        return await client.post(
+            "/api/packs/registry/install", json={"slug": "withmethods", "version": "1.0.0"}
+        )
+
+
+@pytest.mark.parametrize("state", ["listed", "delisted"])
+async def test_a_reviewed_methods_pack_installs_from_the_registry(
+    client, seed, storage, tmp_path, state
+):
+    response = await _registry_install_methods_pack(client, seed, tmp_path, state)
+    assert response.status_code == 200, response.text
+    assert response.json()["slug"] == "withmethods"
+
+
+@pytest.mark.parametrize("state", [None, "in_review", "submitted"])
+async def test_an_unreviewed_methods_pack_is_refused_from_the_registry(
+    client, seed, storage, tmp_path, state
+):
+    response = await _registry_install_methods_pack(client, seed, tmp_path, state)
+    assert response.status_code == 403, response.text
+    assert (await client.get("/api/packs")).json() == []

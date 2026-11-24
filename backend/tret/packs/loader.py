@@ -32,6 +32,7 @@ from tret.engine.context import doctrine_sha, parse_doctrine_selector, select_do
 from tret.engine.delegation import SUBAGENT_TASK_TYPE
 from tret.packs.archive import PackArchiveError, extract_pack_archive
 from tret.packs.integrity import pack_content_hash
+from tret.packs.paths import PackFileMissing, PackPathError, resolve_pack_file
 from tret.packs.safety import scan_method_file
 from tret.packs.schema import PackManifest
 from tret.packs.storage import PackStorage
@@ -71,6 +72,31 @@ class PackValidationError(Exception):
         super().__init__("; ".join(errors))
 
 
+class PackMethodsNotAllowed(Exception):
+    """An archive install carried `methods:` but the caller may not install
+    executable pack code (`install_pack_from_archive(allow_methods=False)`).
+    Mapped to 403 by the API layer."""
+
+
+def _pack_file_error(what: str, rel: object, err: PackPathError) -> str:
+    """One validation message for a manifest path `resolve_pack_file`
+    refused. A plain missing file keeps the long-standing "<what> missing:
+    <rel>" wording; anything else (absolute, `..`, symlinked out, not a
+    regular file) says it was rejected and why."""
+    if isinstance(err, PackFileMissing):
+        return f"{what} missing: {rel}"
+    return f"{what} rejected: {err}"
+
+
+def _pack_file(pack_dir: Path, rel: object, what: str, errors: list[str]) -> Path | None:
+    """`resolve_pack_file`, appending a validation message on refusal."""
+    try:
+        return resolve_pack_file(pack_dir, rel)
+    except PackPathError as e:
+        errors.append(_pack_file_error(what, rel, e))
+        return None
+
+
 class PackInstallConflict(Exception):
     """Two installs of the same pack directory collided and disagreed: a
     concurrent re-install finished first with *different* content than this
@@ -90,8 +116,12 @@ def _doctrine_selector_errors(
             f"task '{task_slug}': doctrine selector '{selector}' references '{rel}', which is "
             "not in the pack's doctrine list"
         ]
-    path = pack_dir / rel
-    if section is None or not path.exists():
+    if section is None:
+        return []
+    try:
+        path = resolve_pack_file(pack_dir, rel)
+    except PackPathError:
+        # Already reported by validate_pack's own doctrine-list check.
         return []
     _, matched, unresolved = select_doctrine_text(path.read_text(), [section])
     if unresolved:
@@ -115,9 +145,12 @@ def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[s
     except Exception as e:
         return None, {}, [f"pack.yaml invalid: {e}"]  # type: ignore[return-value]
 
+    # Every path the manifest names must be a regular file inside the pack
+    # directory (`tret.packs.paths`): an absolute or `..` path, or a symlink
+    # out of the pack, would otherwise be read at install and served back by
+    # `GET /api/packs/{id}`.
     for rel in manifest.doctrine:
-        if not (pack_dir / rel).exists():
-            errors.append(f"doctrine file missing: {rel}")
+        _pack_file(pack_dir, rel, "doctrine file", errors)
 
     schemas: dict[str, dict] = {}
     builtins = set(get_builtin_tools())
@@ -134,11 +167,11 @@ def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[s
                 "subagent runs and may not be declared by a pack"
             )
         if task.output_schema:
-            path = pack_dir / task.output_schema
+            path = _pack_file(
+                pack_dir, task.output_schema, f"task '{task.slug}': schema file", errors
+            )
             slug = Path(task.output_schema).stem.removesuffix(".schema")
-            if not path.exists():
-                errors.append(f"task '{task.slug}': schema file missing: {task.output_schema}")
-            else:
+            if path is not None:
                 try:
                     schema = json.loads(path.read_text())
                     jsonschema.Draft202012Validator.check_schema(schema)
@@ -164,8 +197,7 @@ def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[s
                 errors.append(f"task '{task.slug}': unknown tool '{tool}'")
 
     for ds in manifest.datasets:
-        if not (pack_dir / ds.file).exists():
-            errors.append(f"dataset file missing: {ds.file}")
+        _pack_file(pack_dir, ds.file, "dataset file", errors)
 
     # Deferred for the same reason `get_builtin_tools` is above: TIER_ORDER's
     # own import chain (router_llm.objectives -> providers.catalog -> tret.net)
@@ -229,10 +261,8 @@ def validate_pack(pack_dir: Path) -> tuple[PackManifest, dict[str, dict], list[s
         if m.slug in seen_methods:
             errors.append(f"duplicate method slug '{m.slug}'")
         seen_methods.add(m.slug)
-        entrypoint = pack_dir / m.entrypoint
-        if not entrypoint.exists():
-            errors.append(f"method '{m.slug}': entrypoint missing: {m.entrypoint}")
-        else:
+        entrypoint = _pack_file(pack_dir, m.entrypoint, f"method '{m.slug}': entrypoint", errors)
+        if entrypoint is not None:
             for violation in scan_method_file(entrypoint, label=m.entrypoint):
                 errors.append(f"method '{m.slug}': {violation}")
         for spec in m.inputs:
@@ -343,7 +373,8 @@ async def install_pack(
         ).scalar_one_or_none()
         if already is not None:
             continue
-        rows = list(csv.DictReader((pack_dir / ds_spec.file).open()))
+        with resolve_pack_file(pack_dir, ds_spec.file).open() as fh:
+            rows = list(csv.DictReader(fh))
         dataset = Dataset(
             project_id=project_id,
             pack_id=pack.id,
@@ -453,6 +484,18 @@ async def install_pack(
     return pack
 
 
+def manifest_declares_methods(pack_root: Path) -> bool:
+    """Whether `pack_root/pack.yaml` declares any `methods:`, judged on the
+    raw YAML before validation. Stricter than the validated manifest: any
+    truthy `methods` value counts. A missing or unparseable manifest is
+    False here because `validate_pack` rejects it moments later anyway."""
+    try:
+        data = yaml.safe_load((pack_root / "pack.yaml").read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return False
+    return isinstance(data, dict) and bool(data.get("methods"))
+
+
 _CONCURRENT_LOSER_ERRNOS = {errno.ENOTEMPTY, errno.EEXIST}
 
 
@@ -539,6 +582,7 @@ async def install_pack_from_archive(
     archive_bytes: bytes,
     *,
     expected_content_hash: str | None = None,
+    allow_methods: bool = False,
 ) -> Pack:
     """Install a pack shipped as a tar.gz archive (an upload, or later a
     marketplace download) rather than a path on the server's own filesystem.
@@ -569,6 +613,13 @@ async def install_pack_from_archive(
     exception propagates (a `PackInstallConflict`'s "we lost the race but
     agreed on content" outcome is not a failure, and still cleans up the same
     way). Nothing partial is left for a later install to trip over.
+
+    `allow_methods` (default False, fail closed): a pack whose manifest
+    declares `methods:` ships Python that `services/methods.py` runs as the
+    server's own user, with no filesystem isolation — installing one is
+    deploying code. Without `allow_methods=True` such an archive is refused
+    with `PackMethodsNotAllowed` before anything is installed. The upload
+    endpoint grants it only to the instance admin; see `api/packs.py`.
     """
     storage = PackStorage()
     staging_dir = storage.staging_dir()
@@ -584,6 +635,12 @@ async def install_pack_from_archive(
                     f"archive content hash {actual_hash[:16]}… does not match the "
                     f"expected {expected_content_hash[:16]}… — refusing to install"
                 )
+
+        if not allow_methods and manifest_declares_methods(pack_root):
+            raise PackMethodsNotAllowed(
+                "This pack declares methods (executable Python that runs on the server). "
+                "Only an instance admin may install a methods pack from an archive."
+            )
 
         # install_pack commits internally with source_path still pointing at
         # pack_root (inside staging_dir). Known residual risk, accepted rather

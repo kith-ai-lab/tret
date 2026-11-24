@@ -479,6 +479,53 @@ class DisclosureReport(Base):
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class CompanyClassification(Base):
+    """One source's industry classification of one company in a workspace
+    (`tret/taxonomy`, `tret/services/peer_taxonomy.py`), on the NACE Rev. 2 ladder
+    (group -> division -> cluster -> section).
+
+    A company is identified by `(company_key_type, company_key)`: `lei`, `cik`, `ticker` or
+    `target` (a register target slug) with the key normalised by the writer. `source`:
+    `sec_sic` (the SEC's SIC code through the curated concordance), `extractor` (proposed by
+    a run, a later PR) or `manual` (a workspace admin's override). One row per source; the
+    effective classification is manual > sec_sic > extractor (`taxonomy.resolve`).
+    `gics_disagrees` flags a cluster the register's GICS sector name does not fit: never
+    auto-resolved. `nace_group` is null for a division-level classification.
+    """
+
+    __tablename__ = "company_classifications"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "company_key_type", "company_key", "source"),
+        Index("ix_company_classifications_ws_division", "workspace_id", "nace_division"),
+        Index("ix_company_classifications_ws_cluster", "workspace_id", "cluster"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    company_key_type: Mapped[str] = mapped_column(Text, nullable=False)  # lei|cik|ticker|target
+    company_key: Mapped[str] = mapped_column(Text, nullable=False)
+    company_name: Mapped[str | None] = mapped_column(Text)
+    nace_group: Mapped[str | None] = mapped_column(Text)
+    nace_division: Mapped[str] = mapped_column(Text, nullable=False)
+    cluster: Mapped[str] = mapped_column(Text, nullable=False)
+    nace_section: Mapped[str] = mapped_column(Text, nullable=False)
+    taxonomy_version: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)  # sec_sic|extractor|manual
+    source_code: Mapped[str | None] = mapped_column(Text)  # e.g. the SIC code "2834"
+    source_label: Mapped[str | None] = mapped_column(Text)  # e.g. SEC sicDescription
+    confidence: Mapped[float | None] = mapped_column()
+    match: Mapped[str | None] = mapped_column(Text)  # exact|close|broad (SIC concordance)
+    evidence: Mapped[dict | None] = mapped_column(JSONB)  # {document_id, page, url}
+    gics_sector: Mapped[str | None] = mapped_column(Text)
+    gics_disagrees: Mapped[bool | None] = mapped_column(Boolean)
+    reviewed_by: Mapped[str | None] = mapped_column(Text)
+    reviewed_at: Mapped[datetime | None] = mapped_column()
+    created_at: Mapped[datetime] = created_at_col()
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class DocumentChunk(Base):
     """One structure-aware retrieval unit sliced out of `Document.extracted_text`
     by `tret.services.retrieval` — the chunked, ranked replacement for scanning

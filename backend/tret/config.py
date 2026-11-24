@@ -344,6 +344,15 @@ class Settings(BaseSettings):
     # pdftotext text and the cut is recorded in the metrics.
     normaliser_max_table_pages: int = 150
 
+    # ── peer taxonomy (tret/taxonomy, tret/services/peer_taxonomy.py) ─────────
+    # `off` (default) makes the /api/company-classifications routes a 404. The operator
+    # CLI (`tret disclosure classify-sec`, `classifications`) works either way.
+    peer_taxonomy: Literal["off", "on"] = "off"
+    # SEC EDGAR requires a descriptive User-Agent that says who is calling and how to
+    # reach them, e.g. "Example Co research ops@example.com". Empty (default): `tret
+    # disclosure classify-sec` refuses to run.
+    sec_user_agent: str = ""
+
     # ── batch evaluator (tret/batches/evaluation.py) ──────────────────────────
     # The judge model a batch's evaluation pass uses unless the request names one,
     # as an ordered, comma-separated preference list: the first model in the catalog

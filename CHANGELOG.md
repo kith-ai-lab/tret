@@ -10,6 +10,20 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Peer taxonomy (experimental).** Peer pools for the disclosure evaluation engine are built on
+  an open ladder, NACE Rev. 2 (Eurostat: 21 sections, 88 divisions, 272 groups) with 29 Tret
+  industry clusters on top (`tret/taxonomy/`, `TAXONOMY_VERSION` `nace2-tret-1`), never on
+  licensed GICS. A curated SIC to NACE table (not an official concordance; each row graded
+  exact, close or broad) classifies companies from their SEC SIC code, and the register's GICS
+  sector name is only a flag (`gics_disagrees`). New table `company_classifications` (new
+  migration, workspace-scoped, one row per source: manual > sec_sic > extractor).
+  `tret disclosure classify-sec --batch <id>` reads SIC codes from `data.sec.gov` (through `tret/net`: needs
+  `TRET_EGRESS=on` and `TRET_EGRESS_RESEARCH=on`, honours `TRET_EGRESS_PROXY`; at most 8 requests a
+  second; refuses to run unless `TRET_SEC_USER_AGENT` names who is calling) and
+  `tret disclosure classifications --batch <id>` lists each target's effective classification.
+  `TRET_PEER_TAXONOMY=on` enables `GET /api/company-classifications`, `.../effective` and an
+  admin-only `PUT .../manual` override (404 while off). See
+  [docs/disclosure-collection.md](docs/disclosure-collection.md).
 - **Stage 1 normaliser (experimental, off by default).** `TRET_DISCLOSURE_NORMALISER=on` enables
   `tret disclosure normalise --batch <id>`, which turns each PDF and ESEF package a collection run
   fetched into one Markdown file with real tables (`pdftotext -layout` over every page, uncapped,

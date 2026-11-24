@@ -1794,6 +1794,63 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/company-classifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Company Classifications */
+        get: operations["list_company_classifications_api_company_classifications_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/company-classifications/effective": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Effective Classification
+         * @description One company's effective classification, resolved exactly as `tret disclosure
+         *     classifications` does: across the rows of every key given (at least one of `cik`, `lei`,
+         *     `ticker`, `target`), manual > sec_sic > extractor. A manual override keyed by ticker
+         *     therefore applies to every target with that ticker in the workspace.
+         */
+        get: operations["get_effective_classification_api_company_classifications_effective_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/company-classifications/manual": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Put Manual Classification */
+        put: operations["put_manual_classification_api_company_classifications_manual_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/connections": {
         parameters: {
             query?: never;
@@ -4401,6 +4458,25 @@ export interface components {
             email: string;
             /** Password */
             password: string;
+        };
+        /** ManualClassificationIn */
+        ManualClassificationIn: {
+            /** Company Key */
+            company_key: string;
+            /**
+             * Company Key Type
+             * @description lei | cik | ticker | target
+             */
+            company_key_type: string;
+            /** Company Name */
+            company_name?: string | null;
+            /**
+             * Nace Code
+             * @description A NACE Rev. 2 division ("21") or group ("21.2" or "212")
+             */
+            nace_code: string;
+            /** Note */
+            note?: string | null;
         };
         /** MemberOut */
         MemberOut: {
@@ -7876,6 +7952,115 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_company_classifications_api_company_classifications_get: {
+        parameters: {
+            query?: {
+                source?: string | null;
+                cluster?: string | null;
+                division?: string | null;
+                disagreements_only?: boolean;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_effective_classification_api_company_classifications_effective_get: {
+        parameters: {
+            query?: {
+                cik?: string | null;
+                lei?: string | null;
+                ticker?: string | null;
+                target?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_manual_classification_api_company_classifications_manual_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManualClassificationIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
             /** @description Validation Error */
