@@ -10,6 +10,19 @@ one that needs action on an existing install.
 
 ### Added
 
+- **Stage 2 module extractor (experimental, off by default).** `TRET_DISCLOSURE_EXTRACT=on` enables
+  the `disclosure_extract` batch profile and `tret disclosure extract --from-batch <id> [--limit N]
+  [--only-missing] [--policy ...] [--dry-run]`, which finds, in each normalised report, the passages
+  for four modules (physical climate risk, targets and transition, governance and capex, sensitive
+  framing; module sets are YAML, `TRET_DISCLOSURE_MODULE_SET`) plus metadata (document type, year,
+  frameworks, assurance, a NACE proposal). The model only names block ids (`p12.b3`); the text of
+  each module is cut verbatim from the report and kept in the blob store. New direct batch path: a
+  profile with `direct = True` gets a normal `Run` per target (task type `structured_call`, so
+  cost, budgets, credit gates, post-run hooks and billing all apply) but executes one or more
+  routed structured calls (`tret/engine/routed_call.py`, never a pinned model) instead of the agent
+  loop; such runs are kept out of the router's outcome priors. New tables `report_extractions` and
+  `report_modules` (new migration, workspace-scoped); read-only routes under
+  `/api/report-extractions` (404 while off). See [docs/disclosure-evaluation.md](docs/disclosure-evaluation.md).
 - **Peer taxonomy (experimental).** Peer pools for the disclosure evaluation engine are built on
   an open ladder, NACE Rev. 2 (Eurostat: 21 sections, 88 divisions, 272 groups) with 29 Tret
   industry clusters on top (`tret/taxonomy/`, `TAXONOMY_VERSION` `nace2-tret-1`), never on

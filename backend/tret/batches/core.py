@@ -55,6 +55,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.batches import search_outage
 from tret.batches.profiles import BatchProfile, RegisterError, get_profile, profile_for
+from tret.batches.rubrics import STRUCTURED_CALL_KEY
 from tret.config import get_settings
 from tret.db.models import (
     Batch,
@@ -102,6 +103,8 @@ CONCURRENCY_MIN, CONCURRENCY_MAX = 1, 6
 # How long a timed-out target run gets to notice the engine's cooperative cancel
 # before its task is torn down (the same grace `delegate_parallel` gives).
 CANCEL_GRACE_SECONDS = 30.0
+# What a run the time limit stopped carries as its error (direct runs use the same text).
+TIMEOUT_RUN_ERROR = "timeout: stopped by the collection run's time limit"
 SUCCESS_RUN_STATUSES = ("completed", "completed_without_output")
 # Set on a target whose packages were ready only after its collection was
 # finalized: nothing is uploaded until an operator asks (retry-write).
@@ -514,6 +517,9 @@ def _require(c: Batch, allowed: tuple[str, ...], verb: str) -> None:
 async def start(db: AsyncSession, c: Batch) -> None:
     _require(c, ("draft",), "started")
     profile = profile_for(c)
+    refusal = getattr(profile, "launch_refusal", None)
+    if refusal is not None and (why := refusal(c)):
+        raise HTTPException(409, why)
     if await profile.harness_for(db, c) is None:
         raise HTTPException(409, profile.no_harness_error)
     check_headroom(await load_targets(db, [c.id]))
@@ -669,13 +675,22 @@ async def _launch(collection_id: uuid.UUID) -> int:
             if not pending or slots == 0:
                 return 0
             profile = profile_for(c)
+            refusal = getattr(profile, "launch_refusal", None)
+            if refusal is not None and (why := refusal(c)):
+                c.status = "paused"
+                c.settings = {**(c.settings or {}), "last_error": why}
+                await db.commit()
+                return 0
             harness = await profile.harness_for(db, c)
             if harness is None:
                 c.status = "paused"
                 c.settings = {**(c.settings or {}), "last_error": profile.missing_harness_message}
                 await db.commit()
                 return 0
-            pack = resolve_pack_for_task(await packs_for_harness(db, harness), "freeform")
+            direct = bool(getattr(profile, "direct", False))
+            # A direct profile (`tret/engine/direct.py`) runs no agent loop: no pack, and the
+            # model/iteration overrides below do not apply (its policy lives in the batch settings).
+            pack = None if direct else resolve_pack_for_task(await packs_for_harness(db, harness), "freeform")
             model_override = (c.settings or {}).get("model_override")
             max_iterations = (c.settings or {}).get("max_iterations")
             max_cost_usd = (c.settings or {}).get("max_cost_usd")
@@ -724,6 +739,9 @@ async def _launch(collection_id: uuid.UUID) -> int:
                     t_model = arm.get("model_override") or t_model
                     t_objective = arm.get("objective") or t_objective
                     t_iterations = arm.get("max_iterations") or t_iterations
+                if direct:
+                    t_model = t_objective = t_iterations = None
+                    task_input[STRUCTURED_CALL_KEY] = True
                 if t_model:
                     task_input["_model_override"] = t_model
                 if t_objective:
@@ -740,7 +758,7 @@ async def _launch(collection_id: uuid.UUID) -> int:
                     project_id=c.project_id,
                     harness_id=harness.id,
                     pack_id=pack.id if pack else None,
-                    task_type="freeform",
+                    task_type=getattr(profile, "direct_task_type", "structured_call") if direct else "freeform",
                     task_input=task_input,
                     document_ids=[],
                     created_by=c.created_by,
@@ -793,6 +811,7 @@ async def _run_target(collection_id: uuid.UUID, target_id: uuid.UUID, run_id: uu
                 t = await db.get(BatchTarget, target_id)
                 if c is None or t is None or t.run_id != run_id:
                     return
+                run_profile = profile_for(c)
                 if c.status != "running":
                     # Paused while this target waited for a process-wide slot:
                     # give the slot back untouched, to launch on resume.
@@ -807,13 +826,21 @@ async def _run_target(collection_id: uuid.UUID, target_id: uuid.UUID, run_id: uu
                     t.attempts = max(0, (t.attempts or 1) - 1)
                     await db.commit()
                     return
-            engine = _compat().get_harness_engine()
             timeout = max(1, int(get_settings().collections_run_timeout_seconds))
-            task = asyncio.create_task(engine.execute(run_id))
+            if getattr(run_profile, "direct", False):
+                # No harness loop: the profile's routed structured call (engine/direct.py).
+                from tret.engine.direct import execute_direct
+
+                engine = None
+                task = asyncio.create_task(execute_direct(run_id, run_profile, _session_factory()))
+            else:
+                engine = _compat().get_harness_engine()
+                task = asyncio.create_task(engine.execute(run_id))
             done, _ = await asyncio.wait({task}, timeout=timeout)
             timed_out = not done
             if timed_out:
-                engine.cancel(run_id)
+                if engine is not None:
+                    engine.cancel(run_id)
                 done, _ = await asyncio.wait({task}, timeout=_compat().CANCEL_GRACE_SECONDS)
                 if not done:
                     task.cancel()
@@ -823,13 +850,13 @@ async def _run_target(collection_id: uuid.UUID, target_id: uuid.UUID, run_id: uu
                 # Bounded: this runs while holding a process-wide slot, and a
                 # database call stuck on a dead socket must not hold it forever.
                 closer = asyncio.ensure_future(
-                    _close_out_run(run_id, "timeout: stopped by the collection run's time limit")
+                    _close_out_run(run_id, TIMEOUT_RUN_ERROR)
                 )
                 await asyncio.wait({closer}, timeout=_compat().CANCEL_GRACE_SECONDS)
                 if not closer.done():
                     closer.cancel()
                     log.error("closing out timed-out run %s did not finish; slot released", run_id)
-                forget = getattr(engine, "forget_cancelled", None)
+                forget = getattr(engine, "forget_cancelled", None) if engine is not None else None
                 if forget is not None:
                     forget(run_id)
             else:

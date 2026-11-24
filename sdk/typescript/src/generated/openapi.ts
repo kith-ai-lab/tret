@@ -2358,6 +2358,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/disclosure-reports/{report_id}/extractions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Report Extractions */
+        get: operations["list_report_extractions_api_disclosure_reports__report_id__extractions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/disclosure-reports/{report_id}/markdown": {
         parameters: {
             query?: never;
@@ -3272,6 +3289,40 @@ export interface paths {
          *     See docs/connections.md.
          */
         post: operations["import_documents_api_projects__project_id__documents_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/report-extractions/{extraction_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Report Extraction */
+        get: operations["get_report_extraction_api_report_extractions__extraction_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/report-extractions/{extraction_id}/modules/{module}/text": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Module Text */
+        get: operations["get_module_text_api_report_extractions__extraction_id__modules__module__text_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -8756,6 +8807,37 @@ export interface operations {
             };
         };
     };
+    list_report_extractions_api_disclosure_reports__report_id__extractions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                report_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_disclosure_report_markdown_api_disclosure_reports__report_id__markdown_get: {
         parameters: {
             query?: never;
@@ -10194,6 +10276,69 @@ export interface operations {
                 "application/json": components["schemas"]["ImportBody"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_report_extraction_api_report_extractions__extraction_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                extraction_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_module_text_api_report_extractions__extraction_id__modules__module__text_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                extraction_id: string;
+                module: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

@@ -24,6 +24,9 @@ from pydantic import BaseModel, ConfigDict, Field
 EVALUATION_ID_KEY = "_batch_evaluation_id"
 # Stamped on every blind pairwise judge run (`tret/batches/pairwise.py`).
 PAIRWISE_ID_KEY = "_pairwise_judgment_id"
+# Stamped by `batches/core.py` on the run of a direct (non-agent) batch target: a structured
+# model call whose quality is not scored yet, so it is no evidence for the router.
+STRUCTURED_CALL_KEY = "_structured_call"
 PAIRWISE_ORDER_KEY = "_pairwise_order"
 DISCLOSURE_RUBRIC_KEY = "disclosure-v1"
 PROMPT_RUBRIC_KEY = "prompt-default-v1"
@@ -56,6 +59,13 @@ def is_evaluator_run(task_input: dict | None) -> bool:
     performance sample for the router."""
     ti = task_input or {}
     return bool(ti.get(EVALUATION_ID_KEY) or ti.get(PAIRWISE_ID_KEY))
+
+
+def is_structured_call_run(task_input: dict | None) -> bool:
+    """True for the run of a direct batch target (`engine/direct.py`): a routed structured
+    call, not an agent loop. Extraction quality is not scored yet, so such a run must not
+    become a performance sample for the router (`services/outcomes.build_outcomes`)."""
+    return bool((task_input or {}).get(STRUCTURED_CALL_KEY))
 
 
 def _criterion(key: str, label: str, weight: int, applies: str, five: str, one: str) -> dict:
@@ -315,6 +325,7 @@ __all__ = [
     "criterion_applies",
     "default_rubric",
     "is_evaluator_run",
+    "is_structured_call_run",
     "rubric_text",
     "rubric_version",
     "validate_custom_rubric",

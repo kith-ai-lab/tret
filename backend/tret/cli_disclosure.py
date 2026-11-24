@@ -67,6 +67,30 @@ def register(sub: argparse._SubParsersAction) -> None:
     lst.add_argument("--csv", type=Path, metavar="FILE", help="Also write the table to this CSV file")
     lst.add_argument("--json", action="store_true", help="Print raw JSON")
 
+    ext = dsub.add_parser(
+        "extract",
+        help="Create a module-extraction batch from a collection batch's normalised reports "
+        "(needs TRET_DISCLOSURE_EXTRACT=on)",
+        description="Stage 2: create a DRAFT `disclosure_extract` batch with one target per primary "
+        "normalised report of the source batch, or with --dry-run only print how many reports, how "
+        "many input tokens and what cost range (no model call). Start the batch from the batches API "
+        "or UI (POST /api/collections/<id>/start) so the running server executes it. The model is "
+        "chosen by the router under --policy; a pinned model is refused.",
+    )
+    ext.add_argument("--from-batch", required=True, metavar="BATCH_ID", help="The collection batch to read")
+    ext.add_argument("--limit", type=int, metavar="N", help="Only the first N reports")
+    ext.add_argument("--only-missing", action="store_true", help="Skip reports already extracted at this version")
+    ext.add_argument(
+        "--policy", metavar="POLICY",
+        help='Model policy: a JSON object or key=value pairs, e.g. "objective=eco,open_weights=prefer"',
+    )
+    ext.add_argument("--module-set", type=Path, metavar="FILE", help="Module set YAML (default: TRET_DISCLOSURE_MODULE_SET or the built-in)")
+    ext.add_argument("--name", metavar="NAME", help="Batch name")
+    ext.add_argument("--run-slug", metavar="SLUG", help="Batch run slug (default: extract-<date>-<id>)")
+    ext.add_argument("--max-cost", type=float, metavar="USD", help="Cost cap per report")
+    ext.add_argument("--dry-run", action="store_true", help="Count reports, estimate tokens and cost; create nothing")
+    ext.add_argument("--json", action="store_true", help="Print raw JSON")
+
     one = dsub.add_parser(
         "normalise-file",
         help="Normalise one local PDF (or ESEF .zip/.xbri) with no database; writes <stem>.md and <stem>.metrics.json",
@@ -79,6 +103,8 @@ def register(sub: argparse._SubParsersAction) -> None:
 def run(args: argparse.Namespace) -> int:
     if args.disclosure_command == "normalise-file":
         return _normalise_file(args)
+    if args.disclosure_command == "extract":
+        return _extract(args)
     if args.disclosure_command == "classify-sec":
         return _classify_sec(args)
     if args.disclosure_command == "classifications":
@@ -341,4 +367,107 @@ def _classifications(args: argparse.Namespace) -> int:
             )
     done = sum(1 for r in rows if r["source"])
     print(f"{len(rows)} target(s), {done} classified, {len(rows) - done} without a classification")
+    return 0
+
+
+def parse_policy(raw: str | None) -> dict | None:
+    """`--policy`: a JSON object, or comma-separated key=value pairs (`allowed` takes `|`)."""
+    if raw is None or not raw.strip():
+        return None
+    text = raw.strip()
+    if text.startswith("{"):
+        value = json.loads(text)
+        if not isinstance(value, dict):
+            raise ValueError("a policy must be a JSON object")
+        return value
+    out: dict = {}
+    for part in text.split(","):
+        key, sep, val = part.partition("=")
+        if not sep or not key.strip():
+            raise ValueError(f"bad policy item {part!r}; use key=value")
+        val = val.strip()
+        out[key.strip()] = val.split("|") if key.strip() == "allowed" else val
+    return out
+
+
+def _extract(args: argparse.Namespace) -> int:
+    """`tret disclosure extract`: create (or, with --dry-run, estimate) an extraction batch."""
+    import asyncio
+    import datetime as dt
+
+    from fastapi import HTTPException
+
+    batch_id = _batch_uuid(args.from_batch)
+    if batch_id is None:
+        return 2
+    if args.limit is not None and args.limit < 1:
+        print("error: --limit must be at least 1", file=sys.stderr)
+        return 2
+    try:
+        policy = parse_policy(args.policy)
+    except (ValueError, json.JSONDecodeError) as e:
+        print(f"error: --policy: {e}", file=sys.stderr)
+        return 2
+
+    from tret.batches.profiles import disclosure_extract as de
+    from tret.config import get_settings
+    from tret.db.engine import get_session_factory
+    from tret.db.models import Batch
+    from tret.evaluation import estimate
+    from tret.evaluation.modules import ModuleSetError, load_module_set
+
+    if not de.extract_enabled(get_settings()):
+        print(f"error: {de.OFF_MESSAGE}", file=sys.stderr)
+        return 2
+    try:
+        module_set = load_module_set(args.module_set)
+    except ModuleSetError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    async def go():
+        async with get_session_factory()() as db:
+            src = await db.get(Batch, batch_id)
+            if src is None:
+                return None
+            if args.dry_run:
+                register, pairs = await de.build_register(
+                    db, workspace_id=src.workspace_id, source_batch_id=batch_id, limit=args.limit,
+                    only_missing=args.only_missing, module_set=module_set,
+                )
+                return await estimate.estimate_reports(
+                    [r for r, _ in pairs], module_set, get_settings().extract_window_tokens, policy
+                )
+            slug = args.run_slug or f"extract-{dt.date.today():%Y%m%d}-{str(batch_id)[:6]}"
+            batch, targets = await de.create_extract_batch(
+                db, workspace_id=src.workspace_id, user_id=None, source_batch_id=batch_id,
+                name=args.name or f"Module extraction of {src.name}", run_slug=slug, limit=args.limit,
+                only_missing=args.only_missing, model_policy=policy,
+                module_set_path=str(args.module_set) if args.module_set else None,
+                max_cost_usd=args.max_cost,
+            )
+            return {"batch_id": str(batch.id), "run_slug": batch.run_slug, "targets": len(targets), "status": batch.status}
+
+    try:
+        result = asyncio.run(go())
+    except HTTPException as e:
+        print(f"error: {e.detail}", file=sys.stderr)
+        return 1
+    if result is None:
+        print(f"error: batch {batch_id} not found", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result, indent=2))
+    elif args.dry_run:
+        cost = result["cost_usd"]
+        print(
+            f"{result['reports']} report(s), {result['windows']} window(s), about "
+            f"{result['input_tokens']:,} input tokens; estimated cost "
+            + (f"${cost['low']:.2f} to ${cost['high']:.2f} (cheapest to dearest catalog model)" if cost else "unknown (no catalog model)")
+        )
+    else:
+        print(
+            f"created draft batch {result['batch_id']} ({result['run_slug']}) with {result['targets']} target(s); "
+            f"start it with POST /api/collections/{result['batch_id']}/start"
+        )
     return 0

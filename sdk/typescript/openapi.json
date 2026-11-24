@@ -8398,6 +8398,47 @@
         ]
       }
     },
+    "/api/disclosure-reports/{report_id}/extractions": {
+      "get": {
+        "operationId": "list_report_extractions_api_disclosure_reports__report_id__extractions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Report Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Report Extractions",
+        "tags": [
+          "report-extractions"
+        ]
+      }
+    },
     "/api/disclosure-reports/{report_id}/markdown": {
       "get": {
         "operationId": "get_disclosure_report_markdown_api_disclosure_reports__report_id__markdown_get",
@@ -10389,6 +10430,97 @@
         "summary": "Import Documents",
         "tags": [
           "documents"
+        ]
+      }
+    },
+    "/api/report-extractions/{extraction_id}": {
+      "get": {
+        "operationId": "get_report_extraction_api_report_extractions__extraction_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "extraction_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Extraction Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Report Extraction",
+        "tags": [
+          "report-extractions"
+        ]
+      }
+    },
+    "/api/report-extractions/{extraction_id}/modules/{module}/text": {
+      "get": {
+        "operationId": "get_module_text_api_report_extractions__extraction_id__modules__module__text_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "extraction_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Extraction Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "module",
+            "required": true,
+            "schema": {
+              "title": "Module",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Module Text",
+        "tags": [
+          "report-extractions"
         ]
       }
     },

@@ -36,6 +36,16 @@ class BatchProfile(Protocol):
     no_harness_error: str
     # `_launch` pauses the batch with this as `last_error` when no harness is found.
     missing_harness_message: str
+    # Optional DIRECT capability (`tret/engine/direct.py`): `direct = True` makes `core._launch` file
+    # a `Run(task_type=direct_task_type)` per target and execute it with `run_direct(ctx)` (a routed
+    # structured call booked on the run) instead of the agent harness. Profiles that do not define it
+    # are agent profiles, exactly as before. `launch_refusal(batch)` (optional) returns why the batch
+    # may not start or launch right now.
+    direct: bool = False
+
+    async def run_direct(self, ctx: Any) -> Any:
+        """Direct profiles only: do the target's work through `ctx.call_json(...)` and return a
+        `tret.engine.direct.DirectResult`."""
 
     async def parse_targets(self, body: Any) -> tuple[list[dict], list[str]]:
         """The create request's register as target rows (each with at least
@@ -108,6 +118,7 @@ _REGISTRY: dict[str, BatchProfile] = {}
 _BUILTIN = {
     "disclosure": "tret.batches.profiles.disclosure",
     "prompt": "tret.batches.profiles.prompt",
+    "disclosure_extract": "tret.batches.profiles.disclosure_extract",
 }
 
 
