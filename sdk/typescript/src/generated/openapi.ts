@@ -2670,6 +2670,178 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/eval/divergence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Sets */
+        get: operations["list_sets_api_eval_divergence_get"];
+        put?: never;
+        /** Create */
+        post: operations["create_api_eval_divergence_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/divergence/inputs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Inputs */
+        get: operations["inputs_api_eval_divergence_inputs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/divergence/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview */
+        post: operations["preview_api_eval_divergence_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/divergence/spot-checks/{check_id}/answer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Answer */
+        post: operations["answer_api_eval_divergence_spot_checks__check_id__answer_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/divergence/{set_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read */
+        get: operations["read_api_eval_divergence__set_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete */
+        delete: operations["delete_api_eval_divergence__set_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/divergence/{set_id}/acknowledge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Acknowledge */
+        post: operations["acknowledge_api_eval_divergence__set_id__acknowledge_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/divergence/{set_id}/reading-list": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Reading List */
+        get: operations["reading_list_api_eval_divergence__set_id__reading_list_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/divergence/{set_id}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Review */
+        post: operations["review_api_eval_divergence__set_id__review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/divergence/{set_id}/rows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Rows */
+        get: operations["rows_api_eval_divergence__set_id__rows_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/divergence/{set_id}/spot-checks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Spot Checks */
+        get: operations["spot_checks_api_eval_divergence__set_id__spot_checks_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/eval/jury/freezes": {
         parameters: {
             query?: never;
@@ -4442,6 +4614,16 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AcknowledgeIn */
+        AcknowledgeIn: {
+            /** Gate */
+            gate: string;
+            /**
+             * Note
+             * @default
+             */
+            note: string;
+        };
         /** AdviceBody */
         AdviceBody: {
             /** Fiscal Year */
@@ -4468,6 +4650,15 @@ export interface components {
         AnchorResumeIn: {
             /** Budget Usd */
             budget_usd?: number | null;
+        };
+        /** AnswerIn */
+        AnswerIn: {
+            /** Answer */
+            answer: {
+                [key: string]: unknown;
+            };
+            /** Note */
+            note?: string | null;
         };
         /** ApprovalBody */
         ApprovalBody: {
@@ -4651,32 +4842,6 @@ export interface components {
         CreateGroupBody: {
             /** Title */
             title?: string | null;
-        };
-        /** CreateIn */
-        CreateIn: {
-            /** Arms */
-            arms: components["schemas"]["ArmIn"][];
-            /** Batch Id */
-            batch_id?: string | null;
-            /** Budget Usd */
-            budget_usd?: number | null;
-            /** Disclosure Report Ids */
-            disclosure_report_ids?: string[] | null;
-            /**
-             * Limit
-             * @description With batch_id: read at most this many reports
-             */
-            limit?: number | null;
-            /**
-             * Name
-             * @default
-             */
-            name: string;
-            /**
-             * Sample Seed
-             * @description With limit: draw a seeded random sample instead of the first reports
-             */
-            sample_seed?: number | null;
         };
         /** CreateInviteBody */
         CreateInviteBody: {
@@ -5244,27 +5409,6 @@ export interface components {
             /** Workspace Name */
             workspace_name: string;
         };
-        /** PreviewIn */
-        PreviewIn: {
-            /** Arms */
-            arms: components["schemas"]["ArmIn"][];
-            /** Batch Id */
-            batch_id?: string | null;
-            /** Budget Usd */
-            budget_usd?: number | null;
-            /** Disclosure Report Ids */
-            disclosure_report_ids?: string[] | null;
-            /**
-             * Limit
-             * @description With batch_id: read at most this many reports
-             */
-            limit?: number | null;
-            /**
-             * Sample Seed
-             * @description With limit: draw a seeded random sample instead of the first reports
-             */
-            sample_seed?: number | null;
-        };
         /** PromoteExperimentBody */
         PromoteExperimentBody: {
             /**
@@ -5338,6 +5482,11 @@ export interface components {
              * @description `item_key` of a review item
              */
             item_key: string;
+            /** Note */
+            note?: string | null;
+        };
+        /** ReviewIn */
+        ReviewIn: {
             /** Note */
             note?: string | null;
         };
@@ -5583,6 +5732,53 @@ export interface components {
             /** Web Url */
             web_url?: string | null;
         };
+        /** CreateIn */
+        tret__api__eval_credibility__CreateIn: {
+            /** Arms */
+            arms: components["schemas"]["ArmIn"][];
+            /** Batch Id */
+            batch_id?: string | null;
+            /** Budget Usd */
+            budget_usd?: number | null;
+            /** Disclosure Report Ids */
+            disclosure_report_ids?: string[] | null;
+            /**
+             * Limit
+             * @description With batch_id: read at most this many reports
+             */
+            limit?: number | null;
+            /**
+             * Name
+             * @default
+             */
+            name: string;
+            /**
+             * Sample Seed
+             * @description With limit: draw a seeded random sample instead of the first reports
+             */
+            sample_seed?: number | null;
+        };
+        /** PreviewIn */
+        tret__api__eval_credibility__PreviewIn: {
+            /** Arms */
+            arms: components["schemas"]["ArmIn"][];
+            /** Batch Id */
+            batch_id?: string | null;
+            /** Budget Usd */
+            budget_usd?: number | null;
+            /** Disclosure Report Ids */
+            disclosure_report_ids?: string[] | null;
+            /**
+             * Limit
+             * @description With batch_id: read at most this many reports
+             */
+            limit?: number | null;
+            /**
+             * Sample Seed
+             * @description With limit: draw a seeded random sample instead of the first reports
+             */
+            sample_seed?: number | null;
+        };
         /** ResumeIn */
         tret__api__eval_credibility__ResumeIn: {
             /**
@@ -5594,6 +5790,35 @@ export interface components {
             budget_usd?: number | null;
             /** Note */
             note?: string | null;
+        };
+        /** CreateIn */
+        tret__api__eval_divergence__CreateIn: {
+            /** Arm Key */
+            arm_key?: string | null;
+            /**
+             * Name
+             * @default
+             */
+            name: string;
+            /**
+             * Pass Id
+             * Format: uuid
+             */
+            pass_id: string;
+            /** Tournament Ids */
+            tournament_ids: string[];
+        };
+        /** PreviewIn */
+        tret__api__eval_divergence__PreviewIn: {
+            /** Arm Key */
+            arm_key?: string | null;
+            /**
+             * Pass Id
+             * Format: uuid
+             */
+            pass_id: string;
+            /** Tournament Ids */
+            tournament_ids: string[];
         };
         /** ResumeIn */
         tret__api__eval_tournaments__ResumeIn: {
@@ -9818,7 +10043,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateIn"];
+                "application/json": components["schemas"]["tret__api__eval_credibility__CreateIn"];
             };
         };
         responses: {
@@ -9851,7 +10076,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PreviewIn"];
+                "application/json": components["schemas"]["tret__api__eval_credibility__PreviewIn"];
             };
         };
         responses: {
@@ -10118,6 +10343,375 @@ export interface operations {
                 "application/json": components["schemas"]["StartIn"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_sets_api_eval_divergence_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    create_api_eval_divergence_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["tret__api__eval_divergence__CreateIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    inputs_api_eval_divergence_inputs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    preview_api_eval_divergence_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["tret__api__eval_divergence__PreviewIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    answer_api_eval_divergence_spot_checks__check_id__answer_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                check_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnswerIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_api_eval_divergence__set_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_api_eval_divergence__set_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    acknowledge_api_eval_divergence__set_id__acknowledge_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcknowledgeIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reading_list_api_eval_divergence__set_id__reading_list_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_api_eval_divergence__set_id__review_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ReviewIn"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rows_api_eval_divergence__set_id__rows_get: {
+        parameters: {
+            query?: {
+                quadrant?: string | null;
+                complete?: boolean | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    spot_checks_api_eval_divergence__set_id__spot_checks_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

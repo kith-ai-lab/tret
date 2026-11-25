@@ -1,6 +1,27 @@
 {
   "components": {
     "schemas": {
+      "AcknowledgeIn": {
+        "additionalProperties": false,
+        "properties": {
+          "gate": {
+            "maxLength": 40,
+            "title": "Gate",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "gate"
+        ],
+        "title": "AcknowledgeIn",
+        "type": "object"
+      },
       "AdviceBody": {
         "additionalProperties": false,
         "properties": {
@@ -91,6 +112,33 @@
           }
         },
         "title": "AnchorResumeIn",
+        "type": "object"
+      },
+      "AnswerIn": {
+        "additionalProperties": false,
+        "properties": {
+          "answer": {
+            "additionalProperties": true,
+            "title": "Answer",
+            "type": "object"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "title": "AnswerIn",
         "type": "object"
       },
       "ApprovalBody": {
@@ -617,98 +665,6 @@
           }
         },
         "title": "CreateGroupBody",
-        "type": "object"
-      },
-      "CreateIn": {
-        "additionalProperties": false,
-        "properties": {
-          "arms": {
-            "items": {
-              "$ref": "#/components/schemas/ArmIn"
-            },
-            "maxItems": 4,
-            "minItems": 1,
-            "title": "Arms",
-            "type": "array"
-          },
-          "batch_id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Batch Id"
-          },
-          "budget_usd": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "maximum": 100000.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Budget Usd"
-          },
-          "disclosure_report_ids": {
-            "anyOf": [
-              {
-                "items": {
-                  "format": "uuid",
-                  "type": "string"
-                },
-                "maxItems": 2000,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Disclosure Report Ids"
-          },
-          "limit": {
-            "anyOf": [
-              {
-                "maximum": 2000.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "With batch_id: read at most this many reports",
-            "title": "Limit"
-          },
-          "name": {
-            "default": "",
-            "maxLength": 120,
-            "title": "Name",
-            "type": "string"
-          },
-          "sample_seed": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "With limit: draw a seeded random sample instead of the first reports",
-            "title": "Sample Seed"
-          }
-        },
-        "required": [
-          "arms"
-        ],
-        "title": "CreateIn",
         "type": "object"
       },
       "CreateInviteBody": {
@@ -2107,92 +2063,6 @@
         "title": "PendingInviteOut",
         "type": "object"
       },
-      "PreviewIn": {
-        "additionalProperties": false,
-        "properties": {
-          "arms": {
-            "items": {
-              "$ref": "#/components/schemas/ArmIn"
-            },
-            "maxItems": 4,
-            "minItems": 1,
-            "title": "Arms",
-            "type": "array"
-          },
-          "batch_id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Batch Id"
-          },
-          "budget_usd": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "maximum": 100000.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Budget Usd"
-          },
-          "disclosure_report_ids": {
-            "anyOf": [
-              {
-                "items": {
-                  "format": "uuid",
-                  "type": "string"
-                },
-                "maxItems": 2000,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Disclosure Report Ids"
-          },
-          "limit": {
-            "anyOf": [
-              {
-                "maximum": 2000.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "With batch_id: read at most this many reports",
-            "title": "Limit"
-          },
-          "sample_seed": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "With limit: draw a seeded random sample instead of the first reports",
-            "title": "Sample Seed"
-          }
-        },
-        "required": [
-          "arms"
-        ],
-        "title": "PreviewIn",
-        "type": "object"
-      },
       "PromoteExperimentBody": {
         "additionalProperties": false,
         "properties": {
@@ -2434,6 +2304,25 @@
           "decision"
         ],
         "title": "ReviewDecisionIn",
+        "type": "object"
+      },
+      "ReviewIn": {
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "title": "ReviewIn",
         "type": "object"
       },
       "RoutingPreviewBody": {
@@ -3195,6 +3084,184 @@
         "title": "WriteTargetEntry",
         "type": "object"
       },
+      "tret__api__eval_credibility__CreateIn": {
+        "additionalProperties": false,
+        "properties": {
+          "arms": {
+            "items": {
+              "$ref": "#/components/schemas/ArmIn"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Arms",
+            "type": "array"
+          },
+          "batch_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "disclosure_report_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 2000,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disclosure Report Ids"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "maximum": 2000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With batch_id: read at most this many reports",
+            "title": "Limit"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 120,
+            "title": "Name",
+            "type": "string"
+          },
+          "sample_seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With limit: draw a seeded random sample instead of the first reports",
+            "title": "Sample Seed"
+          }
+        },
+        "required": [
+          "arms"
+        ],
+        "title": "CreateIn",
+        "type": "object"
+      },
+      "tret__api__eval_credibility__PreviewIn": {
+        "additionalProperties": false,
+        "properties": {
+          "arms": {
+            "items": {
+              "$ref": "#/components/schemas/ArmIn"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Arms",
+            "type": "array"
+          },
+          "batch_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "disclosure_report_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 2000,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disclosure Report Ids"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "maximum": 2000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With batch_id: read at most this many reports",
+            "title": "Limit"
+          },
+          "sample_seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With limit: draw a seeded random sample instead of the first reports",
+            "title": "Sample Seed"
+          }
+        },
+        "required": [
+          "arms"
+        ],
+        "title": "PreviewIn",
+        "type": "object"
+      },
       "tret__api__eval_credibility__ResumeIn": {
         "additionalProperties": false,
         "properties": {
@@ -3241,6 +3308,88 @@
           }
         },
         "title": "ResumeIn",
+        "type": "object"
+      },
+      "tret__api__eval_divergence__CreateIn": {
+        "additionalProperties": false,
+        "properties": {
+          "arm_key": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arm Key"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 120,
+            "title": "Name",
+            "type": "string"
+          },
+          "pass_id": {
+            "format": "uuid",
+            "title": "Pass Id",
+            "type": "string"
+          },
+          "tournament_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Tournament Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pass_id",
+          "tournament_ids"
+        ],
+        "title": "CreateIn",
+        "type": "object"
+      },
+      "tret__api__eval_divergence__PreviewIn": {
+        "additionalProperties": false,
+        "properties": {
+          "arm_key": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arm Key"
+          },
+          "pass_id": {
+            "format": "uuid",
+            "title": "Pass Id",
+            "type": "string"
+          },
+          "tournament_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Tournament Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pass_id",
+          "tournament_ids"
+        ],
+        "title": "PreviewIn",
         "type": "object"
       },
       "tret__api__eval_tournaments__ResumeIn": {
@@ -9389,7 +9538,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateIn"
+                "$ref": "#/components/schemas/tret__api__eval_credibility__CreateIn"
               }
             }
           },
@@ -9428,7 +9577,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/PreviewIn"
+                "$ref": "#/components/schemas/tret__api__eval_credibility__PreviewIn"
               }
             }
           },
@@ -9921,6 +10070,534 @@
         "summary": "Start",
         "tags": [
           "eval-credibility"
+        ]
+      }
+    },
+    "/api/eval/divergence": {
+      "get": {
+        "operationId": "list_sets_api_eval_divergence_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Sets",
+        "tags": [
+          "eval-divergence"
+        ]
+      },
+      "post": {
+        "operationId": "create_api_eval_divergence_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/tret__api__eval_divergence__CreateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create",
+        "tags": [
+          "eval-divergence"
+        ]
+      }
+    },
+    "/api/eval/divergence/inputs": {
+      "get": {
+        "operationId": "inputs_api_eval_divergence_inputs_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Inputs",
+        "tags": [
+          "eval-divergence"
+        ]
+      }
+    },
+    "/api/eval/divergence/preview": {
+      "post": {
+        "operationId": "preview_api_eval_divergence_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/tret__api__eval_divergence__PreviewIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview",
+        "tags": [
+          "eval-divergence"
+        ]
+      }
+    },
+    "/api/eval/divergence/spot-checks/{check_id}/answer": {
+      "post": {
+        "operationId": "answer_api_eval_divergence_spot_checks__check_id__answer_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "check_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Check Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnswerIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Answer",
+        "tags": [
+          "eval-divergence"
+        ]
+      }
+    },
+    "/api/eval/divergence/{set_id}": {
+      "delete": {
+        "operationId": "delete_api_eval_divergence__set_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Set Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete",
+        "tags": [
+          "eval-divergence"
+        ]
+      },
+      "get": {
+        "operationId": "read_api_eval_divergence__set_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Set Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read",
+        "tags": [
+          "eval-divergence"
+        ]
+      }
+    },
+    "/api/eval/divergence/{set_id}/acknowledge": {
+      "post": {
+        "operationId": "acknowledge_api_eval_divergence__set_id__acknowledge_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Set Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcknowledgeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Acknowledge",
+        "tags": [
+          "eval-divergence"
+        ]
+      }
+    },
+    "/api/eval/divergence/{set_id}/reading-list": {
+      "get": {
+        "operationId": "reading_list_api_eval_divergence__set_id__reading_list_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Set Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reading List",
+        "tags": [
+          "eval-divergence"
+        ]
+      }
+    },
+    "/api/eval/divergence/{set_id}/review": {
+      "post": {
+        "operationId": "review_api_eval_divergence__set_id__review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Set Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ReviewIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review",
+        "tags": [
+          "eval-divergence"
+        ]
+      }
+    },
+    "/api/eval/divergence/{set_id}/rows": {
+      "get": {
+        "operationId": "rows_api_eval_divergence__set_id__rows_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Set Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "quadrant",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^(both_strong|parts_over_whole|whole_over_parts|both_weak)$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Quadrant"
+            }
+          },
+          {
+            "in": "query",
+            "name": "complete",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Complete"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 2000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rows",
+        "tags": [
+          "eval-divergence"
+        ]
+      }
+    },
+    "/api/eval/divergence/{set_id}/spot-checks": {
+      "get": {
+        "operationId": "spot_checks_api_eval_divergence__set_id__spot_checks_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Set Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Spot Checks",
+        "tags": [
+          "eval-divergence"
         ]
       }
     },

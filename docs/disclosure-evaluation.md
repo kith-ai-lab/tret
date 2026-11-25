@@ -362,7 +362,7 @@ and `acknowledged_gates`.
 | `position_bias` | The same flip rate pooled over the swaps of the families still on the jury | above 0.15 with 8 swaps in all | pause, `position_bias` |
 | `juror_agreement` | Cohen's kappa pooled over all double-judged matches (a, b, tie), on oriented pairs (below); the per-pair table is in the response | kappa below 0.3 AND raw agreement below 0.75, with 12 doubles | pause, `low_agreement` (the module prompt is too vague) |
 | `anchor_drift` | The anchor set re-judged at the start of the pass (below): verdicts that changed against the baseline | more than 3 changed | pause, `anchor_drift`, before the first round |
-| `parts_vs_whole`, `score_clumping` | Need Engine 2 | none | reported `not_applicable` |
+| `parts_vs_whole`, `score_clumping` | Not computed here: the Divergence page (below) judges `parts_vs_whole`, each credibility pass shows `score_clumping` | none | reported `not_applicable` |
 
 A gate is `ok`, `warn`, `tripped`, `insufficient_data` (below its sample minimum) or `not_applicable`. On
 a completed tournament a gate that never left `insufficient_data` is shown as `warn` ("not evaluated:
@@ -530,6 +530,87 @@ Settings: `TRET_EVAL_CREDIBILITY`, `TRET_EVAL_CREDIBILITY_CONCURRENCY` (default 
 a new-pass form with a free preview, and per pass the arms with their frozen models, the gates, the
 score histogram per arm, a filterable reviews table and, per review, the pushbacks with evidence, the
 hashes and a "Verify payload" button.
+
+## Divergence and spot checks (PR 9)
+
+Engine 1 rates report modules against peers; Engine 2 scores each whole report. The two never read each
+other (linted), so the one step that compares them is plain code in `evaluation/divergence.py`: no model
+call, nothing sealed to break, deterministic. Behind `TRET_EVAL_DIVERGENCE` (off: every
+`/api/eval/divergence` route is a 404).
+
+**The join.** A divergence set takes ONE completed credibility pass (optionally one arm: scores from different
+arms come from different models, and the page warns when they are mixed) and 1 to 4 completed tournaments, one
+per module, from the same workspace and project. Per report it holds the mean module decile (the *parts*; a
+quintile band counts as `2*band - 0.5` on the 1 to 10 scale) and the Credibility Score (the *whole*), both as
+mid-rank percentiles over the reports rated in every selected module, and `delta = whole_pct - parts_pct`. A
+report rated in only some modules is shown but left out of r, the quadrants and the reading list. The result
+is frozen in the set (both inputs are completed and immutable), so the sample below stays stable.
+
+**Quadrants.** `both_strong`, `both_weak`, `parts_over_whole` (strong modules, weak whole: the briefing's
+"8/10 modules that hides a major supply-chain exposure behind 15 pages of office recycling") and
+`whole_over_parts` (weak modules, strong whole). The reading list is the top `TRET_EVAL_DIVERGENCE_READING_LIST`
+(10) reports by `abs(delta)`: read them by hand.
+
+**Gates.**
+
+| Gate | Measures | Rule |
+|---|---|---|
+| `parts_vs_whole` | Pearson r between the mean decile and the score over the complete reports | `insufficient_data` below `TRET_EVAL_DIVERGENCE_MIN_N` (20); `tripped` outside 0.2 to 0.8 (read the extremes before going on); `warn` outside the briefing's 0.4 to 0.6 |
+| `spot_check_agreement` | The human's agreement with the machines over the set's spot checks | `insufficient_data` while any check is pending; `tripped` when triad or critique agreement is under 70%: no client use; `warn` when over a third of a kind was skipped |
+
+A tripped gate must be acknowledged (with a note) before the set can be marked reviewed. Low agreement does
+not stop "reviewed": it is recorded and the set keeps showing "no client use".
+
+**Spot checks.** Sampled once at creation, seeded from the set id. `TRET_EVAL_SPOT_CHECK_TRIADS` (15) blind
+triads: three module extracts from one pool (one from the bottom, middle and top third of its ratings),
+round-robin over the selected modules; the human ranks them best to worst and the agreement is the share of
+the three pairs ordered as Engine 1 ordered them. `TRET_EVAL_SPOT_CHECK_CRITIQUES` (10) critiques: half from
+the top of the reading list, the rest random; the human reads one whole-report review and says agree, partly or
+disagree (agreement 1, 0.5, 0), and whether each of the three pushbacks is sharp enough to raise in an
+investor meeting. A check can be skipped, and re-answered while the set is open. Answers are stamped with the
+session's user, never with one named in the request.
+
+**Blindness.** A pending triad shows the letters and the module extracts only, masked with the same name
+masking the jurors get (every member's company, aliases and domains); no rating, band, company, report id or
+pool, nothing from Engine 2. A pending critique shows the review on its own, without any module band. Both
+reveal the truth after the answer. If an extract's blob is missing or no longer matches its snapshot hash the
+text is `null` with `error: "text unavailable"`.
+
+**Reveal only when everything is answered.** Nothing about Engine 1 leaves the server while any spot check of the
+set is pending: every `revealed` block, the per-check `agreement` and the running agreement figure stay null
+(skipped checks included), `/rows` and `/reading-list` answer 409, and the plot data (`scatter`) is empty;
+`spot_checks.locked` says which state the set is in. A pending critique does not even say whether it came from the
+reading list. While something is pending any answer can be changed and a skipped check answered; once nothing
+is pending everything is revealed and answers lock (409). An answer and a review are serialised by a conditional
+row touch on the set (`UPDATE ... WHERE status = 'open'`), so they cannot interleave. A short sample (fewer
+triads drawn than wanted, or a kind with none) makes the agreement gate `warn`, not `ok`.
+
+**Stale sets.** Each set stores a fingerprint of every tournament's ratings and of the pass's done reviews; a
+refit or a changed score makes `GET /{id}` report `stale: true` with `stale_tournaments`. The frozen rows stay as they were.
+
+**Limits of the blinding.** Spot checks are blind only if the checker doesn't open the Tournaments ratings for that
+pool while checking; Tret does not hide those. Checks are per pass, not per set: the first set on a pass to have
+any check answered or skipped holds the record, and it can't be deleted (so a failed set can't be thrown away and
+re-rolled). A later set on the same pass gets no spot checks of its own, points to that set
+(`stats.spot_checks_from_set`), shows `spot_check_agreement` as `not_applicable` and is open to read at once. A
+set whose checks are all still pending can be deleted. If every check of a kind is skipped the gate trips
+("No triad was answered; agreement can't be shown") and needs an acknowledgement before review.
+
+**Why not rows in `approvals`.** An approval needs a finding, and a finding needs a run. An Engine 2 review
+is a sealed call with neither. Spot checks are therefore rows of their own table (`spot_checks`) with the
+approval's shape: a decision, `decided_by` from the session, a note and `purpose = spot_check`. `approvals`,
+`APPROVAL_PURPOSES` and the outcomes service are untouched.
+
+**API** (prefix `/api/eval/divergence`; writes need a workspace approver): `GET /inputs`; `POST /preview`
+(`pass_id`, `tournament_ids`, `arm_key`; writes nothing); `POST ""` (plus `name`); `GET ""`; `GET /{id}`;
+`GET /{id}/rows` (`quadrant`, `complete`, `limit`, `offset`); `GET /{id}/reading-list`; `GET /{id}/spot-checks`;
+`POST /spot-checks/{check_id}/answer` (`answer`, `note`); `POST /{id}/acknowledge` (`gate`, `note`);
+`POST /{id}/review` (`note`); `DELETE /{id}` (an open set only).
+
+**CLI.** `tret eval divergence inputs|preview|create|show|reading-list|spot-checks`. Answering is UI-only.
+
+**Settings.** `TRET_EVAL_DIVERGENCE` (false), `TRET_EVAL_DIVERGENCE_MIN_N` (20), `_R_LOW` (0.2), `_R_HIGH` (0.8),
+`_READING_LIST` (10), `TRET_EVAL_SPOT_CHECK_TRIADS` (15), `_CRITIQUES` (10), `_AGREEMENT_MIN` (0.70).
 
 ## The 30-report hand check
 

@@ -15,7 +15,10 @@
 * `credibility preview|create|start|status|reviews|show|verify|cancel|resume`: Engine 2, the sealed whole-report
   Credibility call. `preview` is free (it writes nothing); `create` writes a draft; `start --budget USD` freezes
   each arm's model and plays the pass in this process until it completes, pauses or is interrupted. Needs
-  `TRET_EVAL_JURY=on`; the HTTP routes need `TRET_EVAL_CREDIBILITY=true` as well."""
+  `TRET_EVAL_JURY=on`; the HTTP routes need `TRET_EVAL_CREDIBILITY=true` as well.
+* `divergence inputs|preview|create|show|reading-list|spot-checks`: Engine 1's parts against Engine 2's whole (PR 9).
+  Plain code over finished results: no model call, so no `TRET_EVAL_JURY` needed. Answering spot checks is done in
+  the web UI only; the HTTP routes need `TRET_EVAL_DIVERGENCE=true`."""
 from __future__ import annotations
 
 import argparse
@@ -139,8 +142,36 @@ def register(sub: argparse._SubParsersAction) -> None:
         x.add_argument("review_id")
         x.add_argument("--json", action="store_true")
 
+    dp = esub.add_parser(
+        "divergence",
+        help="PR 9: parts (Engine 1) against whole (Engine 2): quadrants, reading list, spot checks. No model is called.",
+        description="Join a completed credibility pass with completed tournaments, per report. Answering spot checks is UI-only.",
+    )
+    dsub = dp.add_subparsers(dest="divergence_command", required=True)
+    di = dsub.add_parser("inputs", help="The completed passes and tournaments a set can be built from")
+    di.add_argument("--workspace", required=True, metavar="ID", help="Workspace id")
+    di.add_argument("--json", action="store_true")
+    for name, helptext in (("preview", "Free: stats, the parts-vs-whole gate and warnings. Writes nothing."),
+                           ("create", "Freeze the join and sample the spot checks")):
+        x = dsub.add_parser(name, help=helptext)
+        x.add_argument("--workspace", required=True, metavar="ID", help="Workspace id")
+        x.add_argument("--pass", dest="pass_id", required=True, metavar="ID", help="A completed credibility pass")
+        x.add_argument("--tournament", action="append", dest="tournaments", required=True, metavar="ID", help="A completed tournament (repeatable, one per module, up to 4)")
+        x.add_argument("--arm", metavar="KEY", help="Only this arm's scores (default: all arms)")
+        x.add_argument("--json", action="store_true")
+        if name == "create":
+            x.add_argument("--name", default="", help="A name for the set")
+    for name, helptext in (("show", "A set: stats, gates and spot-check progress"),
+                           ("reading-list", "The biggest divergences, with each review's summary and pushbacks"),
+                           ("spot-checks", "The set's spot checks as the UI shows them (blind until answered)")):
+        x = dsub.add_parser(name, help=helptext)
+        x.add_argument("set_id")
+        x.add_argument("--json", action="store_true")
+
 
 def run(args: argparse.Namespace) -> int:
+    if getattr(args, "eval_command", None) == "divergence":
+        return _divergence(args)
     if getattr(args, "eval_command", None) == "credibility":
         return _credibility(args)
     if getattr(args, "eval_command", None) == "tournament":
@@ -619,6 +650,103 @@ def _credibility(args: argparse.Namespace) -> int:
         print("Interrupted. A pass that was running is paused or its lease will lapse; resume it with `tret eval credibility resume`.", file=sys.stderr)
         return 130
     except cr.CredibilityError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except (ValueError, json.JSONDecodeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if text:
+        print(text)
+    return code
+
+
+# ── divergence (PR 9) ───────────────────────────────────────────────────────────────────────────
+def render_divergence_set(d: dict) -> str:
+    c = d.get("stats") or {}
+    q = d["quadrant_counts"]
+    lines = [
+        f"Divergence set {d['id']} ({d['name']}): {d['status']}, pass {d['pass_name'] or d['credibility_pass_id']}, modules {', '.join(d['modules'])}"
+        + (f", arm {d['arm_key']}" if d["arm_key"] else ", all arms"),
+        f"{c.get('n_complete', d['n_complete'])} complete report(s), r = " + ("n/a" if d["pearson"] is None else f"{d['pearson']:.2f}")
+        + (f", spearman {c['spearman']:.2f}" if c.get("spearman") is not None else "")
+        + f"; both strong {q.get('both_strong', 0)}, parts over whole {q.get('parts_over_whole', 0)}, "
+        f"whole over parts {q.get('whole_over_parts', 0)}, both weak {q.get('both_weak', 0)}",
+    ]
+    for g in d["gates"]:
+        v = "" if g["value"] is None else f" {g['value']:.2f}"
+        lines.append(f"  gate {g['key']:<22} {_STATE_MARK.get(g['state'], g['state'])}{v} (n={g['n']}): {g['detail']}")
+    sc = d["spot_checks"]
+    lines.append(f"Spot checks: {sc['answered']} of {sc['total']} answered (in the web UI).")
+    return "\n".join(lines)
+
+
+def _divergence(args: argparse.Namespace) -> int:
+    import asyncio
+    import uuid
+    from types import SimpleNamespace
+
+    from tret.db.engine import get_session_factory
+    from tret.db.models import DivergenceSet
+    from tret.evaluation import divergence as dv
+
+    cmd = args.divergence_command
+
+    def dump(x) -> str:
+        return json.dumps(x, indent=2, default=str)
+
+    async def go() -> tuple[int, str]:
+        async with get_session_factory()() as db:
+            if cmd == "inputs":
+                out = await dv.inputs_out(db, workspace_id=uuid.UUID(args.workspace))
+                if args.json:
+                    return 0, dump(out)
+                lines = [f"{len(out['passes'])} completed pass(es):"]
+                lines += [f"  {p['id']}  {p['name'] or '-'}  arms {','.join(a['key'] for a in p['arms'])}  {p['n_done']} done review(s)" for p in out["passes"]]
+                lines.append(f"{len(out['tournaments'])} completed tournament(s):")
+                lines += [f"  {t['id']}  {t['module']}  {t['n_rated']} rated" for t in out["tournaments"]]
+                return 0, "\n".join(lines)
+            if cmd in ("preview", "create"):
+                sel = {"pass_id": uuid.UUID(args.pass_id), "tournament_ids": [uuid.UUID(t) for t in args.tournaments], "arm_key": args.arm}
+                ws = uuid.UUID(args.workspace)
+                if cmd == "preview":
+                    out = await dv.preview_set(db, workspace_id=ws, **sel)
+                    if args.json:
+                        return 0, dump(out)
+                    st, g = out["stats"], out["gate"]
+                    lines = [f"Divergence preview (nothing written): {st['n_complete']} complete of {st['n_joined']} joined report(s), r = "
+                             + ("n/a" if st["pearson"] is None else f"{st['pearson']:.2f}") + f", reading list {out['n_reading_list']}.",
+                             f"  gate {g['key']}: {_STATE_MARK.get(g['state'], g['state'])}: {g['detail']}"]
+                    return 0, "\n".join(lines + [f"  warning: {w}" for w in out["warnings"]])
+                s = await dv.create_set(db, workspace=ws, user=SimpleNamespace(id=None, email="cli"), name=args.name, **sel)
+                d = await dv.set_detail(db, s)
+                return 0, dump(d) if args.json else render_divergence_set(d) + f"\n\nAnswer the spot checks in the web UI (Divergence page, set {s.id})."
+            s = await db.get(DivergenceSet, uuid.UUID(args.set_id))
+            if s is None:
+                raise dv.DivergenceError("Divergence set not found", 404)
+            if cmd == "show":
+                d = await dv.set_detail(db, s)
+                return 0, dump(d) if args.json else render_divergence_set(d)
+            if cmd == "reading-list":
+                rows = await dv.reading_list_out(db, s, enforce_lock=False)
+                if not dv._locked(await dv.load_checks(db, s.id)):
+                    print("warning: spot checks are still pending; this list shows module bands the human checks are meant to be blind to.", file=sys.stderr)
+                if args.json:
+                    return 0, dump(rows)
+                lines = [f"{len(rows)} biggest divergence(s), read them:"]
+                for r in rows:
+                    rv = r.get("review") or {}
+                    lines.append(f"  {r['company'] or r['disclosure_report_id']}: whole {r['whole']}, parts {r['parts']:.1f}, {r['quadrant']}, delta {r['delta']:+.2f}")
+                    if rv.get("summary"):
+                        lines.append(textwrap.fill(rv["summary"], 100, initial_indent="     ", subsequent_indent="     "))
+                return 0, "\n".join(lines)
+            out = await dv.spot_checks_out(db, s)
+            if args.json:
+                return 0, dump(out)
+            return 0, "\n".join(f"  {c['kind']:<8} #{c['position']:<3} {c['status']}" + (f" agreement {c['agreement']:.2f}" if c["agreement"] is not None else "") for c in out)
+
+    try:
+        code, text = asyncio.run(go())
+    except dv.DivergenceError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     except (ValueError, json.JSONDecodeError) as e:

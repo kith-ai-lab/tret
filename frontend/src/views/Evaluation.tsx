@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Link, Navigate } from 'react-router-dom'
 
 import {
   api,
@@ -13,6 +13,21 @@ import {
   type CredReview,
   type CredReviewFilters,
   type CredSelectionIn,
+  type DivAnswer,
+  type DivArmStat,
+  type DivCritiqueCheck,
+  type DivGate,
+  type DivModuleBand,
+  type DivPreview,
+  type DivReadingRow,
+  type DivRevealedMember,
+  type DivRow,
+  type DivScatterPoint,
+  type DivSelectionIn,
+  type DivSet,
+  type DivSetList,
+  type DivStats,
+  type DivTriadCheck,
   type EvalDiagnostics,
   type EvalGate,
   type EvalGateState,
@@ -36,7 +51,7 @@ import { StatusBadge } from '../components/shared/StatusBadge'
 const POLL_MS = 10_000
 const DIAG_POLL_MS = 30_000
 
-type Section = 'tournaments' | 'credibility'
+type Section = 'tournaments' | 'credibility' | 'divergence'
 
 function isGone(e: unknown): boolean {
   return e instanceof ApiError && (e.status === 404 || e.status === 403)
@@ -55,18 +70,20 @@ export function Evaluation() {
     retry: false,
     refetchInterval: (q) => (q.state.data?.passes.some((p) => p.status === 'running' && !p.stalled) ? POLL_MS : false),
   })
+  const divQuery = useQuery({ queryKey: ['eval-div-sets'], queryFn: api.evalDivSets, retry: false })
   const [chosen, setChosen] = useState<Section | null>(null)
 
-  if (listQuery.isLoading || credQuery.isLoading) return <div className="empty pulse">Loading evaluation…</div>
+  if (listQuery.isLoading || credQuery.isLoading || divQuery.isLoading) return <div className="empty pulse">Loading evaluation…</div>
 
   const sections: Section[] = []
   const tournamentsFailed = listQuery.isError && !isGone(listQuery.error)
   if (listQuery.data || tournamentsFailed) sections.push('tournaments')
   if (credQuery.data) sections.push('credibility')
+  if (divQuery.data) sections.push('divergence')
   if (sections.length === 0) {
     // Both features off (404) or not allowed (403): leave rather than render an error.
-    if (isGone(listQuery.error) && isGone(credQuery.error)) return <Navigate to="/" replace />
-    const failed = !isGone(listQuery.error) ? listQuery : credQuery
+    if (isGone(listQuery.error) && isGone(credQuery.error) && isGone(divQuery.error)) return <Navigate to="/" replace />
+    const failed = !isGone(listQuery.error) ? listQuery : !isGone(credQuery.error) ? credQuery : divQuery
     return (
       <div className="eval-page">
         <QueryError error={failed.error} what="evaluation" />
@@ -91,7 +108,7 @@ export function Evaluation() {
               className={`tab${section === k ? ' active' : ''}`}
               onClick={() => setChosen(k)}
             >
-              {k === 'tournaments' ? 'Tournaments' : 'Credibility'}
+              {k === 'tournaments' ? 'Tournaments' : k === 'credibility' ? 'Credibility' : 'Divergence'}
             </button>
           ))}
         </div>
@@ -106,6 +123,7 @@ export function Evaluation() {
         </>
       )}
       {section === 'credibility' && credQuery.data && <CredibilitySection passes={credQuery.data.passes} />}
+      {section === 'divergence' && divQuery.data && <DivergenceSection sets={divQuery.data} />}
     </div>
   )
 }
@@ -1859,6 +1877,1116 @@ function ReviewDetail({ id, onClose }: { id: string; onClose: () => void }) {
             </div>
           )}
         </>
+      )}
+    </div>
+  )
+}
+
+// ── Divergence (Engine 1 parts vs Engine 2 whole) ────────────────────────
+
+const DIV_NEW = 'new'
+
+const QUADRANT_LABEL: Record<string, string> = {
+  both_strong: 'Strong parts, strong whole',
+  parts_over_whole: 'Strong parts, weak whole (story breaks)',
+  whole_over_parts: 'Weak parts, strong whole',
+  both_weak: 'Weak parts, weak whole',
+}
+const QUADRANT_ORDER = ['both_strong', 'parts_over_whole', 'whole_over_parts', 'both_weak']
+const QUADRANT_COLOR: Record<string, string> = {
+  both_strong: 'var(--green)',
+  parts_over_whole: 'var(--red)',
+  whole_over_parts: 'var(--blue)',
+  both_weak: 'var(--gray)',
+}
+
+function quadrantLabel(q: string | null | undefined): string {
+  return q ? (QUADRANT_LABEL[q] ?? q) : 'partial (not placed)'
+}
+
+function signed(n: number | null | undefined, digits = 2): string {
+  if (n == null || Number.isNaN(n)) return '—'
+  return `${n > 0 ? '+' : ''}${n.toFixed(digits)}`
+}
+
+function bandsCompact(modules: Record<string, DivModuleBand>): string {
+  return Object.entries(modules)
+    .map(([m, b]) => `${m} ${b.band_kind === 'quintile' ? 'Q' : 'D'}${b.band}`)
+    .join(' · ')
+}
+
+function DocLink({ id }: { id: string | null | undefined }) {
+  if (!id) return <span className="fine-print">no source document</span>
+  return (
+    <Link to={`/documents?doc=${id}`} target="_blank" rel="noreferrer">
+      Open source document
+    </Link>
+  )
+}
+
+function divSub(s: DivSetList): string {
+  const parts = [s.modules.join(', ')]
+  parts.push(`n=${s.n_complete}`)
+  parts.push(`r ${num(s.pearson)}`)
+  parts.push(`checks ${s.spot_checks.answered}/${s.spot_checks.total}`)
+  if (s.created_at) parts.push(formatDateTime(s.created_at))
+  return parts.join(' · ')
+}
+
+function DivergenceSection({ sets }: { sets: DivSetList[] }) {
+  const [selectedId, setSelectedId] = useState<string | null>(sets.length > 0 ? sets[0].id : DIV_NEW)
+
+  useEffect(() => {
+    if (selectedId !== DIV_NEW && selectedId != null && !sets.some((s) => s.id === selectedId)) {
+      setSelectedId(sets.length > 0 ? sets[0].id : DIV_NEW)
+    }
+  }, [sets, selectedId])
+
+  return (
+    <>
+      <div className="view-sub">
+        Divergence: each report's mean module decile (Engine 1 parts) against its Credibility Score (Engine 2 whole). The biggest gaps
+        make the reading list, and blind human spot checks test whether the engines can be trusted. Nothing here calls a model.
+      </div>
+      <ListDetail
+        listWidth={300}
+        list={
+          <>
+            <ListItem
+              active={selectedId === DIV_NEW}
+              onClick={() => setSelectedId(DIV_NEW)}
+              title={<strong>+ New divergence set</strong>}
+              sub="Joins a completed pass with completed tournaments"
+            />
+            {sets.map((s) => (
+              <ListItem
+                key={s.id}
+                active={s.id === selectedId}
+                onClick={() => setSelectedId(s.id)}
+                title={
+                  <>
+                    {s.name || s.id.slice(0, 8)} <StatusBadge status={s.status} />
+                    <GateDots gates={s.gates} />
+                  </>
+                }
+                sub={divSub(s)}
+              />
+            ))}
+          </>
+        }
+        detail={
+          selectedId === DIV_NEW ? (
+            <NewDivForm onCreated={(id) => setSelectedId(id)} />
+          ) : selectedId ? (
+            <DivPane key={selectedId} id={selectedId} onOpenSet={setSelectedId} />
+          ) : null
+        }
+      />
+    </>
+  )
+}
+
+function NewDivForm({ onCreated }: { onCreated: (id: string) => void }) {
+  const queryClient = useQueryClient()
+  const inputs = useQuery({ queryKey: ['eval-div-inputs'], queryFn: api.evalDivInputs, retry: false })
+  const [name, setName] = useState('')
+  const [passId, setPassId] = useState('')
+  const [tids, setTids] = useState<string[]>([])
+  const [armKey, setArmKey] = useState('')
+  const [preview, setPreview] = useState<DivPreview | null>(null)
+  const [previewKey, setPreviewKey] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const pass = inputs.data?.passes.find((p) => p.id === passId)
+  const tournaments = (inputs.data?.tournaments ?? []).filter((t) => !pass || t.project_id === pass.project_id)
+  const chosen = tournaments.filter((t) => tids.includes(t.id))
+  const chosenModules = new Set(chosen.map((t) => t.module))
+  const body: DivSelectionIn | null =
+    passId && chosen.length >= 1 && chosen.length <= 4 ? { pass_id: passId, tournament_ids: chosen.map((t) => t.id), arm_key: armKey || null } : null
+  const formKey = JSON.stringify(body)
+
+  const previewMutation = useMutation({
+    mutationFn: (b: DivSelectionIn) => api.evalDivPreview(b),
+    onMutate: () => setError(null),
+    onSuccess: (r) => {
+      setPreview(r)
+      setPreviewKey(formKey)
+    },
+    onError: (e) => setError(errorText(e)),
+  })
+  const createMutation = useMutation({
+    mutationFn: (b: DivSelectionIn & { name: string }) => api.evalDivCreate(b),
+    onMutate: () => setError(null),
+    onSuccess: (s) => {
+      queryClient.setQueryData<DivSetList[]>(['eval-div-sets'], (old) => [s, ...(old ?? []).filter((x) => x.id !== s.id)])
+      void queryClient.invalidateQueries({ queryKey: ['eval-div-sets'] })
+      onCreated(s.id)
+    },
+    onError: (e) => setError(errorText(e)),
+  })
+  const busy = previewMutation.isPending || createMutation.isPending
+
+  if (inputs.isLoading) return <div className="empty pulse">Loading inputs…</div>
+  if (inputs.isError || !inputs.data) return <QueryError error={inputs.error} what="the divergence inputs" />
+
+  const toggle = (id: string, on: boolean) => setTids((cur) => (on ? [...cur.filter((x) => x !== id), id] : cur.filter((x) => x !== id)))
+
+  return (
+    <div>
+      <strong className="mono-label">New divergence set</strong>
+      <div className="fine-print" style={{ margin: '4px 0 12px' }}>
+        Pick a completed credibility pass and up to four completed tournaments (one per module). The join is frozen when you create the
+        set, and the spot-check sample is drawn then. No model is involved.
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+        <div className="field" style={{ flex: '1 1 280px' }}>
+          <label className="mono-label" htmlFor="div-name">
+            Name
+          </label>
+          <input id="div-name" type="text" maxLength={120} placeholder="e.g. Banks, E1 vs whole" value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="field" style={{ flex: '1 1 280px' }}>
+          <label className="mono-label" htmlFor="div-pass">
+            Credibility pass
+          </label>
+          <select
+            id="div-pass"
+            value={passId}
+            onChange={(e) => {
+              setPassId(e.target.value)
+              setArmKey('')
+              setTids([])
+            }}
+          >
+            <option value="">choose a completed pass</option>
+            {inputs.data.passes.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name || p.id.slice(0, 8)} ({p.n_done} done)
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field" style={{ width: 200 }}>
+          <label className="mono-label" htmlFor="div-arm">
+            Arm (optional)
+          </label>
+          <select id="div-arm" value={armKey} disabled={!pass} onChange={(e) => setArmKey(e.target.value)}>
+            <option value="">all arms</option>
+            {(pass?.arms ?? []).map((a) => (
+              <option key={a.key} value={a.key}>
+                {a.label ?? a.key}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="eval-section">Tournaments</div>
+      <div className="fine-print" style={{ marginBottom: 6 }}>
+        Up to 4, at most one per module. {pass ? 'Only tournaments in the pass\'s project are listed.' : 'Choose a pass first.'}
+      </div>
+      {tournaments.length === 0 ? (
+        <div className="empty">No completed tournaments{pass ? ' in this project' : ''}.</div>
+      ) : (
+        tournaments.map((t) => {
+          const on = tids.includes(t.id)
+          const sameModule = !on && chosenModules.has(t.module)
+          const full = !on && tids.length >= 4
+          return (
+            <label key={t.id} className="check-row" title={sameModule ? `Already chose a ${t.module} tournament` : undefined}>
+              <input type="checkbox" checked={on} disabled={busy || sameModule || full} onChange={(e) => toggle(t.id, e.target.checked)} />
+              <span>
+                {t.module} · {t.name || t.id.slice(0, 8)} <span className="fine-print">({t.n_rated} rated)</span>
+              </span>
+            </label>
+          )
+        })
+      )}
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginTop: 16 }}>
+        <button className="btn" disabled={busy || !body} onClick={() => body && previewMutation.mutate(body)}>
+          Preview
+        </button>
+        <button
+          className="btn btn-primary"
+          disabled={busy || !body || name.trim() === ''}
+          title={name.trim() === '' ? 'Give the set a name' : undefined}
+          onClick={() => body && createMutation.mutate({ ...body, name: name.trim() })}
+        >
+          Create
+        </button>
+        {busy && <span className="fine-print pulse">working…</span>}
+      </div>
+      {error && (
+        <div className="error-text" role="alert" style={{ marginTop: 8 }}>
+          {error}
+        </div>
+      )}
+      {preview && (
+        <div style={{ marginTop: 14 }}>
+          {previewKey !== formKey && (
+            <div className="badge badge-amber" style={{ marginBottom: 8 }}>
+              Form changed since this preview
+            </div>
+          )}
+          <div className="eval-section" style={{ marginTop: 0 }}>
+            Preview
+          </div>
+          {preview.warnings.map((w, i) => (
+            <div key={i} className="badge badge-amber" style={{ display: 'block', marginBottom: 4, whiteSpace: 'normal' }}>
+              {w}
+            </div>
+          ))}
+          <div className="eval-gates" style={{ marginTop: 8 }}>
+            <DivGateCard g={preview.gate} />
+          </div>
+          <DivStatsView stats={preview.stats} />
+          <div className="fine-print" style={{ marginTop: 6 }}>
+            Reading list: {preview.n_reading_list} report(s).
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function armStatRows(per: DivStats['by_arm']): Array<{ key: string } & DivArmStat> {
+  return (per ?? []).map((a) => ({ ...a, key: a.label ? `${a.label} (${a.arm_key})` : a.arm_key }))
+}
+
+function DivGateCard({ g }: { g: DivGate }) {
+  const isAgreement = g.key === 'spot_check_agreement'
+  return (
+    <div className={`eval-gate ${g.state}`}>
+      <div className="gate-name">
+        <span>{DIV_GATE_LABEL[g.key] ?? gateLabel(g.key)}</span>
+        <span className={`badge ${STATE_BADGE[g.state]}`}>{STATE_LABEL[g.state]}</span>
+      </div>
+      <div>
+        {isAgreement ? `agreement ${g.value != null ? pct0(g.value) : '—'}` : `r ${num(g.value)}`} · n={g.n}
+      </div>
+      {isAgreement && g.triad_agreement !== undefined && (
+        <div className="gate-line">
+          triads {pct0(g.triad_agreement)} ({g.n_triads ?? 0}) · critiques {pct0(g.critique_agreement)} ({g.n_critiques ?? 0})
+          {g.n_skipped ? ` · ${g.n_skipped} skipped` : ''}
+        </div>
+      )}
+      {g.detail && <div className="gate-line">{g.detail}</div>}
+    </div>
+  )
+}
+
+const DIV_GATE_LABEL: Record<string, string> = {
+  parts_vs_whole: 'Parts vs whole',
+  spot_check_agreement: 'Spot-check agreement',
+}
+
+function DivStatsView({ stats }: { stats: DivStats }) {
+  const arms = armStatRows(stats.by_arm)
+  const partial = stats.n_partial ?? Math.max(0, stats.n_joined - stats.n_complete)
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div className="fine-print">
+        {stats.n_complete} complete · {partial} partial (rated in some modules only) · {stats.n_whole_only} whole-only (no module rating) ·{' '}
+        {stats.n_parts_only} parts-only (no Engine 2 score) · Pearson {num(stats.pearson)} · Spearman {num(stats.spearman)}
+      </div>
+      {arms.length > 1 && (
+        <div style={{ marginTop: 8 }}>
+          <div className="badge badge-amber" style={{ display: 'block', whiteSpace: 'normal', marginBottom: 6 }}>
+            This set mixes arms. Scores from different arms come from different models, so the combined correlation mixes models. Pick one
+            arm for a like-for-like read.
+          </div>
+          <div className="eval-scroll">
+            <MonoTable
+              columns={[
+                { key: 'arm', header: 'Arm', render: (a: { key: string } & DivArmStat) => a.key },
+                { key: 'n', header: 'n', align: 'right', render: (a) => a.n },
+                { key: 'p', header: 'Pearson', align: 'right', render: (a) => num(a.pearson) },
+                { key: 's', header: 'Spearman', align: 'right', render: (a) => num(a.spearman) },
+              ]}
+              rows={arms}
+              rowKey={(a) => a.key}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+type DivTab = 'overview' | 'checks' | 'reading' | 'rows'
+const DIV_TAB_LABEL: Record<DivTab, string> = {
+  overview: 'Overview',
+  checks: 'Spot checks',
+  reading: 'Reading list',
+  rows: 'Rows',
+}
+
+const FINISH_CHECKS_FIRST =
+  'Finish the spot checks first. The rows and reading list show module bands, which would unblind the checks.'
+
+function DivPane({ id, onOpenSet }: { id: string; onOpenSet: (id: string) => void }) {
+  const queryClient = useQueryClient()
+  const confirm = useConfirm()
+  const [tab, setTab] = useState<DivTab>('overview')
+  const [error, setError] = useState<string | null>(null)
+  const q = useQuery({ queryKey: ['eval-div-set', id], queryFn: () => api.evalDivSet(id) })
+  const del = useMutation({
+    mutationFn: () => api.evalDivDelete(id),
+    onMutate: () => setError(null),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['eval-div-sets'] }),
+    onError: (e) => setError(errorText(e)),
+  })
+  if (q.isLoading) return <div className="empty pulse">Loading set…</div>
+  if (q.isError || !q.data) return <QueryError error={q.error} what="the divergence set" />
+  const s = q.data
+  const agreement = s.gates.find((g) => g.key === 'spot_check_agreement')
+  const label = s.name || s.id.slice(0, 8)
+  const reviewer = s.acknowledged_gates.find((a) => a.gate === 'review')?.by ?? null
+  const otherSet = s.stats.spot_checks_from_set ?? null
+
+  const onDelete = async () => {
+    const ok = await confirm({
+      title: 'Delete divergence set',
+      message: `Delete "${label}", its frozen join and every spot-check answer? This cannot be undone.`,
+      confirmLabel: 'Delete',
+      destructive: true,
+    })
+    if (ok) del.mutate()
+  }
+
+  return (
+    <div>
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          <strong className="mono-label">{label}</strong>
+          <StatusBadge status={s.status} />
+          <GateDots gates={s.gates} />
+          {s.status === 'open' && s.spot_checks.answered === 0 && (
+            <button className="btn btn-reject btn-sm" disabled={del.isPending} onClick={onDelete}>
+              Delete
+            </button>
+          )}
+        </div>
+        <div className="fine-print">
+          pass {s.pass_name ?? s.credibility_pass_id.slice(0, 8)} · modules {s.modules.join(', ')} · {s.arm_key ? `arm ${s.arm_key}` : 'all arms'}
+          {s.reviewed_at ? ` · Reviewed ${formatDateTime(s.reviewed_at)}${reviewer ? ` by ${reviewer}` : ''}` : ''}
+        </div>
+        {(s.stale || s.stale_pass) && (
+          <div className="badge badge-amber" role="alert" style={{ display: 'block', whiteSpace: 'normal', marginTop: 8 }}>
+            Inputs changed since this set was frozen (a tournament was refit or the pass's reviews changed). Create a new set to see current
+            results.
+          </div>
+        )}
+        {otherSet && (
+          <div className="fine-print" style={{ marginTop: 8 }}>
+            Spot checks for this pass were answered in another set.{' '}
+            <button className="btn btn-sm" onClick={() => onOpenSet(otherSet)}>
+              Open that set
+            </button>
+          </div>
+        )}
+        {agreement?.state === 'tripped' && (
+          <div className="error-text" role="alert" style={{ marginTop: 8 }}>
+            No client use: spot-check agreement under 70%. {agreement.detail ?? ''}
+          </div>
+        )}
+        {error && (
+          <div className="error-text" role="alert" style={{ marginTop: 8 }}>
+            {error}
+          </div>
+        )}
+      </div>
+      <div className="tabs" role="tablist">
+        {(Object.keys(DIV_TAB_LABEL) as DivTab[]).map((k) => (
+          <button key={k} role="tab" aria-selected={tab === k} className={`tab${tab === k ? ' active' : ''}`} onClick={() => setTab(k)}>
+            {DIV_TAB_LABEL[k]}
+          </button>
+        ))}
+      </div>
+      {tab === 'overview' && <DivOverview s={s} />}
+      {tab === 'reading' && <DivReadingList id={id} locked={s.spot_checks.locked} />}
+      {tab === 'rows' && <DivRows id={id} locked={s.spot_checks.locked} />}
+      {tab === 'checks' &&
+        (otherSet ? (
+          <div className="empty">
+            Spot checks for this pass were answered in another set.{' '}
+            <button className="btn btn-sm" onClick={() => onOpenSet(otherSet)}>
+              Open that set
+            </button>
+          </div>
+        ) : (
+          <DivChecks s={s} />
+        ))}
+    </div>
+  )
+}
+
+function DivScatter({ points }: { points: DivScatterPoint[] }) {
+  const W = 380
+  const H = 340
+  const L = 40
+  const B = 36
+  const T = 12
+  const R = 12
+  const x = (v: number) => L + ((v - 1) / 9) * (W - L - R)
+  const y = (v: number) => T + (1 - (v - 1) / 9) * (H - T - B)
+  // The whole score is an integer, so dots stack; a small stable offset per report keeps them countable.
+  const jitter = (id: string) => {
+    let h = 0
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
+    return ((Math.abs(h) % 100) / 100 - 0.5) * 0.3
+  }
+  const ticks = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Parts against whole" style={{ width: '100%', maxWidth: 460, height: 'auto' }}>
+      <rect x={L} y={T} width={W - L - R} height={H - T - B} fill="none" stroke="var(--border)" />
+      {ticks.map((t) => (
+        <g key={t}>
+          <line x1={x(t)} x2={x(t)} y1={H - B} y2={H - B + 4} stroke="var(--text-muted)" />
+          <text x={x(t)} y={H - B + 15} textAnchor="middle" fontSize="9" fill="var(--text-muted)">
+            {t}
+          </text>
+          <line x1={L - 4} x2={L} y1={y(t)} y2={y(t)} stroke="var(--text-muted)" />
+          <text x={L - 7} y={y(t) + 3} textAnchor="end" fontSize="9" fill="var(--text-muted)">
+            {t}
+          </text>
+        </g>
+      ))}
+      <text x={(L + W - R) / 2} y={H - 4} textAnchor="middle" fontSize="10" fill="var(--text-muted)">
+        parts: mean module decile (1 to 10)
+      </text>
+      <text transform={`translate(11 ${(T + H - B) / 2}) rotate(-90)`} textAnchor="middle" fontSize="10" fill="var(--text-muted)">
+        whole: credibility score (1 to 10)
+      </text>
+      {points.map((p) => (
+        <circle
+          key={p.id}
+          cx={x(Math.min(10, Math.max(1, p.parts)))}
+          cy={y(Math.min(10, Math.max(1, p.whole + jitter(p.id))))}
+          r="4"
+          fill={QUADRANT_COLOR[p.quadrant ?? ''] ?? 'var(--gray)'}
+          fillOpacity="0.7"
+          stroke="var(--bg-panel)"
+          strokeWidth="0.5"
+        >
+          <title>
+            parts {p.parts.toFixed(1)} · whole {p.whole} · {quadrantLabel(p.quadrant)}
+            {p.delta != null ? ` · delta ${signed(p.delta)}` : ''}
+          </title>
+        </circle>
+      ))}
+    </svg>
+  )
+}
+
+function DivOverview({ s }: { s: DivSet }) {
+  const queryClient = useQueryClient()
+  const [notes, setNotes] = useState<Record<string, string>>({})
+  const [reviewNote, setReviewNote] = useState('')
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ['eval-div-sets'] })
+    void queryClient.invalidateQueries({ queryKey: ['eval-div-set', s.id] })
+  }
+  const ack = useMutation({
+    mutationFn: (v: { gate: string; note: string }) => api.evalDivAcknowledge(s.id, v),
+    onMutate: () => setError(null),
+    onSuccess: refresh,
+    onError: (e) => setError(errorText(e)),
+  })
+  const review = useMutation({
+    mutationFn: () => api.evalDivReview(s.id, reviewNote.trim() ? { note: reviewNote.trim() } : {}),
+    onMutate: () => setError(null),
+    onSuccess: refresh,
+    onError: (e) => setError(errorText(e)),
+  })
+
+  const open = s.status === 'open'
+  const unanswered = s.spot_checks.total - s.spot_checks.answered
+  const acked = new Set(s.acknowledged_gates.map((a) => a.gate))
+  const counts = s.stats.quadrants ?? s.quadrant_counts ?? {}
+  const unackTripped = s.gates.filter((g) => g.state === 'tripped' && !acked.has(g.key))
+  const reviewBlocked = !s.spot_checks.locked ? `${unanswered} spot check(s) still unanswered` : null
+
+  return (
+    <div>
+      <div className="eval-section" style={{ marginTop: 4 }}>
+        Gates
+      </div>
+      <div className="eval-gates">
+        {s.gates.map((g) => {
+          const a = s.acknowledged_gates.find((x) => x.gate === g.key)
+          return (
+            <div key={g.key}>
+              <DivGateCard g={g} />
+              {a && (
+                <div className="fine-print">
+                  acknowledged{a.by ? ` by ${a.by}` : ''}
+                  {a.note ? `: ${a.note}` : ''}
+                </div>
+              )}
+              {g.state === 'tripped' && !a && open && (
+                <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <input
+                    type="text"
+                    style={{ flex: '1 1 200px' }}
+                    placeholder="note (required)"
+                    aria-label={`Acknowledgement note for ${g.key}`}
+                    value={notes[g.key] ?? ''}
+                    onChange={(e) => setNotes((n) => ({ ...n, [g.key]: e.target.value }))}
+                  />
+                  <button
+                    className="btn btn-sm"
+                    disabled={ack.isPending || (notes[g.key] ?? '').trim() === ''}
+                    onClick={() => ack.mutate({ gate: g.key, note: (notes[g.key] ?? '').trim() })}
+                  >
+                    Acknowledge
+                  </button>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="eval-section">Parts vs whole</div>
+      <DivStatsView stats={s.stats} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, marginTop: 12, alignItems: 'flex-start' }}>
+        <div style={{ flex: '1 1 320px', minWidth: 280 }}>
+          {s.spot_checks.locked ? <DivScatter points={s.scatter} /> : <div className="empty">{FINISH_CHECKS_FIRST}</div>}
+        </div>
+        <div style={{ flex: '0 1 300px' }}>
+          {QUADRANT_ORDER.map((k) => (
+            <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              <span aria-hidden style={{ width: 10, height: 10, borderRadius: 5, background: QUADRANT_COLOR[k], flex: '0 0 10px' }} />
+              <span style={{ flex: 1 }}>{QUADRANT_LABEL[k]}</span>
+              <strong>{counts[k] ?? 0}</strong>
+            </div>
+          ))}
+          <div className="fine-print">Split at the median percentile of the complete rows (rated in every selected module).</div>
+        </div>
+      </div>
+
+      {s.acknowledged_gates.some((a) => a.gate === 'review') && (
+        <div className="fine-print" style={{ marginTop: 8 }}>
+          {s.acknowledged_gates
+            .filter((a) => a.gate === 'review')
+            .map((a) => `Review note${a.by ? ` by ${a.by}` : ''}${a.note ? `: ${a.note}` : ''}`)
+            .join('; ')}
+        </div>
+      )}
+      <div className="eval-section">Review</div>
+      {s.status === 'reviewed' ? (
+        <div className="fine-print">This set is reviewed and locked.</div>
+      ) : (
+        <>
+          <div className="fine-print">
+            Marking reviewed locks the set. Every spot check must be answered or skipped, and every tripped gate acknowledged with a note.
+            {unackTripped.length > 0 ? ` Still to acknowledge: ${unackTripped.map((g) => DIV_GATE_LABEL[g.key] ?? g.key).join(', ')}.` : ''}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginTop: 8 }}>
+            <input
+              type="text"
+              style={{ flex: '1 1 260px', maxWidth: 480 }}
+              placeholder="note (optional)"
+              aria-label="Review note"
+              value={reviewNote}
+              onChange={(e) => setReviewNote(e.target.value)}
+            />
+            <button className="btn btn-primary" disabled={review.isPending || reviewBlocked != null} title={reviewBlocked ?? undefined} onClick={() => review.mutate()}>
+              Mark reviewed
+            </button>
+            {reviewBlocked && <span className="fine-print">{reviewBlocked}</span>}
+          </div>
+        </>
+      )}
+      {error && (
+        <div className="error-text" role="alert" style={{ marginTop: 8 }}>
+          {error}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DivReadingList({ id, locked }: { id: string; locked: boolean }) {
+  const [openId, setOpenId] = useState<string | null>(null)
+  const q = useQuery({ queryKey: ['eval-div-reading', id], queryFn: () => api.evalDivReadingList(id), enabled: locked })
+  const rows = q.data ?? []
+  if (!locked) return <div className="empty">{FINISH_CHECKS_FIRST}</div>
+  const open = rows.find((r) => r.disclosure_report_id === openId) ?? null
+
+  const columns: Column<DivReadingRow>[] = [
+    { key: 'company', header: 'Company', render: (r) => r.company ?? r.disclosure_report_id.slice(0, 8) },
+    { key: 'quadrant', header: 'Quadrant', render: (r) => quadrantLabel(r.quadrant) },
+    { key: 'parts', header: 'Parts', align: 'right', render: (r) => num(r.parts, 1) },
+    { key: 'whole', header: 'Whole', align: 'right', render: (r) => r.whole },
+    { key: 'delta', header: 'Delta', align: 'right', render: (r) => signed(r.delta) },
+    { key: 'modules', header: 'Modules', render: (r) => <span className="fine-print">{bandsCompact(r.modules)}</span> },
+  ]
+
+  return (
+    <div>
+      <div className="fine-print" style={{ marginBottom: 8 }}>
+        The complete rows with the biggest gap between where a report ranks on its parts and where it ranks as a whole. Positive delta: the
+        whole beats the parts. Read these by hand.
+      </div>
+      {open && <DivReadingDetail r={open} onClose={() => setOpenId(null)} />}
+      {q.isLoading ? (
+        <div className="empty pulse">Loading reading list…</div>
+      ) : (
+        <div className="eval-scroll">
+          <MonoTable
+            columns={columns}
+            rows={rows}
+            rowKey={(r) => r.disclosure_report_id}
+            rowLabel={(r) => `Open divergence of ${r.company ?? r.disclosure_report_id}`}
+            onRowClick={(r) => setOpenId(r.disclosure_report_id === openId ? null : r.disclosure_report_id)}
+            error={q.error}
+            empty="The reading list is empty."
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CritiqueBody({
+  review,
+}: {
+  review: { credibility_score: number; summary: string | null; pushbacks: Array<{ pushback: string; evidence: string }>; story_breaks: string[]; model: string | null }
+}) {
+  return (
+    <>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
+        <strong style={{ fontSize: 22 }}>{review.credibility_score}/10</strong>
+        {review.model && <span className="fine-print">{review.model}</span>}
+      </div>
+      {review.summary && <p style={{ margin: '8px 0' }}>{review.summary}</p>}
+      {review.pushbacks.length > 0 && (
+        <>
+          <div className="eval-section" style={{ marginTop: 10 }}>
+            Pushbacks
+          </div>
+          <ol style={{ margin: 0, paddingLeft: 20 }}>
+            {review.pushbacks.map((pb, i) => (
+              <li key={i} style={{ marginBottom: 6 }}>
+                {pb.pushback}
+                <div className="fine-print">Evidence: {pb.evidence}</div>
+              </li>
+            ))}
+          </ol>
+        </>
+      )}
+      {review.story_breaks.length > 0 && (
+        <>
+          <div className="eval-section" style={{ marginTop: 10 }}>
+            Where the story breaks
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 20 }}>
+            {review.story_breaks.map((b, i) => (
+              <li key={i}>{b}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </>
+  )
+}
+
+function DivReadingDetail({ r, onClose }: { r: DivReadingRow; onClose: () => void }) {
+  return (
+    <div className="eval-gate ok" style={{ margin: '4px 0 14px', fontFamily: 'inherit' }}>
+      <div className="gate-name">
+        <span>{r.company ?? r.disclosure_report_id}</span>
+        <button className="btn btn-sm" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <div className="fine-print" style={{ marginBottom: 6 }}>
+        {quadrantLabel(r.quadrant)} · parts {num(r.parts, 1)} · delta {signed(r.delta)} · {bandsCompact(r.modules)}
+      </div>
+      {r.review ? <CritiqueBody review={r.review} /> : <div className="fine-print">review no longer available</div>}
+      <div style={{ marginTop: 10 }}>
+        <DocLink id={r.document_id} />
+      </div>
+    </div>
+  )
+}
+
+function DivRows({ id, locked }: { id: string; locked: boolean }) {
+  const [quadrant, setQuadrant] = useState('')
+  const [complete, setComplete] = useState('')
+  const [offset, setOffset] = useState(0)
+  const q = useQuery({
+    queryKey: ['eval-div-rows', id, quadrant, complete, offset],
+    queryFn: () => api.evalDivRows(id, { quadrant: quadrant || undefined, complete: complete === '' ? undefined : complete === 'yes', limit: PAGE, offset }),
+    enabled: locked,
+  })
+  const total = q.data?.total ?? 0
+  const reset = (fn: () => void) => {
+    fn()
+    setOffset(0)
+  }
+  const columns: Column<DivRow>[] = [
+    { key: 'company', header: 'Company', render: (r) => r.company ?? r.disclosure_report_id.slice(0, 8) },
+    { key: 'quadrant', header: 'Quadrant', render: (r) => quadrantLabel(r.quadrant) },
+    { key: 'parts', header: 'Parts', align: 'right', render: (r) => num(r.parts, 1) },
+    { key: 'whole', header: 'Whole', align: 'right', render: (r) => r.whole },
+    { key: 'delta', header: 'Delta', align: 'right', render: (r) => (r.delta != null ? signed(r.delta) : `raw ${signed(r.raw_delta, 1)}`) },
+    { key: 'arm', header: 'Arm', render: (r) => r.arm_key ?? '—' },
+    { key: 'modules', header: 'Modules', render: (r) => <span className="fine-print">{bandsCompact(r.modules)}</span> },
+    { key: 'doc', header: '', render: (r) => (r.document_id ? <DocLink id={r.document_id} /> : null) },
+  ]
+  if (!locked) return <div className="empty">{FINISH_CHECKS_FIRST}</div>
+  return (
+    <div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+        <div className="field" style={{ width: 280 }}>
+          <label className="mono-label" htmlFor="div-f-q">
+            Quadrant
+          </label>
+          <select id="div-f-q" value={quadrant} onChange={(e) => reset(() => setQuadrant(e.target.value))}>
+            <option value="">all</option>
+            {QUADRANT_ORDER.map((k) => (
+              <option key={k} value={k}>
+                {QUADRANT_LABEL[k]}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field" style={{ width: 160 }}>
+          <label className="mono-label" htmlFor="div-f-c">
+            Coverage
+          </label>
+          <select id="div-f-c" value={complete} onChange={(e) => reset(() => setComplete(e.target.value))}>
+            <option value="">all</option>
+            <option value="yes">complete</option>
+            <option value="no">partial</option>
+          </select>
+        </div>
+      </div>
+      {q.isLoading ? (
+        <div className="empty pulse">Loading rows…</div>
+      ) : (
+        <div className="eval-scroll">
+          <MonoTable columns={columns} rows={q.data?.rows ?? []} rowKey={(r) => r.disclosure_report_id} error={q.error} empty="No rows match." />
+        </div>
+      )}
+      {total > 0 && (
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 }}>
+          <button className="btn btn-sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
+            Previous
+          </button>
+          <span className="fine-print">
+            {offset + 1}–{Math.min(offset + PAGE, total)} of {total}
+          </span>
+          <button className="btn btn-sm" disabled={offset + PAGE >= total} onClick={() => setOffset(offset + PAGE)}>
+            Next
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Spot checks ──────────────────────────────────────────────────────────
+
+function DivChecks({ s }: { s: DivSet }) {
+  const q = useQuery({ queryKey: ['eval-div-checks', s.id], queryFn: () => api.evalDivSpotChecks(s.id) })
+  const [index, setIndex] = useState<number | null>(null)
+  if (q.isLoading) return <div className="empty pulse">Loading spot checks…</div>
+  if (q.isError || !q.data) return <QueryError error={q.error} what="the spot checks" />
+  const checks = q.data
+  if (checks.length === 0) return <div className="empty">This set has no spot checks.</div>
+  const firstPending = checks.findIndex((c) => c.status === 'pending')
+  const cur = Math.min(index ?? (firstPending >= 0 ? firstPending : 0), checks.length - 1)
+  const check = checks[cur]
+  const answered = checks.filter((c) => c.status !== 'pending').length
+  const locked = s.spot_checks.locked
+  const next = () => setIndex(Math.min(cur + 1, checks.length - 1))
+
+  return (
+    <div>
+      <div className="fine-print" style={{ marginBottom: 8 }}>
+        {answered} of {checks.length} answered. Judge each item on its own: triad texts are masked and unrated, critiques hide the module
+        bands until the set is locked. {locked ? 'Every check is answered or skipped, so answers are locked.' : 'You can change an answer, or answer a skipped one, until then.'}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 12 }}>
+        {checks.map((c, i) => (
+          <button
+            key={c.id}
+            className={`btn btn-sm${i === cur ? ' btn-primary' : ''}`}
+            title={`${c.kind} ${c.position + 1}: ${c.status}`}
+            aria-label={`${c.kind} ${c.position + 1}, ${c.status}`}
+            style={{ minWidth: 34, opacity: c.status === 'pending' ? 1 : 0.65 }}
+            onClick={() => setIndex(i)}
+          >
+            {c.kind === 'triad' ? 'T' : 'C'}
+            {c.position + 1}
+            {c.status === 'done' ? ' ✓' : c.status === 'skipped' ? ' –' : ''}
+          </button>
+        ))}
+      </div>
+      {check.kind === 'triad' ? (
+        <TriadCard key={check.id} setId={s.id} check={check} locked={locked} progress={`${answered} of ${checks.length}`} onDone={next} />
+      ) : (
+        <CritiqueCard key={check.id} setId={s.id} check={check} locked={locked} progress={`${answered} of ${checks.length}`} onDone={next} />
+      )}
+    </div>
+  )
+}
+
+function useAnswer(setId: string, onDone: () => void) {
+  const queryClient = useQueryClient()
+  const [error, setError] = useState<string | null>(null)
+  const m = useMutation({
+    mutationFn: (v: { id: string; answer: DivAnswer; note?: string }) => api.evalDivAnswer(v.id, { answer: v.answer, note: v.note }),
+    onMutate: () => setError(null),
+    onSuccess: (_r, v) => {
+      void queryClient.invalidateQueries({ queryKey: ['eval-div-checks', setId] })
+      void queryClient.invalidateQueries({ queryKey: ['eval-div-set', setId] })
+      void queryClient.invalidateQueries({ queryKey: ['eval-div-sets'] })
+      // Skipping moves on at once; an answer stays put so the reveal can be read.
+      if ('skip' in v.answer) onDone()
+    },
+    onError: (e) => setError(errorText(e)),
+  })
+  return { m, error }
+}
+
+function TriadCard({ setId, check, locked, progress, onDone }: { setId: string; check: DivTriadCheck; locked: boolean; progress: string; onDone: () => void }) {
+  const open = !locked
+  const prior = (check.answer as { order?: string[] } | null | undefined)?.order
+  const [order, setOrder] = useState<string[]>(prior && prior.length === 3 ? prior : ['', '', ''])
+  const [note, setNote] = useState(check.note ?? '')
+  const { m, error } = useAnswer(setId, onDone)
+  const valid = ['A', 'B', 'C'].every((l) => order.includes(l))
+  const answered = check.status !== 'pending'
+  const ranks = ['Best', 'Middle', 'Worst']
+  const rev = check.revealed
+  const info = (letter: string): DivRevealedMember | undefined =>
+    rev?.letters?.[letter] ?? rev?.members?.find((x) => x.letter === letter)
+
+  return (
+    <div className="eval-gate ok" style={{ fontFamily: 'inherit' }}>
+      <div className="gate-name">
+        <span>
+          Triad {check.position + 1} · {check.module}
+        </span>
+        <StatusBadge status={check.status} />
+      </div>
+      <div className="fine-print" style={{ marginBottom: 8 }}>
+        Rank the three excerpts from best to worst disclosure quality for this module.
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+        {check.texts.map((t) => (
+          <div key={t.letter} style={{ flex: '1 1 260px', minWidth: 0 }}>
+            <div className="mono-label">Text {t.letter}</div>
+            <div
+              style={{
+                maxHeight: 360,
+                overflow: 'auto',
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'anywhere',
+                border: '1px solid var(--border)',
+                borderRadius: 4,
+                padding: 8,
+                background: 'var(--bg-panel)',
+                fontSize: 12.5,
+              }}
+            >
+              {t.text != null ? t.text : <span className="fine-print">{t.error ?? 'text unavailable'}</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 12 }}>
+        {ranks.map((r, i) => (
+          <div key={r} className="field" style={{ width: 120 }}>
+            <label className="mono-label" htmlFor={`rank-${check.id}-${i}`}>
+              {r}
+            </label>
+            <select
+              id={`rank-${check.id}-${i}`}
+              disabled={!open || m.isPending}
+              value={order[i]}
+              onChange={(e) => setOrder((o) => o.map((x, k) => (k === i ? e.target.value : x === e.target.value ? '' : x)))}
+            >
+              <option value="">—</option>
+              {['A', 'B', 'C'].map((l) => (
+                <option key={l} value={l}>
+                  {l}
+                </option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+      <input
+        type="text"
+        style={{ maxWidth: 520, marginTop: 6 }}
+        placeholder="note (optional)"
+        aria-label="Note"
+        disabled={!open || m.isPending}
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+      />
+      {open && (
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 }}>
+        <button
+          className="btn btn-primary"
+          disabled={!valid || m.isPending}
+          title={!valid ? 'Rank all three texts' : undefined}
+          onClick={() => m.mutate({ id: check.id, answer: { order }, note: note.trim() || undefined })}
+        >
+          {answered ? 'Update answer' : 'Submit'}
+        </button>
+        <button className="btn" disabled={m.isPending} onClick={() => m.mutate({ id: check.id, answer: { skip: true }, note: note.trim() || undefined })}>
+          Skip
+        </button>
+        {m.isPending && <span className="fine-print pulse">saving…</span>}
+      </div>
+      )}
+      {!locked && (
+        <div className="fine-print" style={{ marginTop: 8 }}>
+          Results are revealed once every check is answered or skipped ({progress}).
+        </div>
+      )}
+      {error && (
+        <div className="error-text" role="alert" style={{ marginTop: 8 }}>
+          {error}
+        </div>
+      )}
+      {locked && rev && (
+        <div style={{ marginTop: 12 }} role="status">
+          <div className="eval-section" style={{ marginTop: 0 }}>
+            Revealed
+          </div>
+          <div>
+            Engine 1 order (best to worst):{' '}
+            {rev.expected_order
+              .map((l) => {
+                const m2 = info(l)
+                return m2 ? `${l} = ${m2.company ?? 'unknown'} (${m2.band_kind === 'quintile' ? 'Q' : 'D'}${m2.band}, rating ${num(m2.rating, 0)})` : l
+              })
+              .join(' > ')}
+          </div>
+          <div className="fine-print">
+            {check.status === 'skipped'
+              ? 'You skipped this one.'
+              : `Your order: ${(check.answer as { order?: string[] } | null | undefined)?.order?.join(' > ') ?? '—'} · agreement ${num(rev.agreement ?? check.agreement ?? null)}`}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CritiqueCard({ setId, check, locked, progress, onDone }: { setId: string; check: DivCritiqueCheck; locked: boolean; progress: string; onDone: () => void }) {
+  const open = !locked
+  const prior = check.answer as { verdict?: string; pushbacks_sharp?: boolean[] } | null | undefined
+  const [verdict, setVerdict] = useState<string>(prior?.verdict ?? '')
+  const [sharp, setSharp] = useState<boolean[]>([0, 1, 2].map((i) => prior?.pushbacks_sharp?.[i] ?? false))
+  const [note, setNote] = useState(check.note ?? '')
+  const { m, error } = useAnswer(setId, onDone)
+  const answered = check.status !== 'pending'
+  const rev = check.revealed
+
+  return (
+    <div className="eval-gate ok" style={{ fontFamily: 'inherit' }}>
+      <div className="gate-name">
+        <span>
+          Critique {check.position + 1} · {check.company ?? check.disclosure_report_id.slice(0, 8)}
+        </span>
+        <StatusBadge status={check.status} />
+      </div>
+      <div className="fine-print" style={{ marginBottom: 6 }}>
+        Is the score fair, and are the pushbacks right? Read the source document if in doubt.
+      </div>
+      {check.review ? <CritiqueBody review={check.review} /> : <div className="fine-print">review no longer available</div>}
+      {check.review && check.review.pushbacks.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          {check.review.pushbacks.map((_, i) => (
+            <label key={i} className="check-row">
+              <input
+                type="checkbox"
+                disabled={!open || m.isPending}
+                checked={sharp[i] ?? false}
+                onChange={(e) => setSharp((cur) => cur.map((x, k) => (k === i ? e.target.checked : x)))}
+              />
+              <span>Pushback {i + 1} is sharp enough for an investor meeting</span>
+            </label>
+          ))}
+        </div>
+      )}
+      <div style={{ marginTop: 10 }}>
+        <DocLink id={check.document_id} />
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }} role="group" aria-label="Verdict">
+        {(['agree', 'partly', 'disagree'] as const).map((v) => (
+          <button key={v} className={`btn${verdict === v ? ' btn-primary' : ''}`} disabled={!open || m.isPending} aria-pressed={verdict === v} onClick={() => setVerdict(v)}>
+            {v === 'agree' ? 'Agree' : v === 'partly' ? 'Partly agree' : 'Disagree'}
+          </button>
+        ))}
+      </div>
+      <input
+        type="text"
+        style={{ maxWidth: 520, marginTop: 8 }}
+        placeholder="note (optional)"
+        aria-label="Note"
+        disabled={!open || m.isPending}
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+      />
+      {open && (
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 }}>
+        <button
+          className="btn btn-primary"
+          disabled={verdict === '' || m.isPending}
+          title={verdict === '' ? 'Choose a verdict' : undefined}
+          onClick={() =>
+            m.mutate({
+              id: check.id,
+              answer: { verdict: verdict as 'agree' | 'partly' | 'disagree', pushbacks_sharp: sharp },
+              note: note.trim() || undefined,
+            })
+          }
+        >
+          {answered ? 'Update answer' : 'Submit'}
+        </button>
+        <button className="btn" disabled={m.isPending} onClick={() => m.mutate({ id: check.id, answer: { skip: true }, note: note.trim() || undefined })}>
+          Skip
+        </button>
+        {m.isPending && <span className="fine-print pulse">saving…</span>}
+      </div>
+      )}
+      {!locked && (
+        <div className="fine-print" style={{ marginTop: 8 }}>
+          Results are revealed once every check is answered or skipped ({progress}).
+        </div>
+      )}
+      {error && (
+        <div className="error-text" role="alert" style={{ marginTop: 8 }}>
+          {error}
+        </div>
+      )}
+      {locked && rev && (
+        <div style={{ marginTop: 12 }} role="status">
+          <div className="eval-section" style={{ marginTop: 0 }}>
+            Revealed
+          </div>
+          <div>
+            Parts {num(rev.parts, 1)} · {quadrantLabel(rev.quadrant)}
+          </div>
+          <div className="fine-print">{bandsCompact(rev.modules)}</div>
+          {rev.from_reading_list != null && <div className="fine-print">{rev.from_reading_list ? 'From the reading list' : 'Random pick'}</div>}
+          {check.status === 'done' && check.agreement != null && <div className="fine-print">agreement {num(check.agreement)}</div>}
+        </div>
       )}
     </div>
   )
