@@ -237,6 +237,45 @@ def _module_def(module_set: str, module: str) -> Module:
     raise TournamentError(f"module {module!r} is not in module set {ms.ident}")
 
 
+async def ready_anchor_set(db: AsyncSession, workspace_id: uuid.UUID, module: str, module_set: str) -> EvalAnchorSet | None:
+    """The latest `ready` anchor set of this workspace, module and module set (what a tournament re-judges first)."""
+    return (await db.execute(
+        select(EvalAnchorSet).where(
+            EvalAnchorSet.workspace_id == workspace_id, EvalAnchorSet.module == module, EvalAnchorSet.module_set == module_set,
+            EvalAnchorSet.status == "ready",
+        ).order_by(EvalAnchorSet.created_at.desc(), EvalAnchorSet.id).limit(1)
+    )).scalar_one_or_none()
+
+
+def add_anchor_estimate(est: dict, aset: EvalAnchorSet | None, models: list[Any]) -> None:
+    """The anchor matches (every usable pair x every juror, judged first by each juror) in the plan's
+    matches, tokens and cost range, and `anchor_set` (id, pairs, matches; null when there is none)."""
+    pairs = [p for p in (aset.pairs if aset else []) if p.get("baseline")]
+    if not pairs:
+        est["anchor_set"] = None
+        est["matches"]["anchor"] = 0
+        return
+    k = len(models)
+    tin = tout = 0
+    for p in pairs:
+        i, o = match_tokens(int(p["a"].get("word_count") or 0), int(p["b"].get("word_count") or 0))
+        tin, tout = tin + i * k, tout + o * k
+    n = len(pairs) * k
+    est["matches"]["anchor"] = n
+    est["matches"]["total"] += n
+    est["tokens"] = {"input": est["tokens"]["input"] + tin, "output": est["tokens"]["output"] + tout}
+    if est.get("cost_usd"):
+        # every juror judges every anchor pair (no rotation): the same extra for the low, expected and high figures
+        extra = 0.0
+        for m in models:
+            if m is None:
+                continue
+            for p in pairs:
+                extra += float(m.cost_usd(*match_tokens(int(p["a"].get("word_count") or 0), int(p["b"].get("word_count") or 0))))
+        est["cost_usd"] = {k_: v + extra for k_, v in est["cost_usd"].items()}
+    est["anchor_set"] = {"id": str(aset.id), "pairs": len(pairs), "matches": n}
+
+
 async def create_tournament(
     db: AsyncSession,
     *,
@@ -291,6 +330,7 @@ async def create_tournament(
         raise TournamentError(str(e), e.status) from e
     models = [services.catalog.get(p.model) for p in sel.picks]
     est = estimate_plan(plan, models, SWAP_RATE, DOUBLE_RATE)
+    add_anchor_estimate(est, await ready_anchor_set(db, workspace_id, module, module_set), models)
     est["gate_coverage"] = dg.gate_coverage(est["matches"], sum(p["n"] for p in plan), len(sel.picks))
     t = EvalTournament(
         workspace_id=workspace_id, module=module, module_set=module_set, snapshot_id=snap.id,
@@ -393,11 +433,21 @@ async def start_tournament(
     except jury.JuryError as e:
         raise TournamentError(str(e), e.status) from e
     owner = new_owner()
+    # The anchor set this pass will re-judge is chosen now and recorded: the one the preview named if it is
+    # still ready, else the latest ready one (or none). The runner uses exactly this and never looks again.
+    previewed = ((t.estimates or {}).get("anchor_set") or {}).get("id")
+    chosen = None
+    if previewed:
+        prev = await db.get(EvalAnchorSet, uuid.UUID(previewed))
+        if prev is not None and prev.status == "ready" and prev.workspace_id == workspace_id:
+            chosen = prev
+    chosen = chosen or await ready_anchor_set(db, workspace_id, t.module, t.module_set)
     res = await db.execute(
         update(EvalTournament)
         .where(EvalTournament.id == t.id, EvalTournament.status == "draft")
         .values(freeze_id=row.id, budget_usd=budget, status="running", pause_reason=None, started_by=started_by,
-                started_at=_now(), lease_owner=owner, lease_until=_lease_end(), updated_at=_now())
+                started_at=_now(), lease_owner=owner, lease_until=_lease_end(), updated_at=_now(),
+                diagnostics={**(t.diagnostics or {}), "anchor_set_id": str(chosen.id) if chosen else None})
     )
     if res.rowcount != 1:
         await db.rollback()
@@ -505,13 +555,20 @@ async def resume_tournament(
 
 
 def required_gates(t: EvalTournament) -> list[str]:
-    """The gates that block resuming this tournament: the tripped pausing gates nobody acknowledged yet
-    (`flip_rate` only after a `jury_degraded` pause). Empty unless the tournament is paused."""
+    """What blocks resuming this tournament: the tripped pausing gates nobody acknowledged yet, and after
+    a `jury_degraded` pause either `flip_rate` (one family left: continue on it alone) or `jury_restore`
+    (none left: seat the original jurors again). The two are different situations and each needs its own
+    acknowledgement; `jury_restore` is used up by the restore, so a later pause with no family left asks
+    again. Empty unless the tournament is paused."""
     if t.status != "paused":
         return []
-    mine = dg.PAUSING_GATES + (("flip_rate",) if t.pause_reason == "jury_degraded" else ())
+    diag = t.diagnostics or {}
     acked = t.acknowledged_gates or {}
-    return [g["key"] for g in ((t.diagnostics or {}).get("gates") or [])
+    degraded = t.pause_reason == "jury_degraded"
+    if degraded and diag.get("families_left") == 0:
+        return [] if "jury_restore" in acked else ["jury_restore"]
+    mine = dg.PAUSING_GATES + (("flip_rate",) if degraded else ())
+    return [g["key"] for g in (diag.get("gates") or [])
             if g.get("state") == "tripped" and g["key"] in mine and g["key"] not in acked]
 
 
@@ -643,7 +700,9 @@ def _fit_inputs(members: list[dict], matches: list[dict], fitted_at: str) -> tup
     return rows, summary
 
 
-async def compute_ratings(factory: Any, tid: uuid.UUID, *, finish: bool, owner: str | None = None) -> bool:
+async def compute_ratings(
+    factory: Any, tid: uuid.UUID, *, finish: bool, owner: str | None = None, expect: tuple[str, Any] | None = None
+) -> bool:
     """Fit every pool from the stored matches and write ratings and summary (`summary.partial` when the
     tournament is not completed: a refit of a paused, cancelled or failed one). The inputs are loaded
     and the session closed, the fits run in a thread (they are CPU-bound and would block the event
@@ -682,7 +741,15 @@ async def compute_ratings(factory: Any, tid: uuid.UUID, *, finish: bool, owner: 
                 await db.rollback()
                 return False
         else:
-            await db.execute(update(EvalTournament).where(EvalTournament.id == tid).values(summary=summary, updated_at=_now()))
+            # a refit writes only if the tournament is exactly as it was read (status, updated_at) and no runner holds it
+            guard = [EvalTournament.id == tid]
+            if expect is not None:
+                guard += [EvalTournament.status == expect[0], EvalTournament.updated_at == expect[1], EvalTournament.lease_owner.is_(None)]
+            res = await db.execute(update(EvalTournament).where(*guard).values(summary=summary, updated_at=_now())
+                                   .execution_options(synchronize_session=False))
+            if res.rowcount != 1:
+                await db.rollback()
+                return False
         await db.execute(delete(ModuleRating).where(ModuleRating.tournament_id == tid))
         db.add_all([ModuleRating(tournament_id=tid, member_id=uuid.UUID(r.pop("member_id")), **r) for r in rows])
         if finish and freeze_id:
@@ -698,13 +765,20 @@ async def refit_tournament(db: AsyncSession, *, workspace_id: uuid.UUID, tournam
     t = await get_tournament(db, workspace_id=workspace_id, tournament_id=tournament_id)
     if t.status not in REFITTABLE:
         raise TournamentError(f"Tournament is {t.status}; only a completed, failed, paused or cancelled one can be refitted", 409)
+    lease = _aware(t.lease_until)
+    if t.lease_owner and lease is not None and lease > _now():
+        raise TournamentError("A runner holds this tournament's lease; refit it when it has stopped", 409)
     done = (await db.execute(
-        select(func.count()).select_from(EvalMatch).where(EvalMatch.tournament_id == t.id, EvalMatch.status == "done")
+        select(func.count()).select_from(EvalMatch).where(
+            EvalMatch.tournament_id == t.id, EvalMatch.status == "done", EvalMatch.kind != "anchor")  # anchors are never rated
     )).scalar_one()
     if not done:
-        raise TournamentError("There are no completed matches to fit", 409)
+        raise TournamentError("There are no completed matches to fit: nothing to fit", 409)
+    expect = (t.status, t.updated_at)
     await db.commit()  # no transaction open while the fit runs
-    await compute_ratings(get_session_factory(), t.id, finish=False)
+    if not await compute_ratings(get_session_factory(), t.id, finish=False, expect=expect):
+        await db.rollback()
+        raise TournamentError("The tournament changed while it was refitted (it was resumed or finished); nothing was written, try again", 409)
     await db.refresh(t)
     return t
 
@@ -845,7 +919,9 @@ class _Runner:
             self.history: list[dict] = list(self.diag.get("history") or [])
             self.anchor_set_id: str | None = self.diag.get("anchor_set_id")
             self.notes: list[str] = list(self.diag.get("notes") or [])  # what the runner did about the jury, for the operator
-            self.restored: bool = bool(self.diag.get("jury_restored"))
+            self.restores: int = int(self.diag.get("restores") or 0)
+            self.restore_round: int | None = self.diag.get("restore_round")
+            self.families_left: int | None = self.diag.get("families_left")
             self.module_set = t.module_set
             self.spent = Decimal(t.spent_usd or 0)
             self.budget = Decimal(t.budget_usd) if t.budget_usd is not None else None
@@ -942,19 +1018,28 @@ class _Runner:
             self.notes.append(text)
 
     def _extra(self) -> dict[str, Any]:
-        return {"notes": self.notes, "jury_restored": self.restored}
+        return {"notes": self.notes, "restores": self.restores, "restore_round": self.restore_round,
+                "families_left": self.families_left}
 
     async def _restore_jury(self) -> bool:
-        """Every family was dropped and the resume acknowledged `flip_rate`: the original frozen jurors
-        sit again (the alternative is a pass nobody can finish). Recorded in the diagnostics, and the
-        flip-rate drop is not applied again in this pass. False = stop."""
+        """Every family was dropped and the resume acknowledged `jury_restore`: the original frozen jurors
+        sit again (the alternative is a pass nobody can finish). The acknowledgement is used up (kept in
+        the notes, removed from `acknowledged_gates`), so a later pause with no family left needs a new
+        one. Flip drops stay ON: the restored jurors are judged on the swaps they play from now on
+        (`restore_round`) and are dropped, and the pass paused, again if they flip. False = stop."""
         families = {p.family for p in self.sel.picks}
-        if not families or self.dropped < families or "flip_rate" not in self.acked:
+        if not families or self.dropped < families or "jury_restore" not in self.acked:
             return True
-        self.dropped, self.restored = set(), True
-        self._add_note("jury restored: every family had been dropped, and the acknowledged resume seated the original frozen jurors again")
+        ack = self.acked.pop("jury_restore")
+        async with self.factory() as db:
+            last = (await db.execute(
+                select(func.max(EvalMatch.round)).where(EvalMatch.tournament_id == self.tid, EvalMatch.kind != "anchor")
+            )).scalar_one()
+        self.dropped, self.restores, self.restore_round, self.families_left = set(), self.restores + 1, int(last or 0), len(families)
+        self._add_note(f"jury restored (#{self.restores}) after round {self.restore_round}: every family had been dropped, and "
+                       f"{ack.get('by') or 'an approver'} acknowledged it ({ack.get('note') or 'no note'})")
         self.diag = {**self.diag, **self._extra()}
-        return await self._set(diagnostics=self.diag, dropped_families=[])
+        return await self._set(diagnostics=self.diag, dropped_families=[], acknowledged_gates=self.acked)
 
     def _active(self) -> list[int]:
         """Indexes of the frozen jurors still on the jury (a dropped family is skipped)."""
@@ -1038,20 +1123,21 @@ class _Runner:
         block = await asyncio.to_thread(dg.compute_from_inputs, inputs)  # CPU-bound, no session open
         th = block["thresholds"]
         families = {p.family for p in self.sel.picks}
-        newly = [] if self.restored else [
-            f["family"] for f in block["flip_rates"]
+        newly = [
+            f["family"] for f in block["flips_gate"]
             if f["family"] in families and f["family"] not in self.dropped and f["swaps"] >= th["min_swaps"]
             and f["rate"] is not None and f["rate"] > th["flip_drop"]
         ]
         if newly:
             self.dropped |= set(newly)
-            for f in block["flip_rates"]:
+            for f in block["flip_rates"] + block["flips_gate"]:
                 f["dropped"] = f["family"] in self.dropped
-            block["gates"] = dg.build_gates(block["length_bias"], block["flip_rates"], block["agreement"], block["anchors"], th,
+            block["gates"] = dg.build_gates(block["length_bias"], block["flips_gate"], block["agreement"], block["anchors"], th,
                                             self.acked, block["pooled_kappa"])
         self.history = dg.merge_history(self.history, dg.history_entry(r, block))
         if len(self._active()) < 2 and len(families) >= 2:
             self._add_note("doubles skipped: fewer than two juror families on the jury, so no other family can re-judge a match")
+        self.families_left = len(families - self.dropped)
         self.diag = dg.stored_block(block, self.history, self.anchor_set_id, self._extra())
         if not await self._set(diagnostics=self.diag, dropped_families=sorted(self.dropped)):
             return False
@@ -1060,7 +1146,7 @@ class _Runner:
             if state[key] == "tripped" and key not in self.acked:
                 await self._pause(dg.PAUSE_FOR_GATE[key])
                 return False
-        left = len({p.family for p in self.sel.picks} - self.dropped)
+        left = self.families_left
         if self.dropped and (left == 0 or (left < dg.MIN_JURY_FAMILIES and "flip_rate" not in self.acked)):
             await self._pause("jury_degraded")
             return False

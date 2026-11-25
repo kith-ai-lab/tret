@@ -129,6 +129,7 @@ const GATE_LABELS: Record<string, string> = {
   length_bias: 'Length bias',
   flip_rate: 'Flip rate',
   position_bias: 'Position bias',
+  jury_restore: 'Jury restore',
   juror_agreement: 'Juror agreement',
   anchor_drift: 'Anchor drift',
   parts_vs_whole: 'Parts vs whole',
@@ -211,7 +212,6 @@ function Header({ t }: { t: EvalTournamentDetail }) {
   const budgetBlankOk = budget.trim() === ''
   const pct = t.budget_usd ? Math.min(100, (t.spent_usd / t.budget_usd) * 100) : 0
   const required = t.required_acknowledgements ?? []
-  const acknowledged = t.acknowledged_gates ?? {}
 
   const onStart = async () => {
     if (!budgetValid || budgetNum == null) return
@@ -224,10 +224,12 @@ function Header({ t }: { t: EvalTournamentDetail }) {
           .join('; ') +
         '.'
       : ''
+    const as = t.estimates?.anchor_set
+    const anchorText = as ? ` Anchor set: ${as.pairs} pairs, ${as.matches} matches (included in cost).` : ' No anchor set yet.'
     const range = c ? `Estimated cost ${money(c.low)} to ${money(c.high)} (the jury rotates).` : 'No cost estimate is available.'
     const ok = await confirm({
       title: 'Start tournament',
-      message: `${range}${covText} Spending stops at the budget of ${money(budgetNum)}. Start ${t.module}?`,
+      message: `${range}${anchorText}${covText} Spending stops at the budget of ${money(budgetNum)}. Start ${t.module}?`,
       confirmLabel: 'Start',
     })
     if (ok) mutation.mutate(() => api.evalStart(t.id, budgetNum))
@@ -261,7 +263,7 @@ function Header({ t }: { t: EvalTournamentDetail }) {
 
   const juryInfo = useMemo(() => {
     if (t.jury && t.jury.length > 0) {
-      return { preview: false, seats: t.jury.map((j) => ({ key: `${j.index}`, label: j.family, title: j.model, dropped: j.dropped })) }
+      return { preview: false, seats: t.jury.map((j) => ({ key: `${j.index}`, label: j.family ?? 'unknown', title: j.model, dropped: j.dropped })) }
     }
     const picks = t.estimates?.jury?.picks ?? []
     const seen = new Set<string>()
@@ -381,7 +383,6 @@ function Header({ t }: { t: EvalTournamentDetail }) {
               />
               <span>
                 {gateLabel(key)}
-                {key in acknowledged && <span className="desc"> (acknowledged before)</span>}
               </span>
             </label>
           ))}
@@ -533,8 +534,13 @@ function thresholdText(g: EvalGate, th: EvalDiagnostics['thresholds']): string |
       return th.length_r_warn != null ? `warn at |r| > ${th.length_r_warn}, pause at > ${th.length_r_pause ?? '—'}` : null
     case 'flip_rate':
       return th.flip_drop != null ? `drop a family at flip rate > ${th.flip_drop}` : null
+    case 'position_bias':
+      return th.flip_drop != null ? `pause > ${th.flip_drop}, needs ≥ ${th.min_swaps_pooled ?? '—'} swaps` : null
     case 'juror_agreement':
-      return th.kappa_pause != null ? `pause below κ ${th.kappa_pause}` : null
+      if (th.kappa_pause == null) return null
+      return th.agreement_floor != null
+        ? `pause < ${th.kappa_pause} and agreement < ${th.agreement_floor}`
+        : `pause below κ ${th.kappa_pause}`
     case 'anchor_drift':
       return th.anchor_changes_pause != null ? `pause at > ${th.anchor_changes_pause} changed` : null
     default:
@@ -604,6 +610,13 @@ function DiagnosticsTab({ id, running }: { id: string; running: boolean }) {
 
   return (
     <div>
+      {d.notes && d.notes.length > 0 && (
+        <ul className="fine-print" style={{ margin: '0 0 8px', paddingLeft: 18 }}>
+          {d.notes.map((n, i) => (
+            <li key={i}>{n}</li>
+          ))}
+        </ul>
+      )}
       {d.computed_at && <div className="fine-print">computed {formatDateTime(d.computed_at)}</div>}
       <div className="eval-gates" style={{ marginTop: 8 }}>
         {d.gates.map((g) => {

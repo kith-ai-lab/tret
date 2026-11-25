@@ -81,11 +81,30 @@ def install(env, default=by_strength, **families):
 
 
 @pytest.fixture
+def no_agreement_gate(monkeypatch):
+    """Tests about the flip gates: the agreement gate is out of the way (member ids are random uuids, so the
+    orientation of the kappa pairs, and a positional juror's kappa on a handful of doubles, vary run to run)."""
+    monkeypatch.setattr(get_settings(), "eval_gate_min_doubles", 1000)
+    monkeypatch.setattr(get_settings(), "eval_gate_length_r_pause", 1.0)  # nor can a chance length correlation of 14 modules pause it
+    monkeypatch.setattr(get_settings(), "eval_gate_length_r_warn", 1.0)
+
+
+@pytest.fixture
 def gates(monkeypatch):
     """Small samples so the gates can trip on the 14-module test corpus."""
     s = get_settings()
-    for k, v in (("eval_gate_min_swaps", 2), ("eval_gate_min_swaps_pooled", 2), ("eval_gate_min_doubles", 2), ("eval_gate_min_rated", 5), ("eval_anchor_pairs", 6)):
+    for k, v in (("eval_gate_min_swaps", 2), ("eval_gate_min_swaps_pooled", 2), ("eval_gate_min_doubles", 2), ("eval_gate_min_rated", 5), ("eval_anchor_pairs", 6),
+                 # member ids are random uuids, so on 14 modules a chance length correlation can reach 0.6: only the
+                 # tests about length bias (fixture `length_gate`) let that gate fire
+                 ("eval_gate_length_r_pause", 1.0), ("eval_gate_length_r_warn", 1.0)):
         monkeypatch.setattr(s, k, v)
+
+
+@pytest.fixture
+def length_gate(gates, monkeypatch):
+    """The length-bias thresholds at their defaults, for the tests whose fake juror prefers the longer text."""
+    monkeypatch.setattr(get_settings(), "eval_gate_length_r_pause", 0.6)
+    monkeypatch.setattr(get_settings(), "eval_gate_length_r_warn", 0.4)
 
 
 def client(env, role="approver", state=None):
@@ -185,7 +204,7 @@ def test_clean_tournament_diagnostics_shape_and_insufficient_data(env):
 
     d = fetch(env.world, go)
     assert set(d) == {"tournament_id", "status", "computed_at", "thresholds", "gates", "length_bias", "flip_rates", "agreement", "anchors", "history", "notes"}
-    assert set(d["thresholds"]) == {"length_r_warn", "length_r_pause", "flip_drop", "kappa_pause", "anchor_changes_pause", "min_swaps", "min_doubles", "min_rated", "min_swaps_pooled"}
+    assert set(d["thresholds"]) == {"length_r_warn", "length_r_pause", "flip_drop", "kappa_pause", "anchor_changes_pause", "min_swaps", "min_doubles", "min_rated", "min_swaps_pooled", "agreement_floor"}
     assert d["thresholds"]["length_r_pause"] == 0.6 and d["thresholds"]["min_rated"] == 30 and d["status"] == "completed"
     assert (d["thresholds"]["min_swaps"], d["thresholds"]["min_swaps_pooled"], d["thresholds"]["min_doubles"]) == (10, 8, 12)
     assert [g["key"] for g in d["gates"]] == ["length_bias", "flip_rate", "position_bias", "juror_agreement", "anchor_drift", "parts_vs_whole", "score_clumping"]
@@ -229,7 +248,7 @@ def test_a_draft_reports_insufficient_data(env):
 
 
 # ── length bias ──────────────────────────────────────────────────────────────────────────────────
-def test_length_bias_pauses_and_needs_an_acknowledgement(env, gates):
+def test_length_bias_pauses_and_needs_an_acknowledgement(env, gates, length_gate):
     corpus(env.world)
     install(env, longer)
     tid = play(env)
@@ -281,7 +300,7 @@ def test_a_mild_length_correlation_only_warns(env, gates, monkeypatch):
 
 
 # ── flip rate ────────────────────────────────────────────────────────────────────────────────────
-def test_a_position_biased_family_is_dropped_and_never_used_again(env, gates, monkeypatch):
+def test_a_position_biased_family_is_dropped_and_never_used_again(env, gates, no_agreement_gate, monkeypatch):
     monkeypatch.setattr(tn, "SWAP_RATE", 1.0)
     corpus(env.world)
     install(env, gpt=position)  # the openai juror always answers "1"
@@ -302,7 +321,7 @@ def test_a_position_biased_family_is_dropped_and_never_used_again(env, gates, mo
     assert tn.tournament_out(t)["dropped_families"] == ["openai"]
 
 
-def test_fewer_than_two_families_left_pauses_the_jury_as_degraded(env, gates, monkeypatch):
+def test_fewer_than_two_families_left_pauses_the_jury_as_degraded(env, gates, no_agreement_gate, monkeypatch):
     monkeypatch.setattr(tn, "SWAP_RATE", 1.0)
     corpus(env.world)
     install(env, gpt=position, gem=position)
@@ -507,7 +526,7 @@ def test_api_is_a_404_while_off(env, monkeypatch):
         assert c.post(f"/api/eval/anchor-sets/{tid}/resume", json={}).status_code == 404
 
 
-def test_api_diagnostics_anchor_sets_roles_and_isolation(env, gates, monkeypatch):
+def test_api_diagnostics_anchor_sets_roles_and_isolation(env, gates, length_gate, monkeypatch):
     corpus(env.world)
     install(env, longer)
     tid = str(play(env))
@@ -579,7 +598,7 @@ def test_api_anchor_sets_and_ratings_shape(env, gates, monkeypatch):
         assert c.post(f"/api/eval/anchor-sets/{s['id']}/resume", json={}).status_code == 404
 
 
-def test_cli_parser_and_renderers(env, gates):
+def test_cli_parser_and_renderers(env, gates, length_gate):
     import argparse
 
     p = argparse.ArgumentParser()

@@ -50,7 +50,7 @@ existing install.
   jury; each later tournament of the module re-judges them first and pauses (`anchor_drift`) when more
   than 3 verdicts changed. Settings `TRET_EVAL_GATE_*` and `TRET_EVAL_ANCHOR_PAIRS`. Migration
   `c5d1a8f3e726` (`eval_anchor_sets`, three columns on `eval_tournaments`, anchor columns on
-  `eval_matches`, plus the `eval_anchor_runs` spend ledger). `GET .../ratings` pools also carry `pool_key`, `level`, `n`, `band_kind` and `rows`, and a `partial` flag. Only a tripped, blocking gate (`required_acknowledgements`) can be acknowledged, with a note; refit works for paused and cancelled tournaments; the tournament shows its frozen `jury`; the create preview reports `gate_coverage`.
+  `eval_matches`, plus the `eval_anchor_runs` spend ledger). `GET .../ratings` pools also carry `pool_key`, `level`, `n`, `band_kind` and `rows`, and a `partial` flag. Only a tripped, blocking gate (`required_acknowledgements`) can be acknowledged, with a note; refit works for paused and cancelled tournaments; the tournament shows its frozen `jury`; the create preview reports `gate_coverage` and the anchor matches; kappa is computed on oriented pairs and trips only with raw agreement below `TRET_EVAL_GATE_AGREEMENT_FLOOR`; a jury with no family left needs a fresh `jury_restore` acknowledgement.
 
 - **Tournament, Engine 1 of the disclosure evaluation engine (experimental, `TRET_EVAL_TOURNAMENT`,
   off by default; needs `TRET_EVAL_JURY`).** Report modules are compared in pairs, only against peers:

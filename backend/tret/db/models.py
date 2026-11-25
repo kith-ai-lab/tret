@@ -799,7 +799,12 @@ class EvalAnchorRun(Base):
     under-book a call (`tret/evaluation/anchors.py`)."""
 
     __tablename__ = "eval_anchor_runs"
-    __table_args__ = (Index("ix_eval_anchor_runs_set", "anchor_set_id"),)
+    __table_args__ = (
+        Index("ix_eval_anchor_runs_set", "anchor_set_id"),
+        # one vote per juror per pair: a second settled verdict for the same (set, pair, juror) is refused
+        Index("uq_eval_anchor_runs_vote", "anchor_set_id", "pair_index", "juror_index", unique=True,
+              postgresql_where=text("verdict IS NOT NULL"), sqlite_where=text("verdict IS NOT NULL")),
+    )
 
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     anchor_set_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("eval_anchor_sets.id", ondelete="CASCADE"), nullable=False)

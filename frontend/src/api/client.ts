@@ -3176,6 +3176,7 @@ export interface EvalTournamentDetail extends EvalTournament {
     cost_usd?: { low: number; high: number; expected?: number } | null
     jury?: { picks?: EvalJurySeat[]; [key: string]: unknown } | null
     gate_coverage?: Record<string, unknown>
+    anchor_set?: { id: string; pairs: number; matches: number } | null
     [key: string]: unknown
   } | null
   summary: Record<string, unknown> | null
@@ -3183,7 +3184,7 @@ export interface EvalTournamentDetail extends EvalTournament {
   dropped_families?: string[]
   acknowledged_gates?: Record<string, { by: string | null; at: string | null; note: string | null }>
   /** The frozen jury, after start. */
-  jury?: Array<{ index: number; family: string; model: string; dropped: boolean }>
+  jury?: Array<{ index: number; family: string | null; model: string; dropped: boolean }>
 }
 
 export interface EvalRatingRow {
@@ -3250,6 +3251,8 @@ export interface EvalGateThresholds {
   min_swaps?: number
   min_doubles?: number
   min_rated?: number
+  min_swaps_pooled?: number
+  agreement_floor?: number
 }
 
 export interface EvalGate {
@@ -3275,6 +3278,7 @@ export interface EvalDiagnostics {
   status: string
   computed_at: string | null
   thresholds: EvalGateThresholds
+  notes?: string[]
   gates: EvalGate[]
   length_bias: { overall: EvalLengthCorr | null; pools: Array<EvalLengthCorr & { pool_key: string }> } | null
   flip_rates: Array<{ family: string; swaps: number; flips: number; rate: number | null; dropped: boolean }>

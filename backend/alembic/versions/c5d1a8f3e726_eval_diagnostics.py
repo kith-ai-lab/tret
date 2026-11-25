@@ -74,6 +74,8 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=_now()),
     )
     op.create_index('ix_eval_anchor_runs_set', 'eval_anchor_runs', ['anchor_set_id'])
+    op.create_index('uq_eval_anchor_runs_vote', 'eval_anchor_runs', ['anchor_set_id', 'pair_index', 'juror_index'],
+                    unique=True, postgresql_where=sa.text('verdict IS NOT NULL'))
     op.alter_column('eval_matches', 'a_member_id', existing_type=_uuid(), nullable=True)
     op.alter_column('eval_matches', 'b_member_id', existing_type=_uuid(), nullable=True)
     op.add_column('eval_matches', sa.Column('anchor_set_id', _uuid(), sa.ForeignKey('eval_anchor_sets.id', ondelete='SET NULL'), nullable=True))
@@ -90,6 +92,7 @@ def downgrade() -> None:
     op.drop_column('eval_matches', 'anchor_set_id')
     op.alter_column('eval_matches', 'b_member_id', existing_type=_uuid(), nullable=False)
     op.alter_column('eval_matches', 'a_member_id', existing_type=_uuid(), nullable=False)
+    op.drop_index('uq_eval_anchor_runs_vote', table_name='eval_anchor_runs')
     op.drop_index('ix_eval_anchor_runs_set', table_name='eval_anchor_runs')
     op.drop_table('eval_anchor_runs')
     op.drop_index('ix_eval_anchor_sets_ws_module', table_name='eval_anchor_sets')

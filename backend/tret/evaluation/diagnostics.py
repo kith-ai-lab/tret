@@ -27,6 +27,7 @@ PROVISIONAL ratings: the Bradley-Terry fit over the matches done so far, never w
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -62,7 +63,7 @@ def thresholds() -> dict[str, Any]:
         "flip_drop": float(s.eval_gate_flip_drop), "kappa_pause": float(s.eval_gate_kappa_pause),
         "anchor_changes_pause": int(s.eval_gate_anchor_changes_pause), "min_swaps": int(s.eval_gate_min_swaps),
         "min_doubles": int(s.eval_gate_min_doubles), "min_rated": int(s.eval_gate_min_rated),
-        "min_swaps_pooled": int(s.eval_gate_min_swaps_pooled),
+        "min_swaps_pooled": int(s.eval_gate_min_swaps_pooled), "agreement_floor": float(s.eval_gate_agreement_floor),
     }
 
 
@@ -156,8 +157,20 @@ def _flip_block(matches: list[dict], dropped: list[str]) -> list[dict]:
     ]
 
 
+def orient(a_id: str, b_id: str, x: str, y: str) -> tuple[str, str]:
+    """Kappa's categories are balanced by flipping both verdicts of a pair (a <-> b) when a hash of the two
+    member ids is odd. Swiss pairing always makes the higher-scored member canonical `a`, so verdicts lean
+    `a`, and two raters who agree on "a" nearly every time would otherwise score kappa near 0 (the
+    prevalence paradox). A deterministic hash, never the verdict, picks the pairs to flip."""
+    if hashlib.sha256(f"{a_id}:{b_id}".encode()).digest()[0] & 1:
+        swap = {"a": "b", "b": "a", "tie": "tie"}
+        return swap[x], swap[y]
+    return x, y
+
+
 def _pooled_kappa(matches: list[dict]) -> dict[str, Any]:
-    """Kappa over every double-judged match: the original juror's verdict against the other family's."""
+    """Kappa over every double-judged match: the original juror's verdict against the other family's,
+    each pair oriented (`orient`) first. `raw_agreement` is the plain share that agree."""
     by = {m["id"]: m for m in matches}
     pairs = []
     for m in matches:
@@ -165,7 +178,7 @@ def _pooled_kappa(matches: list[dict]) -> dict[str, Any]:
             continue
         o = by.get(m["double_of"])
         if o is not None and o["status"] == "done" and o["verdict"] and (o["family"] or "?") != (m["family"] or "?"):
-            pairs.append((o["verdict"], m["verdict"]))
+            pairs.append(orient(o["a"], o["b"], o["verdict"], m["verdict"]))
     return {"n": len(pairs), "kappa": cohen_kappa(pairs),
             "raw_agreement": (sum(1 for x, y in pairs if x == y) / len(pairs)) if pairs else None}
 
@@ -182,10 +195,11 @@ def _agreement_block(matches: list[dict]) -> list[dict]:
         fo, fd = o["family"] or "?", m["family"] or "?"
         if fo == fd:
             continue
+        ov, dv = orient(o["a"], o["b"], o["verdict"], m["verdict"])
         if fo <= fd:
-            groups.setdefault((fo, fd), []).append((o["verdict"], m["verdict"]))
+            groups.setdefault((fo, fd), []).append((ov, dv))
         else:
-            groups.setdefault((fd, fo), []).append((m["verdict"], o["verdict"]))
+            groups.setdefault((fd, fo), []).append((dv, ov))
     return [
         {"family_a": a, "family_b": b, "n": len(v), "kappa": cohen_kappa(v),
          "raw_agreement": sum(1 for x, y in v if x == y) / len(v)}
@@ -263,10 +277,15 @@ def build_gates(
         gates["juror_agreement"] = {"state": "insufficient_data", "value": pooled["kappa"], "n": pooled["n"], "detail":
                                     f"{pooled['n']} double-judged match(es) with a defined kappa so far; the gate needs {th['min_doubles']}."}
     else:
+        raw = pooled.get("raw_agreement") or 0.0
+        low = pooled["kappa"] < th["kappa_pause"]
+        # a low kappa with the jurors mostly agreeing is the prevalence paradox, not a vague prompt: it only warns
+        state = "tripped" if low and raw < th["agreement_floor"] else ("warn" if low else "ok")
         gates["juror_agreement"] = {
-            "state": "tripped" if pooled["kappa"] < th["kappa_pause"] else "ok", "value": pooled["kappa"], "n": pooled["n"],
-            "detail": f"Pooled kappa {pooled['kappa']:.2f} over {pooled['n']} double-judged matches; "
-                      f"below {th['kappa_pause']} the module prompt is too vague."}
+            "state": state, "value": pooled["kappa"], "n": pooled["n"],
+            "detail": f"Pooled kappa {pooled['kappa']:.2f}, raw agreement {raw:.2f}, over {pooled['n']} double-judged matches; "
+                      f"it pauses when kappa is below {th['kappa_pause']} and agreement below {th['agreement_floor']} "
+                      "(the module prompt is too vague)."}
 
     if anchors is None or not anchors["judged"]:
         gates["anchor_drift"] = {"state": "insufficient_data", "value": None, "n": 0, "detail":
@@ -308,6 +327,9 @@ def compute_from_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     rows, _summary = _fit_inputs(inputs["members"], inputs["matches"], _now().isoformat())
     length = _length_block(rows)
     flips = _flip_block(inputs["matches"], inputs["dropped"])
+    after = inputs.get("flip_after_round")
+    # after the jury was restored the flip gates judge only what the restored jury did since
+    flips_gate = flips if after is None else _flip_block([m for m in inputs["matches"] if m["round"] > after], inputs["dropped"])
     agreement = _agreement_block(inputs["matches"])
     anchors = None
     if inputs.get("anchor_pairs") is not None:
@@ -315,8 +337,8 @@ def compute_from_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     pooled = _pooled_kappa(inputs["matches"])
     return {
         "thresholds": th, "length_bias": length, "flip_rates": flips, "agreement": agreement, "anchors": anchors,
-        "pooled_kappa": pooled,
-        "gates": build_gates(length, flips, agreement, anchors, th, inputs.get("acknowledged"), pooled),
+        "pooled_kappa": pooled, "flips_gate": flips_gate,
+        "gates": build_gates(length, flips_gate, agreement, anchors, th, inputs.get("acknowledged"), pooled),
     }
 
 
@@ -336,7 +358,7 @@ async def load_inputs(db: AsyncSession, tid: uuid.UUID) -> dict[str, Any]:
             anchor_matches.append({"anchor_index": m.anchor_index, "status": m.status, "verdict": m.verdict})
             continue
         matches.append({
-            "id": m.id, "pool_key": m.pool_key, "a": str(m.a_member_id), "b": str(m.b_member_id), "kind": m.kind,
+            "id": m.id, "pool_key": m.pool_key, "round": m.round, "a": str(m.a_member_id), "b": str(m.b_member_id), "kind": m.kind,
             "status": m.status, "verdict": m.verdict, "swap_of": m.swap_of, "double_of": m.double_of, "family": m.juror_family,
         })
     stored = dict(t.diagnostics or {})
@@ -345,6 +367,7 @@ async def load_inputs(db: AsyncSession, tid: uuid.UUID) -> dict[str, Any]:
         "dropped": list(t.dropped_families or []), "acknowledged": dict(t.acknowledged_gates or {}),
         "history": list(stored.get("history") or []), "thresholds": thresholds(),
         "anchor_set_id": stored.get("anchor_set_id"), "anchor_pairs": None, "notes": list(stored.get("notes") or []),
+        "flip_after_round": stored.get("restore_round"),
     }
     if stored.get("anchor_set_id"):
         aset = await db.get(EvalAnchorSet, uuid.UUID(stored["anchor_set_id"]))
@@ -355,9 +378,10 @@ async def load_inputs(db: AsyncSession, tid: uuid.UUID) -> dict[str, Any]:
 
 def history_entry(round_: int, block: dict[str, Any]) -> dict[str, Any]:
     flips = [f["rate"] for f in block["flip_rates"] if f["swaps"] >= block["thresholds"]["min_swaps"] and f["rate"] is not None]
-    kappas = [a["kappa"] for a in block["agreement"] if a["n"] >= block["thresholds"]["min_doubles"] and a["kappa"] is not None]
+    pooled = block.get("pooled_kappa") or {"n": 0, "kappa": None}  # the same pooled kappa the gate uses
+    kappa = pooled["kappa"] if pooled["n"] >= block["thresholds"]["min_doubles"] else None
     return {"round": round_, "length_spearman": block["length_bias"]["overall"]["spearman"],
-            "max_flip": max(flips) if flips else None, "min_kappa": min(kappas) if kappas else None,
+            "max_flip": max(flips) if flips else None, "min_kappa": kappa,
             "rated": block["length_bias"]["overall"]["n"]}
 
 

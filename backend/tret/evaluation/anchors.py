@@ -34,6 +34,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from tret.batches.rubrics import JUROR_KEY, STRUCTURED_CALL_KEY
@@ -229,6 +230,10 @@ class _Baseline:
             await db.commit()
         return res.rowcount == 1
 
+    async def _release(self, reason: str) -> None:
+        with contextlib.suppress(Exception):
+            await self._save(pause_reason=reason, lease_owner=None, lease_until=None)
+
     async def _heartbeat(self) -> None:
         """Keep the lease while the baseline plays, as the tournament runner does; losing it stops this runner."""
         while True:
@@ -253,8 +258,10 @@ class _Baseline:
                 select(EvalAnchorRun).where(EvalAnchorRun.anchor_set_id == self.sid, EvalAnchorRun.booked.is_(True))
             )).scalars())
         votes: dict[int, list[dict]] = {}
-        for r in rows:
-            if r.verdict:
+        seen: set[tuple[int, int]] = set()
+        for r in sorted(rows, key=lambda r: (tn._aware(r.created_at) or tn._now(), str(r.run_id))):
+            if r.verdict and (r.pair_index, r.juror_index) not in seen:  # one vote per juror per pair: the first booked
+                seen.add((r.pair_index, r.juror_index))
                 votes.setdefault(r.pair_index, []).append({
                     "juror_index": r.juror_index, "family": r.family, "model": r.model, "verdict": r.verdict,
                     "strength": r.strength, "run_id": str(r.run_id), "cost_usd": float(r.cost_usd or 0)})
@@ -271,11 +278,13 @@ class _Baseline:
             )).scalars())
             for r in rows:
                 run = await db.get(Run, r.run_id)
-                if run is not None and run.status in ("queued", "running"):
+                if run is None:
+                    continue  # cost unknown: never settle a guess, leave it for the next recovery
+                if run.status in ("queued", "running"):
                     created = tn._aware(run.created_at)
                     if created is None or (tn._now() - created).total_seconds() < tn.RUN_STALE_SECONDS:
                         continue  # in flight somewhere: its settlement will come
-                cost = Decimal(run.reported_cost_usd if run is not None and run.reported_cost_usd is not None else ((run.cost_usd or 0) if run is not None else 0))
+                cost = Decimal(run.reported_cost_usd if run.reported_cost_usd is not None else (run.cost_usd or 0))
                 await db.execute(
                     update(EvalAnchorRun).where(EvalAnchorRun.run_id == r.run_id, EvalAnchorRun.booked.is_(False))
                     .values(booked=True, cost_usd=cost, error="unsettled run recovered by a takeover")
@@ -344,6 +353,10 @@ class _Baseline:
         beat = asyncio.create_task(self._heartbeat())
         try:
             await self._play(pairs, budget)
+        except asyncio.CancelledError:
+            # cancelled (shutdown, a replacing task): give the lease back at once, so a resume does not wait it out
+            await asyncio.shield(self._release("interrupted"))
+            raise
         finally:
             beat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -430,7 +443,7 @@ class _Baseline:
             t1, t2 = (ta, tb) if shown_a_first else (tb, ta)
             run_id = uuid.uuid4()
             out: dict[str, Any] = {"juror_index": idx, "model": pick.model, "verdict": None, "strength": None,
-                                   "cost": Decimal(0), "outage": None, "error": None}
+                                   "cost": Decimal(0), "cost_known": False, "outage": None, "error": None}
             try:
                 async with self.factory() as db:
                     db.add(Run(
@@ -450,6 +463,7 @@ class _Baseline:
                 async with self.factory() as db:
                     run = (await db.execute(select(Run).where(Run.id == run_id).execution_options(populate_existing=True))).scalar_one()
                     out["cost"] = Decimal(run.reported_cost_usd if run.reported_cost_usd is not None else (run.cost_usd or 0))
+                    out["cost_known"] = True  # the run was read: only now can its row be settled
                     if run.status != "completed":
                         if run.started_at is None:
                             out["outage"] = "credits"
@@ -468,14 +482,30 @@ class _Baseline:
             except Exception as e:  # noqa: BLE001 - a transient database or provider error, not the jury's verdict
                 log.warning("anchor set %s pair %s: %s", self.sid, p["index"], e, exc_info=True)
                 out["error"] = f"{type(e).__name__}: {e}"
-            async with self.factory() as db:  # settle the ledger row exactly once
-                await db.execute(
-                    update(EvalAnchorRun).where(EvalAnchorRun.run_id == run_id, EvalAnchorRun.booked.is_(False))
-                    .values(booked=True, cost_usd=out["cost"], verdict=out["verdict"], strength=out["strength"],
-                            error=(out["error"] or None) and out["error"][:500])
-                )
-                await db.commit()
+            if not out.get("cost_known"):
+                # the run could not be read (a database or provider error between the call and here): its cost is
+                # unknown, so the row stays unbooked and the next takeover books the run's real cost from the run
+                out["verdict"] = None
+                return out
+            vals = dict(booked=True, cost_usd=out["cost"], verdict=out["verdict"], strength=out["strength"],
+                        error=(out["error"] or None) and out["error"][:500])
+            try:
+                await self._settle(run_id, vals)
+            except IntegrityError:  # another booked vote of this juror on this pair exists: book the cost, not a second vote
+                vals.update(verdict=None, strength=None, error="duplicate vote ignored")
+                out["verdict"] = None
+                await self._settle(run_id, vals)
             return out
+
+    async def _settle(self, run_id: uuid.UUID, vals: dict[str, Any]) -> None:
+        """Settle a ledger row exactly once (the update is conditional on the row still being unbooked)."""
+        async with self.factory() as db:
+            try:
+                await db.execute(update(EvalAnchorRun).where(EvalAnchorRun.run_id == run_id, EvalAnchorRun.booked.is_(False)).values(**vals))
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                raise
 
 
 async def run_baseline(set_id: uuid.UUID, owner: str) -> None:

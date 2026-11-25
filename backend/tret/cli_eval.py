@@ -163,7 +163,8 @@ def render_preview(t: dict) -> str:
     lines = [
         f"Tournament {t['id']} (draft, nothing spent): module {t['module']} of {t['module_set']}, "
         f"{est['n']} modules in {len(est['pools'])} pool(s), up to {est['rounds']} round(s).",
-        f"Estimated matches: {m['total']} ({m['primary']} primary + {m['swap']} swaps + {m['double']} doubles).",
+        f"Estimated matches: {m['total']} ({m['primary']} primary + {m['swap']} swaps + {m['double']} doubles"
+        + (f" + {m['anchor']} anchors of set {est['anchor_set']['id']}" if est.get("anchor_set") else "") + ").",
         "Estimated cost: " + (f"${cost['low']:.2f} to ${cost['high']:.2f} (expected ${cost['expected']:.2f})" if cost else "unknown (a juror is not priced)")
         + f"; {est['method']}.",
         "",

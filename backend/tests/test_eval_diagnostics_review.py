@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 
+import pytest
+
 from sqlalchemy import select
 
 from tests.test_batches_core import world  # noqa: F401 - fixture
@@ -20,7 +22,9 @@ from tests.test_eval_diagnostics import (  # noqa: F401 - fixtures and helpers
     fetch,
     gate_map,
     gates,
+    length_gate,
     get_set,
+    no_agreement_gate,
     install,
     longer,
     make_set,
@@ -36,34 +40,57 @@ from tret.evaluation import tournament as tn
 
 
 # ── B: dead ends ──────────────────────────────────────────────────────────────────────────────────
-def test_every_family_dropped_then_an_acknowledged_resume_restores_the_jury(env, gates, monkeypatch):
+def test_every_family_dropped_then_a_fresh_jury_restore_acknowledgement_seats_the_jury_again(env, gates, no_agreement_gate, monkeypatch):
     monkeypatch.setattr(tn, "SWAP_RATE", 1.0)
     corpus(env.world)
     install(env, gpt=position, gem=position, llama=position)
     tid = play(env)
     t, matches, _r = state(env, tid)
     assert t.status == "paused" and t.pause_reason == "jury_degraded" and set(t.dropped_families) == {"openai", "google", "meta"}
-    resume(env, tid, acknowledge_gates=["flip_rate"], note="no better jury available")
+    assert tn.required_gates(t) == ["jury_restore"]  # not flip_rate: none is left, a different situation
+    with pytest.raises(tn.TournamentError) as e:
+        resume(env, tid, acknowledge_gates=["flip_rate"], note="x")
+    assert e.value.status == 422
+    with pytest.raises(tn.TournamentError) as e:
+        resume(env, tid)
+    assert e.value.status == 409 and "jury_restore" in str(e.value)
+    resume(env, tid, acknowledge_gates=["jury_restore"], note="no better jury available", acknowledged_by="boss@example.com")
     t, matches, _r = state(env, tid)
-    assert t.dropped_families == [] and any(n.startswith("jury restored") for n in t.diagnostics["notes"])
-    assert t.diagnostics["jury_restored"] is True
-    # the pooled position-bias gate sees the bias of the restored jury and asks for its own acknowledgement
-    assert t.status == "paused" and t.pause_reason == "position_bias" and tn.required_gates(t) == ["position_bias"]
-    seen = {t.pause_reason}
-    for _ in range(4):  # the positional jurors also disagree with each other: each gate is acknowledged on its own
-        req = tn.required_gates(t)
-        if t.status != "paused" or not req:
-            break
-        resume(env, tid, acknowledge_gates=req, note="all jurors are positional on this corpus")
-        t = state(env, tid)[0]
-        seen.add(t.pause_reason)
-    assert {"position_bias"} <= seen
-    t, matches, ratings = state(env, tid)
-    assert t.status == "completed" and len(ratings) == 14 and t.dropped_families == []  # not dropped again once restored
-    assert {m.juror_family for m in matches if m.round >= 2} == {"openai", "google", "meta"}  # the original jurors sit again
+    # the restored jurors played round 2, flip drops stayed on: all dropped again, and the acknowledgement was used up
+    assert {m.juror_family for m in matches if m.round == 2} == {"openai", "google", "meta"}
+    assert t.status == "paused" and t.pause_reason == "jury_degraded" and set(t.dropped_families) == {"openai", "google", "meta"}
+    assert "jury_restore" not in t.acknowledged_gates and tn.required_gates(t) == ["jury_restore"]
+    assert t.diagnostics["restores"] == 1 and any(n.startswith("jury restored (#1) after round 1") and "boss@example.com" in n for n in t.diagnostics["notes"])
+    with pytest.raises(tn.TournamentError) as e:  # the old acknowledgement does not carry over
+        resume(env, tid)
+    assert e.value.status == 409
 
 
-def test_refit_works_for_paused_and_cancelled_tournaments_as_partial(env, gates):
+def test_an_old_flip_rate_acknowledgement_never_restores_the_jury(env, gates, no_agreement_gate, monkeypatch):
+    """X and Y are dropped (pause, one family left), flip_rate is acknowledged, Z is dropped too: a plain resume must not restore."""
+    monkeypatch.setattr(tn, "SWAP_RATE", 1.0)
+    corpus(env.world)
+    from tests.test_eval_diagnostics import by_strength
+
+    z_positional = {"on": False}
+    install(env, gpt=position, gem=position, llama=lambda prompt: position(prompt) if z_positional["on"] else by_strength(prompt))
+    tid = play(env)
+    t = state(env, tid)[0]
+    assert t.pause_reason == "jury_degraded" and set(t.dropped_families) == {"openai", "google"} and tn.required_gates(t) == ["flip_rate"]
+    z_positional["on"] = True
+    resume(env, tid, acknowledge_gates=["flip_rate"], note="continue on the one that is left")
+    t, matches, _r = state(env, tid)
+    assert t.status == "paused" and t.pause_reason == "jury_degraded" and set(t.dropped_families) == {"openai", "google", "meta"}
+    assert "flip_rate" in t.acknowledged_gates  # the old acknowledgement is still on record ...
+    assert tn.required_gates(t) == ["jury_restore"]  # ... and is not what is asked for now
+    with pytest.raises(tn.TournamentError) as e:
+        resume(env, tid)
+    assert e.value.status == 409 and "jury_restore" in str(e.value)
+    assert fetch(env.world, lambda db: db.get(EvalTournament, tid)).status == "paused"
+    assert fetch(env.world, lambda db: db.get(EvalTournament, tid)).dropped_families  # nothing was restored
+
+
+def test_refit_works_for_paused_and_cancelled_tournaments_as_partial(env, gates, length_gate):
     corpus(env.world)
     install(env, longer)
     tid = play(env)
@@ -93,7 +120,7 @@ def test_refit_works_for_paused_and_cancelled_tournaments_as_partial(env, gates)
 
 
 # ── C: gates at realistic sizes ──────────────────────────────────────────────────────────────────
-def test_the_pooled_position_bias_gate_fires_without_per_family_samples(env, gates, monkeypatch):
+def test_the_pooled_position_bias_gate_fires_without_per_family_samples(env, gates, no_agreement_gate, monkeypatch):
     monkeypatch.setattr(tn, "SWAP_RATE", 1.0)
     monkeypatch.setattr(get_settings(), "eval_gate_min_swaps", 50)  # no family reaches it: only the pooled gate can fire
     corpus(env.world)
@@ -249,7 +276,7 @@ def test_the_baseline_heartbeat_keeps_the_lease_and_stops_when_it_is_lost(env, g
 
 
 # ── E: the anchor phase on a resume ──────────────────────────────────────────────────────────────
-def test_the_anchor_phase_on_a_resume_only_replaces_its_own_gate(env, gates, monkeypatch):
+def test_the_anchor_phase_on_a_resume_only_replaces_its_own_gate(env, gates, length_gate, monkeypatch):
     corpus(env.world)
     first = play(env)
     make_set(env, first)
@@ -281,7 +308,7 @@ def test_the_anchor_phase_on_a_resume_only_replaces_its_own_gate(env, gates, mon
 
 
 # ── G: stored diagnostics ────────────────────────────────────────────────────────────────────────
-def test_diagnostics_are_served_from_the_stored_block_and_cached_when_completed(env, gates, monkeypatch):
+def test_diagnostics_are_served_from_the_stored_block_and_cached_when_completed(env, gates, length_gate, monkeypatch):
     corpus(env.world)
     install(env, longer)
     tid = play(env)  # paused after a round, with a stored block
