@@ -235,7 +235,7 @@ def test_only_an_internal_error_fails_a_tournament(env, monkeypatch):
     assert t.status == "failed" and "RuntimeError" in t.pause_reason and t.lease_owner is None
 
 
-def test_refit_works_for_failed_and_completed_not_for_others(env):
+def test_refit_works_for_finished_and_unfinished_not_for_running_or_draft(env):
     corpus(env.world)
     tid = play(env)
 
@@ -252,7 +252,10 @@ def test_refit_works_for_failed_and_completed_not_for_others(env):
     assert asyncio.run(refit()).status == "completed"
     asyncio.run(set_status("failed"))
     assert asyncio.run(refit()).status == "failed" and len(env.juror.calls) == calls  # no spend
-    asyncio.run(set_status("paused"))
+    asyncio.run(set_status("paused"))  # PR 7: an unfinished tournament is refitted too, as partial
+    t = asyncio.run(refit())
+    assert t.status == "paused" and t.summary["partial"] is True and len(env.juror.calls) == calls
+    asyncio.run(set_status("running"))
     with pytest.raises(tn.TournamentError) as e:
         asyncio.run(refit())
     assert e.value.status == 409

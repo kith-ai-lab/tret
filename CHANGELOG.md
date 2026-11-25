@@ -37,6 +37,21 @@ existing install.
 
 ### Added
 
+- **Engine 1 diagnostics and pause gates** (disclosure evaluation engine, PR 7), behind
+  `TRET_EVAL_TOURNAMENT`. Every tournament computes the day-1 gates after each round: rating vs word
+  count (Pearson and Spearman, per pool and overall, claim density alongside; warn above 0.4, pause
+  above 0.6), the position-flip rate per juror family (a family above 0.15 is dropped from the jury;
+  fewer than two left pauses as `jury_degraded`), Cohen's kappa between families on the double-judged
+  sample (below 0.3 pauses as `low_agreement`), a pooled position-bias gate (`position_bias`) and judge drift. `GET /api/eval/tournaments/{id}/diagnostics`
+  and `tret eval tournament diagnostics ID` show them; `resume` takes `acknowledge_gates` and `note`
+  (`--acknowledge`, `--note`), and resuming past an unacknowledged tripped gate is a 409. Anchor sets
+  (`POST /api/eval/tournaments/{id}/anchor-set`, `GET/POST /api/eval/anchor-sets`, `tret eval anchors
+  create|list|resume`) fix 20 pairs of a completed tournament with a majority baseline from a frozen
+  jury; each later tournament of the module re-judges them first and pauses (`anchor_drift`) when more
+  than 3 verdicts changed. Settings `TRET_EVAL_GATE_*` and `TRET_EVAL_ANCHOR_PAIRS`. Migration
+  `c5d1a8f3e726` (`eval_anchor_sets`, three columns on `eval_tournaments`, anchor columns on
+  `eval_matches`, plus the `eval_anchor_runs` spend ledger). `GET .../ratings` pools also carry `pool_key`, `level`, `n`, `band_kind` and `rows`, and a `partial` flag. Only a tripped, blocking gate (`required_acknowledgements`) can be acknowledged, with a note; refit works for paused and cancelled tournaments; the tournament shows its frozen `jury`; the create preview reports `gate_coverage`.
+
 - **Tournament, Engine 1 of the disclosure evaluation engine (experimental, `TRET_EVAL_TOURNAMENT`,
   off by default; needs `TRET_EVAL_JURY`).** Report modules are compared in pairs, only against peers:
   a peer-pool snapshot cuts pools on the NACE ladder (division, then cluster, then section when a

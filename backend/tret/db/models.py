@@ -741,6 +741,13 @@ class EvalTournament(Base):
     seed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     estimates: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Day-1 diagnostics (`tret/evaluation/diagnostics.py`): the gates as of the last finished round,
+    # the per-round history and the anchor set this pass used. `dropped_families` are juror
+    # families taken off the jury for the rest of the pass (flip rate); `acknowledged_gates` maps
+    # a gate key to {by, at, note}: an acknowledged gate does not pause this tournament again.
+    diagnostics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    dropped_families: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    acknowledged_gates: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     lease_owner: Mapped[str | None] = mapped_column(Text)
     lease_until: Mapped[datetime | None] = mapped_column()
     created_by: Mapped[str | None] = mapped_column(Text)
@@ -750,10 +757,69 @@ class EvalTournament(Base):
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class EvalAnchorSet(Base):
+    """Fixed anchor pairs for the judge-drift gate (`tret/evaluation/anchors.py`): pairs judged
+    once by a frozen jury (the baseline) and re-judged at the start of every later tournament of the
+    same module. A pair names its two texts by blob key + sha256 (never by pool member: snapshots
+    differ between passes) and copies the masking names. `status`: baseline_pending (judging not
+    finished: budget or juror trouble; `resume` continues) | ready | failed (too few usable pairs). The baseline is booked to this
+    row's own spend, never to a tournament. `lease_*` is the baseline runner's lease."""
+
+    __tablename__ = "eval_anchor_sets"
+    __table_args__ = (Index("ix_eval_anchor_sets_ws_module", "workspace_id", "module", "module_set"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    module: Mapped[str] = mapped_column(Text, nullable=False)
+    module_set: Mapped[str] = mapped_column(Text, nullable=False)
+    source_tournament_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("eval_tournaments.id", ondelete="SET NULL")
+    )
+    module_def: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    judge_prompt_version: Mapped[str | None] = mapped_column(Text)
+    freeze_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("routing_freezes.id", ondelete="SET NULL"))
+    pairs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="baseline_pending")
+    pause_reason: Mapped[str | None] = mapped_column(Text)
+    budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    spent_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    lease_owner: Mapped[str | None] = mapped_column(Text)
+    lease_until: Mapped[datetime | None] = mapped_column()
+    created_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class EvalAnchorRun(Base):
+    """The ledger of an anchor set's baseline runs, one row per run id: written before the call (so a crash
+    leaves a trace), settled once after it with the cost and the verdict. The set's `spent_usd` and the
+    votes of its pairs are derived from the settled rows, so a crash or a takeover can neither double- nor
+    under-book a call (`tret/evaluation/anchors.py`)."""
+
+    __tablename__ = "eval_anchor_runs"
+    __table_args__ = (Index("ix_eval_anchor_runs_set", "anchor_set_id"),)
+
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    anchor_set_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("eval_anchor_sets.id", ondelete="CASCADE"), nullable=False)
+    pair_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    juror_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    family: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(Text)
+    verdict: Mapped[str | None] = mapped_column(Text)
+    strength: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    booked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = created_at_col()
+
+
 class EvalMatch(Base):
     """One juror judgement of two pool members. `a` and `b` are the canonical sides;
     `shown_a_first` is the order the juror saw them in. `kind`: primary | swap (same juror, the
-    other order, for the flip rate) | double (another family judges the same pair). Its `Run`
+    other order, for the flip rate) | double (another family judges the same pair) | anchor (a pair of
+    the anchor set, round 0, for the judge-drift gate; never rated or paired). Its `Run`
     carries the juror marker, so it never becomes router evidence. `status`: pending | running (claimed by
     one runner, `claimed_by`) | done | failed; a failed match does not count. `mask_count_a/b` = how many
     identity strings were masked in each text, for auditing the masking."""
@@ -761,6 +827,7 @@ class EvalMatch(Base):
     __tablename__ = "eval_matches"
     __table_args__ = (
         UniqueConstraint("tournament_id", "round", "a_member_id", "b_member_id", "kind", "juror_index"),
+        UniqueConstraint("tournament_id", "anchor_set_id", "anchor_index", "juror_index"),
         Index("ix_eval_matches_tournament_status", "tournament_id", "status"),
         Index("ix_eval_matches_a_member", "a_member_id"),
         Index("ix_eval_matches_b_member", "b_member_id"),
@@ -772,12 +839,15 @@ class EvalMatch(Base):
     )
     pool_key: Mapped[str] = mapped_column(Text, nullable=False)
     round: Mapped[int] = mapped_column(Integer, nullable=False)
-    a_member_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("peer_pool_members.id", ondelete="CASCADE"), nullable=False
+    # NULL for an `anchor` match: its texts are the anchor pair's (anchor_set_id, anchor_index)
+    a_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("peer_pool_members.id", ondelete="CASCADE"), nullable=True
     )
-    b_member_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("peer_pool_members.id", ondelete="CASCADE"), nullable=False
+    b_member_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("peer_pool_members.id", ondelete="CASCADE"), nullable=True
     )
+    anchor_set_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("eval_anchor_sets.id", ondelete="SET NULL"))
+    anchor_index: Mapped[int | None] = mapped_column(Integer)
     shown_a_first: Mapped[bool] = mapped_column(Boolean, nullable=False)
     juror_index: Mapped[int] = mapped_column(Integer, nullable=False)
     juror_family: Mapped[str | None] = mapped_column(Text)

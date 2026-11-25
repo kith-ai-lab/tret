@@ -56,6 +56,43 @@
         "title": "AdviceBody",
         "type": "object"
       },
+      "AnchorIn": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_usd": {
+            "description": "The most the baseline judging of the anchor set may spend",
+            "exclusiveMinimum": 0.0,
+            "maximum": 100000.0,
+            "title": "Budget Usd",
+            "type": "number"
+          }
+        },
+        "required": [
+          "budget_usd"
+        ],
+        "title": "AnchorIn",
+        "type": "object"
+      },
+      "AnchorResumeIn": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          }
+        },
+        "title": "AnchorResumeIn",
+        "type": "object"
+      },
       "ApprovalBody": {
         "additionalProperties": false,
         "properties": {
@@ -2093,6 +2130,22 @@
       "ResumeIn": {
         "additionalProperties": false,
         "properties": {
+          "acknowledge_gates": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tripped gates the approver has looked at; they will not pause this tournament again",
+            "title": "Acknowledge Gates"
+          },
           "budget_usd": {
             "anyOf": [
               {
@@ -2105,6 +2158,18 @@
               }
             ],
             "title": "Budget Usd"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
           }
         },
         "title": "ResumeIn",
@@ -8859,6 +8924,148 @@
         ]
       }
     },
+    "/api/eval/anchor-sets": {
+      "get": {
+        "operationId": "list_anchor_sets_api_eval_anchor_sets_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Anchor Sets",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
+    "/api/eval/anchor-sets/{set_id}": {
+      "get": {
+        "operationId": "read_anchor_set_api_eval_anchor_sets__set_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Set Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Anchor Set",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
+    "/api/eval/anchor-sets/{set_id}/resume": {
+      "post": {
+        "operationId": "resume_anchor_set_api_eval_anchor_sets__set_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Set Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AnchorResumeIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume Anchor Set",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
     "/api/eval/jury/freezes": {
       "post": {
         "operationId": "create_freeze_api_eval_jury_freezes_post",
@@ -9179,6 +9386,57 @@
         ]
       }
     },
+    "/api/eval/tournaments/{tournament_id}/anchor-set": {
+      "post": {
+        "operationId": "create_anchor_set_api_eval_tournaments__tournament_id__anchor_set_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tournament Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnchorIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Anchor Set",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
     "/api/eval/tournaments/{tournament_id}/cancel": {
       "post": {
         "operationId": "cancel_api_eval_tournaments__tournament_id__cancel_post",
@@ -9215,6 +9473,47 @@
           }
         },
         "summary": "Cancel",
+        "tags": [
+          "eval-tournaments"
+        ]
+      }
+    },
+    "/api/eval/tournaments/{tournament_id}/diagnostics": {
+      "get": {
+        "operationId": "diagnostics_api_eval_tournaments__tournament_id__diagnostics_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tournament_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tournament Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Diagnostics",
         "tags": [
           "eval-tournaments"
         ]
@@ -9281,7 +9580,7 @@
             "schema": {
               "anyOf": [
                 {
-                  "pattern": "^(primary|swap|double)$",
+                  "pattern": "^(primary|swap|double|anchor)$",
                   "type": "string"
                 },
                 {

@@ -366,6 +366,20 @@ class Settings(BaseSettings):
     # network; the process is small, so keep it low).
     eval_tournament: Literal["off", "on"] = "off"
     eval_tournament_concurrency: int = Field(default=2, ge=1, le=4)
+    # Day-1 diagnostics of a tournament (evaluation/diagnostics.py); all live behind `eval_tournament`.
+    # A gate that trips pauses the pass (a bad judge stops before it spends the whole budget); the
+    # flip-rate gate drops the family instead. Minimums are the sample sizes below which a gate
+    # reports `insufficient_data`.
+    eval_gate_length_r_warn: float = Field(default=0.4, ge=0, le=1)  # |Spearman| rating vs word count: warn above
+    eval_gate_length_r_pause: float = Field(default=0.6, ge=0, le=1)  # ... pause above
+    eval_gate_flip_drop: float = Field(default=0.15, ge=0, le=1)  # a family whose swapped re-judgements flip more often is dropped
+    eval_gate_kappa_pause: float = Field(default=0.3, ge=-1, le=1)  # Cohen's kappa between families below this pauses
+    eval_gate_anchor_changes_pause: int = Field(default=3, ge=0)  # more anchor verdicts changed than this pauses
+    eval_gate_min_swaps: int = Field(default=10, ge=1)  # swapped matches per family before its flip rate counts (drops the family)
+    eval_gate_min_swaps_pooled: int = Field(default=8, ge=1)  # swapped matches over the whole jury before the position-bias gate counts
+    eval_gate_min_doubles: int = Field(default=12, ge=1)  # double-judged matches (pooled) before kappa counts
+    eval_gate_min_rated: int = Field(default=30, ge=3)  # rated modules before the length correlation counts
+    eval_anchor_pairs: int = Field(default=20, ge=4, le=100)  # pairs in an anchor set
     # Path of a YAML module-set file (see tret/evaluation/modules.py). Empty (default):
     # the module set shipped in the package (modules-v0.1.yaml).
     disclosure_module_set: str = ""

@@ -3124,6 +3124,182 @@ export interface ReviewDetail extends MarketplacePackVersion {
   diff_against_previous_listed: MarketplaceDiff
 }
 
+// ── Evaluation (Engine 1 tournaments, staff) ─────────────────────────────
+
+export type EvalTournamentStatus = 'draft' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
+export type EvalGateState = 'ok' | 'warn' | 'tripped' | 'insufficient_data' | 'not_applicable'
+
+export interface EvalGateSummary {
+  key: string
+  state: EvalGateState
+}
+
+export interface EvalPoolPlan {
+  key: string
+  level?: string | null
+  n: number
+  rounds?: number
+  primary_matches?: number
+}
+
+export interface EvalTournament {
+  id: string
+  module: string
+  module_set: string | null
+  status: EvalTournamentStatus | string
+  pause_reason: string | null
+  rounds: number
+  current_round: number
+  budget_usd: number | null
+  spent_usd: number
+  stalled?: boolean
+  created_at: string | null
+  started_at?: string | null
+  gates?: EvalGateSummary[]
+  dropped_families?: string[]
+  /** Gates that must be ticked to resume (exactly these, no more). */
+  required_acknowledgements?: string[]
+}
+
+export interface EvalJurySeat {
+  family?: string
+  model?: string
+  [key: string]: unknown
+}
+
+export interface EvalTournamentDetail extends EvalTournament {
+  pools: EvalPoolPlan[]
+  estimates: {
+    n?: number
+    rounds?: number
+    matches?: { primary?: number; swap?: number; double?: number; total?: number }
+    cost_usd?: { low: number; high: number; expected?: number } | null
+    jury?: { picks?: EvalJurySeat[]; [key: string]: unknown } | null
+    gate_coverage?: Record<string, unknown>
+    [key: string]: unknown
+  } | null
+  summary: Record<string, unknown> | null
+  gates?: EvalGateSummary[]
+  dropped_families?: string[]
+  acknowledged_gates?: Record<string, { by: string | null; at: string | null; note: string | null }>
+  /** The frozen jury, after start. */
+  jury?: Array<{ index: number; family: string; model: string; dropped: boolean }>
+}
+
+export interface EvalRatingRow {
+  member_id: string
+  company?: string | null
+  label?: string | null
+  rating: number | null
+  se?: number | null
+  lo90?: number | null
+  hi90?: number | null
+  matches?: number | null
+  wins?: number | null
+  band_kind?: string | null
+  band?: number | string | null
+  word_count?: number | null
+  claim_density?: number | null
+}
+
+export interface EvalRatingPool {
+  key: string
+  level?: string | null
+  n?: number
+  band_kind?: string | null
+  ratings: EvalRatingRow[]
+}
+
+export interface EvalRatings {
+  tournament_id: string
+  status: string
+  partial?: boolean
+  pools: EvalRatingPool[]
+}
+
+export interface EvalMatch {
+  id: string
+  pool_key: string
+  round: number
+  kind: 'primary' | 'swap' | 'double' | 'anchor' | string
+  a: string | null
+  b: string | null
+  juror_family: string | null
+  juror_model: string | null
+  verdict: string | null
+  strength: number | string | null
+  rationale: string | null
+  status: string
+  error?: string | null
+  cost_usd: number
+}
+
+export interface EvalMatchPage {
+  total: number
+  limit: number
+  offset: number
+  matches: EvalMatch[]
+}
+
+export interface EvalGateThresholds {
+  length_r_warn?: number
+  length_r_pause?: number
+  flip_drop?: number
+  kappa_pause?: number
+  anchor_changes_pause?: number
+  min_swaps?: number
+  min_doubles?: number
+  min_rated?: number
+}
+
+export interface EvalGate {
+  key: string
+  state: EvalGateState
+  value: number | null
+  n: number
+  detail: string
+  acknowledged_by: string | null
+  acknowledged_at: string | null
+}
+
+export interface EvalLengthCorr {
+  n: number
+  pearson: number | null
+  spearman: number | null
+  pearson_density: number | null
+  spearman_density: number | null
+}
+
+export interface EvalDiagnostics {
+  tournament_id: string
+  status: string
+  computed_at: string | null
+  thresholds: EvalGateThresholds
+  gates: EvalGate[]
+  length_bias: { overall: EvalLengthCorr | null; pools: Array<EvalLengthCorr & { pool_key: string }> } | null
+  flip_rates: Array<{ family: string; swaps: number; flips: number; rate: number | null; dropped: boolean }>
+  agreement: Array<{ family_a: string; family_b: string; n: number; kappa: number | null; raw_agreement: number | null }>
+  anchors: null | {
+    anchor_set_id: string
+    n: number
+    judged: number
+    changed: number
+    items: Array<{ index: number; baseline: string | null; current: string | null; changed: boolean }>
+  }
+  history: Array<{
+    round: number
+    length_spearman: number | null
+    max_flip: number | null
+    min_kappa: number | null
+    rated: number | null
+  }>
+}
+
+export interface EvalAnchorSet {
+  id: string
+  [key: string]: unknown
+}
+
 // ── Fetch wrapper ────────────────────────────────────────────────────────
 
 export class ApiError extends Error {
@@ -4904,6 +5080,29 @@ export const api = {
     request<EmissionsSettingsResponse>('/workspace/settings/emissions', { method: 'DELETE' }),
   emissionsWhatif: (body: EmissionsWhatifBody) =>
     request<EmissionsWhatifResult>('/analytics/emissions/whatif', { method: 'POST', body }),
+
+  // Evaluation (Engine 1 tournaments). The whole /eval/tournaments surface 404s
+  // while the feature setting is off; the page and nav item are gated on that.
+  evalTournaments: () => request<{ tournaments: EvalTournament[] }>('/eval/tournaments'),
+  evalTournament: (id: string) => request<EvalTournamentDetail>(`/eval/tournaments/${id}`),
+  evalRatings: (id: string) => request<EvalRatings>(`/eval/tournaments/${id}/ratings`),
+  evalMatches: (id: string, params: { status?: string; limit?: number; offset?: number } = {}) => {
+    const q = new URLSearchParams()
+    if (params.status) q.set('status', params.status)
+    q.set('limit', String(params.limit ?? 50))
+    q.set('offset', String(params.offset ?? 0))
+    return request<EvalMatchPage>(`/eval/tournaments/${id}/matches?${q.toString()}`)
+  },
+  evalDiagnostics: (id: string) => request<EvalDiagnostics>(`/eval/tournaments/${id}/diagnostics`),
+  evalStart: (id: string, budget_usd: number) =>
+    request<EvalTournamentDetail>(`/eval/tournaments/${id}/start`, { method: 'POST', body: { budget_usd } }),
+  evalCancel: (id: string) => request<EvalTournamentDetail>(`/eval/tournaments/${id}/cancel`, { method: 'POST' }),
+  evalResume: (id: string, body: { budget_usd?: number; acknowledge_gates?: string[]; note?: string }) =>
+    request<EvalTournamentDetail>(`/eval/tournaments/${id}/resume`, { method: 'POST', body }),
+  evalRefit: (id: string) => request<EvalTournamentDetail>(`/eval/tournaments/${id}/refit`, { method: 'POST' }),
+  evalAnchorSets: () => request<unknown>('/eval/anchor-sets'),
+  evalCreateAnchorSet: (id: string, budget_usd: number) =>
+    request<unknown>(`/eval/tournaments/${id}/anchor-set`, { method: 'POST', body: { budget_usd } }),
 }
 
 // ── workspace spend budgets (Settings → Spend budget) ───────────────────────

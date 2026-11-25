@@ -134,6 +134,7 @@ function Sidebar({
           </NavLink>
         ))}
         {edition !== 'cohort' && <MarketplaceReviewNavItem />}
+        {edition !== 'cohort' && <EvaluationNavItem />}
       </nav>
       {!LIGHT_ONLY && (
         <button
@@ -207,6 +208,14 @@ function MarketplaceReviewNavItem() {
   const probeQuery = useQuery({ queryKey: ['review-queue'], queryFn: api.reviewQueue, retry: false })
   if (!probeQuery.isSuccess) return null
   return <NavLink to="/marketplace-review">Marketplace review</NavLink>
+}
+
+/** The Evaluation nav item exists only where `GET /api/eval/tournaments`
+ *  succeeds (it 404s while the evaluation feature setting is off). */
+function EvaluationNavItem() {
+  const probeQuery = useQuery({ queryKey: ['eval-tournaments'], queryFn: api.evalTournaments, retry: false })
+  if (!probeQuery.isSuccess) return null
+  return <NavLink to="/evaluation">Evaluation</NavLink>
 }
 
 // ── Workspace switcher ───────────────────────────────────────────────────

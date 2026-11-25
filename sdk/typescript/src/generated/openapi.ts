@@ -2464,6 +2464,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/eval/anchor-sets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Anchor Sets */
+        get: operations["list_anchor_sets_api_eval_anchor_sets_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/anchor-sets/{set_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Anchor Set */
+        get: operations["read_anchor_set_api_eval_anchor_sets__set_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/anchor-sets/{set_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Anchor Set */
+        post: operations["resume_anchor_set_api_eval_anchor_sets__set_id__resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/eval/jury/freezes": {
         parameters: {
             query?: never;
@@ -2568,6 +2619,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/eval/tournaments/{tournament_id}/anchor-set": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Anchor Set */
+        post: operations["create_anchor_set_api_eval_tournaments__tournament_id__anchor_set_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/eval/tournaments/{tournament_id}/cancel": {
         parameters: {
             query?: never;
@@ -2579,6 +2647,23 @@ export interface paths {
         put?: never;
         /** Cancel */
         post: operations["cancel_api_eval_tournaments__tournament_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/tournaments/{tournament_id}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Diagnostics */
+        get: operations["diagnostics_api_eval_tournaments__tournament_id__diagnostics_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4216,6 +4301,19 @@ export interface components {
             /** Template */
             template?: string | null;
         };
+        /** AnchorIn */
+        AnchorIn: {
+            /**
+             * Budget Usd
+             * @description The most the baseline judging of the anchor set may spend
+             */
+            budget_usd: number;
+        };
+        /** AnchorResumeIn */
+        AnchorResumeIn: {
+            /** Budget Usd */
+            budget_usd?: number | null;
+        };
         /** ApprovalBody */
         ApprovalBody: {
             /**
@@ -4997,8 +5095,15 @@ export interface components {
         };
         /** ResumeIn */
         ResumeIn: {
+            /**
+             * Acknowledge Gates
+             * @description Tripped gates the approver has looked at; they will not pause this tournament again
+             */
+            acknowledge_gates?: string[] | null;
             /** Budget Usd */
             budget_usd?: number | null;
+            /** Note */
+            note?: string | null;
         };
         /** ReviewBody */
         ReviewBody: {
@@ -9343,6 +9448,103 @@ export interface operations {
             };
         };
     };
+    list_anchor_sets_api_eval_anchor_sets_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_anchor_set_api_eval_anchor_sets__set_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_anchor_set_api_eval_anchor_sets__set_id__resume_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AnchorResumeIn"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     create_freeze_api_eval_jury_freezes_post: {
         parameters: {
             query?: never;
@@ -9597,7 +9799,73 @@ export interface operations {
             };
         };
     };
+    create_anchor_set_api_eval_tournaments__tournament_id__anchor_set_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tournament_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnchorIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     cancel_api_eval_tournaments__tournament_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tournament_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    diagnostics_api_eval_tournaments__tournament_id__diagnostics_get: {
         parameters: {
             query?: never;
             header?: never;
