@@ -532,7 +532,7 @@ def test_a_shared_copy_reads_with_a_banner_at_least_as_strict_as_a_package(world
 # ── what crosses in an outcome ───────────────────────────────────────────────
 LEAKY = {
     "answer": "42 tonnes",
-    "finding": {"id": "f-1", "schema_slug": "freeform", "status": "draft", "payload": {"run_id": "r-1", "cost_usd": 3}},
+    "finding": {"id": "finding-never-shared", "schema_slug": "freeform", "status": "draft", "payload": {"run_id": "r-1", "cost_usd": 3}},
     "reported_at": "2026-11-10T10:00:00+00:00",
     "status": "captured", "summary": "found", "run_id": "r-1", "cost_usd": 1.5, "model_used": "secret/model",
     "candidate_urls": ["https://a.example"], "fy2025_gap": False,
@@ -576,7 +576,8 @@ def test_a_prompt_batch_never_shows_its_finding(world):
     inner = {k: v for k, v in target.items() if k != "id"}  # the row's own id is its handle
     assert not (set(_walk_keys(inner)) & LEAKY_KEYS)
     assert not (set(_walk_keys(out["share"])) & LEAKY_KEYS - {"id"})
-    assert "f-1" not in json.dumps(out) and "secret/" not in json.dumps(out)
+    # A distinctive id: a short one like "f-1" turns up inside random UUIDs ("…8cff-16b0…").
+    assert "finding-never-shared" not in json.dumps(out) and "secret/" not in json.dumps(out)
 
 
 # ── duplicate live shares ────────────────────────────────────────────────────
