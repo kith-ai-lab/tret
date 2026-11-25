@@ -79,6 +79,27 @@ class V3Tokens:
 
 
 @dataclass(frozen=True)
+class OperatorGrid:
+    """A grid factor an operator supplied, as the main accounting resolved it.
+
+    The wiring fills this from the run's resolved `FactorSet.grid` (or the
+    `grid_co2e_*` fields a persisted run recorded) only when the winning layer
+    is one an operator controls: `run_override`, `harness`, `workspace`,
+    `managed` or `env`. The `dataset` and `global_default` layers are not
+    operator figures and deliberately do not come through here: v3 has its own
+    region/provider ladder over the same Ember data, which refines them.
+    """
+
+    g_per_kwh: float
+    layer: str
+    source: str | None = None
+    label: str | None = None
+    setting: str | None = None
+    basis: str | None = None
+    temporal: str | None = None
+
+
+@dataclass(frozen=True)
 class V3Inputs:
     model_id: str                              # OpenRouter-style, e.g. "anthropic/claude-sonnet-5"
     maker: str | None = None                   # model maker ("anthropic", "openai", ...)
@@ -98,6 +119,10 @@ class V3Inputs:
     openrouter_data_region: str | None = None  # None | "us" | "europe"
     run_duration_s: float | None = None
     router_overhead_g: float = 0.0
+    # An operator-supplied grid factor (see `OperatorGrid`); outranks every rung
+    # of the v3 grid ladder, exactly as an operator layer outranks the dataset
+    # and the shipped default in the main accounting.
+    operator_grid: OperatorGrid | None = None
 
 
 # ── data ─────────────────────────────────────────────────────────────────────
@@ -340,6 +365,29 @@ def _grid(inp: V3Inputs, provider: str) -> dict[str, Any]:
     cal = load_calibration()
     g_cfg = cal["grid"]
     notes: list[str] = []
+
+    op = inp.operator_grid
+    if op is not None:
+        # The operator's figure is used as given, like the main accounting: no T&D
+        # gross-up (we cannot know whether it already includes losses) and no
+        # provider/region inference. The band class is `known` (an operator's own
+        # annual figure for a known grid), which carries the D4.5 hourly spread.
+        who = f"{op.layer} ({op.source})" if op.source and op.source != op.layer else op.layer
+        notes.append(
+            f"operator grid factor applied from {who}"
+            + (f" '{op.label}'" if op.label else "")
+            + ": used as given, no T&D gross-up, no region/provider inference"
+        )
+        if op.basis and op.basis != "location_based":
+            notes.append(
+                f"operator grid basis is {op.basis}; reported in the location-based slot as supplied"
+            )
+        return {"rung": "operator", "geography": "operator-supplied", "g_per_kwh": float(op.g_per_kwh),
+                "td_multiplier": 1.0, "td_applied": False,
+                "basis": f"Operator grid factor ({who})" + (f", {op.label}" if op.label else ""),
+                "tier": 2, "band_class": "known", "notes": notes,
+                "operator": {"layer": op.layer, "source": op.source, "label": op.label,
+                             "setting": op.setting, "basis": op.basis, "temporal": op.temporal}}
 
     def located(rung: str, iso3: str, basis: str, tier: int, band_class: str) -> dict[str, Any] | None:
         g = _country_g(iso3)
@@ -690,6 +738,7 @@ def compute_facility_v3(inputs: V3Inputs) -> dict[str, Any]:
                           "thinking": thinking, "source": source}},
         "grid": {
             "rung": g["rung"], "basis": g["basis"],
+            **({"operator": g["operator"]} if "operator" in g else {}),
             "location_based": {"geography": g["geography"], "g_per_kwh": g["g_per_kwh"],
                                "td_multiplier": g["td_multiplier"] if g["td_applied"] else 1.0,
                                "g_per_kwh_effective": g["g_per_kwh"] * (

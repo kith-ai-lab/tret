@@ -1,6 +1,7 @@
 // Directly exercises the privacy rule at the heart of the report handler:
 // it must read `request.method`, the URL, `content-type`, `content-length`,
-// and the body -- and nothing else. Calls src/index.js's fetch() in-process (bypassing
+// the body and `cf-connecting-ip` (only ever as the rate limiter's key) --
+// and nothing else. Calls src/index.js's fetch() in-process (bypassing
 // SELF's request/response round trip) so a Proxy over the request's headers
 // can observe every `.get()` call the handler makes.
 import { describe, it, expect } from 'vitest';
@@ -60,7 +61,7 @@ function fakeRequestFor(payload, extraHeaders) {
 }
 
 describe('report handler header access', () => {
-  it('never reads any header other than content-type and content-length', async () => {
+  it('never reads any header other than content-type, content-length and the limiter key', async () => {
     const payload = validPayload({ instance_id: uuidFor(101) });
     const { request, seen } = fakeRequestFor(payload);
 
@@ -69,7 +70,7 @@ describe('report handler header access', () => {
     await waitOnExecutionContext(ctx);
 
     expect(res.status).toBe(204);
-    expect([...seen]).toEqual(['content-type', 'content-length']);
+    expect([...seen]).toEqual(['content-type', 'content-length', 'cf-connecting-ip']);
   });
 
   it('stores no column containing the injected CF-Connecting-IP / User-Agent values', async () => {

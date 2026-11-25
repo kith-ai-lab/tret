@@ -1,6 +1,6 @@
 """Guardrail settings: what a member may tune, what is locked, what the operator owns (R25).
 
-Three tiers, mirroring Ben's request (2026-11-20):
+Three tiers, from the Learning edition's testing round (2026-11-20):
 
 - **locked** — always on, no switch anywhere: numbers only via lookups or vetted
   methods (the unvetted lane is labelled, never silent), provenance on every run,

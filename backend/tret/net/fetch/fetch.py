@@ -30,6 +30,7 @@ from dataclasses import dataclass
 import httpx
 
 from tret.config import get_settings
+from tret.net.audit_base import redact_urls, strip_query
 from tret.net.client import USER_AGENT, open_client
 from tret.net.guard import check_url
 from tret.net.policy import CLASS_RESEARCH, ClassPolicy, EgressDenied
@@ -186,7 +187,7 @@ async def fetch_page(
                         current = str(httpx.URL(current).join(location))
                         continue
                     if resp.status_code >= 400:
-                        raise FetchError(f"HTTP {resp.status_code} from {current}", status_code=resp.status_code)
+                        raise FetchError(f"HTTP {resp.status_code} from {strip_query(current)}", status_code=resp.status_code)
                     content_type = _content_type(resp)
                     sniff_zip_type = capture and sniff_zip and content_type in ZIP_SNIFF_TYPES
                     sniff_pdf = capture and content_type == SNIFFED_TYPE and not sniff_zip_type
@@ -209,7 +210,7 @@ async def fetch_page(
                     if fail_on_truncate and declared.isdigit() and int(declared) > max_bytes:
                         # Saves streaming 200 MB to learn what the headers said.
                         raise FetchError(
-                            f"{current} is {int(declared)} bytes, over the {max_bytes}-byte limit; "
+                            f"{strip_query(current)} is {int(declared)} bytes, over the {max_bytes}-byte limit; "
                             "refusing to store a truncated copy"
                         )
                     # The bytes must be a PDF for capture to call them one. Decided on
@@ -231,7 +232,7 @@ async def fetch_page(
                             zip_checked = True
                         if fail_on_truncate and len(body) > max_bytes:
                             raise FetchError(
-                                f"{current} is larger than the {max_bytes}-byte limit; refusing "
+                                f"{strip_query(current)} is larger than the {max_bytes}-byte limit; refusing "
                                 "to store a truncated copy"
                             )
                         if not fail_on_truncate and len(body) >= max_bytes:
@@ -257,10 +258,10 @@ async def fetch_page(
                         headers=_provenance_headers(resp),
                     )
             except httpx.HTTPError as e:
-                raise FetchError(f"{type(e).__name__}: {e}") from e
+                raise FetchError(redact_urls(f"{type(e).__name__}: {e}")) from e
     raise EgressDenied(
         "too_many_redirects",
         url,
         CLASS_RESEARCH,
-        f"more than {MAX_REDIRECTS} redirects starting at {url}",
+        f"more than {MAX_REDIRECTS} redirects starting at {strip_query(url)}",
     )

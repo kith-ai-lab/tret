@@ -264,7 +264,17 @@ class ProviderError(Exception):
 
 
 _OUT_OF_CREDIT_RE = re.compile(
-    r"insufficient credits\b|requires more credits|can only afford|out of credits\b",
+    r"insufficient credits\b|requires more credits|can only afford|out of credits\b"
+    # Anthropic: HTTP 400 `invalid_request_error`, "Your credit balance is too
+    # low to access the Anthropic API. ..." — a 400, so no status check can see it.
+    r"|credit balance is too low"
+    # OpenAI: HTTP 429 with error code/type `insufficient_quota`. The code is
+    # matched anywhere in the body, JSON or Python-repr quoting alike, because
+    # `ProviderError` keeps only the body text, not the parsed error. Not the
+    # message ("You exceeded your current quota"): Gemini uses that sentence for
+    # its ordinary per-minute RESOURCE_EXHAUSTED 429, which must stay a retryable
+    # rate limit rather than pause a batch as out of credit.
+    r"|\binsufficient_quota\b",
     re.IGNORECASE,
 )
 # The pre-run veto an extension raises when the workspace's Tret balance is
@@ -273,12 +283,22 @@ _WORKSPACE_CREDIT_RE = re.compile(r"(?:^|\s)insufficient_credits:", re.IGNORECAS
 _PROVIDER_TAG_RE = re.compile(r"\[([a-z0-9_.-]+)\]", re.IGNORECASE)
 
 
+def is_out_of_credit_text(text: str) -> bool:
+    """Whether a provider's error body says its account is out of credit or
+    quota. Used by the 429 retry policy too: OpenAI reports `insufficient_quota`
+    as a 429, but waiting does not refill an account, so it must not be retried
+    like a rate limit."""
+    return bool(_OUT_OF_CREDIT_RE.search(text or ""))
+
+
 def provider_out_of_credit(error: "str | BaseException | None", status: int | None = None) -> str | None:
     """The provider's name when `error` says the provider account is out of
     credit, "workspace" when it is the workspace's Tret balance (the pre-run
     `insufficient_credits:` veto), else None. Matches HTTP 402 (`status`, or taken
-    from a `ProviderError`) and the wording OpenRouter uses ("Insufficient
-    credits", "This request requires more credits ... can only afford N").
+    from a `ProviderError`) and the wording of OpenRouter ("Insufficient
+    credits", "This request requires more credits ... can only afford N"),
+    Anthropic ("Your credit balance is too low", an HTTP 400) and OpenAI
+    (`insufficient_quota`, an HTTP 429).
     A 429, a 5xx and "Provider returned error" are not credit problems. The name
     comes from the `[provider]` prefix `ProviderError` puts on its message."""
     if error is None:

@@ -1041,8 +1041,16 @@ async def browse_m365(
     site_id: str | None = None,
     drive_id: str | None = None,
     item_id: str | None = None,
+    restrict_to: list[ConnectedSource] | None = None,
 ) -> list[dict]:
     """Server-side Graph browsing for the m365 import picker.
+
+    `restrict_to` is the workspace's read allowlist when an admin has set one
+    (see `restricted_read_sources`): `scope=sites` then lists only those
+    sites and, for the OneDrive entry, only when that drive is allowed; a
+    site's drive listing keeps only allowed drives; and a `drive_id` outside
+    the list raises `PermissionError` before Graph is called. `None` is the
+    unrestricted "everything the account can see" default.
 
     `scope="sites"` (the default) lists every site the connected account can
     reach plus a pseudo-entry for their own OneDrive — its `drive_id` is
@@ -1071,14 +1079,21 @@ async def browse_m365(
             log.info("connections: /sites unavailable (%s); returning OneDrive only", exc)
             body = {}
         items = [_m365_site_out(s) for s in body.get("value", [])]
+        if restrict_to is not None:
+            allowed_sites = {s.site_id for s in restrict_to if s.site_id}
+            items = [i for i in items if i["id"] in allowed_sites]
         my_drive = await _graph_get(token, "/me/drive", params={"$select": "id,name"})
-        if my_drive.get("id"):
+        if my_drive.get("id") and (
+            restrict_to is None or my_drive["id"] in {s.drive_id for s in restrict_to}
+        ):
             items.append(
                 {"id": my_drive["id"], "name": "OneDrive", "kind": "drive", "drive_id": my_drive["id"]}
             )
         return items
     if scope == "drive_children":
         if drive_id:
+            if restrict_to is not None and drive_id not in {s.drive_id for s in restrict_to}:
+                raise PermissionError("That drive is outside the workspace's allowed sources.")
             # `quote(..., safe="")` — every id below is caller-supplied
             # (a query param on GET /api/connections/m365/browse) and lands
             # straight in a URL path segment; unescaped, a value containing
@@ -1093,7 +1108,11 @@ async def browse_m365(
             return [_m365_child_out(c, drive_id=drive_id) for c in body.get("value", [])]
         if site_id:
             body = await _graph_get(token, f"/sites/{quote(site_id, safe='')}/drives")
-            return [_m365_drive_out(d, site_id=site_id) for d in body.get("value", [])]
+            drives = [_m365_drive_out(d, site_id=site_id) for d in body.get("value", [])]
+            if restrict_to is not None:
+                allowed_drives = {s.drive_id for s in restrict_to}
+                drives = [d for d in drives if d["drive_id"] in allowed_drives]
+            return drives
         raise ValueError("scope=drive_children requires site_id or drive_id")
     raise ValueError(f"unknown browse scope {scope!r}")
 
@@ -1520,6 +1539,24 @@ async def list_connected_sources(db: AsyncSession, workspace_id: uuid.UUID) -> l
 
     _sources_cache[key] = (now + _SOURCES_CACHE_SECONDS, sources)
     return sources
+
+
+async def restricted_read_sources(
+    db: AsyncSession, workspace_id: uuid.UUID
+) -> list[ConnectedSource] | None:
+    """The admin's read allowlist as sources when one is set, else `None`.
+
+    Browse and import must honour the same allowlist runs do, but only when
+    it actually narrows something: with no allowlist, "allowed" is everything
+    the account can see (docs/connections.md, Read allowlist), which includes
+    non-default document libraries `_derive_connected_sources` does not list,
+    so the derived list is not a gate for the picker. Raises
+    `ConnectionUnavailable` like `list_connected_sources`."""
+    conn = await ensure_connection_usable(db, workspace_id, M365)
+    if not (conn.selected_resources or {}).get("read"):
+        # Not derived: that would cost a Graph listing on every browse click.
+        return None
+    return await list_connected_sources(db, workspace_id)
 
 
 def _strip_html(text: str | None) -> str | None:

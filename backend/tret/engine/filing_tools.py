@@ -316,6 +316,7 @@ async def capture_filing(ctx: RunContext, note: str | None = None) -> str:
             await tools_module._record_egress(
                 ctx, method="GET", host=tools_module._host_of(package_url),
                 path=tools_module._path_of(package_url),
+                query=tools_module._query_of(package_url),
                 decision=egress_audit.DECISION_DENIED, reason=e.reason,
             )
             raise ToolError(
@@ -326,6 +327,7 @@ async def capture_filing(ctx: RunContext, note: str | None = None) -> str:
             await tools_module._record_egress(
                 ctx, method="GET", host=tools_module._host_of(package_url),
                 path=tools_module._path_of(package_url),
+                query=tools_module._query_of(package_url),
                 decision=egress_audit.DECISION_DENIED, reason=f"fetch_failed: {e}",
             )
             if getattr(e, "status_code", None) == 404 and package_url_source == "derived" and not retried:
@@ -345,6 +347,7 @@ async def capture_filing(ctx: RunContext, note: str | None = None) -> str:
         method="GET",
         host=tools_module._host_of(page.url),
         path=tools_module._path_of(page.url),
+        query=tools_module._page_query(page),
         decision=egress_audit.DECISION_ALLOWED,
         status_code=page.status_code,
         byte_count=len(page.body),

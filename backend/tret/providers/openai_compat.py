@@ -34,6 +34,7 @@ from tret.providers.base import (
     ToolSpec,
     TurnComplete,
     Usage,
+    is_out_of_credit_text,
     is_retryable_status,
     looks_like_html,
     mark_cache_breakpoint,
@@ -60,6 +61,34 @@ class _StreamFailure(Exception):
         self.retryable = retryable
         self.retry_after = retry_after
         super().__init__(message)
+
+
+def _stream_error_failure(error) -> _StreamFailure:
+    """A `_StreamFailure` from the `error` member of an in-stream error chunk
+    (`{"error": {"message": ..., "code": ...}}`, or a bare string).
+
+    The provider's own wording is kept (the batch credit pause reads it), and a
+    numeric HTTP-style `code` becomes the status so the usual retry policy sees
+    it. Non-retryable unless the code says 5xx-transient: the stream has often
+    already produced output by then.
+    """
+    if isinstance(error, dict):
+        message = error.get("message")
+        code = error.get("code")
+        status = code if isinstance(code, int) and not isinstance(code, bool) else None
+        if not message:
+            message = json.dumps(error)[:2000]
+        elif status is None and isinstance(code, str):
+            message = f"{message} ({code})"
+        if status is None and isinstance(code, str) and code.isdigit():
+            status = int(code)
+    else:
+        message, status = str(error)[:2000], None
+    return _StreamFailure(
+        str(message),
+        status,
+        retryable=status is not None and is_retryable_status(status, html_body=False),
+    )
 
 
 # Wire fields an assistant message may carry its reasoning in.
@@ -538,6 +567,10 @@ class OpenAICompatProvider(Provider):
                 if (
                     not yielded_any
                     and exc.status == RATE_LIMIT_STATUS
+                    # OpenAI's `insufficient_quota` rides a 429, but an empty
+                    # account does not refill by waiting: fail at once so the
+                    # batch credit pause sees it, rather than retrying 3 times.
+                    and not is_out_of_credit_text(exc.message)
                     and rate_limit_attempts < RATE_LIMIT_MAX_RETRIES
                 ):
                     await asyncio.sleep(rate_limit_delay(rate_limit_attempts, exc.retry_after))
@@ -566,6 +599,10 @@ class OpenAICompatProvider(Provider):
         primary_choice: int | None = None
         usage = Usage()
         finish_reason = "end_turn"
+        # Whether the provider actually told us how the turn ended, and whether
+        # it sent the `[DONE]` sentinel — see the truncation check below.
+        finish_seen = False
+        done_seen = False
         # The last non-empty value seen across chunks: OpenRouter's routing
         # decision (and so which endpoint is `selected`) is settled once the
         # upstream is picked, but nothing guarantees which chunk first carries
@@ -598,11 +635,23 @@ class OpenAICompatProvider(Provider):
                             continue
                         payload = line[5:].strip()
                         if payload == "[DONE]":
+                            done_seen = True
                             break
                         try:
                             chunk = json.loads(payload)
                         except json.JSONDecodeError:
                             continue
+                        if isinstance(chunk, dict) and chunk.get("error"):
+                            # A provider that fails mid-stream (OpenRouter's
+                            # upstream dropping, a gateway quota error) sends
+                            # a top-level `error` chunk on an HTTP 200. Falling
+                            # through ended the run "completed" with whatever
+                            # usage had arrived — usually none — so it was
+                            # under-metered and under-billed. Fail like any
+                            # other provider error; `stream()` retries only
+                            # when nothing has been yielded yet, and the engine
+                            # meters the partial output of a turn that dies here.
+                            raise _stream_error_failure(chunk["error"])
                         if chunk.get("usage"):
                             # Streaming usage objects are cumulative snapshots;
                             # replace with the newest one rather than summing.
@@ -628,6 +677,7 @@ class OpenAICompatProvider(Provider):
                                 continue
                             if choice.get("finish_reason"):
                                 finish_reason = choice["finish_reason"]
+                                finish_seen = True
                             delta = choice.get("delta") or {}
                             if delta.get("content"):
                                 yield TextDelta(delta["content"])
@@ -657,6 +707,20 @@ class OpenAICompatProvider(Provider):
                 # failure, never retried (see `providers.base.is_retryable_status`,
                 # which this deliberately does not call).
                 raise _StreamFailure(str(e), None, retryable=False) from e
+
+        if not done_seen and not finish_seen:
+            # The connection closed with neither `[DONE]` nor a `finish_reason`:
+            # the response was cut off, and the usage frame (which arrives last)
+            # never came. Completing here recorded a truncated turn as a clean,
+            # zero-usage one. Servers that merely omit `[DONE]` (local runtimes,
+            # some gateways) still send a `finish_reason`, so they complete
+            # normally. Retryable only if nothing reached the caller yet.
+            raise _StreamFailure(
+                "stream ended before the provider finished the response "
+                "(no finish_reason, no [DONE])",
+                None,
+                retryable=True,
+            )
 
         for key in sorted(pending):
             _choice_idx, idx = key
@@ -774,6 +838,7 @@ class OpenAICompatProvider(Provider):
                 message = summarize_html_error(resp.status_code, raw) if html else raw[:2000]
                 if (
                     resp.status_code == RATE_LIMIT_STATUS
+                    and not is_out_of_credit_text(raw)
                     and rate_limit_attempts < RATE_LIMIT_MAX_RETRIES
                 ):
                     await asyncio.sleep(

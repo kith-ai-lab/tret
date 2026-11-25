@@ -315,15 +315,24 @@ self-hosted instance has no credential to present. That means someone
 willing to submit fake reports over time could still skew the published
 totals, or probe where the 5/10-instance floors sit. The mitigations are the
 caps above, the 7-day seasoning rule, the fact that every published snapshot
-blends at least 5 real reports, and a Cloudflare rate-limit rule on
-`/v1/report` configured at the edge — evaluated before a request ever
-reaches the Worker's own code, and independent of anything in this
-repository (see
-[`telemetry-ingest/README.md`'s "What Cloudflare may still see"](../telemetry-ingest/README.md#what-cloudflare-may-still-see):
-the Worker itself never reads or stores an IP, but Cloudflare's own edge, like
-any CDN in front of it, still sees the connecting IP for that edge rule to
-act on). None of this makes the figures authenticated — they remain
-self-reported.
+blends at least 5 real reports, and a per-sender rate limit inside the Worker
+itself: `POST /v1/report` is limited to 3 requests per minute per connecting
+IP, using Cloudflare's Workers Rate Limiting binding declared in
+[`wrangler.jsonc`](../telemetry-ingest/wrangler.jsonc). The IP is passed to
+that limiter as its key and nowhere else: the Worker never writes it to the
+database, a log line or a response, and the limiter keeps only short-lived
+counters inside Cloudflare. This is the one request header the report handler
+reads. Be clear about what it does and does not buy: Cloudflare's limiter only
+supports 10-second and 60-second windows, so it stops a flood from using up
+the global daily cap in seconds, but one patient sender can still introduce a
+few thousand fresh instance ids a day, and anyone with many IP addresses is
+not slowed at all. Counting distinct instances per IP per day would need the
+Worker to store a per-IP identifier (even a hash), which this design
+deliberately does not do, so it is not implemented. The 5-instance and
+10-instance publication floors are therefore a speed bump against forged
+reports, not a guarantee. If the binding is absent (local development, or a
+fork that removes it) the limit is simply off. None of this makes the figures
+authenticated — they remain self-reported.
 
 ## Forks
 

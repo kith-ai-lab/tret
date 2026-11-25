@@ -6,6 +6,10 @@ and per workspace (`Workspace.settings["auto_approve"]`, a list that wins over
 the default when present, `[]` meaning "off here"). A `package_map` is never
 auto-approved: approving one starts packaging, which is always a human call.
 
+Only a run started by an approver (or admin/owner) is ever auto-approved: the
+approval is made in the starter's name, so an analyst's run leaves its drafts
+for a human approver, exactly as when the policy is off.
+
 An automatic approval is a real `Approval` row (so the banner strip, the
 SharePoint upload and the audit trail all happen exactly as for a person) but
 with purpose "auto": it is stamped with the user who started the run, and it is
@@ -81,15 +85,25 @@ async def maybe_auto_approve(
         actor = await db.get(User, actor_user_id)
         if actor is None or actor.disabled:
             return False
-        member = (
+        role = (
             await db.execute(
-                select(WorkspaceMember.user_id).where(
+                select(WorkspaceMember.role).where(
                     WorkspaceMember.user_id == actor_user_id,
                     WorkspaceMember.workspace_id == workspace_id,
                 )
             )
-        ).first()
-        if member is None:
+        ).scalar_one_or_none()
+        if role is None:
+            return False
+        # Approving is an approver's act, and this one is stamped with the
+        # actor's name (and, for a connected_write, lands a file in
+        # SharePoint under it). An analyst's run must not sign off in the
+        # analyst's name what the Approvals queue would not let them approve:
+        # it stays a draft for a human approver, exactly as with the policy off.
+        # Lazy for the same reason as `_decide` below.
+        from tret.api.workspace import ROLE_RANK
+
+        if ROLE_RANK.get(role, -1) < ROLE_RANK["approver"]:
             return False
         finding = await db.get(Finding, finding_id)
         if finding is None or finding.status != "draft":

@@ -22,7 +22,7 @@ from typing import Any, Iterable
 
 from datetime import datetime
 
-from tret.services.emissions_v3 import V3Inputs, V3Tokens, canonical_model_id, compute_facility_v3
+from tret.services.emissions_v3 import OperatorGrid, V3Inputs, V3Tokens, canonical_model_id, compute_facility_v3
 
 log = logging.getLogger(__name__)
 
@@ -245,10 +245,43 @@ def _merge_group_blocks(blocks: list[dict], served_by: list[str | None]) -> dict
 
 
 # ── adapter: one segment ─────────────────────────────────────────────────────
+def _operator_grid_of(factors: Any | None, accounting: dict | None) -> OperatorGrid | None:
+    """The operator-supplied grid factor the main accounting resolved, or None.
+
+    Reuses that resolution rather than repeating it: the live `FactorSet.grid`
+    when the segment carries one, else the `grid_co2e_*` fields the run recorded
+    (persisted segments, overhead calls). Only the layers an operator controls
+    count; `dataset` and `global_default` are left to v3's own ladder.
+    """
+    from tret.services.emission_factors import (
+        LAYER_ENV, LAYER_HARNESS, LAYER_MANAGED, LAYER_RUN_OVERRIDE, LAYER_WORKSPACE,
+    )
+
+    operator_layers = (LAYER_RUN_OVERRIDE, LAYER_HARNESS, LAYER_WORKSPACE, LAYER_MANAGED, LAYER_ENV)
+    grid = getattr(factors, "grid", None) if factors is not None else None
+    if grid is not None:
+        layer, value = getattr(grid, "layer", None), getattr(grid, "value", None)
+        if layer not in operator_layers or value is None:
+            return None
+        return OperatorGrid(
+            g_per_kwh=float(value), layer=layer, source=getattr(grid, "source", None),
+            label=getattr(grid, "label", None), setting=getattr(grid, "setting", None),
+            basis=getattr(factors, "grid_basis", None), temporal=getattr(grid, "temporal", None),
+        )
+    if accounting and accounting.get("grid_co2e_layer") in operator_layers \
+            and accounting.get("grid_co2e_g_per_kwh") is not None:
+        return OperatorGrid(
+            g_per_kwh=float(accounting["grid_co2e_g_per_kwh"]), layer=accounting["grid_co2e_layer"],
+            source=accounting.get("grid_co2e_source"), label=accounting.get("grid_co2e_label"),
+            basis=accounting.get("grid_co2e_basis"), temporal=accounting.get("grid_temporal"),
+        )
+    return None
+
+
 def _inputs_for_group(
     *, model: Any, model_id: str, calls: list[dict], serving: str | None, deployment: str,
     region_pin: tuple[str, str] | None, metered_wh: float | None,
-    run_duration_s: float | None = None,
+    run_duration_s: float | None = None, operator_grid: OperatorGrid | None = None,
 ) -> V3Inputs:
     def total(key: str) -> int:
         return sum(int(c.get(key) or 0) for c in calls)
@@ -287,6 +320,7 @@ def _inputs_for_group(
         region_pin=region_pin,
         openrouter_data_region=None,  # tret has no OpenRouter data_region concept
         run_duration_s=run_duration_s,
+        operator_grid=operator_grid,
     )
 
 
@@ -316,6 +350,7 @@ def v3_for_segment(
             for call in calls:
                 groups.setdefault(call.get("served_by"), []).append(call)
         provider = getattr(model, "provider", None) or _get(segment, "provider")
+        operator_grid = _operator_grid_of(factors, accounting)
         blocks, keys = [], []
         for served_by, group in groups.items():
             serving = served_by or (provider if provider not in _NOT_A_SERVING_PROVIDER else None)
@@ -324,6 +359,7 @@ def v3_for_segment(
                 deployment=deployment, region_pin=_cloud_for_region(region, served_by),
                 metered_wh=metered,
                 run_duration_s=run_duration_s if run_duration_s is not None else _span_s(group),
+                operator_grid=operator_grid,
             )
             block = compute_facility_v3(inputs)
             if meter_unusable:
@@ -350,7 +386,7 @@ def v3_for_overhead_call(call: dict, model: Any | None = None) -> dict | None:
         inputs = _inputs_for_group(
             model=model or _Stub(provider), model_id=model_id, calls=[call], serving=serving,
             deployment=deployment, region_pin=_cloud_for_region(region, served_by),
-            metered_wh=None,
+            metered_wh=None, operator_grid=_operator_grid_of(None, acct),
         )
         block = compute_facility_v3(inputs)
         block["kind"] = call.get("kind")
@@ -476,7 +512,7 @@ _SLIM_STAMPS = ("method_id", "method_version", "calibration_id", "pin", "boundar
                 "label", "note", "total_g", "parts", "shadows", "training",
                 "comparative_difference", "primary_segment")
 _SLIM_BAND = ("low_g", "high_g", "low_div", "high_mult", "label", "floor_applied", "aggregation")
-_SLIM_GRID = ("rung", "basis", "location_based", "market_based")
+_SLIM_GRID = ("rung", "basis", "operator", "location_based", "market_based")
 _SLIM_PLACEMENT = ("rung", "size_source", "flags", "provider", "reasoning")
 
 

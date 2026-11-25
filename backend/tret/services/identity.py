@@ -303,6 +303,42 @@ async def _track_email_verified(
         await db.commit()
 
 
+# A released email is rewritten to `<prefix>-<user id>@<this domain>`. `.invalid`
+# is reserved (RFC 2606): it never resolves, so nothing can be mailed there and
+# nobody can ever sign up with it; the user id makes it unique per account, so
+# it cannot collide with `users.email`'s unique constraint or with another
+# release.
+RELEASED_EMAIL_DOMAIN = "released.invalid"
+
+
+def _is_squatter(user: User, *, sub: str, email_verified: bool) -> bool:
+    """Whether `user` holds an email only on the strength of an unverified
+    claim, and a verified claim from a different identity is now asking for it.
+
+    All four must hold: the claimant is verified (an unverified one never
+    displaces anyone); the holder is OIDC-only (a password account was created
+    by an administrator, or predates `email_verified`, and is never released);
+    the holder's own claim was never verified (a verified account is the real
+    owner as far as the IdP can tell); and it is bound to some other `sub`.
+    """
+    return bool(
+        email_verified
+        and user.password_hash is None
+        and not user.email_verified
+        and user.oidc_sub is not None
+        and user.oidc_sub != sub
+    )
+
+
+async def _release_email(db: AsyncSession, squatter: User) -> None:
+    """Free `squatter`'s email for the verified owner. The account itself —
+    its `sub`, workspaces and data — is untouched and still signs in by `sub`;
+    it just no longer holds an address nobody proved it owned. Flushed here so
+    the unique index is clear before the caller inserts the new row."""
+    squatter.email = f"released-{squatter.id}@{RELEASED_EMAIL_DOMAIN}"
+    await db.flush()
+
+
 async def match_or_provision(
     db: AsyncSession,
     *,
@@ -333,6 +369,18 @@ async def match_or_provision(
 
     users = (await db.execute(select(User))).scalars().all()
     by_email = next((u for u in users if u.email.strip().lower() == email), None)
+    # JIT provisioning (below) is open to unverified emails in multi-tenant, so
+    # a stranger can sign up as `ceo@victim.com` and hold that address bound to
+    # their own `sub`. When the real owner arrives with a verified claim, the
+    # squatter must not win the email-match branch (a 409 there would lock the
+    # owner out on every attempt, and tell an outsider the address is taken):
+    # a verified claim wins, and the squatter is released further down, once
+    # the newcomer has passed the provisioning gates. Checked before the
+    # disabled check on purpose, so a deactivated squatter cannot block the
+    # owner either.
+    squatter = None
+    if by_email is not None and _is_squatter(by_email, sub=sub, email_verified=email_verified):
+        squatter, by_email = by_email, None
     if by_email is not None:
         _disabled_check(by_email)
         if not email_verified:
@@ -401,6 +449,12 @@ async def match_or_provision(
         # squat an invited address — provisioning a User bound to *their* sub
         # and locking the real invitee out with a 409 at the linking branch.
         raise HTTPException(403, "This deployment requires an invitation.")
+
+    if squatter is not None:
+        # Only the email moves. Never the squatter's workspaces or data: the
+        # newcomer gets a fresh account and personal workspace like any other
+        # first sign-in.
+        await _release_email(db, squatter)
 
     user = User(
         email=email,

@@ -46,6 +46,24 @@
     "DAILY_ACCEPT_CAP": "2000"
   },
 
+  // Per-sender limit on POST /v1/report (Workers Rate Limiting API; src/index.js
+  // `isRateLimited`). The key is the connecting IP, held only by the limiter's
+  // own short-lived counters -- never written to D1 or logs. `period` may only
+  // be 10 or 60 seconds, so this is a burst limit, not a daily one: it stops a
+  // flood from draining DAILY_ACCEPT_CAP in seconds, it does not bound one
+  // patient sender (see docs/telemetry.md). A real instance reports about once
+  // a day, so 3/minute leaves headroom for several instances behind one NAT.
+  // `namespace_id` is just a number unique within the account; change it if
+  // another Worker on the account already uses 1001. Absent binding (tests,
+  // `wrangler dev` without it, forks that drop it) means no limit, not an error.
+  "ratelimits": [
+    {
+      "name": "REPORT_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 3, "period": 60 }
+    }
+  ],
+
   // Observability is left OFF on purpose. Cloudflare's built-in request
   // logging persists per-request metadata (including the requesting IP) for
   // every invocation of a Worker -- exactly the kind of record this Worker

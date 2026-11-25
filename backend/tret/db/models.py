@@ -1351,7 +1351,7 @@ class RunOutcome(Base):
     override: Mapped[str | None] = mapped_column(Text)  # user_pin | run_override | null
 
     # ── the verdict ──────────────────────────────────────────────────────────
-    # delivered | no_output | failed | handed_off | handed_off_capacity
+    # delivered | no_output | failed | billing_failed | handed_off | handed_off_capacity
     outcome_class: Mapped[str] = mapped_column(Text, nullable=False)
     quality_score: Mapped[Decimal] = mapped_column(Numeric(6, 4), nullable=False)
     score_version: Mapped[str] = mapped_column(Text, nullable=False)
@@ -1560,7 +1560,8 @@ class EgressCall(Base):
     reading prose.
 
     Query strings are never stored (see audit.py): they carry API keys and the
-    private half of a search term.
+    private half of a search term. `query_length` and `query_sha256` stand in
+    for them so a query used as an exfiltration channel is still visible.
     """
 
     __tablename__ = "egress_calls"
@@ -1577,6 +1578,12 @@ class EgressCall(Base):
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     decision: Mapped[str] = mapped_column(Text, nullable=False)  # allowed | denied
     reason: Mapped[str | None] = mapped_column(Text)
+    # Length (characters) and SHA-256 prefix of the URL query / search query this
+    # call carried. NULL when the call had no query to speak of (rows written
+    # before these columns existed, or a call with no URL); length 0 and a NULL
+    # hash when the URL had an empty query.
+    query_length: Mapped[int | None] = mapped_column(Integer)
+    query_sha256: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = created_at_col()
 
     __table_args__ = (Index("ix_egress_calls_created_at", "created_at"),)

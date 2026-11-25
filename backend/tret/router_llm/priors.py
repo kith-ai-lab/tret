@@ -48,7 +48,7 @@ from datetime import timedelta, timezone
 from sqlalchemy import select
 
 from tret.db.models import BatchTarget, Run, RunOutcome
-from tret.router_llm.outcomes import NON_QUALITY_CLASSES
+from tret.router_llm.outcomes import BILLING_FAILED, NON_QUALITY_CLASSES
 from tret.router_llm.scoring import AgentRow
 from tret.router_llm.priors_base import (
     ENDPOINT_POOR_MARGIN,
@@ -471,7 +471,14 @@ class OutcomePriors:
         async with factory() as db:
             q = (
                 select(RunOutcome)
-                .where(RunOutcome.model_id.in_(candidate_ids), RunOutcome.observed_at >= since)
+                .where(
+                    RunOutcome.model_id.in_(candidate_ids),
+                    RunOutcome.observed_at >= since,
+                    # One workspace's out-of-credit failure is not the endpoint
+                    # rejecting the model, and this breaker is global: a
+                    # 402 must neither trip it nor sit between two real failures.
+                    RunOutcome.outcome_class != BILLING_FAILED,
+                )
                 .order_by(RunOutcome.observed_at.desc())
                 .limit(ROW_SCAN_LIMIT)
             )
@@ -512,6 +519,8 @@ class OutcomePriors:
         # a model that already has enough add nothing.
         recent: dict[str, list[RunOutcome]] = {}
         for row in rows:
+            if row.outcome_class == BILLING_FAILED:
+                continue  # also filtered in the query; see `_cooldown_rows`
             bucket = recent.setdefault(row.model_id, [])
             if len(bucket) < COOLDOWN_TRIP_COUNT:
                 bucket.append(row)

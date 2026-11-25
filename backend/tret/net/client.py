@@ -27,6 +27,7 @@ import httpx
 from tret.config import get_settings
 from tret.net import audit_base
 from tret.net.guard import check_url
+from tret.net.pinning import PinnedBackend, build_transports
 from tret.net.policy import ClassPolicy, EgressDenied, policy_for
 
 log = logging.getLogger("tret.net")
@@ -36,9 +37,14 @@ log = logging.getLogger("tret.net")
 USER_AGENT = "tret/0.1 (+https://github.com/kith-ai-lab/tret)"
 
 
-def _hook(egress_class: str, policy: ClassPolicy):
+def _hook(egress_class: str, policy: ClassPolicy, backend: PinnedBackend | None = None):
     async def enforce(request: httpx.Request) -> None:
         target = await check_url(str(request.url), egress_class, policy)
+        if backend is not None:
+            # The connection is made to exactly these addresses (`pinning.py`),
+            # so the lookup that was vetted is the lookup that is dialled. Runs
+            # per request, hence per redirect hop.
+            backend.pin(request.url.raw_host.decode("ascii"), target.addresses)
         audit_base.note_attempt(egress_class, target.host)
 
     return enforce
@@ -72,12 +78,17 @@ def build_client(
             f"Set TRET_EGRESS_{egress_class.upper()}=on (and TRET_EGRESS=on) to allow it.",
         )
     proxy = (get_settings().egress_proxy or "").strip() or None
+    # Direct connections dial the vetted address, never a second lookup of the
+    # name; proxied ones are resolved by the proxy (see `pinning.py`).
+    backend = PinnedBackend()
+    transport, mounts = build_transports(backend, proxy)
     return httpx.AsyncClient(
         timeout=timeout if timeout is not None else pol.timeout_seconds,
         headers=headers,
         follow_redirects=follow_redirects,
-        proxy=proxy,
-        event_hooks={"request": [_hook(egress_class, pol)]},
+        transport=transport,
+        mounts=mounts,
+        event_hooks={"request": [_hook(egress_class, pol, backend)]},
     )
 
 

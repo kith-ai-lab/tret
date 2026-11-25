@@ -32,8 +32,33 @@ one that needs action on an existing install.
   `.xlsx` readers ignore a sheet's declared `<dimension>`, which used to pad every row to
   16,384 columns.
 
-See [docs/upgrading.md](docs/upgrading.md#2026-11-24--security-fixes) for what to check on an
-existing install.
+- **M365 read allowlist enforced when browsing and importing.** With a read allowlist set,
+  `GET /api/connections/m365/browse` lists only allowed sites and drives and refuses any other
+  `drive_id` (403), and importing from a drive outside the list is refused before anything is
+  fetched. Runs already enforced it; the picker did not.
+- **Google Drive picker token is approver-only.** `GET /api/connections/gdrive/token` returns a
+  `drive.file` token that can modify or trash any file picked through the connected account, so
+  it now needs the approver role; the "Google Drive" import item is disabled below approver.
+- **Auto-approve needs an approver.** With auto-approve on (`connected_write`, `findings`,
+  `draft_section`), a run started by an analyst now leaves a draft for an approver instead of
+  approving in the analyst's name.
+- **An unverified OIDC sign-up can no longer lock out an email's owner.** On a multi-tenant
+  deployment, a verified sign-in now releases the email from an unverified, password-less
+  account bound to another identity (it keeps its sign-in and data, under a
+  `released-<id>@released.invalid` address) instead of refusing the owner with 409.
+- **Login limiter counts attempts atomically, and password hashing runs off the event loop.**
+  Parallel guesses beyond the limit are refused; argon2 no longer stalls other requests.
+- **Research fetches connect to the address the guard vetted** (no second DNS lookup), with SNI
+  and certificate checks against the hostname, on every redirect hop. Behind an egress proxy the
+  proxy resolves names and must refuse private ranges itself.
+- **`fetch_url` counts every attempt against the per-run cap**, failed and refused ones included,
+  and egress audit rows record the length and a SHA-256 prefix of the query string (new nullable
+  columns `egress_calls.query_length` and `query_sha256`; new migration). The raw query is never
+  stored.
+
+See docs/upgrading.md, [security fixes](docs/upgrading.md#2026-11-24--security-fixes) and
+[access, sign-in and egress fixes](docs/upgrading.md#2026-11-24--access-sign-in-and-egress-fixes),
+for what to check on an existing install.
 
 ### Added
 
@@ -115,7 +140,7 @@ existing install.
   `TRET_NORMALISER_MAX_RSS_MB`, `TRET_NORMALISER_CHUNK_PAGES`,
   `TRET_NORMALISER_CHUNK_TIMEOUT_SECONDS` and `TRET_NORMALISER_MAX_TABLE_PAGES`. See
   [docs/disclosure-collection.md](docs/disclosure-collection.md).
-- **Tret Learning testing round (R01–R28, 2026-11-20).** Fixes and additions from Ben's
+- **Tret Learning testing round (R01–R28, 2026-11-20).** Fixes and additions from a
   test of the cohort edition. Request IDs are stable.
   - *Long replies (R01).* The seeded chat harness may write 16,384 output tokens (was 4,096;
     subagents 8,192). Each call is capped at the model's own limit when the catalog knows it. A
@@ -351,6 +376,10 @@ existing install.
 
 ### Changed
 
+- **The compose backend runs as uid 10001**, like the Fly image: the shared entrypoint fixes the
+  storage volume's ownership as root, then drops privileges.
+- **Telemetry ingest limits each sender** to 3 reports a minute (Workers Rate Limiting, keyed on
+  the client IP, an IPv6 sender by its /64; no IP is written to the Worker's database). Needs a `wrangler deploy` of the ingest Worker.
 - **A leaner cohort edition.** The sidebar is now Sessions, Runs, Analytics, Emissions and
   Settings; Approvals, Deliverables and Documents are hidden alongside Workbench, Batches,
   Packs and Harnesses, so the edition assumes automatic approval is on (the cohort deploy sets
@@ -469,6 +498,23 @@ existing install.
 
 ### Fixed
 
+- **A workspace's out-of-credit failure no longer cools a model for every workspace.** Billing
+  failures are recorded as `outcome_class='billing_failed'` and excluded from the router's shared
+  cooldown and its quality priors.
+- **Batches pause on Anthropic's and OpenAI's out-of-credit errors** ("credit balance is too low",
+  `insufficient_quota`), not only OpenRouter's, and an `insufficient_quota` 429 is no longer
+  retried as a rate limit.
+- **A provider error inside a stream, or a stream cut off before any `finish_reason`, now fails
+  the run** instead of completing it with zero usage; output already streamed is metered as an
+  estimate.
+- **The v3 emissions preview honours operator grid factors** (run, harness, workspace, managed
+  and env layers) and records which applied, instead of falling back to the World average.
+- **The cloud PUE record no longer cites Google for 1.2**: the note describes the value that
+  applied and its basis (tret's conservative default, a setting, or an upstream disclosure), and
+  AWS is cited once, at 1.15.
+- **Grid factors from Ember are labelled Ember (CC BY 4.0)** in the UI, not Electricity Maps.
+- **The calculator's "treat the split as unreliable" warning no longer fires on rounding noise.**
+- **Uploads over 1 MB work through the compose frontend** (`client_max_body_size 26m`).
 - **The batch list, batch detail, scorecard and cost roll-up no longer load run transcripts.**
   The UI polls the list and detail every 5 s while a batch is live, and each poll read every
   run's full `messages`. They now read run summaries without the transcript, and the list

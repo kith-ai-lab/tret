@@ -296,6 +296,18 @@ LOCAL_PUE_PROFILES = (PUE_PROFILE_WORKSTATION, PUE_PROFILE_ONPREM)
 # three self-reports — which is the safe direction for an estimate nobody can
 # verify per request.
 PUE_REFERENCE = {
+    # tret's own cloud default. Not a published figure and not anyone's
+    # disclosure: it is a deliberately conservative ceiling set above the three
+    # hyperscaler self-reports below, so it must never be cited to one of them.
+    "tret_default_cloud": {
+        "value": 1.2,
+        "source": (
+            "tret default: conservative ceiling above hyperscaler self-reports "
+            "(Google 1.09, AWS 1.15, Microsoft 1.16)"
+        ),
+        "url": None,
+        "date": None,
+    },
     "industry_average": {
         "value": 1.56,
         "source": "Uptime Institute, 2024 Global Data Center Survey (879 operators)",
@@ -1563,6 +1575,72 @@ def _factor(
     }
 
 
+def _pue_provenance(
+    factors: "FactorSet", pue_profile: str, pue_ref: dict | None
+) -> tuple[str, str | None, str | None, str]:
+    """(source, url, as_of, note) for the PUE record, describing the value that
+    actually applied and its real basis.
+
+    The shipped defaults carry their own explanation (the cloud 1.2 is tret's
+    conservative ceiling over the hyperscalers' self-reports, never a figure any
+    of them published); an operator or environment value says so instead of
+    borrowing that text; an upstream disclosure cites the disclosure.
+    """
+    from tret.services.emission_factors import LAYER_ENV, LAYER_GLOBAL_DEFAULT, LAYER_RUN_OVERRIDE
+
+    resolved = factors.pue
+    shown = f"{float(resolved.value):g}"
+    if resolved.disclosure:
+        statistic = resolved.disclosure["statistic"].replace("_", " ")
+        return (
+            resolved.label or "Upstream PUE disclosure",
+            resolved.url,
+            resolved.as_of,
+            f"Provider-asserted {statistic} for {resolved.label}; it is not a measurement "
+            "of this request.",
+        )
+    if resolved.layer == LAYER_GLOBAL_DEFAULT:
+        note = {
+            PUE_PROFILE_CLOUD: (
+                f"{shown} for hyperscaler cloud: tret's own conservative default, not a "
+                "published figure. It sits above the three hyperscalers' self-reports "
+                "(Google 1.09, AWS 1.15, Microsoft 1.16) and well below the 1.56 industry "
+                "average, i.e. deliberately conservative for a facility tret cannot see. "
+                "Self-reported figures are fleet averages, not the building that served "
+                "this request."
+            ),
+            PUE_PROFILE_WORKSTATION: (
+                f"{shown} for a desktop or workstation: fans and a share of room "
+                "cooling, no facility to speak of."
+            ),
+            PUE_PROFILE_ONPREM: (
+                f"{shown}, the Uptime Institute 2024 industry average across 879 "
+                "operators. An on-prem machine room is a small data centre and "
+                "must not borrow a hyperscaler's number."
+            ),
+        }[pue_profile]
+        ref = pue_ref or {}
+        return (
+            resolved.label or ref.get("source", "tret default for a workstation profile"),
+            resolved.url or ref.get("url"),
+            resolved.as_of or ref.get("date"),
+            note,
+        )
+    if resolved.layer == LAYER_RUN_OVERRIDE:
+        where = "an explicit override on this run"
+    elif resolved.layer == LAYER_ENV:
+        where = f"the operator's environment setting {resolved.setting}"
+    else:
+        where = f"the {resolved.source} PUE override ({resolved.setting})"
+    return (
+        resolved.label or f"Operator-set PUE ({resolved.layer})",
+        resolved.url,
+        resolved.as_of,
+        f"{shown} set by {where}; it replaces tret's shipped default for this profile "
+        "and is not a published or measured figure unless the operator's label says so.",
+    )
+
+
 def factor_records(
     *,
     energy_class: str,
@@ -1636,9 +1714,10 @@ def factor_records(
         grid_source.split(":provider:")[-1] if ":provider:" in grid_source else None
     )
     pue_ref = {
-        PUE_PROFILE_CLOUD: PUE_REFERENCE["google"],
+        PUE_PROFILE_CLOUD: PUE_REFERENCE["tret_default_cloud"],
         PUE_PROFILE_ONPREM: PUE_REFERENCE["industry_average"],
     }.get(pue_profile)
+    pue_source, pue_url, pue_as_of, pue_note = _pue_provenance(factors, pue_profile, pue_ref)
     grid_ref = GRID_REFERENCE["default"]
 
     # The "energy_class" record's confidence/source/note/date/url come from
@@ -1661,30 +1740,6 @@ def factor_records(
             "Wh) and replaces the per-token estimate below, which is still "
             "recorded separately as energy_wh_estimated. What would otherwise "
             "have been estimated: " + energy_note
-        )
-
-    pue_note = {
-        PUE_PROFILE_CLOUD: (
-            "1.2 for hyperscaler cloud. Above every self-report (Google 1.09, "
-            "AWS 1.14) and well below the 1.56 industry average, i.e. "
-            "deliberately conservative for a facility tret cannot see. "
-            "Self-reported figures are fleet averages, not the building "
-            "that served this request."
-        ),
-        PUE_PROFILE_WORKSTATION: (
-            "1.05 for a desktop or workstation: fans and a share of room "
-            "cooling, no facility to speak of."
-        ),
-        PUE_PROFILE_ONPREM: (
-            "1.56, the Uptime Institute 2024 industry average across 879 "
-            "operators. An on-prem machine room is a small data centre and "
-            "must not borrow a hyperscaler's number."
-        ),
-    }[pue_profile]
-    if factors.pue.disclosure:
-        pue_note = (
-            f"Provider-asserted {factors.pue.disclosure['statistic'].replace('_', ' ')} "
-            f"for {factors.pue.label}; it is not a measurement of this request."
         )
 
     factors = [
@@ -1772,10 +1827,9 @@ def factor_records(
             "Power Usage Effectiveness",
             _f(pue, 3),
             "total facility energy / IT-load energy",
-            factors.pue.label
-            or (pue_ref or {}).get("source", "tret default for a workstation profile"),
-            factors.pue.url or (pue_ref or {}).get("url"),
-            factors.pue.as_of or (pue_ref or {}).get("date"),
+            pue_source,
+            pue_url,
+            pue_as_of,
             "low",
             pue_note,
             factors.pue.setting,

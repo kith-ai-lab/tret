@@ -743,8 +743,8 @@ unstructured; `off`), `TRET_NORMALISER_MAX_RSS_MB` (3200, also the limit for the
 **Installing docling.** It is the optional `normalise` extra (`pip install "tret[normalise]"`):
 torch and models make it about 1.4 GB plus roughly 0.5 GB of models downloaded on first use.
 It is not in the server extra and not in the shipped images. Plan a machine of at least 4 GB
-for the conversion; a 2 GB machine is not safe. A separate 4 GB worker machine for Tret
-Cloud is a later change to tret-cloud, not part of this one.
+for the conversion; a 2 GB machine is not safe. A separate 4 GB worker machine for a
+hosted deployment is a later change to the hosting extension, not part of this one.
 
 ## Peer taxonomy (experimental, API off by default)
 

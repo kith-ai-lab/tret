@@ -1,4 +1,7 @@
 """Login rate limiting: the sliding window and the endpoint that uses it."""
+import asyncio
+import uuid
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -216,3 +219,130 @@ def test_the_account_bucket_caps_a_distributed_attempt(monkeypatch):
     # A different account is untouched: a lockout is never deployment-wide.
     assert _attempt(fresh_host, "someone-else@example.com").status_code == 401
     login_limiter.reset()
+
+
+# ── atomic check-and-record, and argon2 off the event loop ──────────────────
+def test_admit_records_only_when_every_bucket_has_room():
+    limiter = SlidingWindowLimiter()
+    buckets = [("src", 2), ("acct", 10)]
+    assert limiter.admit(buckets, 60.0, now=0) == 0.0
+    assert limiter.admit(buckets, 60.0, now=1) == 0.0
+    assert limiter.admit(buckets, 60.0, now=2) > 0
+    # The refused attempt recorded nothing, so it did not extend the lockout...
+    assert len(limiter._hits["src"]) == 2 and len(limiter._hits["acct"]) == 2
+    # ...and the window still slides open on schedule.
+    assert limiter.admit(buckets, 60.0, now=60.5) == 0.0
+
+
+def _user_with_password(password: str):
+    from argon2 import PasswordHasher
+
+    from tret.db.models import User
+
+    return User(
+        id=uuid.uuid4(), email="victim@example.com", display_name="Victim",
+        password_hash=PasswordHasher().hash(password), role="analyst",
+        session_epoch=0, disabled=False,
+    )
+
+
+class YieldingSession:
+    """Like a real session, `execute` suspends, so concurrent requests actually
+    interleave between the limiter's check and whatever follows it."""
+
+    def __init__(self, user):
+        self.user = user
+
+    async def execute(self, *_args, **_kwargs):
+        await asyncio.sleep(0)
+
+        class Result:
+            def scalar_one_or_none(_self):
+                return self.user
+
+        return Result()
+
+
+def test_parallel_guesses_beyond_the_limit_are_refused(monkeypatch):
+    """The check used to run before the failure was recorded, so every guess
+    already in flight passed it: N parallel attempts counted as zero."""
+    import httpx
+
+    monkeypatch.setattr(auth.get_settings(), "login_max_attempts", 3)
+    monkeypatch.setattr(auth.get_settings(), "login_window_seconds", 300.0)
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.dependency_overrides[get_db] = lambda: YieldingSession(_user_with_password("right-pw-123"))
+    login_limiter.reset()
+
+    async def fire(n):
+        transport = httpx.ASGITransport(app=app, client=("198.51.100.9", 1))
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as http:
+            return await asyncio.gather(
+                *[
+                    http.post(
+                        "/api/auth/login",
+                        json={"email": "victim@example.com", "password": f"guess-{i}"},
+                    )
+                    for i in range(n)
+                ]
+            )
+
+    try:
+        codes = sorted(r.status_code for r in asyncio.run(fire(25)))
+    finally:
+        login_limiter.reset()
+    assert codes == [401] * 3 + [429] * 22
+
+
+class _LoopSpyHasher:
+    """Wraps the real hasher (PasswordHasher has __slots__, so its methods
+    cannot be patched in place) and notes whether each call ran on a thread
+    with a running event loop, i.e. whether it would block that loop."""
+
+    def __init__(self):
+        self._real = auth._hasher
+        self.on_loop: list[bool] = []
+
+    def _note(self):
+        try:
+            asyncio.get_running_loop()
+            self.on_loop.append(True)
+        except RuntimeError:
+            self.on_loop.append(False)
+
+    def verify(self, *args, **kwargs):
+        self._note()
+        return self._real.verify(*args, **kwargs)
+
+    def hash(self, *args, **kwargs):
+        self._note()
+        return self._real.hash(*args, **kwargs)
+
+
+def test_password_verify_runs_off_the_event_loop(monkeypatch):
+    spy = _LoopSpyHasher()
+    monkeypatch.setattr(auth, "_hasher", spy)
+    app = FastAPI()
+    app.include_router(auth.router)
+    app.dependency_overrides[get_db] = lambda: YieldingSession(_user_with_password("right-pw-123"))
+    login_limiter.reset()
+    try:
+        client = TestClient(app)
+        assert client.post(
+            "/api/auth/login", json={"email": "victim@example.com", "password": "wrong"}
+        ).status_code == 401
+        assert client.post(
+            "/api/auth/login", json={"email": "victim@example.com", "password": "wrong-too"}
+        ).status_code == 401
+    finally:
+        login_limiter.reset()
+    assert spy.on_loop == [False, False]
+
+
+def test_password_hash_runs_off_the_event_loop(monkeypatch):
+    spy = _LoopSpyHasher()
+    monkeypatch.setattr(auth, "_hasher", spy)
+    digest = asyncio.run(auth.hash_password("some-password-1"))
+    assert spy.on_loop == [False]
+    asyncio.run(auth.verify_password(digest, "some-password-1"))

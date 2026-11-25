@@ -131,7 +131,7 @@ def main():
     activity = inputs.get("activity") or []
     factors = inputs.get("factors") or []
     if not factors:
-        sys.stderr.write("the factor dataset is empty: load it first (docs/learning-edition.md, Loading Ben's EPA spreadsheets)\n")
+        sys.stderr.write("the factor dataset is empty: load it first (docs/learning-edition.md, Loading the EPA spreadsheets)\n")
         sys.exit(2)
     index = build_index(factors)
     subregion_map = params.get("subregion_map") or {}

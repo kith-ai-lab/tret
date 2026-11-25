@@ -30,6 +30,7 @@ from tret.services.connections import (
     GDRIVE,
     M365,
     ConnectionAuthError,
+    ConnectionUnavailable,
     IMPORT_MAX_BYTES,
     DownloadTooLargeError,
     download_gdrive_file,
@@ -40,6 +41,7 @@ from tret.services.connections import (
     get_access_token,
     m365_item_metadata,
     record_connection_activity,
+    restricted_read_sources,
 )
 from tret.services.blobs import delete_blob_unless_referenced
 from tret.services.documents import MAX_DOCUMENT_BYTES, ingest_document
@@ -470,6 +472,24 @@ async def import_documents(
     project = await project_in_workspace(db, project_id, ctx.id)
     if project is None:
         raise HTTPException(404, "Project not found")
+
+    if body.provider == M365:
+        # The admin's read allowlist binds import exactly as it binds runs and
+        # the picker: an item in a drive outside it is refused before any
+        # token is fetched or byte moves. `drive_id` is client-supplied, so
+        # this cannot be left to the picker having hidden the drive.
+        try:
+            restrict_to = await restricted_read_sources(db, ctx.id)
+        except ConnectionUnavailable as exc:
+            raise HTTPException(
+                409, f"the {body.provider} connection needs to be reconnected: {exc.reason}"
+            ) from exc
+        if restrict_to is not None:
+            allowed_drives = {s.drive_id for s in restrict_to}
+            if any(item.drive_id not in allowed_drives for item in body.items):
+                raise HTTPException(
+                    403, "One or more items are outside the workspace's allowed sources."
+                )
 
     try:
         access_token = await get_access_token(db, ctx.id, body.provider)

@@ -14,9 +14,12 @@
 // The single most important privacy rule in this file lives in
 // `handleReport`: that function is only allowed to read `request.method`,
 // the URL path, the `content-length` header, the `content-type` header,
-// and the request body. It must never read `cf`, any `CF-*` header,
-// `User-Agent`, or anything else -- there is nothing in a telemetry report
-// that should ever be joined against request metadata. `checkAdminAuth`
+// the request body, and -- for exactly one purpose -- `CF-Connecting-IP`,
+// which is handed to the Workers Rate Limiting binding as its key and goes
+// nowhere else (never into D1, a log line, or a response). It must never
+// read `cf`, any other `CF-*` header, `User-Agent`, or anything else --
+// there is nothing in a telemetry report that should ever be joined
+// against request metadata. `checkAdminAuth`
 // (src/admin.js) is the one place this Worker reads a header beyond that,
 // because the admin endpoint is authenticated and not part of the
 // anonymous reporting path.
@@ -33,6 +36,11 @@ const MAX_BODY_BYTES = 8192;
 // Fallback only: wrangler.jsonc declares a `DAILY_ACCEPT_CAP` var with this
 // same default, so this is only reached if a deploy somehow drops the var.
 const DEFAULT_DAILY_ACCEPT_CAP = 2000;
+
+// Per-sender limit on POST /v1/report. The numbers live in wrangler.jsonc
+// (`ratelimits`, binding REPORT_LIMITER) -- this is only the Retry-After a
+// limited caller is told to wait, which is that binding's period.
+const RATE_LIMIT_RETRY_AFTER_SECONDS = '60';
 
 const AGGREGATES_CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -222,6 +230,58 @@ async function insertReport(db, value, receivedDay) {
   await db.batch(statements);
 }
 
+/**
+ * The limiter key for one sender: an IPv4 address as is, an IPv6 address as
+ * its /64. A single host is routinely given a whole /64, so keying on the full
+ * IPv6 address would hand one sender 2^64 separate allowances. An IPv4-mapped
+ * IPv6 address (`::ffff:192.0.2.1`) is keyed as the IPv4 address.
+ */
+export function senderKey(ip) {
+  if (!ip.includes(':')) return ip;
+  const [head, tail = ''] = ip.split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail ? tail.split(':') : [];
+  const last = t.length ? t[t.length - 1] : h[h.length - 1] || '';
+  if (last.includes('.')) return last;
+  const groups = ip.includes('::')
+    ? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t]
+    : h;
+  return `${groups
+    .slice(0, 4)
+    .map((g) => (parseInt(g || '0', 16) || 0).toString(16))
+    .join(':')}::/64`;
+}
+
+/**
+ * True when this sender has exceeded its per-IP allowance on /v1/report.
+ *
+ * Without it, anyone can post fresh-UUID reports until the global daily cap
+ * is gone (locking every real instance out) or to skew the published totals
+ * and stand up the 5-instance publication floor alone. The key is the
+ * connecting IP, but it is only ever passed to the rate limiter -- that
+ * binding keeps short-lived counters in Cloudflare's own infrastructure; this
+ * Worker never writes the IP to D1, logs, or responses.
+ *
+ * Degrades open, on purpose, in two cases: the binding is absent (local
+ * `wrangler dev`, tests, a fork that has not declared one) or there is no
+ * `CF-Connecting-IP` header (not behind Cloudflare). A limiter *error* also
+ * lets the report through: telemetry is best-effort and its outage must not
+ * become the reason reports are dropped. The per-instance-per-day unique
+ * constraint and the global daily cap still apply in every one of those cases.
+ */
+async function isRateLimited(request, env) {
+  const limiter = env.REPORT_LIMITER;
+  if (!limiter || typeof limiter.limit !== 'function') return false;
+  const ip = request.headers.get('cf-connecting-ip');
+  if (!ip) return false;
+  try {
+    const { success } = await limiter.limit({ key: senderKey(ip) });
+    return !success;
+  } catch {
+    return false;
+  }
+}
+
 async function handleReport(request, env) {
   // Contract §7 amendments B2: a CORS preflight the Worker never
   // satisfies, so a browser can't be used as a drive-by reporter.
@@ -235,6 +295,12 @@ async function handleReport(request, env) {
   const declaredLength = Number(request.headers.get('content-length'));
   if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
     return errorResponse('payload too large', 413);
+  }
+
+  // Before the body is read or the database touched: a flooding sender is
+  // turned away as cheaply as possible.
+  if (await isRateLimited(request, env)) {
+    return errorResponse(null, 429, { 'Retry-After': RATE_LIMIT_RETRY_AFTER_SECONDS });
   }
 
   const { text, tooLarge } = await readBodyCapped(request, MAX_BODY_BYTES);

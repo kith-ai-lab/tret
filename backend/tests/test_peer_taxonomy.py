@@ -721,7 +721,10 @@ def test_classify_sec_cli_end_to_end_through_tret_net(world, cfg, monkeypatch, c
     assert "classified 1" in out and "1 without a CIK" in out and "26.2" in out
     assert seen["follow_redirects"] is False and seen["timeout"] == 30.0
     assert seen["headers"]["User-Agent"] == "Test Org test-contact"
-    assert seen["proxy"] == "http://proxy.example:3128"  # TRET_EGRESS_PROXY applies
+    # TRET_EGRESS_PROXY applies: every request is mounted on a transport to that
+    # proxy (tret/net/pinning.py `build_transports`; direct connections are pinned).
+    proxy_url = seen["mounts"]["all://"]._pool._proxy_url
+    assert (proxy_url.host, proxy_url.port) == (b"proxy.example", 3128)
     assert "request" in seen["event_hooks"]  # the URL guard and audit hook are installed
     assert seen["client"].closed
     (row,) = rows_of(world)

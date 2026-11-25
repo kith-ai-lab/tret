@@ -7,7 +7,7 @@ description: >
   facility and per portfolio company. Ships NO emission factors: they come from
   a factor dataset an operator loads from published sources (EPA GHG Emission
   Factors Hub, eGRID, GHG Protocol) with `python -m tret.services.dataset_import`.
-  See docs/learning-edition.md, "Loading Ben's EPA spreadsheets".
+  See docs/learning-edition.md, "Loading the EPA spreadsheets".
 frameworks: [GHG-Protocol]
 
 # Installed only into cohort-edition workspaces (loader.install_pack raises
@@ -43,5 +43,5 @@ methods:
       factors: >-
         The emission-factor dataset has not been loaded in this project. An operator
         loads it from the published EPA/eGRID spreadsheets: see docs/learning-edition.md,
-        "Loading Ben's EPA spreadsheets" (python -m tret.services.dataset_import).
+        "Loading the EPA spreadsheets" (python -m tret.services.dataset_import).
         Until then no figure can be produced; do not estimate one.

@@ -71,6 +71,24 @@ RUN pip install --no-cache-dir --no-deps .
 # it. tests/test_docs_api.py fails if this line is dropped.
 COPY docs ./docs
 
+# Non-root runtime identity, same as Dockerfile.fly (docs/hardening.md:
+# "container/VM with a non-root user"). Fixed uid/gid 10001 so volume ownership
+# is stable across rebuilds and matches the Fly image. HOME=/app for the same
+# reason as there: asyncpg stats $HOME/.postgresql/ on every connection, and
+# under /root that is a PermissionError for this user, not a miss.
+RUN groupadd --gid 10001 tret \
+    && useradd --uid 10001 --gid tret --home /app --no-create-home --shell /usr/sbin/nologin tret \
+    && chown -R tret:tret /app
+ENV HOME=/app
+
+# Starts as root only to chown the named `storage` volume (created root-owned,
+# and root-written by installs that predate this user), then setpriv drops to
+# `tret` and execs uvicorn. A Dockerfile `USER` line would defeat that. /packs is
+# a read-only bind mount in compose, so nothing there needs a chown.
+COPY fly-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 EXPOSE 8000
+ENTRYPOINT ["/entrypoint.sh"]
 # Single worker by design: the run event bus is in-process (see docs/architecture.md).
 CMD ["uvicorn", "tret.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

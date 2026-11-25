@@ -3,7 +3,7 @@
 Kith Climate collects public sustainability disclosures, and the disclosure is
 often a few dozen pages inside a 300-page annual report. A reviewer decides which
 *physical* pages form the package; this module retains exactly those pages and
-records where each one came from. It never infers a range. Ported from Diego's
+records where each one came from. It never infers a range. Ported from the pilot's
 reference `collect.py` (pilot-2026-10-29), keeping its rules and its wording so a
 package produced here is comparable with one produced there.
 

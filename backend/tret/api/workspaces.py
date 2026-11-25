@@ -243,7 +243,7 @@ async def archive_workspace(
     if body.confirm_name.strip().lower() != workspace.name.strip().lower():
         raise HTTPException(422, "confirm_name must match the workspace name.")
 
-    # tret_cloud could refuse here (e.g. an outstanding credit balance) through
+    # A hosting extension could refuse here (e.g. an outstanding credit balance) through
     # the workspace gate seam, the same one invites use.
     gate = await get_extension_registry().check_workspace_gate(db, workspace.id, "archive")
     if not gate.allowed:

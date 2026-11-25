@@ -559,7 +559,9 @@ def test_the_resolved_profile_and_its_source_travel_with_the_run():
 
     cloud = next(f for f in _account(_model("L"))["factors"] if f["key"] == "pue")
     assert cloud["value"] == 1.2
-    assert "Google" in cloud["source"]
+    # 1.2 is tret's own conservative ceiling, never a figure Google published.
+    assert cloud["source"].startswith("tret default")
+    assert not cloud["url"]
 
 
 def test_a_pue_below_one_is_refused_rather_than_shrinking_the_number():
@@ -1911,3 +1913,59 @@ def test_emissions_is_readable_by_any_authenticated_user(monkeypatch):
     body = client.get("/api/analytics/emissions?days=7").json()
     assert body["window_days"] == 7
     assert body["totals"]["runs"] == 0
+
+
+# ── the PUE note describes the value that applied (M15) ──────────────────────
+def _pue_record(settings=None, **factor_kwargs):
+    from tret.services.emission_factors import build_factor_set
+
+    fs = build_factor_set(provider="anthropic", settings=settings or _settings(), **factor_kwargs)
+    return next(f for f in _account(_model("L"), settings, factors=fs)["factors"] if f["key"] == "pue")
+
+
+def test_default_cloud_pue_note_does_not_attribute_1_2_to_google():
+    rec = _pue_record()
+    assert rec["value"] == 1.2
+    note = rec["note"]
+    assert "tret's own conservative default" in note
+    assert "Google 1.09" in note and "AWS 1.15" in note and "Microsoft 1.16" in note
+    assert "1.14" not in note
+    assert "Google 1.2" not in note and "Environmental Report" not in rec["source"]
+    assert "google" not in (rec["url"] or "").lower()
+
+
+def test_pue_note_follows_an_env_or_operator_value():
+    env = _pue_record(_settings(datacenter_pue=1.35))
+    assert env["value"] == 1.35 and env["layer"] == "env"
+    assert "1.35 set by the operator's environment setting TRET_DATACENTER_PUE" in env["note"]
+    assert "conservative default" not in env["note"]
+    assert "Google" not in env["source"]
+
+    ws = _pue_record(workspace_settings={"pue": {"cloud": 1.6, "label": "metered site PUE"}})
+    assert ws["value"] == 1.6 and ws["source"] == "metered site PUE"
+    assert "1.6 set by" in ws["note"] and "workspace" in ws["note"]
+    assert "conservative default" not in ws["note"]
+
+
+def test_pue_note_for_an_upstream_disclosure_cites_the_disclosure():
+    rec = _pue_record(
+        workspace_settings={"pue": {"cloud": 1.3, "label": "ws", "upstreams": {"aws": {
+            "value": 1.15, "label": "AWS 2024 report",
+            "as_of": "2024-12-31", "url": "https://example.test/aws"}}}},
+        served_by="amazon-bedrock",
+    )
+    assert rec["value"] == 1.15
+    assert rec["note"].startswith("Provider-asserted operating fleet average for AWS 2024 report")
+    assert rec["url"] == "https://example.test/aws"
+
+
+def test_aws_pue_is_one_figure_everywhere_in_the_main_method():
+    import re
+
+    from tret.services.emission_settings import shipped_defaults
+    from tret.services.emissions import PUE_REFERENCE
+
+    assert PUE_REFERENCE["aws"]["value"] == 1.15
+    shown = [_pue_record()["note"], shipped_defaults()["pue_cloud"]["label"]]
+    for text in shown:
+        assert re.findall(r"AWS (1\.\d+)", text) == ["1.15"], text

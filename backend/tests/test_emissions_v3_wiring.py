@@ -20,7 +20,7 @@ from tret.providers.base import Usage
 from tret.providers.catalog import ModelCatalog, ModelInfo
 from tret.services.emissions import overhead_block, overhead_call
 from tret.services.emissions_v3_wiring import (
-    attach_to_routing, build_method_v3, method_v3_of, public_routing, v3_for_overhead_call,
+    attach_to_routing, build_method_v3, build_run_block, method_v3_of, public_routing, v3_for_overhead_call,
     v3_for_segment,
 )
 from tret.services.energy_meter import MeterReading
@@ -389,3 +389,63 @@ def test_dated_openrouter_ids_still_reach_the_classification_table():
     assert lookup_classification(
         _v3_model_id(SimpleNamespace(id="anthropic/claude-haiku-4-5", openrouter_id=None), None)
     ) is not None
+
+
+# ── operator grid factors reach the v3 preview (M14) ─────────────────────────
+def _grid_block(**fs_kwargs):
+    from tret.config import Settings
+    from tret.services.emission_factors import build_factor_set
+
+    settings = fs_kwargs.pop("settings", None) or Settings()
+    fs = build_factor_set(provider="anthropic", settings=settings, **fs_kwargs)
+    return fs, v3_for_segment(_segment(factors=fs), _sonnet())
+
+
+def test_workspace_grid_factor_is_used_by_the_v3_preview_with_provenance():
+    doc = {"grid": {"default": {"g_per_kwh": 30, "label": "Hydro campus PPA"}}}
+    fs, block = _grid_block(workspace_settings=doc)
+    assert float(fs.grid.value) == 30.0  # what the main accounting uses
+    loc = block["grid"]["location_based"]
+    assert loc["g_per_kwh"] == 30.0 and loc["g_per_kwh_effective"] == 30.0
+    assert block["parts"]["grid_g_per_kwh"] == 30.0
+    assert block["grid"]["rung"] == "operator"
+    assert block["grid"]["operator"]["layer"] == "workspace"
+    assert block["grid"]["operator"]["label"] == "Hydro campus PPA"
+    assert block["grid"]["operator"]["setting"] == "workspace.emissions.grid.default"
+    assert any("operator grid factor applied" in f for f in block["placement"]["flags"])
+    # operational carbon follows the 30 g/kWh, not the ~406 g/kWh USA default
+    plain = v3_for_segment(_segment(), _sonnet())
+    assert block["parts"]["operational_g"] == pytest.approx(
+        plain["parts"]["operational_g"] * 30.0 / plain["parts"]["grid_g_per_kwh"])
+
+
+def test_env_grid_factor_and_run_override_reach_the_v3_preview():
+    from tret.config import Settings
+
+    _, block = _grid_block(settings=Settings(grid_factors={"anthropic": {"g_per_kwh": 30}}))
+    assert block["parts"]["grid_g_per_kwh"] == 30.0
+    assert block["grid"]["operator"]["layer"] == "env"
+
+    _, block = _grid_block(run_overrides={"grid_g_per_kwh": 12})
+    assert block["parts"]["grid_g_per_kwh"] == 12.0
+    assert block["grid"]["operator"]["layer"] == "run_override"
+
+
+def test_operator_grid_survives_slimming_and_persisted_accounting():
+    doc = {"grid": {"default": {"g_per_kwh": 30, "label": "Hydro campus PPA"}}}
+    fs, block = _grid_block(workspace_settings=doc)
+    assert wiring.slim_method_v3({**build_run_block([block], []), })["grid"]["operator"]["layer"] == "workspace"
+    # a persisted segment (no live FactorSet) carries the same facts in energy_accounting
+    from tret.services.emissions import energy_accounting
+
+    acct = energy_accounting(_sonnet(), 8000, 1200, 20000, 2000, factors=fs)
+    persisted = {"model": SONNET, "provider": "anthropic", "energy_accounting": acct, **TOK}
+    again = v3_for_segment(persisted, _sonnet())
+    assert again["parts"]["grid_g_per_kwh"] == 30.0
+    assert again["grid"]["operator"]["layer"] == "workspace"
+
+
+def test_dataset_and_default_layers_are_not_operator_figures():
+    _, block = _grid_block()
+    assert block["grid"]["rung"] == "provider_geography"
+    assert "operator" not in block["grid"]

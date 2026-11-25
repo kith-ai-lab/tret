@@ -399,6 +399,51 @@ async def test_removed_member_actor_stays_draft(session_factory, world):
     assert await _approvals(session_factory, fid) == []
 
 
+@pytest.mark.parametrize("role,expected", [("analyst", "draft"), ("approver", "approved"), ("admin", "approved")])
+async def test_auto_approval_needs_an_approver_actor(session_factory, world, role, expected):
+    """The approval is made in the run starter's name, so a run started by an
+    analyst must leave its draft for a human approver, as with the policy off."""
+    await _set_ws_settings(session_factory, world, {"auto_approve": ["draft_section"]})
+    async with session_factory() as db:
+        m = await db.get(WorkspaceMember, (world.user.id, world.ws.id))
+        m.role = role
+        await db.commit()
+    async with session_factory() as db:
+        await draft_section(_ctx(db, world), "report", "gov", BANNER_MD)
+        await db.commit()
+    f = await _only_finding(session_factory)
+    assert f.status == expected
+    assert bool(await _approvals(session_factory, f.id)) == (expected == "approved")
+
+
+async def test_analyst_run_connected_write_is_not_uploaded(session_factory, world, monkeypatch):
+    """The audit's case: `connected_write` auto-approve on, run started by an
+    analyst. Nothing may be written to SharePoint without a human approver."""
+    await _set_ws_settings(session_factory, world, {"auto_approve": ["connected_write"]})
+    async with session_factory() as db:
+        m = await db.get(WorkspaceMember, (world.user.id, world.ws.id))
+        m.role = "analyst"
+        await db.commit()
+    target = SimpleNamespace(slug="fin", label="Finance", path="/Documents/tret")
+
+    async def _targets(db, workspace_id):
+        return [target]
+
+    async def _upload(db, **kw):
+        raise AssertionError("an analyst's run must not trigger an upload")
+
+    monkeypatch.setattr(connections_service, "list_write_targets", _targets)
+    monkeypatch.setattr(connections_service, "safe_upload_path", lambda n: n, raising=False)
+    monkeypatch.setattr(connections_service, "upload_connected_file", _upload)
+    async with session_factory() as db:
+        text = await propose_connected_write(
+            _ctx(db, world), target="fin", filename="notes.md", content="hello")
+        await db.commit()
+    f = await _only_finding(session_factory)
+    assert f.status == "draft" and "awaiting approval" in text
+    assert await _approvals(session_factory, f.id) == []
+
+
 async def test_disabled_actor_stays_draft_and_member_approves(session_factory, world):
     async with session_factory() as db:
         db.add(Finding(id=uuid.uuid4(), project_id=world.project.id, run_id=world.run.id,

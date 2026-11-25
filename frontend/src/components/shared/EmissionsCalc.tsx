@@ -25,6 +25,7 @@ import { Fragment } from 'react'
  *     model does not have; the range is a judgment band and is labelled as one.
  */
 import type { EmissionsFactor, EnergyAccounting, TokenBucket } from '../../api/client'
+import { bucketsMatchTotal } from './bucketSum'
 import { CaveatList, FactorTable, SensitivityTable } from './FactorProvenance'
 import { MethodologyLink } from './MethodologyDialog'
 import { WaterDerivation } from './WaterFootprint'
@@ -220,7 +221,7 @@ function buildSteps(energy: EnergyAccounting): Step[] {
     // it, rather than a generic "instance setting" — with several factors
     // configured, which one applied is the question a reader has.
     source: [
-      energy.grid_co2e_source ? gridSourceLabel(energy.grid_co2e_source) : 'instance setting',
+      energy.grid_co2e_source ? gridSourceLabel(energy.grid_co2e_source, energy.grid_dataset_version) : 'instance setting',
       gridBasisLabel(energy.grid_co2e_basis),
       energy.grid_co2e_label ? `“${energy.grid_co2e_label}”` : null,
       energy.grid_region ? `region: ${energy.grid_region}` : null,
@@ -233,6 +234,7 @@ function buildSteps(energy: EnergyAccounting): Step[] {
       .join(' · '),
     sourceHint: `Grid intensity as configured when this run happened, with its GHG Protocol basis. Location-based and market-based factors answer different questions and must never be summed. A region- or supplier-specific factor is the single biggest improvement available here. ${gridSourceWhat(
       energy.grid_co2e_source,
+      energy.grid_dataset_version,
     )} ${GRID_NO_INFERENCE_NOTE}${
       energy.factors?.find((f) => f.key === 'grid_intensity')?.table_miss ? ` ${TABLE_MISS_NOTE}` : ''
     }`,
@@ -426,11 +428,11 @@ function TokenBuckets({ energy }: { energy: EnergyAccounting }) {
   const byBucket = energy.energy_wh_by_bucket
   if (!tokens) return null
   const weights = bucketWeights(energy)
-  const bucketSum = byBucket
-    ? BUCKETS.reduce((total, b) => total + (byBucket[b] ?? 0), 0)
-    : null
-  // The backend guarantees the buckets sum to energy_wh; check it, don't trust it.
-  const sumMatches = bucketSum === null ? null : Math.abs(bucketSum - energy.energy_wh) < 1e-6
+  const bucketValues = byBucket ? BUCKETS.map((b) => byBucket[b] ?? 0) : null
+  const bucketSum = bucketValues ? bucketValues.reduce((total, v) => total + v, 0) : null
+  // The backend guarantees the buckets sum to energy_wh before rounding; check it,
+  // don't trust it — but allow for the rounding each stored figure has had.
+  const sumMatches = bucketValues === null ? null : bucketsMatchTotal(bucketValues, energy.energy_wh)
   return (
     <div>
       <div className="mono-label" style={{ marginBottom: 6 }}>

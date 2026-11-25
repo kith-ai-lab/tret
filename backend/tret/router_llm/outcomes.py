@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 
+from tret.providers.base import provider_out_of_credit
 from tret.services.transcript import TranscriptSignals, read_signals
 
 OUTCOME_SCORE_VERSION = "outcome-v1"
@@ -44,13 +45,24 @@ UNSCORED = "unscored"  # cancelled, or still running — carries no lesson
 HANDED_OFF = "handed_off"  # it stalled: the strongest negative signal there is
 HANDED_OFF_CAPACITY = "handed_off_capacity"  # it ran out of context window
 
+# The provider (or the workspace's own balance) refused the call for want of
+# credit: one tenant's empty wallet, which says nothing about the model's quality
+# or about whether its endpoint is up.
+BILLING_FAILED = "billing_failed"
+
 # Outcome classes that say nothing about how good a model is, and must never
 # reach the priors. A model handed off because the conversation outgrew its
 # context window did not perform badly — it was the wrong *size*, which is a
 # property of the task, and the router already reasons about context windows
 # directly. Scoring it as poor quality would teach the router that a reliable
 # small-context model is a bad model.
-NON_QUALITY_CLASSES = (UNSCORED, HANDED_OFF_CAPACITY)
+#
+# `BILLING_FAILED` is the same kind of non-evidence: a 402 / out-of-credit for one
+# workspace's key or balance. The priors are pooled across every workspace, and
+# the router's model cooldown is global, so counting it would let one tenant's
+# empty wallet degrade routing for all of them (see also `OutcomePriors.
+# cooldown_for`, which ignores these rows).
+NON_QUALITY_CLASSES = (UNSCORED, HANDED_OFF_CAPACITY, BILLING_FAILED)
 
 BASE_SCORE: dict[str, float] = {
     DELIVERED: 0.70,
@@ -79,6 +91,7 @@ ERROR_KINDS = (
     "unknown_tool",
     "routing_unavailable",
     "provider_error",
+    "billing_error",
     "engine_error",
 )
 _ERROR_PREFIXES = (
@@ -174,6 +187,8 @@ def error_kind(status: str, error: str | None) -> str | None:
             return kind
     if is_repeated_failure_stop(text):
         return "repeated_failing_call"
+    if provider_out_of_credit(text) is not None:
+        return "billing_error"
     if "no candidate models" in text.lower() or "cost ceiling" in text.lower():
         return "routing_unavailable"
     if text.startswith("["):  # ProviderError renders as "[provider] message"
@@ -288,6 +303,19 @@ def score(
     elif status == "completed_without_output":
         outcome_class = NO_OUTPUT
     elif status == "failed":
+        if provider_out_of_credit(error) is not None:
+            return OutcomeScore(
+                BILLING_FAILED,
+                0.0,
+                error_kind="billing_error",
+                components={
+                    "note": (
+                        "the provider rejected the call for lack of credit; recorded, but "
+                        "excluded from quality evidence and the model cooldown — an empty "
+                        "wallet is not a property of the model"
+                    ),
+                },
+            )
         outcome_class = FAILED
     else:  # queued | running | cancelled
         return OutcomeScore(UNSCORED, 0.0, components={"reason": f"status '{status}'"})

@@ -761,7 +761,7 @@ async def test_token_is_blocked_by_a_registered_workspace_gate(client, seed):
     workspace = make_workspace("Alpha")
     member = make_user("token-gate-member@example.com")
     conn = make_connection(workspace)
-    await seed(workspace, member, make_member(member, workspace, role="analyst"), conn)
+    await seed(workspace, member, make_member(member, workspace, role="approver"), conn)
     await login(client, member.email)
 
     ext = ExtensionAPI(None)
@@ -794,7 +794,7 @@ async def test_token_passes_the_use_action_when_the_gate_allows(client, seed):
     workspace = make_workspace("Alpha")
     member = make_user("token-gate-allow@example.com")
     conn = make_connection(workspace)
-    await seed(workspace, member, make_member(member, workspace, role="analyst"), conn)
+    await seed(workspace, member, make_member(member, workspace, role="approver"), conn)
     await login(client, member.email)
 
     asked_actions: list[str] = []
@@ -815,6 +815,26 @@ async def test_token_passes_the_use_action_when_the_gate_allows(client, seed):
 
     assert response.status_code == 200, response.text
     assert asked_actions == ["connections.use"]
+
+
+# ── GET /api/connections/{provider}/token: approver-only ─────────────────────
+@pytest.mark.parametrize("role,expected", [("analyst", 403), ("approver", 200), ("admin", 200), ("owner", 200)])
+async def test_token_requires_the_approver_role(client, seed, role, expected):
+    """The picker token is a live `drive.file` token: it can modify or trash
+    any file picked through the app, outside the approval-gated write-back."""
+    workspace = make_workspace("Alpha")
+    member = make_user(f"token-role-{role}@example.com")
+    conn = make_connection(workspace)
+    await seed(workspace, member, make_member(member, workspace, role=role), conn)
+    await login(client, member.email)
+
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post(GDRIVE_TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        )
+        response = await client.get("/api/connections/gdrive/token")
+        assert route.called is (expected == 200)  # a refused analyst never triggers a refresh
+    assert response.status_code == expected, response.text
 
 
 # ── GET /api/connections: now carries selected_resources ────────────────────
