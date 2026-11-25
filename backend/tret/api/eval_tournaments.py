@@ -7,7 +7,15 @@ budget, watch it, read the ratings.
 * `GET /api/eval/tournaments`, `GET /api/eval/tournaments/{id}`.
 * `POST .../{id}/start` (approver): `budget_usd` required. Freezes the jury and runs.
 * `POST .../{id}/cancel`, `POST .../{id}/resume` (approver; resume may raise the budget; it works
-  from any pause reason, and from a `running` tournament whose runner has stopped).
+  from any pause reason, and from a `running` tournament whose runner has stopped). A tripped gate
+  (`length_bias`, `juror_agreement`, `anchor_drift`; `flip_rate` after `jury_degraded`) must be
+  acknowledged to continue: `acknowledge_gates` + `note`, else 409 naming the gate(s).
+* `GET .../{id}/diagnostics`: the gates (length bias, flip rate, position bias, juror agreement, anchor
+  drift) with their evidence. A running or paused tournament serves the block its last round stored; a
+  completed one is computed once and cached on the row. Only a gate listed in the tournament's
+  `required_acknowledgements` can be acknowledged, and with a `note`. `POST .../{id}/anchor-set` (approver, `budget_usd`): take an anchor set
+  from a completed tournament. `GET /api/eval/anchor-sets`, `GET .../{id}`, `POST .../{id}/resume`
+  (approver): the anchor sets and their baseline judging.
 * `POST .../{id}/refit` (approver): recompute the ratings of a completed or failed tournament from its
   stored matches. No model call, no spend.
 * `DELETE .../{id}` (approver): a draft only, with its snapshot.
@@ -31,7 +39,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tret.api.auth import current_user
 from tret.api.workspace import WorkspaceContext, current_workspace, require_workspace_approver
 from tret.db.engine import get_db
-from tret.db.models import EvalTournament, PeerPoolSnapshot
+from tret.db.models import EvalTournament, PeerPoolSnapshot, RoutingFreeze
+from tret.evaluation import anchors as an
+from tret.evaluation import diagnostics as dg
 from tret.evaluation import tournament as tn
 from tret.evaluation.pools import DEFAULT_MIN_N
 
@@ -42,6 +52,7 @@ def _require_enabled() -> None:
 
 
 router = APIRouter(prefix="/api/eval/tournaments", tags=["eval-tournaments"], dependencies=[Depends(_require_enabled)])
+anchors_router = APIRouter(prefix="/api/eval/anchor-sets", tags=["eval-tournaments"], dependencies=[Depends(_require_enabled)])
 
 
 class TournamentIn(BaseModel):
@@ -64,6 +75,20 @@ class ResumeIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     budget_usd: float | None = Field(default=None, gt=0, le=100_000)
+    acknowledge_gates: list[str] | None = Field(default=None, max_length=10, description="Tripped gates the approver has looked at; they will not pause this tournament again")
+    note: str | None = Field(default=None, max_length=500)
+
+
+class AnchorIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    budget_usd: float = Field(gt=0, le=100_000, description="The most the baseline judging of the anchor set may spend")
+
+
+class AnchorResumeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    budget_usd: float | None = Field(default=None, gt=0, le=100_000)
 
 
 def _raise(e: tn.TournamentError) -> None:
@@ -71,7 +96,8 @@ def _raise(e: tn.TournamentError) -> None:
 
 
 async def _out(db: AsyncSession, t: EvalTournament) -> dict[str, Any]:
-    return tn.tournament_out(t, await db.get(PeerPoolSnapshot, t.snapshot_id))
+    freeze = await db.get(RoutingFreeze, t.freeze_id) if t.freeze_id else None
+    return tn.tournament_out(t, await db.get(PeerPoolSnapshot, t.snapshot_id), freeze)
 
 
 @router.post("")
@@ -102,7 +128,9 @@ async def list_tournaments(
     rows = (await db.execute(
         select(EvalTournament).where(EvalTournament.workspace_id == ctx.id).order_by(EvalTournament.created_at.desc()).limit(limit)
     )).scalars().all()
-    return {"tournaments": [tn.tournament_out(t) for t in rows]}
+    ids = [t.freeze_id for t in rows if t.freeze_id]
+    freezes = {f.id: f for f in (await db.execute(select(RoutingFreeze).where(RoutingFreeze.id.in_(ids)))).scalars()} if ids else {}
+    return {"tournaments": [tn.tournament_out(t, None, freezes.get(t.freeze_id)) for t in rows]}
 
 
 async def _get(db: AsyncSession, ctx: WorkspaceContext, tournament_id: uuid.UUID) -> EvalTournament:
@@ -165,7 +193,9 @@ async def resume(
 ):
     try:
         t = await tn.resume_tournament(
-            db, workspace_id=ctx.id, tournament_id=tournament_id, budget_usd=body.budget_usd if body else None
+            db, workspace_id=ctx.id, tournament_id=tournament_id, budget_usd=body.budget_usd if body else None,
+            acknowledge_gates=body.acknowledge_gates if body else None, note=body.note if body else None,
+            acknowledged_by=user.email,
         )
     except tn.TournamentError as e:
         await db.rollback()
@@ -209,7 +239,7 @@ async def matches(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     status: str | None = Query(None, pattern="^(pending|running|done|failed)$"),
-    kind: str | None = Query(None, pattern="^(primary|swap|double)$"),
+    kind: str | None = Query(None, pattern="^(primary|swap|double|anchor)$"),
     pool: str | None = Query(None, max_length=200),
     user=Depends(current_user),
     ctx: WorkspaceContext = Depends(current_workspace),
@@ -227,3 +257,72 @@ async def ratings(
     db: AsyncSession = Depends(get_db),
 ):
     return await tn.list_ratings(db, await _get(db, ctx, tournament_id))
+
+
+@router.get("/{tournament_id}/diagnostics")
+async def diagnostics(
+    tournament_id: uuid.UUID,
+    user=Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    t = await _get(db, ctx, tournament_id)
+    return await dg.serve_diagnostics(db, t)
+
+
+@router.post("/{tournament_id}/anchor-set")
+async def create_anchor_set(
+    tournament_id: uuid.UUID,
+    body: AnchorIn,
+    user=Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        a = await an.create_anchor_set(
+            db, workspace_id=ctx.id, tournament_id=tournament_id, budget_usd=body.budget_usd, created_by=user.email
+        )
+    except tn.TournamentError as e:
+        await db.rollback()
+        _raise(e)
+    return await an.anchor_set_out(db, a, detail=True)
+
+
+@anchors_router.get("")
+async def list_anchor_sets(
+    limit: int = Query(50, ge=1, le=200),
+    user=Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    return {"anchor_sets": await an.list_anchor_sets(db, workspace_id=ctx.id, limit=limit)}
+
+
+@anchors_router.get("/{set_id}")
+async def read_anchor_set(
+    set_id: uuid.UUID,
+    user=Depends(current_user),
+    ctx: WorkspaceContext = Depends(current_workspace),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        a = await an.get_anchor_set(db, workspace_id=ctx.id, set_id=set_id)
+    except tn.TournamentError as e:
+        _raise(e)
+    return await an.anchor_set_out(db, a, detail=True)
+
+
+@anchors_router.post("/{set_id}/resume")
+async def resume_anchor_set(
+    set_id: uuid.UUID,
+    body: AnchorResumeIn | None = None,
+    user=Depends(current_user),
+    ctx: WorkspaceContext = Depends(require_workspace_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        a = await an.resume_anchor_set(db, workspace_id=ctx.id, set_id=set_id, budget_usd=body.budget_usd if body else None)
+    except tn.TournamentError as e:
+        await db.rollback()
+        _raise(e)
+    return await an.anchor_set_out(db, a, detail=True)

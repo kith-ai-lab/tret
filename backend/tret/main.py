@@ -484,6 +484,7 @@ def create_app() -> FastAPI:
     app.include_router(report_extractions_api.router)
     app.include_router(eval_jury_api.router)
     app.include_router(eval_tournaments_api.router)
+    app.include_router(eval_tournaments_api.anchors_router)
     # Reference documentation, read straight out of `docs/` so the methodology the
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)

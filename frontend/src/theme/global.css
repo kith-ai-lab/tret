@@ -2264,3 +2264,37 @@ summary:focus-visible {
 .session-archived-list { max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
 .session-archived-row { display: flex; align-items: center; gap: 4px; }
 .session-archived-row .chat-rail-item { flex: 1; min-width: 0; }
+
+/* ── Evaluation (Engine 1 tournaments) ─────────────────────────────────── */
+
+.eval-scroll { overflow-x: auto; max-width: 100%; }
+.eval-bar { height: 6px; background: var(--border-subtle); border-radius: 3px; overflow: hidden; min-width: 80px; }
+.eval-bar > span { display: block; height: 100%; background: var(--accent); }
+.eval-bar.over > span { background: var(--red); }
+.eval-dots { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; }
+.eval-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gray); display: inline-block; }
+.eval-dot.ok { background: var(--green); }
+.eval-dot.warn { background: var(--amber); }
+.eval-dot.tripped { background: var(--red); }
+.eval-dot.insufficient_data, .eval-dot.not_applicable { background: var(--text-muted); opacity: 0.45; }
+.eval-gates { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.eval-gate { border: 1px solid var(--border); border-left-width: 4px; border-radius: 5px; padding: 10px 12px; background: var(--bg-panel); font-family: var(--mono); font-size: 11.5px; }
+.eval-gate.ok { border-left-color: var(--green); }
+.eval-gate.warn { border-left-color: var(--amber); }
+.eval-gate.tripped { border-left-color: var(--red); }
+.eval-gate.insufficient_data { border-left-color: var(--gray); }
+.eval-gate.not_applicable { border-left-color: var(--border); opacity: 0.65; }
+.eval-gate .gate-name { font-weight: 600; margin-bottom: 4px; display: flex; justify-content: space-between; gap: 8px; }
+.eval-gate .gate-line { color: var(--text-muted); margin-top: 3px; }
+.eval-interval { position: relative; height: 10px; min-width: 140px; background: var(--border-subtle); border-radius: 2px; }
+.eval-interval .rng { position: absolute; top: 3px; height: 4px; background: var(--accent-dim, var(--border)); border: 1px solid var(--accent); border-radius: 2px; box-sizing: border-box; }
+.eval-interval .pt { position: absolute; top: 1px; width: 2px; height: 8px; background: var(--accent); }
+.eval-changed td { background: var(--amber-dim); }
+.eval-dropped { text-decoration: line-through; color: var(--text-muted); }
+.eval-section { margin: 20px 0 8px; font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.eval-rationale { max-width: 360px; white-space: normal; cursor: pointer; }
+@media (max-width: 760px) {
+  .eval-page .list-detail { flex-direction: column; }
+  .eval-page .list-detail-list { width: 100% !important; border-right: none; padding-right: 0; max-height: 240px; }
+  .eval-page .list-detail-detail { width: 100%; }
+}

@@ -55,6 +55,7 @@ const EDITIONS: Record<Edition, { nav: NavItem[]; hiddenPrefixes: string[]; exac
       '/packs',
       '/harnesses',
       '/marketplace-review',
+      '/evaluation',
       '/collections',
     ],
   },

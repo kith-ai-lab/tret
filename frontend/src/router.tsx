@@ -14,6 +14,7 @@ import { ConnectionsView } from './views/Connections'
 import { Deliverables } from './views/Deliverables'
 import { Documents } from './views/Documents'
 import { Emissions } from './views/Emissions'
+import { Evaluation } from './views/Evaluation'
 import { Harnesses } from './views/Harnesses'
 import { InviteAccept } from './views/InviteAccept'
 import { MarketplaceReview } from './views/MarketplaceReview'
@@ -58,6 +59,9 @@ export function AppRoutes() {
           review API is not there (self-host, or an authenticated non-staff
           user) — see MarketplaceReview.tsx's own doc comment. */}
       <Route path="/marketplace-review" element={<MarketplaceReview />} />
+      {/* Staff-only; the component probes the tournaments API (404 while the
+          feature setting is off) and bounces home, like Marketplace review. */}
+      <Route path="/evaluation" element={<Evaluation />} />
       <Route path="/harnesses" element={<Harnesses />} />
       <Route path="/settings" element={<SettingsView />} />
       <Route path="/settings/connections" element={<ConnectionsView />} />

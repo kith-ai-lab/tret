@@ -329,7 +329,7 @@ double matches (swaps are used only for the flip rate), giving each module a rat
 with the module's word count and claim density. The tournament `summary` holds per-pool counts, the
 flip rate per juror family, the correlation (Pearson and Spearman) of rating with word count and
 with claim density per pool and overall, and the jury. A length correlation above 0.6 or a flip
-rate above 0.15 is flagged in `summary.flags` (the run is not stopped). A rating belongs to one
+rate above 0.15 is flagged in `summary.flags` of the final fit; during the run the same checks are live gates that pause the pass (see Diagnostics and pause gates). A rating belongs to one
 tournament and one snapshot; a rerun is a new tournament and never rewrites an old one.
 
 **Restarts.** All state is in the database. At boot a tournament left `running` whose lease has
@@ -345,6 +345,105 @@ API (all 404 while off; creating and starting also need `TRET_EVAL_JURY`): `POST
 /api/eval/tournaments`, `GET /api/eval/tournaments[/{id}]`, `POST .../{id}/start|cancel|resume`
 (approver), `GET .../{id}/matches` (staff view, with each juror's model and rationale) and
 `GET .../{id}/ratings`; also `POST .../{id}/refit` and `DELETE .../{id}` (a draft only), both approver.
+
+## Diagnostics and pause gates
+
+Every tournament computes its day-1 diagnostics (`tret/evaluation/diagnostics.py`) and evaluates the
+gates after each round, so a bad judge stops before it spends the whole budget. All of it lives behind
+`TRET_EVAL_TOURNAMENT`; the thresholds are settings (`TRET_EVAL_GATE_*`, below). `GET
+/api/eval/tournaments/{id}/diagnostics` (any member) or `tret eval tournament diagnostics ID` shows the
+gates with their evidence; the tournament itself carries `gates` (key and state), `dropped_families`
+and `acknowledged_gates`.
+
+| Gate | What it measures | Threshold | Action |
+|---|---|---|---|
+| `length_bias` | Spearman (and Pearson) r between a module's word count and its rating, per pool and overall; claim density alongside for contrast | warn above 0.4, trip above 0.6 (absolute, overall Spearman); needs 30 rated modules | pause, `length_bias` |
+| `flip_rate` | The 5% swapped re-judgements (same juror, other order): share whose verdict flips, per juror family | above 0.15 with 10 swaps for the family | the family is dropped from the jury for the rest of the pass; fewer than two families left pauses, `jury_degraded` |
+| `position_bias` | The same flip rate pooled over the swaps of the families still on the jury | above 0.15 with 8 swaps in all | pause, `position_bias` |
+| `juror_agreement` | Cohen's kappa pooled over all double-judged matches (a, b, tie), on oriented pairs (below); the per-pair table is in the response | kappa below 0.3 AND raw agreement below 0.75, with 12 doubles | pause, `low_agreement` (the module prompt is too vague) |
+| `anchor_drift` | The anchor set re-judged at the start of the pass (below): verdicts that changed against the baseline | more than 3 changed | pause, `anchor_drift`, before the first round |
+| `parts_vs_whole`, `score_clumping` | Need Engine 2 | none | reported `not_applicable` |
+
+A gate is `ok`, `warn`, `tripped`, `insufficient_data` (below its sample minimum) or `not_applicable`. On
+a completed tournament a gate that never left `insufficient_data` is shown as `warn` ("not evaluated:
+only n samples"), so silence is never read as a pass. At N=48 a whole pass has about 8 swaps and 16
+doubles, which is why the pooled gates exist; the create preview carries `estimates.gate_coverage`
+(expected swaps and doubles against the minimums) so you see before spending whether the gates can fire.
+Length bias during a run uses PROVISIONAL ratings: the Bradley-Terry fit over the matches done so far,
+fitted in a worker thread with no session open and never written to `module_ratings`; only members that
+have played count. Anchor matches never take part in ratings, pairing or the other diagnostics.
+
+**Kappa and the prevalence paradox.** Swiss pairing makes the higher-scored member canonical `a`, so verdicts
+lean `a`, and two jurors who agree on "a" nearly every time would score kappa near 0. Before kappa is
+computed each (primary, double) pair is oriented: both verdicts are flipped (a and b swapped, tie kept) when a
+deterministic hash of the two member ids is odd, which balances the categories without looking at a verdict.
+The gate also needs the raw agreement below `TRET_EVAL_GATE_AGREEMENT_FLOOR` (0.75): a low kappa with the
+jurors mostly agreeing only warns. The history's `min_kappa` is this pooled kappa.
+
+**Dropped families.** A family that trips the flip gate stays out of the rotation of every later
+primary and double (swaps keep the juror of the match they re-judge). The drop is stored
+(`dropped_families`) and survives a resume. With one family left, acknowledging `flip_rate` continues
+on that family alone (doubles are skipped, and `diagnostics.notes` says so); if every family was
+dropped, `required_acknowledgements` is `jury_restore` (a different situation from `flip_rate`, and its
+own acknowledgement): the resume seats all the original frozen jurors again and the acknowledgement is
+used up (noted, with who and why). Flip drops stay on: the restored jurors are judged on the swaps they
+play from then on, and if they flip they are dropped and the pass pauses again, needing a new
+`jury_restore`. An old `flip_rate` acknowledgement never restores anything. `jury` on the tournament lists the frozen jurors
+(`index`, `family`, `model`, `dropped`).
+
+**Acknowledging a trip.** A paused tournament resumes with `POST .../{id}/resume` body
+`{"acknowledge_gates": ["length_bias"], "note": "..."}` or `tret eval tournament resume ID --acknowledge
+length_bias --note "..."`. The tournament lists what blocks it in `required_acknowledgements`: the
+tripped pausing gates nobody acknowledged yet (`length_bias`, `position_bias`, `juror_agreement`,
+`anchor_drift`, and `flip_rate` after `jury_degraded`). Only those can be acknowledged (422 otherwise),
+a non-empty `note` is required with any acknowledgement (422), and resuming without acknowledging one
+is a 409 naming the gate(s). The acknowledgement (who, when, note) is stored in `acknowledged_gates`;
+an acknowledged gate still shows as tripped but no longer pauses that tournament.
+
+**Stored diagnostics.** After each round the runner stores the whole computed block on the tournament;
+`GET .../diagnostics` serves it while the tournament is running or paused (acknowledgements and drops
+are overlaid), computes live for a draft or before the first round, and computes a completed tournament
+once and caches it on the row.
+
+**Refit and cancel.** `refit` also works for paused and cancelled tournaments (never starts a runner,
+never spends; it counts only non-anchor matches, and with none the answer is 409 "nothing to fit"). It
+writes only if the tournament is exactly as it read it (status and `updated_at`, no live lease), so a
+refit can never lay stale partial ratings over a tournament that finished meanwhile (409); the ratings of an unfinished tournament carry `partial: true` in the ratings response and
+the summary. Cancel works from paused.
+
+**Anchor sets (judge drift).** `POST /api/eval/tournaments/{id}/anchor-set` (approver, `budget_usd`) or
+`tret eval anchors create ID --budget N` takes `TRET_EVAL_ANCHOR_PAIRS` (20) completed primary matches
+of a COMPLETED tournament, stratified across rating-gap quantiles (mostly decisive verdicts, about 15%
+ties when there are any), and judges each once with every juror of a frozen jury (the source
+tournament's freeze if still active, else a new k=3 freeze, pass `anchors:<set id>`). The calls are Runs
+exactly like matches (same direct path, frozen model, no fallback, stamped as juror runs so they never
+become router evidence) booked to the set's own spend through a run-id ledger (`eval_anchor_runs`: the
+trace is written before the call and settled once after it, spend and votes are derived from it, a
+takeover books an unsettled run once; a run whose cost could not be read stays unbooked until recovery
+reads it from the run, and the database allows one settled vote per juror per pair). The baseline holds a
+lease with a heartbeat and gives it back at once if cancelled. A pair whose text
+can never be read as anchored is marked unusable and left out; the set is `ready` with at least 15 of 20
+usable pairs, else `failed` with the reason. The baseline of a pair is the majority verdict
+(tie when there is none); the set is `ready` when every pair has every vote. If the budget runs out the
+set stays `baseline_pending` with what was judged, and `POST /api/eval/anchor-sets/{id}/resume` (or
+`tret eval anchors resume ID`) continues it. A pair names its texts by blob key and sha256 plus the
+masking names, never by pool member, so a later snapshot cannot change it. `GET /api/eval/anchor-sets`
+and `GET .../{id}` read them.
+
+The create preview includes the anchors: with a ready set, `estimates.anchor_set` is `{id, pairs, matches}`
+and its matches (pairs x jurors) are in `estimates.matches.anchor`, the totals, the tokens and the cost range;
+without one it is `null`. The set a tournament will use is chosen at start (the previewed one if it is still
+ready, else the latest ready) and recorded in `diagnostics.anchor_set_id`; the runner uses exactly that.
+
+When a tournament starts and a `ready` set exists for its workspace, module and module set (the latest
+wins; the choice is recorded in `diagnostics.anchor_set_id`), the anchors are judged first by every
+frozen juror (matches of kind `anchor`, round 0, counted in the tournament's spend). The current verdict
+of a pair is the majority across this pass's jurors; more changes against the baseline than
+`TRET_EVAL_GATE_ANCHOR_CHANGES_PAUSE` pause the pass before round 1.
+
+Settings (all default to the values above): `TRET_EVAL_GATE_LENGTH_R_WARN`, `_LENGTH_R_PAUSE`,
+`_FLIP_DROP`, `_KAPPA_PAUSE`, `_AGREEMENT_FLOOR`, `_ANCHOR_CHANGES_PAUSE`, `_MIN_SWAPS`, `_MIN_SWAPS_POOLED`, `_MIN_DOUBLES`, `_MIN_RATED`, and
+`TRET_EVAL_ANCHOR_PAIRS`.
 
 ## The 30-report hand check
 
