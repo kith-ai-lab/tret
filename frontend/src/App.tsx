@@ -213,8 +213,10 @@ function MarketplaceReviewNavItem() {
 /** The Evaluation nav item exists only where `GET /api/eval/tournaments`
  *  succeeds (it 404s while the evaluation feature setting is off). */
 function EvaluationNavItem() {
+  // Either engine being on is enough: the page shows whichever sections are enabled.
   const probeQuery = useQuery({ queryKey: ['eval-tournaments'], queryFn: api.evalTournaments, retry: false })
-  if (!probeQuery.isSuccess) return null
+  const credProbe = useQuery({ queryKey: ['eval-cred-passes'], queryFn: api.evalCredPasses, retry: false })
+  if (!probeQuery.isSuccess && !credProbe.isSuccess) return null
   return <NavLink to="/evaluation">Evaluation</NavLink>
 }
 

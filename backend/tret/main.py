@@ -27,6 +27,7 @@ from tret.api import (
     documents,
     edition as edition_api,
     emissions_settings as emissions_settings_api,
+    eval_credibility as eval_credibility_api,
     eval_jury as eval_jury_api,
     eval_tournaments as eval_tournaments_api,
     findings,
@@ -364,6 +365,13 @@ async def lifespan(app: FastAPI):
         except Exception:  # noqa: BLE001
             log.warning("tournament recovery skipped", exc_info=True)
         try:
+            from tret.evaluation.credibility import recover_running as recover_credibility
+
+            if await recover_credibility():
+                log.warning("credibility passes left running were paused (restart); resume them on purpose")
+        except Exception:  # noqa: BLE001
+            log.warning("credibility recovery skipped", exc_info=True)
+        try:
             await collections_service.launch_auto_resumed()
         except Exception:  # noqa: BLE001
             log.warning("batch auto-resume skipped", exc_info=True)
@@ -485,6 +493,7 @@ def create_app() -> FastAPI:
     app.include_router(eval_jury_api.router)
     app.include_router(eval_tournaments_api.router)
     app.include_router(eval_tournaments_api.anchors_router)
+    app.include_router(eval_credibility_api.router)
     # Reference documentation, read straight out of `docs/` so the methodology the
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)

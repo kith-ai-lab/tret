@@ -330,7 +330,8 @@ def test_migration_chain_and_markers():
     from tret.db.migrate import REVISION_MARKERS, alembic_config
 
     script = ScriptDirectory.from_config(alembic_config())
-    assert script.get_heads() == ["c5d1a8f3e726"]  # diagnostics and anchor sets (PR 7)
+    assert script.get_heads() == ["d7b3f1a9c542"]  # credibility passes (PR 8)
+    assert script.get_revision("d7b3f1a9c542").down_revision == "c5d1a8f3e726"  # diagnostics and anchor sets (PR 7)
     assert script.get_revision("c5d1a8f3e726").down_revision == "b3f8c2a6d914"
     assert script.get_revision("b3f8c2a6d914").down_revision == "a9d4e7c1f352"
     assert script.get_revision("a9d4e7c1f352").down_revision == "e7a4c9d2b861"

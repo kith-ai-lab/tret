@@ -3304,6 +3304,198 @@ export interface EvalAnchorSet {
   [key: string]: unknown
 }
 
+
+// ── Evaluation (Engine 2 credibility passes, staff) ──────────────────────
+// Everything under /eval/credibility 404s while TRET_EVAL_CREDIBILITY is off.
+
+export type CredStatus = 'draft' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
+export type CredReviewStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+
+export interface CredModelPolicy {
+  objective?: string
+  allowed?: string[]
+  open_weights?: 'prefer' | 'require' | 'any'
+  max_cost_tier?: string | number
+  [key: string]: unknown
+}
+
+export interface CredArmIn {
+  key: string
+  label?: string
+  weight: number
+  model_policy: CredModelPolicy | null
+}
+
+export interface CredSelectionIn {
+  disclosure_report_ids?: string[]
+  batch_id?: string
+  limit?: number
+  sample_seed?: number
+  arms: CredArmIn[]
+  budget_usd?: number
+}
+
+export interface CredPick {
+  model: string
+  family?: string | null
+  rank?: number
+  why?: string | null
+  context_window?: number
+  price?: unknown
+}
+
+export interface CredPreviewArm {
+  key: string
+  label: string
+  weight: number
+  model_policy: CredModelPolicy | null
+  expected_reports: number
+  pick: CredPick | null
+  error?: string
+  whole_reports?: number
+  digest_reports?: number
+  est_input_tokens?: number
+  est_output_tokens?: number
+  cost_usd_all_reports?: number
+  cost_usd_per_report?: number
+  expected_cost_usd?: number
+}
+
+export interface CredEstimates {
+  reports: number
+  skipped: number
+  skipped_reasons: Record<string, number>
+  skipped_examples?: Array<{ disclosure_report_id: string; label?: string | null; reason: string }>
+  input: { whole: number; digest: number }
+  arms: CredPreviewArm[]
+  cost_usd: { low: number; high: number; expected: number } | null
+  budget_usd: number | null
+  within_budget: boolean | null
+  unroutable_arms: string[]
+  method?: string
+}
+
+export interface CredArm {
+  key: string
+  label?: string | null
+  weight: number
+  model_policy?: CredModelPolicy | null
+  model?: string | null
+  family?: string | null
+  why?: string | null
+  frozen: boolean
+  max_output_tokens?: number
+  [key: string]: unknown
+}
+
+export interface CredGate {
+  key: string
+  state: EvalGateState
+  value: number | null
+  n: number
+  detail?: string | null
+  threshold?: Record<string, number>
+  acknowledged_by?: string | null
+  acknowledged_note?: string | null
+}
+
+export interface CredArmStat {
+  key: string
+  label?: string | null
+  weight?: number | null
+  model?: string | null
+  assigned: number
+  n_done: number
+  n_failed: number
+  n_pending: number
+  mean: number | null
+  median: number | null
+  histogram: number[]
+  cost_usd: number
+  n_digest?: number
+  digest_share?: number | null
+}
+
+export interface CredCounts {
+  pending: number
+  running: number
+  done: number
+  failed: number
+  skipped: number
+  total: number
+}
+
+export interface CredPass {
+  id: string
+  name: string
+  status: CredStatus | string
+  pause_reason: string | null
+  prompt_version?: string
+  budget_usd: number | null
+  spent_usd: number
+  arms: CredArm[]
+  counts: CredCounts
+  selection?: Record<string, unknown> | null
+  estimates?: CredEstimates | null
+  gates: CredGate[]
+  arm_stats: CredArmStat[]
+  required_acknowledgements: string[]
+  acknowledged_gates: Array<{ gate?: string; by?: string; note?: string }>
+  stalled?: boolean
+  created_by?: string | null
+  created_at?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+}
+
+export interface CredReview {
+  id: string
+  pass_id: string
+  disclosure_report_id: string
+  company: string | null
+  arm_key: string
+  status: CredReviewStatus | string
+  credibility_score: number | null
+  model: string | null
+  input_mode: string | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+  cost_usd: number
+  attempts?: number
+  error: string | null
+  completed_at?: string | null
+  pushbacks?: Array<{ pushback: string; evidence: string }>
+  story_breaks?: string[]
+  summary?: string | null
+  report_sha256?: string | null
+  prompt_sha256?: string | null
+}
+
+export interface CredReviewPage {
+  total: number
+  limit: number
+  offset: number
+  reviews: CredReview[]
+}
+
+export interface CredVerify {
+  ok: boolean
+  reason: string | null
+  input_mode?: string | null
+  rebuilt_input_mode?: string | null
+  report_sha256: { stored: string | null; rebuilt: string | null; match: boolean }
+  prompt_sha256: { stored: string | null; rebuilt: string | null; match: boolean }
+}
+
+export interface CredReviewFilters {
+  arm?: string
+  status?: string
+  min_score?: number
+  max_score?: number
+  limit?: number
+  offset?: number
+}
+
 // ── Fetch wrapper ────────────────────────────────────────────────────────
 
 export class ApiError extends Error {
@@ -5107,6 +5299,32 @@ export const api = {
   evalAnchorSets: () => request<unknown>('/eval/anchor-sets'),
   evalCreateAnchorSet: (id: string, budget_usd: number) =>
     request<unknown>(`/eval/tournaments/${id}/anchor-set`, { method: 'POST', body: { budget_usd } }),
+
+  // Evaluation (Engine 2 credibility passes). 404 while TRET_EVAL_CREDIBILITY is off.
+  evalCredPasses: () => request<{ passes: CredPass[] }>('/eval/credibility'),
+  evalCredPass: (id: string) => request<CredPass>(`/eval/credibility/${id}`),
+  evalCredPreview: (body: CredSelectionIn) =>
+    request<CredEstimates>('/eval/credibility/preview', { method: 'POST', body }),
+  evalCredCreate: (body: CredSelectionIn & { name: string }) =>
+    request<CredPass>('/eval/credibility', { method: 'POST', body }),
+  evalCredStart: (id: string, budget_usd: number) =>
+    request<CredPass>(`/eval/credibility/${id}/start`, { method: 'POST', body: { budget_usd } }),
+  evalCredResume: (id: string, body: { budget_usd?: number; acknowledge_gates?: string[]; note?: string }) =>
+    request<CredPass>(`/eval/credibility/${id}/resume`, { method: 'POST', body }),
+  evalCredCancel: (id: string) => request<CredPass>(`/eval/credibility/${id}/cancel`, { method: 'POST' }),
+  evalCredDelete: (id: string) => request<{ deleted: string }>(`/eval/credibility/${id}`, { method: 'DELETE' }),
+  evalCredReviews: (id: string, f: CredReviewFilters = {}) => {
+    const q = new URLSearchParams()
+    if (f.arm) q.set('arm', f.arm)
+    if (f.status) q.set('status', f.status)
+    if (f.min_score != null) q.set('min_score', String(f.min_score))
+    if (f.max_score != null) q.set('max_score', String(f.max_score))
+    q.set('limit', String(f.limit ?? 50))
+    q.set('offset', String(f.offset ?? 0))
+    return request<CredReviewPage>(`/eval/credibility/${id}/reviews?${q.toString()}`)
+  },
+  evalCredReview: (rid: string) => request<CredReview>(`/eval/credibility/reviews/${rid}`),
+  evalCredVerify: (rid: string) => request<CredVerify>(`/eval/credibility/reviews/${rid}/verify`, { method: 'POST' }),
 }
 
 // ── workspace spend budgets (Settings → Spend budget) ───────────────────────

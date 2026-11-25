@@ -381,6 +381,17 @@ class Settings(BaseSettings):
     eval_gate_min_doubles: int = Field(default=12, ge=1)  # double-judged matches (pooled) before kappa counts
     eval_gate_min_rated: int = Field(default=30, ge=3)  # rated modules before the length correlation counts
     eval_anchor_pairs: int = Field(default=20, ge=4, le=100)  # pairs in an anchor set
+    # Engine 2, the sealed Credibility call (evaluation/credibility.py). `eval_credibility` false (default): the
+    # /api/eval/credibility routes are a 404. `eval_credibility_concurrency` is how many whole-report calls
+    # run at once; the gates pause a pass: scores clumped in 6..8 (`clumping`, from `min_n` reviews), or too
+    # many failed reviews (`failure_rate`).
+    eval_credibility: bool = False
+    eval_credibility_concurrency: int = Field(default=2, ge=1, le=4)
+    eval_credibility_max_output_tokens: int = Field(default=2000, ge=500, le=16000)
+    eval_gate_clumping_pause: float = Field(default=0.70, ge=0, le=1)  # share of scores in 6..8 above which the pass pauses
+    eval_gate_clumping_warn: float = Field(default=0.60, ge=0, le=1)
+    eval_gate_clumping_min_n: int = Field(default=30, ge=1)  # done reviews before the clumping gate counts
+    eval_gate_failure_rate_pause: float = Field(default=0.25, ge=0, le=1)  # failed share of attempted reviews (from 10 attempts)
     # Path of a YAML module-set file (see tret/evaluation/modules.py). Empty (default):
     # the module set shipped in the package (modules-v0.1.yaml).
     disclosure_module_set: str = ""

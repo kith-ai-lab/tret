@@ -11,7 +11,11 @@
   free preview (it writes the draft and the peer-pool snapshot, calls no model). `start --budget USD`
   freezes the jury and plays the tournament in this process until it completes, pauses (budget) or
   is interrupted (Ctrl-C pauses it). The tournament needs `TRET_EVAL_JURY=on`; the HTTP routes need
-  `TRET_EVAL_TOURNAMENT=on` as well."""
+  `TRET_EVAL_TOURNAMENT=on` as well.
+* `credibility preview|create|start|status|reviews|show|verify|cancel|resume`: Engine 2, the sealed whole-report
+  Credibility call. `preview` is free (it writes nothing); `create` writes a draft; `start --budget USD` freezes
+  each arm's model and plays the pass in this process until it completes, pauses or is interrupted. Needs
+  `TRET_EVAL_JURY=on`; the HTTP routes need `TRET_EVAL_CREDIBILITY=true` as well."""
 from __future__ import annotations
 
 import argparse
@@ -89,7 +93,56 @@ def register(sub: argparse._SubParsersAction) -> None:
     ar.add_argument("--budget", type=float, metavar="USD")
 
 
+    cp = esub.add_parser(
+        "credibility",
+        help="Engine 2: the sealed whole-report Credibility call (preview is free)",
+        description="One report in, a 1-10 Credibility Score and the 3 sharpest pushbacks out. The model never sees peers, ratings or metadata.",
+    )
+    csub = cp.add_subparsers(dest="credibility_command", required=True)
+    for name, helptext in (("preview", "Free: reports, skipped, whole vs digest, cost per arm and what each arm would pick. Writes nothing."),
+                           ("create", "Write a draft pass (no model call, nothing spent)")):
+        x = csub.add_parser(name, help=helptext)
+        x.add_argument("--workspace", required=True, metavar="ID", help="Workspace id")
+        x.add_argument("--batch", metavar="ID", help="Read the primary report of every target of this batch")
+        x.add_argument("--report", action="append", dest="reports", metavar="ID", help="A disclosure report id (repeatable)")
+        x.add_argument("--limit", type=int, metavar="N", help="Read at most N reports")
+        x.add_argument("--sample-seed", type=int, metavar="N", help="With --limit: a seeded random sample, not the first N")
+        x.add_argument("--arms-json", metavar="JSON", help='Arms as a JSON list of {"key","label","weight","model_policy"} (default: --experiment)')
+        x.add_argument("--experiment", action="store_true", help="Two equal arms: open weights required vs any model (the default)")
+        x.add_argument("--budget", type=float, metavar="USD", help="Compare the estimate with this budget")
+        x.add_argument("--json", action="store_true")
+        if name == "create":
+            x.add_argument("--name", default="", help="A name for the pass")
+    cs = csub.add_parser("start", help="Freeze each arm's model and play the pass here, within a USD budget")
+    cs.add_argument("pass_id")
+    cs.add_argument("--budget", type=float, required=True, metavar="USD", help="The most this pass may spend")
+    cr_ = csub.add_parser("resume", help="Continue a paused pass here (optionally with a larger budget)")
+    cr_.add_argument("pass_id")
+    cr_.add_argument("--budget", type=float, metavar="USD", help="New total budget")
+    cr_.add_argument("--acknowledge", metavar="GATE,GATE", help="Tripped gates you have looked at (they will not pause this pass again)")
+    cr_.add_argument("--note", help="Why (kept with the acknowledgement)")
+    for name, helptext in (("status", "Status, spend, gates and per-arm statistics"), ("cancel", "Stop a pass for good")):
+        x = csub.add_parser(name, help=helptext)
+        x.add_argument("pass_id")
+        x.add_argument("--json", action="store_true")
+    cl = csub.add_parser("reviews", help="The pass's reviews (company, arm, score, status)")
+    cl.add_argument("pass_id")
+    cl.add_argument("--arm")
+    cl.add_argument("--status", choices=("pending", "running", "done", "failed", "skipped"))
+    cl.add_argument("--score", type=int)
+    cl.add_argument("--limit", type=int, default=50)
+    cl.add_argument("--offset", type=int, default=0)
+    cl.add_argument("--json", action="store_true")
+    for name, helptext in (("show", "One review: score, pushbacks, story breaks, summary and its audit hashes"),
+                           ("verify", "Payload audit: rebuild the prompt from the report and compare the stored hashes")):
+        x = csub.add_parser(name, help=helptext)
+        x.add_argument("review_id")
+        x.add_argument("--json", action="store_true")
+
+
 def run(args: argparse.Namespace) -> int:
+    if getattr(args, "eval_command", None) == "credibility":
+        return _credibility(args)
     if getattr(args, "eval_command", None) == "tournament":
         return _tournament(args)
     if getattr(args, "eval_command", None) == "anchors":
@@ -396,6 +449,176 @@ def _tournament(args: argparse.Namespace) -> int:
     try:
         code, text = asyncio.run(go())
     except tn.TournamentError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except (ValueError, json.JSONDecodeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if text:
+        print(text)
+    return code
+
+
+# ── credibility (Engine 2) ──────────────────────────────────────────────────────────────────────
+EXPERIMENT_ARMS = [
+    {"key": "open", "label": "Open weights required", "weight": 1, "model_policy": {"mode": "auto", "open_weights": "require"}},
+    {"key": "any", "label": "Any model", "weight": 1, "model_policy": {"mode": "auto", "open_weights": "any"}},
+]
+
+
+def render_credibility_preview(est: dict, pass_id: str | None = None) -> str:
+    cost = est.get("cost_usd")
+    head = f"Credibility pass {pass_id} (draft, nothing spent): " if pass_id else "Credibility preview (nothing written, no model called): "
+    lines = [
+        head + f"{est['reports']} report(s) to read, {est['skipped']} skipped"
+        + (f" ({', '.join(f'{k} {v}' for k, v in est['skipped_reasons'].items())})" if est["skipped_reasons"] else "") + ".",
+        f"Whole vs digest (summed over arms, each report counted per arm): {est['input']['whole']} whole, {est['input']['digest']} digest.",
+        "Estimated cost: " + (f"${cost['low']:.2f} to ${cost['high']:.2f} (expected ${cost['expected']:.2f})" if cost else "unknown (no arm can be priced)")
+        + (f"; budget ${est['budget_usd']:.2f}: " + ("within" if est["within_budget"] else "OVER") if est.get("budget_usd") is not None and cost else "") + ".",
+        "",
+        "Arms:",
+    ]
+    for a in est["arms"]:
+        if not a.get("pick"):
+            lines.append(f"  {a['key']:<10} {a['label']}: NO MODEL: {a.get('error')}")
+            continue
+        p = a["pick"]
+        lines.append(f"  {a['key']:<10} {a['label']} (weight {a['weight']}, ~{a['expected_reports']} report(s)): {p['model']} [family {p['family']}, window {p['context_window']:,}]")
+        lines.append(textwrap.fill(p["why"], 100, initial_indent="     ", subsequent_indent="     "))
+        lines.append(f"     {a['whole_reports']} whole + {a['digest_reports']} digest, ~${a['cost_usd_per_report']:.4f} per report")
+    if est.get("rejected_ids"):
+        lines.append(f"  {len(est['rejected_ids'])} id(s) are not this workspace's reports and were left out")
+    return "\n".join(lines)
+
+
+def render_credibility_status(p: dict) -> str:
+    c = p["counts"]
+    lines = [
+        f"Credibility pass {p['id']}: {p['status']}" + (f" ({p['pause_reason']})" if p.get("pause_reason") else "")
+        + f", {c['done']} done / {c['failed']} failed / {c['pending'] + c['running']} left / {c['skipped']} skipped of {c['total']}, spent ${p['spent_usd']:.4f}"
+        + (f" of ${p['budget_usd']:.2f}" if p.get("budget_usd") is not None else " (no budget set)"),
+    ]
+    for g in p.get("gates") or []:
+        v = "" if g["value"] is None else f" {g['value']:.2f}"
+        lines.append(f"  gate {g['key']:<15} {_STATE_MARK.get(g['state'], g['state'])}{v} (n={g['n']}): {g['detail']}")
+    for a in p.get("arm_stats") or []:
+        mean = "n/a" if a["mean"] is None else f"{a['mean']:.2f}"
+        med = "n/a" if a["median"] is None else f"{a['median']:.1f}"
+        lines.append(f"  arm {a['key']:<10} {a.get('model') or '(not frozen)'}: {a['n_done']} done, mean {mean}, median {med}, ${a['cost_usd']:.4f}")
+        if a["n_done"]:
+            lines.append("     scores 1-10: " + " ".join(f"{n:>3}" for n in a["histogram"]))
+    if p.get("required_acknowledgements"):
+        lines.append("Blocked on: " + ", ".join(p["required_acknowledgements"])
+                     + f". Resume with: tret eval credibility resume {p['id']} --acknowledge {','.join(p['required_acknowledgements'])} --note \"why\"")
+    return "\n".join(lines)
+
+
+def render_credibility_review(r: dict) -> str:
+    lines = [f"Review {r['id']}: {r.get('company') or r['disclosure_report_id']} ({r['status']}, arm {r['arm_key'] or '-'}, {r.get('model') or 'no model'}, {r.get('input_mode') or 'no input'})"]
+    if r["credibility_score"] is not None:
+        lines.append(f"Credibility Score: {r['credibility_score']}/10")
+        lines.append(textwrap.fill(r.get("summary") or "", 100))
+        for i, p in enumerate(r["pushbacks"], start=1):
+            lines += [f"Pushback {i}: " + p["pushback"], textwrap.fill("evidence: " + p["evidence"], 100, initial_indent="    ", subsequent_indent="    ")]
+        for b in r["story_breaks"]:
+            lines.append("Story break: " + b)
+    if r.get("error"):
+        lines.append("Error: " + r["error"])
+    lines.append(f"report sha256 {r.get('report_sha256')}  prompt sha256 {r.get('prompt_sha256')}  cost ${r['cost_usd']:.4f}")
+    return "\n".join(lines)
+
+
+def _credibility(args: argparse.Namespace) -> int:
+    import asyncio
+    import uuid
+
+    from tret.db.engine import get_session_factory
+    from tret.db.models import CredibilityPass
+    from tret.evaluation import credibility as cr
+
+    cmd = args.credibility_command
+
+    def selection() -> dict:
+        reports = [uuid.UUID(i) for i in args.reports] if args.reports else None
+        return {"disclosure_report_ids": reports, "batch_id": uuid.UUID(args.batch) if args.batch else None,
+                "limit": args.limit, "sample_seed": args.sample_seed}
+
+    def arms() -> list[dict]:
+        if args.arms_json:
+            return json.loads(args.arms_json)
+        return EXPERIMENT_ARMS
+
+    async def load(db, pid: str):
+        p = await db.get(CredibilityPass, uuid.UUID(pid))
+        if p is None:
+            raise cr.CredibilityError("Pass not found", 404)
+        return p
+
+    async def go() -> tuple[int, str]:
+        factory = get_session_factory()
+        async with factory() as db:
+            if cmd == "preview":
+                est = await cr.preview_pass(db, workspace_id=uuid.UUID(args.workspace), arms=arms(), budget_usd=args.budget, **selection())
+                return 0, json.dumps(est, indent=2) if args.json else render_credibility_preview(est)
+            if cmd == "create":
+                p = await cr.create_pass(db, workspace_id=uuid.UUID(args.workspace), arms=arms(), name=args.name, budget_usd=args.budget,
+                                         created_by="cli", **selection())
+                await db.commit()
+                if args.json:
+                    return 0, json.dumps(await cr.pass_detail(db, p), indent=2)
+                return 0, render_credibility_preview(p.estimates, str(p.id)) + f"\n\nStart it with: tret eval credibility start {p.id} --budget USD"
+            if cmd in ("show", "verify"):
+                rv = await db.get(cr.CredibilityReview, uuid.UUID(args.review_id))
+                if rv is None:
+                    raise cr.CredibilityError("Review not found", 404)
+                p = await db.get(CredibilityPass, rv.pass_id)
+                if cmd == "verify":
+                    v = await cr.verify_review(db, workspace_id=p.workspace_id, review_id=rv.id)
+                    return (0 if v["ok"] else 1), (json.dumps(v, indent=2) if args.json else
+                                                   ("OK: " if v["ok"] else "MISMATCH: ") + (v["reason"] or "the rebuilt prompt and report hashes match the stored ones"))
+                r = await cr.review_detail(db, rv)
+                return 0, json.dumps(r, indent=2) if args.json else render_credibility_review(r)
+            p = await load(db, args.pass_id)
+            ws = p.workspace_id
+            if cmd == "status":
+                d = await cr.pass_detail(db, p)
+                return 0, json.dumps(d, indent=2) if args.json else render_credibility_status(d)
+            if cmd == "reviews":
+                out = await cr.list_reviews(db, p, limit=args.limit, offset=args.offset, arm=args.arm, status=args.status, score=args.score)
+                if args.json:
+                    return 0, json.dumps(out, indent=2)
+                lines = [f"{out['total']} review(s) (showing {len(out['reviews'])}):"]
+                for r in out["reviews"]:
+                    score = "-" if r["credibility_score"] is None else str(r["credibility_score"])
+                    lines.append(f"  {r['id']}  {r['status']:<8} arm {r['arm_key'] or '-':<8} score {score:>2}  {r.get('company') or r['disclosure_report_id']}"
+                                 + (f"  [{r['error'][:60]}]" if r.get("error") else ""))
+                return 0, "\n".join(lines)
+            if cmd == "cancel":
+                p = await cr.cancel_pass(db, workspace_id=ws, pass_id=p.id)
+                return 0, f"Pass {p.id} cancelled; spent ${float(p.spent_usd or 0):.4f}."
+            pid = p.id
+            if cmd == "start":
+                p = await cr.start_pass(db, workspace_id=ws, pass_id=pid, budget_usd=args.budget, started_by="cli", spawn=False)
+            else:  # resume
+                acks = [g.strip() for g in (args.acknowledge or "").split(",") if g.strip()]
+                p = await cr.resume_pass(db, workspace_id=ws, pass_id=pid, budget_usd=args.budget, spawn=False,
+                                         acknowledge_gates=acks or None, note=args.note, acknowledged_by="cli")
+            owner = p.lease_owner
+        try:
+            await cr.run_pass(pid, owner)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            # this pass only, never another one running elsewhere
+            await cr.pause_pass(pid, owner=owner, reason="interrupted")
+            return 130, "Interrupted: the pass is paused. Resume it with `tret eval credibility resume`."
+        async with factory() as db:
+            return 0, render_credibility_status(await cr.pass_detail(db, await load(db, str(pid))))
+
+    try:
+        code, text = asyncio.run(go())
+    except KeyboardInterrupt:  # a second Ctrl-C (or one outside the runner): asyncio.run re-raises it
+        print("Interrupted. A pass that was running is paused or its lease will lapse; resume it with `tret eval credibility resume`.", file=sys.stderr)
+        return 130
+    except cr.CredibilityError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     except (ValueError, json.JSONDecodeError) as e:

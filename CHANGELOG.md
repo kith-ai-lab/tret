@@ -37,6 +37,21 @@ existing install.
 
 ### Added
 
+- **Credibility, Engine 2 of the disclosure evaluation engine (experimental, `TRET_EVAL_CREDIBILITY`,
+  off by default; needs `TRET_EVAL_JURY`), PR 8.** One whole report goes to one model call with a fixed
+  schema and comes back as a 1 to 10 Credibility Score, the 3 sharpest pushbacks with their evidence, the
+  places the story breaks down and a summary. A five-layer firewall keeps peers, ratings, extracts and
+  company metadata out of the call (no tools or harness, one input builder, a sha256 payload audit with
+  `verify`, Engine 1 blind to it, no router-evidence leak), all linted and tested. A report too long for the
+  model's window is cut by code into a proportional structural digest. A pass has 1 to 4 weighted arms
+  (for example open weights required against any model); each arm constrains the router, never names a
+  model, and freezes its pick when the pass starts. Preview is free; start takes a USD budget and spend
+  stops at it. Gates `score_clumping` and `failure_rate` pause the pass and need an acknowledgement with a
+  note to resume. `tret eval credibility preview|create|start|status|reviews|show|verify|cancel|resume`,
+  `/api/eval/credibility`, and a Credibility tab on the Evaluation page. Settings
+  `TRET_EVAL_CREDIBILITY_*` and `TRET_EVAL_GATE_CLUMPING_*`, `TRET_EVAL_GATE_FAILURE_RATE_PAUSE`. See
+  [docs/disclosure-evaluation.md](docs/disclosure-evaluation.md).
+
 - **Engine 1 diagnostics and pause gates** (disclosure evaluation engine, PR 7), behind
   `TRET_EVAL_TOURNAMENT`. Every tournament computes the day-1 gates after each round: rating vs word
   count (Pearson and Spearman, per pool and overall, claim density alongside; warn above 0.4, pause

@@ -2515,6 +2515,161 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/eval/credibility": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Passes */
+        get: operations["list_passes_api_eval_credibility_get"];
+        put?: never;
+        /** Create */
+        post: operations["create_api_eval_credibility_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/credibility/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Preview */
+        post: operations["preview_api_eval_credibility_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/credibility/reviews/{review_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Review */
+        get: operations["read_review_api_eval_credibility_reviews__review_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/credibility/reviews/{review_id}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Verify */
+        post: operations["verify_api_eval_credibility_reviews__review_id__verify_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/credibility/{pass_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read */
+        get: operations["read_api_eval_credibility__pass_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete */
+        delete: operations["delete_api_eval_credibility__pass_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/credibility/{pass_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel */
+        post: operations["cancel_api_eval_credibility__pass_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/credibility/{pass_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume */
+        post: operations["resume_api_eval_credibility__pass_id__resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/credibility/{pass_id}/reviews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Reviews */
+        get: operations["reviews_api_eval_credibility__pass_id__reviews_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/eval/credibility/{pass_id}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start */
+        post: operations["start_api_eval_credibility__pass_id__start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/eval/jury/freezes": {
         parameters: {
             query?: never;
@@ -4339,6 +4494,25 @@ export interface components {
             /** Confirm Name */
             confirm_name: string;
         };
+        /** ArmIn */
+        ArmIn: {
+            /** Key */
+            key: string;
+            /** Label */
+            label?: string | null;
+            /**
+             * Model Policy
+             * @description An auto policy (objective, allowed, open_weights, max_cost_tier); never a pin
+             */
+            model_policy?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Weight
+             * @default 1
+             */
+            weight: number;
+        };
         /** AuthConfigOut */
         AuthConfigOut: {
             /** Auth Mode */
@@ -4477,6 +4651,32 @@ export interface components {
         CreateGroupBody: {
             /** Title */
             title?: string | null;
+        };
+        /** CreateIn */
+        CreateIn: {
+            /** Arms */
+            arms: components["schemas"]["ArmIn"][];
+            /** Batch Id */
+            batch_id?: string | null;
+            /** Budget Usd */
+            budget_usd?: number | null;
+            /** Disclosure Report Ids */
+            disclosure_report_ids?: string[] | null;
+            /**
+             * Limit
+             * @description With batch_id: read at most this many reports
+             */
+            limit?: number | null;
+            /**
+             * Name
+             * @default
+             */
+            name: string;
+            /**
+             * Sample Seed
+             * @description With limit: draw a seeded random sample instead of the first reports
+             */
+            sample_seed?: number | null;
         };
         /** CreateInviteBody */
         CreateInviteBody: {
@@ -5044,6 +5244,27 @@ export interface components {
             /** Workspace Name */
             workspace_name: string;
         };
+        /** PreviewIn */
+        PreviewIn: {
+            /** Arms */
+            arms: components["schemas"]["ArmIn"][];
+            /** Batch Id */
+            batch_id?: string | null;
+            /** Budget Usd */
+            budget_usd?: number | null;
+            /** Disclosure Report Ids */
+            disclosure_report_ids?: string[] | null;
+            /**
+             * Limit
+             * @description With batch_id: read at most this many reports
+             */
+            limit?: number | null;
+            /**
+             * Sample Seed
+             * @description With limit: draw a seeded random sample instead of the first reports
+             */
+            sample_seed?: number | null;
+        };
         /** PromoteExperimentBody */
         PromoteExperimentBody: {
             /**
@@ -5092,18 +5313,6 @@ export interface components {
             read?: components["schemas"]["ResourceEntry"][] | null;
             /** Write */
             write?: components["schemas"]["WriteTargetEntry"][] | null;
-        };
-        /** ResumeIn */
-        ResumeIn: {
-            /**
-             * Acknowledge Gates
-             * @description Tripped gates the approver has looked at; they will not pause this tournament again
-             */
-            acknowledge_gates?: string[] | null;
-            /** Budget Usd */
-            budget_usd?: number | null;
-            /** Note */
-            note?: string | null;
         };
         /** ReviewBody */
         ReviewBody: {
@@ -5373,6 +5582,30 @@ export interface components {
             slug: string;
             /** Web Url */
             web_url?: string | null;
+        };
+        /** ResumeIn */
+        tret__api__eval_credibility__ResumeIn: {
+            /**
+             * Acknowledge Gates
+             * @description Tripped gates the approver has looked at; they will not pause this pass again
+             */
+            acknowledge_gates?: string[] | null;
+            /** Budget Usd */
+            budget_usd?: number | null;
+            /** Note */
+            note?: string | null;
+        };
+        /** ResumeIn */
+        tret__api__eval_tournaments__ResumeIn: {
+            /**
+             * Acknowledge Gates
+             * @description Tripped gates the approver has looked at; they will not pause this tournament again
+             */
+            acknowledge_gates?: string[] | null;
+            /** Budget Usd */
+            budget_usd?: number | null;
+            /** Note */
+            note?: string | null;
         };
     };
     responses: never;
@@ -9545,6 +9778,367 @@ export interface operations {
             };
         };
     };
+    list_passes_api_eval_credibility_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_api_eval_credibility_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_api_eval_credibility_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_review_api_eval_credibility_reviews__review_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                review_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    verify_api_eval_credibility_reviews__review_id__verify_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                review_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_api_eval_credibility__pass_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pass_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_api_eval_credibility__pass_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pass_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_api_eval_credibility__pass_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pass_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_api_eval_credibility__pass_id__resume_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pass_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["tret__api__eval_credibility__ResumeIn"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reviews_api_eval_credibility__pass_id__reviews_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                arm?: string | null;
+                status?: string | null;
+                score?: number | null;
+                min_score?: number | null;
+                max_score?: number | null;
+            };
+            header?: never;
+            path: {
+                pass_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_api_eval_credibility__pass_id__start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                pass_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     create_freeze_api_eval_jury_freezes_post: {
         parameters: {
             query?: never;
@@ -10006,7 +10600,7 @@ export interface operations {
         };
         requestBody?: {
             content: {
-                "application/json": components["schemas"]["ResumeIn"] | null;
+                "application/json": components["schemas"]["tret__api__eval_tournaments__ResumeIn"] | null;
             };
         };
         responses: {
