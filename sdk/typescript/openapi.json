@@ -153,6 +153,55 @@
         "title": "ArchiveWorkspaceBody",
         "type": "object"
       },
+      "ArmIn": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "maxLength": 32,
+            "minLength": 1,
+            "pattern": "^[a-z0-9][a-z0-9_-]*$",
+            "title": "Key",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "model_policy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An auto policy (objective, allowed, open_weights, max_cost_tier); never a pin",
+            "title": "Model Policy"
+          },
+          "weight": {
+            "default": 1.0,
+            "exclusiveMinimum": 0.0,
+            "maximum": 1000.0,
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "title": "ArmIn",
+        "type": "object"
+      },
       "AuthConfigOut": {
         "properties": {
           "auth_mode": {
@@ -568,6 +617,98 @@
           }
         },
         "title": "CreateGroupBody",
+        "type": "object"
+      },
+      "CreateIn": {
+        "additionalProperties": false,
+        "properties": {
+          "arms": {
+            "items": {
+              "$ref": "#/components/schemas/ArmIn"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Arms",
+            "type": "array"
+          },
+          "batch_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "disclosure_report_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 2000,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disclosure Report Ids"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "maximum": 2000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With batch_id: read at most this many reports",
+            "title": "Limit"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 120,
+            "title": "Name",
+            "type": "string"
+          },
+          "sample_seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With limit: draw a seeded random sample instead of the first reports",
+            "title": "Sample Seed"
+          }
+        },
+        "required": [
+          "arms"
+        ],
+        "title": "CreateIn",
         "type": "object"
       },
       "CreateInviteBody": {
@@ -1966,6 +2107,92 @@
         "title": "PendingInviteOut",
         "type": "object"
       },
+      "PreviewIn": {
+        "additionalProperties": false,
+        "properties": {
+          "arms": {
+            "items": {
+              "$ref": "#/components/schemas/ArmIn"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "title": "Arms",
+            "type": "array"
+          },
+          "batch_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Id"
+          },
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "disclosure_report_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 2000,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disclosure Report Ids"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "maximum": 2000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With batch_id: read at most this many reports",
+            "title": "Limit"
+          },
+          "sample_seed": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With limit: draw a seeded random sample instead of the first reports",
+            "title": "Sample Seed"
+          }
+        },
+        "required": [
+          "arms"
+        ],
+        "title": "PreviewIn",
+        "type": "object"
+      },
       "PromoteExperimentBody": {
         "additionalProperties": false,
         "properties": {
@@ -2125,54 +2352,6 @@
           }
         },
         "title": "ResourcesBody",
-        "type": "object"
-      },
-      "ResumeIn": {
-        "additionalProperties": false,
-        "properties": {
-          "acknowledge_gates": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "maxItems": 10,
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Tripped gates the approver has looked at; they will not pause this tournament again",
-            "title": "Acknowledge Gates"
-          },
-          "budget_usd": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "maximum": 100000.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Budget Usd"
-          },
-          "note": {
-            "anyOf": [
-              {
-                "maxLength": 500,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Note"
-          }
-        },
-        "title": "ResumeIn",
         "type": "object"
       },
       "ReviewBody": {
@@ -3014,6 +3193,102 @@
           "item_id"
         ],
         "title": "WriteTargetEntry",
+        "type": "object"
+      },
+      "tret__api__eval_credibility__ResumeIn": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledge_gates": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tripped gates the approver has looked at; they will not pause this pass again",
+            "title": "Acknowledge Gates"
+          },
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "title": "ResumeIn",
+        "type": "object"
+      },
+      "tret__api__eval_tournaments__ResumeIn": {
+        "additionalProperties": false,
+        "properties": {
+          "acknowledge_gates": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tripped gates the approver has looked at; they will not pause this tournament again",
+            "title": "Acknowledge Gates"
+          },
+          "budget_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 100000.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "title": "ResumeIn",
         "type": "object"
       }
     }
@@ -9066,6 +9341,589 @@
         ]
       }
     },
+    "/api/eval/credibility": {
+      "get": {
+        "operationId": "list_passes_api_eval_credibility_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Passes",
+        "tags": [
+          "eval-credibility"
+        ]
+      },
+      "post": {
+        "operationId": "create_api_eval_credibility_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create",
+        "tags": [
+          "eval-credibility"
+        ]
+      }
+    },
+    "/api/eval/credibility/preview": {
+      "post": {
+        "operationId": "preview_api_eval_credibility_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview",
+        "tags": [
+          "eval-credibility"
+        ]
+      }
+    },
+    "/api/eval/credibility/reviews/{review_id}": {
+      "get": {
+        "operationId": "read_review_api_eval_credibility_reviews__review_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Review",
+        "tags": [
+          "eval-credibility"
+        ]
+      }
+    },
+    "/api/eval/credibility/reviews/{review_id}/verify": {
+      "post": {
+        "operationId": "verify_api_eval_credibility_reviews__review_id__verify_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Verify",
+        "tags": [
+          "eval-credibility"
+        ]
+      }
+    },
+    "/api/eval/credibility/{pass_id}": {
+      "delete": {
+        "operationId": "delete_api_eval_credibility__pass_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pass_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pass Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete",
+        "tags": [
+          "eval-credibility"
+        ]
+      },
+      "get": {
+        "operationId": "read_api_eval_credibility__pass_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pass_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pass Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read",
+        "tags": [
+          "eval-credibility"
+        ]
+      }
+    },
+    "/api/eval/credibility/{pass_id}/cancel": {
+      "post": {
+        "operationId": "cancel_api_eval_credibility__pass_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pass_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pass Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel",
+        "tags": [
+          "eval-credibility"
+        ]
+      }
+    },
+    "/api/eval/credibility/{pass_id}/resume": {
+      "post": {
+        "operationId": "resume_api_eval_credibility__pass_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pass_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pass Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/tret__api__eval_credibility__ResumeIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume",
+        "tags": [
+          "eval-credibility"
+        ]
+      }
+    },
+    "/api/eval/credibility/{pass_id}/reviews": {
+      "get": {
+        "operationId": "reviews_api_eval_credibility__pass_id__reviews_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pass_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pass Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "arm",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Arm"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^(pending|running|done|failed|skipped)$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "score",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 10,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Score"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_score",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 10,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Score"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_score",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 10,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Score"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reviews",
+        "tags": [
+          "eval-credibility"
+        ]
+      }
+    },
+    "/api/eval/credibility/{pass_id}/start": {
+      "post": {
+        "operationId": "start_api_eval_credibility__pass_id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "pass_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Pass Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start",
+        "tags": [
+          "eval-credibility"
+        ]
+      }
+    },
     "/api/eval/jury/freezes": {
       "post": {
         "operationId": "create_freeze_api_eval_jury_freezes_post",
@@ -9737,7 +10595,7 @@
               "schema": {
                 "anyOf": [
                   {
-                    "$ref": "#/components/schemas/ResumeIn"
+                    "$ref": "#/components/schemas/tret__api__eval_tournaments__ResumeIn"
                   },
                   {
                     "type": "null"

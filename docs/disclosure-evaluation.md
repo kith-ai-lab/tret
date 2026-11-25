@@ -445,6 +445,92 @@ Settings (all default to the values above): `TRET_EVAL_GATE_LENGTH_R_WARN`, `_LE
 `_FLIP_DROP`, `_KAPPA_PAUSE`, `_AGREEMENT_FLOOR`, `_ANCHOR_CHANGES_PAUSE`, `_MIN_SWAPS`, `_MIN_SWAPS_POOLED`, `_MIN_DOUBLES`, `_MIN_RATED`, and
 `TRET_EVAL_ANCHOR_PAIRS`.
 
+## Credibility (Engine 2)
+
+Engine 2 reads ONE whole report and answers the question an investor asks: would I trust this
+company's leadership and risk management with real capital? It returns a holistic **Credibility
+Score** from 1 to 10, the **3 sharpest pushbacks** (each with the quote or section it rests on),
+the places where the story breaks down and a short summary. It is a single model call with a fixed
+JSON schema (`credibility-v1`): no tools, no harness, no lessons, no row memory. Off by default:
+`TRET_EVAL_CREDIBILITY=true` (the HTTP routes are a 404 otherwise), and `TRET_EVAL_JURY=on`
+because each arm's model is frozen through the jury freeze (creating or starting is a 409 without it).
+
+**The firewall.** The model never sees a peer, a rating, a module extract or company metadata. Five
+layers keep it that way, enforced in code and tested (`tests/test_eval_credibility_firewall.py`):
+
+1. *No tools or harness.* The pass never imports the agent engine; each call goes through
+   `execute_direct` (a `Run` for cost, billing and the runs UI) into `routed_json_call`.
+2. *One input builder.* `evaluation/sealed.py::credibility_payload(db, report_id, max_input_tokens=...)`
+   is the only place the model input is built; its signature has no argument through which anything
+   else could enter. A test allows it only a short import allowlist, and the pass runner is
+   import-linted with a denylist (tournament, ratings, pools, extraction, register, harness, tools).
+3. *Payload audit.* Each review stores the sha256 of the exact prompt and of the report text.
+   `verify` rebuilds both from the report and compares them (a changed report or a different prompt
+   shows as a mismatch with the reason).
+4. *Blind both ways.* Engine 1 never imports Engine 2 or reads its tables (linted).
+5. *No learning leak.* The run is stamped as a sealed call, so it never becomes router evidence or a
+   `run_outcomes` row.
+
+**Whole or digest.** A report that fits the frozen model's window (less a 15% safety margin) is
+sent whole (`input_mode` `whole`). A longer one is cut by code into a proportional structural digest
+(`input_mode` `digest`): the heading outline with the words and share of the report under each
+section, so proportion stays visible, then the verbatim text of the sections that matter most to an
+investor (executive summary or CEO letter, risk, governance, capital allocation or financials),
+filled to the budget in that order, the last one truncated cleanly and said so. The digest reads only
+the report's own Markdown.
+
+**Arms and freeze.** A pass has 1 to 4 weighted arms `{key, label, weight, model_policy}`. A policy
+constrains and the router picks (`objective`, `allowed`, `open_weights`: `require`, `prefer` or
+`any`, `max_cost_tier`); naming a model, or an `allowed` list of one, is a 422. Reports are assigned
+to arms when the pass is created, deterministically by weight (seeded by the pass and report ids). The
+default experiment is two equal arms: open weights required against any model. When the pass starts,
+each arm freezes its own model once, with the router's reason, so the instrument does not change
+under the measurement; the freezes are released when the pass completes, is cancelled or fails.
+
+**Preview, create, start.** `preview` is free (it writes nothing and calls no model): the reports
+read, what is skipped and why, whole against digest counts per arm, the estimated cost (low, high,
+expected) against the budget, and what each arm would pick with the router's reason. `create` writes
+a draft. `start` takes a USD budget and an approver. For a first read, take a seeded sample of a batch
+(`--limit 50 --sample-seed 1`) that a person then reads.
+
+**Running safely.** State lives in the database. A runner holds a lease (120 s, 30 s heartbeat) and
+each review is claimed before its call, so two runners never play the same one. Spend stops at the
+budget (the pass pauses, reason `budget`); the cost of every call, including a failed or cancelled
+one, is booked once. Credits, an unreachable frozen model or a provider outage pause the pass; only an
+internal error fails it. A pass whose runner is gone is paused (`restart`) at boot only once its 120-second lease has expired; one whose lease is still live is left alone and shows as stalled until the lease runs out, after which it can be resumed.
+
+**Gates.** `score_clumping` (the share of done reviews scoring 6 to 8: warn above 60%, pause above
+70%, counted from 30 done reviews) shows a judge that gives most reports the middle score, and
+`failure_rate` (failed share of reviews run to an end, from 10 attempts: pause above 25%). A tripped
+gate pauses the pass; resuming needs it acknowledged with a note (`required_acknowledgements`), and
+resuming without that is a 409 naming the gates (422 without a note). A completed pass shows a gate
+that never got its samples as `warn`, not as a quiet pass. Per-arm statistics (mean, median, a
+1 to 10 histogram, cost) are computed live.
+
+Settings: `TRET_EVAL_CREDIBILITY`, `TRET_EVAL_CREDIBILITY_CONCURRENCY` (default 2, at most 4),
+`TRET_EVAL_CREDIBILITY_MAX_OUTPUT_TOKENS` (default 2000), `TRET_EVAL_GATE_CLUMPING_PAUSE` (0.70),
+`_CLUMPING_WARN` (0.60), `_CLUMPING_MIN_N` (30) and `TRET_EVAL_GATE_FAILURE_RATE_PAUSE` (0.25).
+
+**API** (`/api/eval/credibility`, writes need the workspace approver role):
+
+* `POST /preview`, `POST ""` (same body plus `name`): `disclosure_report_ids` (at most 2000) or
+  `batch_id` with optional `limit` and `sample_seed`, `arms`, optional `budget_usd`
+* `GET ""`, `GET /{id}` (arms with the frozen model and why, gates, per-arm statistics,
+  `required_acknowledgements`), `DELETE /{id}` (a draft or cancelled pass)
+* `POST /{id}/start` (`budget_usd`), `/{id}/cancel`, `/{id}/resume` (`budget_usd`, `acknowledge_gates`, `note`)
+* `GET /{id}/reviews` (filters `arm`, `status`, `score`, `min_score`, `max_score`; paged),
+  `GET /reviews/{review_id}`, `POST /reviews/{review_id}/verify`
+
+**CLI.** `tret eval credibility preview|create|start|status|reviews|show|verify|cancel|resume`.
+`preview` and `create` take `--workspace`, `--batch` or `--report` (repeatable), `--limit`,
+`--sample-seed`, `--arms-json` or `--experiment` (the open-weights-against-any default), `--budget`;
+`start --budget USD`, `resume --budget --acknowledge GATE,GATE --note`, `reviews --arm --status --score`.
+
+**UI.** The Evaluation page has a Credibility tab (shown where the routes are on): a list of passes,
+a new-pass form with a free preview, and per pass the arms with their frozen models, the gates, the
+score histogram per arm, a filterable reviews table and, per review, the pushbacks with evidence, the
+hashes and a "Verify payload" button.
+
 ## The 30-report hand check
 
 1. Pick 30 reports across document types and sizes (include several multi-window ones).

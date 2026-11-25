@@ -925,6 +925,106 @@ class ModuleRating(Base):
     claim_density: Mapped[float | None] = mapped_column()
 
 
+class CredibilityPass(Base):
+    """One Engine 2 pass: the sealed whole-report Credibility call over a set of reports
+    (`tret/evaluation/credibility.py`). Each of 1-4 `arms` (`{key, label, weight, model_policy}`) freezes
+    its own model once at start (`routing_freezes`, purpose `sealed_call`), recorded in the arm with the
+    router's reason; reports are assigned to arms at creation. `status`: draft | running | paused |
+    completed | cancelled | failed. `acknowledged_gates` is a list of `{gate, by, at, note}`. The runner's
+    lease (`lease_owner`, `lease_until`; the heartbeat extends it) and `spent_usd` work as on
+    `eval_tournaments`. Engine 1 never reads this table."""
+
+    __tablename__ = "credibility_passes"
+    __table_args__ = (Index("ix_credibility_passes_ws_created", "workspace_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"))
+    name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    arms: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    prompt_version: Mapped[str] = mapped_column(Text, nullable=False)
+    selection: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    estimates: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
+    spent_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    diagnostics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    acknowledged_gates: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    pause_reason: Mapped[str | None] = mapped_column(Text)
+    lease_owner: Mapped[str | None] = mapped_column(Text)
+    lease_until: Mapped[datetime | None] = mapped_column()
+    created_by: Mapped[str | None] = mapped_column(Text)
+    started_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = created_at_col()
+    started_at: Mapped[datetime | None] = mapped_column()
+    finished_at: Mapped[datetime | None] = mapped_column()
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class CredibilityReview(Base):
+    """One report's sealed Credibility review in a pass. `status`: pending | running (claimed by one
+    runner) | done | failed | skipped (`error` says why). Audit: `report_sha256` is the hash
+    of the Markdown read, `prompt_sha256` the hash of the exact prompt (system + user), so the payload
+    can be rebuilt and compared later. `input_mode`: whole | digest."""
+
+    __tablename__ = "credibility_reviews"
+    __table_args__ = (
+        UniqueConstraint("pass_id", "disclosure_report_id"),
+        Index("ix_credibility_reviews_pass_status", "pass_id", "status"),
+        Index("ix_credibility_reviews_report", "disclosure_report_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    pass_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("credibility_passes.id", ondelete="CASCADE"), nullable=False
+    )
+    disclosure_report_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("disclosure_reports.id", ondelete="CASCADE"), nullable=False
+    )
+    arm_key: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    credibility_score: Mapped[int | None] = mapped_column(Integer)
+    pushbacks: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    story_breaks: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    summary: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(Text)
+    freeze_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("routing_freezes.id", ondelete="SET NULL"))
+    input_mode: Mapped[str | None] = mapped_column(Text)
+    # the prompt budget this review was built with when it is not its arm's (a retry after a context overflow)
+    input_budget: Mapped[int | None] = mapped_column(Integer)
+    report_sha256: Mapped[str | None] = mapped_column(Text)
+    prompt_sha256: Mapped[str | None] = mapped_column(Text)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("runs.id", ondelete="SET NULL"))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    claimed_by: Mapped[str | None] = mapped_column(Text)
+    claimed_at: Mapped[datetime | None] = mapped_column()
+    completed_at: Mapped[datetime | None] = mapped_column()
+    created_at: Mapped[datetime] = created_at_col()
+
+
+class CredibilityReviewRun(Base):
+    """The ledger of runs whose cost has been booked to a Credibility pass, one row per run id (the
+    primary key): a run's spend is added to `credibility_passes.spent_usd` exactly once however many
+    runners, settlements or recoveries see it, and whether the call succeeded, failed or was cancelled."""
+
+    __tablename__ = "credibility_review_runs"
+    __table_args__ = (Index("ix_credibility_review_runs_pass", "pass_id"),)
+
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    pass_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("credibility_passes.id", ondelete="CASCADE"), nullable=False
+    )
+    review_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("credibility_reviews.id", ondelete="SET NULL"))
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, default=0)
+    booked_at: Mapped[datetime] = created_at_col()
+
+
 class ExtractionReview(Base):
     """A reviewer's decision on one computed review item of an extraction
     (`tret/evaluation/review.py`): `accepted` (looked at, fine as it is), `dismissed` (not worth
