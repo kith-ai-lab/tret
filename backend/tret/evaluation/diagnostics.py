@@ -49,7 +49,8 @@ PAUSE_FOR_GATE = {"length_bias": "length_bias", "position_bias": "position_bias"
                   "anchor_drift": "anchor_drift", "flip_rate": "jury_degraded"}
 GATE_FOR_PAUSE = {v: k for k, v in PAUSE_FOR_GATE.items()}
 MIN_JURY_FAMILIES = 2
-ENGINE_2 = "Needs Engine 2 output (not built yet)."
+ENGINE_2 = {"parts_vs_whole": "Computed on the Divergence page, which reads both engines.",
+            "score_clumping": "Shown on each credibility pass (Engine 2)."}
 
 
 def _now() -> datetime:
@@ -298,7 +299,7 @@ def build_gates(
             "detail": f"{ch} of {anchors['judged']} anchor verdicts changed (pause above {th['anchor_changes_pause']})."}
 
     for key in ("parts_vs_whole", "score_clumping"):
-        gates[key] = {"state": "not_applicable", "value": None, "n": 0, "detail": ENGINE_2}
+        gates[key] = {"state": "not_applicable", "value": None, "n": 0, "detail": ENGINE_2[key]}
 
     out = []
     for key in GATE_KEYS:

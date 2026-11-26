@@ -392,6 +392,19 @@ class Settings(BaseSettings):
     eval_gate_clumping_warn: float = Field(default=0.60, ge=0, le=1)
     eval_gate_clumping_min_n: int = Field(default=30, ge=1)  # done reviews before the clumping gate counts
     eval_gate_failure_rate_pause: float = Field(default=0.25, ge=0, le=1)  # failed share of attempted reviews (from 10 attempts)
+    # PR 9, divergence and human spot checks (evaluation/divergence.py): plain code over the finished results of both
+    # engines plus human answers, no model call. `eval_divergence` false (default): the /api/eval/divergence routes
+    # are a 404. The parts-vs-whole r is judged from `min_n` complete reports and trips outside [r_low, r_high].
+    # A set samples `spot_check_triads` blind triads and `spot_check_critiques` critiques; agreement under
+    # `spot_check_agreement_min` means no client use.
+    eval_divergence: bool = False
+    eval_divergence_min_n: int = Field(default=20, ge=3)
+    eval_divergence_r_low: float = Field(default=0.2, ge=-1, le=1)
+    eval_divergence_r_high: float = Field(default=0.8, ge=-1, le=1)
+    eval_divergence_reading_list: int = Field(default=10, ge=1, le=200)
+    eval_spot_check_triads: int = Field(default=15, ge=0, le=200)
+    eval_spot_check_critiques: int = Field(default=10, ge=0, le=200)
+    eval_spot_check_agreement_min: float = Field(default=0.70, ge=0, le=1)
     # Path of a YAML module-set file (see tret/evaluation/modules.py). Empty (default):
     # the module set shipped in the package (modules-v0.1.yaml).
     disclosure_module_set: str = ""

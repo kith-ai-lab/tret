@@ -3496,6 +3496,244 @@ export interface CredReviewFilters {
   offset?: number
 }
 
+// ── Evaluation: divergence (Engine 1 parts vs Engine 2 whole) + spot checks ─
+// Routes live under /api/eval/divergence and 404 while TRET_EVAL_DIVERGENCE is off.
+
+export type DivQuadrant = 'both_strong' | 'parts_over_whole' | 'whole_over_parts' | 'both_weak'
+
+export interface DivGate {
+  key: string
+  state: EvalGateState
+  value: number | null
+  n: number
+  detail?: string | null
+  triad_agreement?: number | null
+  critique_agreement?: number | null
+  n_triads?: number
+  n_critiques?: number
+  n_skipped?: number
+}
+
+export interface DivArmStat {
+  n: number
+  pearson: number | null
+  spearman: number | null
+}
+
+export interface DivStats {
+  n_joined: number
+  n_complete: number
+  n_whole_only: number
+  n_parts_only: number
+  pearson: number | null
+  spearman: number | null
+  n_partial?: number
+  n_other_arm?: number
+  quadrants?: Record<string, number>
+  mixed_arms?: boolean
+  /** Per-arm stats; non-empty only when the set covers several arms. */
+  by_arm?: Array<DivArmStat & { arm_key: string; label?: string | null }>
+  spot_check_shortfall?: unknown
+  /** Set id whose spot checks cover this set's pass; this set then has none of its own. */
+  spot_checks_from_set?: string | null
+  [key: string]: unknown
+}
+
+export interface DivModuleBand {
+  band: number
+  band_kind: 'decile' | 'quintile' | string
+  decile_eq: number
+  rating: number
+  lo90: number | null
+  hi90: number | null
+  pool_key: string | null
+  member_id: string
+}
+
+export interface DivRow {
+  disclosure_report_id: string
+  document_id: string | null
+  company: string | null
+  pool_keys: Record<string, string>
+  modules: Record<string, DivModuleBand>
+  decile_eq?: number | null
+  parts: number
+  whole: number
+  arm_key: string | null
+  review_id: string
+  complete: boolean
+  parts_pct: number | null
+  whole_pct: number | null
+  delta: number | null
+  raw_delta: number
+  quadrant: DivQuadrant | null
+}
+
+export interface DivReadingRow extends DivRow {
+  review: {
+    summary: string | null
+    pushbacks: Array<{ pushback: string; evidence: string }>
+    story_breaks: string[]
+    credibility_score: number
+    model: string | null
+  } | null
+}
+
+export interface DivScatterPoint {
+  id: string
+  parts: number
+  whole: number
+  quadrant: DivQuadrant | string | null
+  delta: number | null
+}
+
+export interface DivSetList {
+  id: string
+  name: string
+  status: 'open' | 'reviewed' | string
+  project_id: string
+  credibility_pass_id: string
+  pass_name: string | null
+  modules: string[]
+  arm_key: string | null
+  created_at: string | null
+  reviewed_at: string | null
+  n_complete: number
+  pearson: number | null
+  quadrant_counts: Record<string, number>
+  gates: DivGate[]
+  /** `locked` is true once no check is pending; until then no reveal, rows, reading list or scatter is served. */
+  spot_checks: { total: number; answered: number; locked: boolean }
+  stale?: boolean
+}
+
+export interface DivInputsUsed {
+  pass_id?: string
+  pass_name?: string | null
+  arms?: Array<{ key: string; label?: string | null }>
+  arm_key?: string | null
+  tournaments?: Array<{ id: string; module: string; snapshot_id?: string | null; completed_at?: string | null; fingerprint?: string }>
+  [key: string]: unknown
+}
+
+export interface DivSet extends DivSetList {
+  stats: DivStats
+  inputs: DivInputsUsed
+  acknowledged_gates: Array<{ gate: string; by?: string | null; at?: string | null; note?: string | null }>
+  reviewed_by: string | null
+  /** Empty until the spot checks are locked. */
+  scatter: DivScatterPoint[]
+  stale: boolean
+  stale_pass: boolean
+  stale_tournaments: string[]
+  tournament_ids: string[]
+  created_by: string | null
+}
+
+export interface DivRowPage {
+  total: number
+  rows: DivRow[]
+}
+
+export interface DivRowFilters {
+  quadrant?: string
+  complete?: boolean
+  limit?: number
+  offset?: number
+}
+
+export interface DivRevealedMember {
+  company: string | null
+  band: number
+  band_kind: string
+  rating: number
+}
+
+export interface DivSpotCheckBase {
+  id: string
+  position: number
+  status: 'pending' | 'done' | 'skipped' | string
+  answer?: Record<string, unknown> | null
+  note?: string | null
+  agreement?: number | null
+  decided_by: string | null
+  decided_at?: string | null
+}
+
+export interface DivTriadCheck extends DivSpotCheckBase {
+  kind: 'triad'
+  module: string
+  texts: Array<{ letter: string; text: string | null; error?: string }>
+  /** Null until the whole set is locked (every check answered or skipped). `letters` (letter -> member) or `members` (array with `letter`) are both accepted. */
+  revealed?: null | {
+    expected_order: string[]
+    letters?: Record<string, DivRevealedMember>
+    members?: Array<DivRevealedMember & { letter: string }>
+    agreement?: number | null
+  }
+}
+
+export interface DivCritiqueCheck extends DivSpotCheckBase {
+  kind: 'critique'
+  company: string | null
+  disclosure_report_id: string
+  document_id: string | null
+  review: null | {
+    credibility_score: number
+    summary: string | null
+    pushbacks: Array<{ pushback: string; evidence: string }>
+    story_breaks: string[]
+    model: string | null
+    input_mode: string | null
+  }
+  revealed?: {
+    parts: number
+    quadrant: DivQuadrant | string | null
+    modules: Record<string, DivModuleBand>
+    from_reading_list?: boolean
+  } | null
+}
+
+export type DivSpotCheck = DivTriadCheck | DivCritiqueCheck
+
+export type DivAnswer =
+  | { order: string[] }
+  | { verdict: 'agree' | 'partly' | 'disagree'; pushbacks_sharp?: boolean[] }
+  | { skip: true }
+
+export interface DivInputs {
+  passes: Array<{
+    id: string
+    name: string
+    status: string
+    project_id: string
+    arms: Array<{ key: string; label?: string | null }>
+    n_done: number
+  }>
+  tournaments: Array<{
+    id: string
+    name: string
+    module: string
+    status: string
+    project_id: string
+    completed_at: string | null
+    n_rated: number
+  }>
+}
+
+export interface DivSelectionIn {
+  pass_id: string
+  tournament_ids: string[]
+  arm_key?: string | null
+}
+
+export interface DivPreview {
+  stats: DivStats
+  gate: DivGate
+  n_reading_list: number
+  warnings: string[]
+}
+
 // ── Fetch wrapper ────────────────────────────────────────────────────────
 
 export class ApiError extends Error {
@@ -5325,6 +5563,48 @@ export const api = {
   },
   evalCredReview: (rid: string) => request<CredReview>(`/eval/credibility/reviews/${rid}`),
   evalCredVerify: (rid: string) => request<CredVerify>(`/eval/credibility/reviews/${rid}/verify`, { method: 'POST' }),
+
+  // Evaluation (divergence of Engine 1 parts vs Engine 2 whole, plus human spot checks).
+  // 404 while TRET_EVAL_DIVERGENCE is off.
+  evalDivInputs: () => request<DivInputs>('/eval/divergence/inputs'),
+  evalDivPreview: (body: DivSelectionIn) => request<DivPreview>('/eval/divergence/preview', { method: 'POST', body }),
+  evalDivCreate: (body: DivSelectionIn & { name: string }) =>
+    request<DivSet>('/eval/divergence', { method: 'POST', body }),
+  evalDivSets: () => request<DivSetList[]>('/eval/divergence'),
+  evalDivSet: (id: string) => request<DivSet>(`/eval/divergence/${id}`),
+  evalDivRows: (id: string, f: DivRowFilters = {}) => {
+    const q = new URLSearchParams()
+    if (f.quadrant) q.set('quadrant', f.quadrant)
+    if (f.complete != null) q.set('complete', String(f.complete))
+    q.set('limit', String(f.limit ?? 50))
+    q.set('offset', String(f.offset ?? 0))
+    return request<DivRowPage>(`/eval/divergence/${id}/rows?${q.toString()}`)
+  },
+  evalDivReadingList: (id: string) => request<DivReadingRow[]>(`/eval/divergence/${id}/reading-list`),
+  evalDivSpotChecks: (id: string) => request<DivSpotCheck[]>(`/eval/divergence/${id}/spot-checks`),
+  evalDivAnswer: (checkId: string, body: { answer: DivAnswer; note?: string }) =>
+    request<DivSpotCheck>(`/eval/divergence/spot-checks/${checkId}/answer`, { method: 'POST', body }),
+  evalDivAcknowledge: (id: string, body: { gate: string; note: string }) =>
+    request<DivSet>(`/eval/divergence/${id}/acknowledge`, { method: 'POST', body }),
+  evalDivReview: (id: string, body: { note?: string } = {}) =>
+    request<DivSet>(`/eval/divergence/${id}/review`, { method: 'POST', body }),
+  // The delete answers 204 with no body, which `request` cannot parse, so it reads the status itself.
+  evalDivDelete: async (id: string): Promise<void> => {
+    const res = await fetch(`/api/eval/divergence/${id}`, { method: 'DELETE', credentials: 'include' })
+    if (res.ok) return
+    let message = `${res.status} ${res.statusText}`
+    let detail: unknown
+    try {
+      const data: unknown = await res.json()
+      if (data && typeof data === 'object' && 'detail' in data) {
+        detail = (data as { detail: unknown }).detail
+        message = typeof detail === 'string' ? detail : JSON.stringify(detail)
+      }
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(res.status, message, detail)
+  },
 }
 
 // ── workspace spend budgets (Settings → Spend budget) ───────────────────────

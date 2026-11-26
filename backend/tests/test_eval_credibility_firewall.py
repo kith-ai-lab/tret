@@ -91,6 +91,65 @@ def test_engine_1_never_sees_engine_2():
         assert "credibility_reviews" not in src and "CredibilityReview" not in src and "CredibilityPass" not in src
 
 
+def names_divergence(path: Path) -> list[str]:
+    """Every import target (any dotted part), attribute, bare name, alias or exact string in the file that IS `divergence`
+    (an exact token: a future `kl_divergence` does not trip it)."""
+    hits = [m for m in targets(path) if "divergence" in m.split(".")]
+    for n in ast.walk(ast.parse(path.read_text())):
+        if isinstance(n, ast.Attribute) and n.attr == "divergence":
+            hits.append(n.attr)
+        elif isinstance(n, ast.Name) and n.id == "divergence":
+            hits.append(n.id)
+        elif isinstance(n, ast.alias) and "divergence" in (n.name.split(".") + [n.asname or ""]):
+            hits.append(n.name)
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in ("divergence", "tret.evaluation.divergence"):
+            hits.append(n.value)
+    return hits
+
+
+def engine_modules() -> list[Path]:
+    """Every module of tret/evaluation but divergence itself: new ones are covered the day they are added."""
+    mods = sorted(p for p in EVAL.glob("*.py") if p.name not in ("divergence.py", "__init__.py"))
+    assert len(mods) >= 15
+    return mods
+
+
+DIVERGENCE_STDLIB = {"__future__", "asyncio", "hashlib", "json", "logging", "random", "uuid", "datetime", "typing"}
+DIVERGENCE_ALLOWED = ("sqlalchemy", "tret.config", "tret.storage", "tret.db.models", "tret.evaluation.ratings")
+DIVERGENCE_NAMES = {"tret.evaluation.juror", "tret.evaluation.juror.mask_names"}
+
+
+def divergence_import_ok(mod: str) -> bool:
+    top = mod.split(".")[0]
+    return top in DIVERGENCE_STDLIB or mod in DIVERGENCE_NAMES or any(mod == a or mod.startswith(a + ".") for a in DIVERGENCE_ALLOWED)
+
+
+def test_nothing_in_engine_1_or_2_names_divergence_and_divergence_imports_from_an_allowlist():
+    for path in engine_modules():
+        assert names_divergence(path) == [], path.name
+        src = path.read_text()
+        assert "DivergenceSet" not in src and "SpotCheck" not in src and "divergence_sets" not in src and "spot_checks" not in src, path.name
+    mods = targets(EVAL / "divergence.py")
+    assert mods and [m for m in mods if not divergence_import_ok(m)] == []
+    # what the allowlist is there to refuse
+    for bad in ("tret.evaluation.tournament", "tret.evaluation.jury", "tret.evaluation.credibility", "tret.evaluation.sealed", "tret.providers.base",
+                "tret.router_llm.router", "tret.engine.routed_call", "tret.engine", "tret.evaluation.juror.build_juror_messages", "os", "httpx"):
+        assert not divergence_import_ok(bad), bad
+    src = (EVAL / "divergence.py").read_text()
+    assert "routed_json_call" not in src and "complete_json" not in src
+
+
+def test_the_divergence_lint_catches_what_it_should(tmp_path):
+    f = tmp_path / "x.py"
+    for src in ("from tret.evaluation import divergence", "from tret.evaluation import divergence as d", "import tret.evaluation.divergence",
+                "import tret.evaluation as e\ne.divergence.build_join", "x = 'divergence'"):
+        f.write_text(src)
+        assert names_divergence(f), src
+    for ok in ("from tret.evaluation import ratings", "kl_divergence = 1\nx.js_divergence()", "from scipy.stats import kl_divergence"):
+        f.write_text(ok)
+        assert names_divergence(f) == [], ok
+
+
 def two_reports(world):
     return seed_reports(world, [body(1) + " ALPHAUNIQUE", body(2) + " BETAUNIQUE"])
 

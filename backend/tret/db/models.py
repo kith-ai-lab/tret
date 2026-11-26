@@ -1025,6 +1025,68 @@ class CredibilityReviewRun(Base):
     booked_at: Mapped[datetime] = created_at_col()
 
 
+class DivergenceSet(Base):
+    """One Divergence set (`tret/evaluation/divergence.py`, PR 9): the join of ONE completed Engine 2 pass
+    (whole-report Credibility Scores) with 1-4 completed Engine 1 tournaments (module ratings), frozen in
+    `computed` (rows, stats, reading list, inputs) because both inputs are completed and immutable and the
+    spot-check sample has to stay stable. `status`: open | reviewed. `acknowledged_gates` is a list of
+    `{gate, by, at, note}`. The only code that reads both engines' result tables."""
+
+    __tablename__ = "divergence_sets"
+    __table_args__ = (Index("ix_divergence_sets_ws_created", "workspace_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    credibility_pass_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("credibility_passes.id", ondelete="CASCADE"), nullable=False
+    )
+    tournament_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    modules: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    arm_key: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="open")
+    computed: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    acknowledged_gates: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = created_at_col()
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    reviewed_at: Mapped[datetime | None] = mapped_column()
+
+
+class SpotCheck(Base):
+    """One human spot check of a Divergence set: a blind `triad` (rank three module extracts) or a
+    `critique` (judge a whole-report review). Shaped like an approval (`decision`/`decided_by`/`note`,
+    `purpose` spot_check) but its own table: an approval needs a finding and a run, and Engine 2 reviews
+    have neither. `item` holds the hidden truth and display data, `answer` the human's answer,
+    `agreement` the server-computed score (null when skipped). `status`: pending | done | skipped."""
+
+    __tablename__ = "spot_checks"
+    __table_args__ = (
+        UniqueConstraint("set_id", "kind", "position"),
+        Index("ix_spot_checks_set", "set_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    set_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("divergence_sets.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # triad | critique
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False, default="spot_check")
+    item: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    answer: Mapped[dict | None] = mapped_column(JSONB)
+    agreement: Mapped[float | None] = mapped_column()
+    note: Mapped[str | None] = mapped_column(Text)
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    decided_at: Mapped[datetime | None] = mapped_column()
+
+
 class ExtractionReview(Base):
     """A reviewer's decision on one computed review item of an extraction
     (`tret/evaluation/review.py`): `accepted` (looked at, fine as it is), `dismissed` (not worth

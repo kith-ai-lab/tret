@@ -28,6 +28,7 @@ from tret.api import (
     edition as edition_api,
     emissions_settings as emissions_settings_api,
     eval_credibility as eval_credibility_api,
+    eval_divergence as eval_divergence_api,
     eval_jury as eval_jury_api,
     eval_tournaments as eval_tournaments_api,
     findings,
@@ -494,6 +495,7 @@ def create_app() -> FastAPI:
     app.include_router(eval_tournaments_api.router)
     app.include_router(eval_tournaments_api.anchors_router)
     app.include_router(eval_credibility_api.router)
+    app.include_router(eval_divergence_api.router)
     # Reference documentation, read straight out of `docs/` so the methodology the
     # product displays is the methodology in the repository (tret/api/docs.py).
     app.include_router(docs.router)

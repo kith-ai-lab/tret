@@ -37,6 +37,21 @@ existing install.
 
 ### Added
 
+- **Divergence and human spot checks (experimental, `TRET_EVAL_DIVERGENCE`, off by default), PR 9 of the
+  disclosure evaluation engine.** Joins one completed credibility pass (Engine 2, whole report) with 1 to 4
+  completed tournaments (Engine 1, modules) per report: the mean module decile against the Credibility Score,
+  a quadrant per report, the Pearson r with a `parts_vs_whole` gate (trips outside 0.2 to 0.8; the briefing
+  targets 0.4 to 0.6), and a reading list of the 10 biggest divergences. Each set samples 15 blind triads
+  (rank three masked module extracts) and 10 critiques of whole-report reviews for a human to answer;
+  agreement under 70% trips `spot_check_agreement` ("no client use"), and a tripped gate must be
+  acknowledged with a note before the set is marked reviewed. Plain code over existing results: no model
+  call, and the firewall lint keeps both engines from importing it. Spot checks are rows of their own
+  `spot_checks` table, not `approvals` (an Engine 2 review has no finding or run). Migration
+  `e3a9c5d1b784`; `/api/eval/divergence`; `tret eval divergence inputs|preview|create|show|reading-list|spot-checks`;
+  settings `TRET_EVAL_DIVERGENCE*` and `TRET_EVAL_SPOT_CHECK_*`. The Engine 1 diagnostics now point
+  `parts_vs_whole` and `score_clumping` to where they are computed. See
+  [docs/disclosure-evaluation.md](docs/disclosure-evaluation.md).
+
 - **Credibility, Engine 2 of the disclosure evaluation engine (experimental, `TRET_EVAL_CREDIBILITY`,
   off by default; needs `TRET_EVAL_JURY`), PR 8.** One whole report goes to one model call with a fixed
   schema and comes back as a 1 to 10 Credibility Score, the 3 sharpest pushbacks with their evidence, the
